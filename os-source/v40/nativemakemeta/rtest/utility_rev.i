@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	64
+DATE	MACRO
+		dc.b	'7.11.90'
+	ENDM
+VERS	MACRO
+		dc.b	'utility 36.64'
+	ENDM
+VSTRING	MACRO
+		dc.b	'utility 36.64 (7.11.90)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: utility 36.64 (7.11.90)',0
+	ENDM

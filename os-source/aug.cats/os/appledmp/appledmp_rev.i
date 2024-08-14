@@ -1,0 +1,14 @@
+VERSION		EQU	35
+REVISION	EQU	51
+DATE	MACRO
+		dc.b	'6.12.93'
+	ENDM
+VERS	MACRO
+		dc.b	'appledmp 35.51'
+	ENDM
+VSTRING	MACRO
+		dc.b	'appledmp 35.51 (6.12.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: appledmp 35.51 (6.12.93)',0
+	ENDM

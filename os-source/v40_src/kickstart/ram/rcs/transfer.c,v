@@ -1,0 +1,376 @@
+head     36.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.7
+date     91.05.04.23.05.11;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.12.02.07.15.34;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     90.11.21.04.53.27;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     90.06.13.02.50.39;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     90.04.05.05.23.33;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     90.02.20.20.37.23;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.32.45;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.7
+log
+@Moved the exit label so the file position isn't changed on write error.
+@
+text
+@/* transfer.c */
+
+#include "ram_includes.h"
+#include "ram.h"
+
+/********************************************************/
+/* nbytes := transfer(lock,buf,bsize,readflag)          */
+/*                                                      */
+/* General read/write routine                           */
+/********************************************************/
+
+#ifdef DOWN_CODED
+LONG
+read (lock,buf,bsize)
+	struct lock *lock;
+	CPTR buf;
+	LONG bsize;
+{
+	struct data *pos;
+	struct data *next;
+	LONG offset;
+	LONG max,count;
+	LONG avail,needed,tsize;
+
+	/* get data about the file */
+	pos    = (struct data *) lock->block;		/* current block */
+	offset = lock->offset;		/* offset of next valid position */
+
+	if (pos == NULL)
+		return 0;
+
+	max = pos->size;
+
+	/* number of bytes read */
+	count  = 0;
+	needed = bsize;
+
+	while (needed > 0) {
+		avail  = max - offset + 1;	/* space in this block */
+		if (avail <= 0)			/* next block needed */
+		{
+			next = pos->next;
+			if (next == NULL)	/* new block needed */
+			{
+				break;	/* EOF */
+			}
+			pos    = next;
+			max    = pos->size;
+			offset = FIRSTBUFFPOS;
+			continue;
+		}
+		tsize = (avail < needed ? avail : needed);
+
+		/* src, dest,size (bytes) */
+		xfer(((char *) pos) + offset,
+		     ((char *) buf) + count, tsize);
+
+		count  += tsize;
+		offset += tsize;
+		needed -= tsize;
+	}
+
+	/* save end positions */
+	lock->block  = (struct node *) pos;
+	lock->offset = offset;
+	lock->cpos   += count;
+
+	return count;	/* number of bytes read/written */
+}
+#endif
+
+LONG
+write (lock,buf,bsize)
+	struct lock *lock;
+	CPTR buf;
+	LONG bsize;
+{
+	struct node *node;
+	struct data *pos;
+	struct data *next;
+	LONG offset,curpos;
+	LONG max,count;
+	LONG avail,needed,tsize;
+
+	/* get data about the file */
+	/* NOTE: now that makefile() in file.c forces all data files to have */
+	/* a non-null node->list, we can no longer have a null lock->block.  */
+
+	node   = (struct node *) lock->lock.fl_Key;
+	pos    = (struct data *) lock->block;		/* current block */
+	offset = lock->offset;		/* offset of next valid position */
+	curpos = lock->cpos;			/* current file position */
+
+	max = MAX_WRITE;
+
+	/* number of bytes read or written */
+	count = 0;
+
+	/* deal with "short block" files */
+	/* short blocks can only be the first block of a file! */
+	if (pos == (struct data *) node->list)
+	{
+		/* replace short block (if it is) with regular one */
+		pos = growblock(pos,node);
+		if (pos == NULL)
+			return -1;
+	}
+
+	while (count < bsize) {
+		needed = bsize - count;		/* number still to be r/w */
+		avail  = max - offset + 1;	/* space in this block */
+		if (avail <= 0)			/* next block needed */
+		{
+			next = pos->next;
+			if (next == NULL)	/* new block needed */
+			{
+				next = (struct data *) 
+					mygetvec(sizeof(struct data));
+				if (next == NULL)
+				{
+					count = -1;	/* gets returned */
+					goto exit;	/* fix fields & exit */
+				}
+
+				next->next = NULL;
+				next->size = FIRSTBUFFPOS - 1;
+				pos->next  = next;
+
+				/* update spaceused */
+				spaceused += 1;
+			}
+			pos    = next;
+			max    = MAX_WRITE;
+			offset = FIRSTBUFFPOS;
+			avail  = max - FIRSTBUFFPOS + 1;
+		}
+		tsize = (avail < needed ? avail : needed);
+
+		/* src, dest,size (bytes) */
+		xfer(((char *) buf) + count,
+		     ((char *) pos) + offset, tsize);
+
+		count  += tsize;
+		offset += tsize;
+		curpos += tsize;
+
+		/* update number of bytes available in current block if needed*/
+		if (offset > pos->size)
+			pos->size = offset-1; /* max valid byte */
+	}
+
+	/* save end positions */
+	lock->block  = pos;
+	lock->offset = offset;
+	lock->cpos   = curpos;
+
+exit:
+	/* update file size if needed, modify flag */
+	lock->flags |= LOCK_MODIFY;
+
+	if (curpos > node->size)
+		node->size = curpos;
+
+	return count;	/* number of bytes read/written */
+}
+
+
+/* deal with short files */
+/* nasty equation to get size of block - note '-1' is in longs */
+/* +4 is for the requirements of AllocVec (size + 1 lw) */
+/* can only be the first block of a 1-block file! */
+
+struct data *
+growblock (p,node)
+	struct data *p;
+	struct node *node;
+{
+	if (*(((long *) p) - 1) != sizeof(struct data) + 4)
+	{
+		/* have to grow a compressed block */
+		p = swapblock(p,sizeof(struct data),
+			      node->size + DATA_EXTRA*sizeof(LONG));
+		if (p)
+			node->list = (struct node *) p;
+	}
+	return p;
+}
+@
+
+
+36.6
+log
+@update ptrs in lock on allocation failure
+@
+text
+@a152 1
+exit:
+d157 1
+@
+
+
+36.5
+log
+@Changes now that all files have at least a 0-length data block
+
+@
+text
+@d120 4
+a123 1
+					return -1;	/* error */
+d153 1
+@
+
+
+36.4
+log
+@->block type
+@
+text
+@d86 3
+d94 1
+a94 1
+	max = (pos == NULL ? 0 : MAX_WRITE);
+d101 1
+a101 1
+	if (pos == (struct data *) node->list && pos)
+d103 1
+a103 1
+		/* replace short block with regular one */
+d114 1
+a114 1
+			next = (pos == NULL ? NULL : pos->next);
+d124 1
+a124 4
+				if (pos == NULL)
+					node->list = (struct node *) next;
+				else
+					pos->next  = next;
+@
+
+
+36.3
+log
+@for rcs 4.x header change
+@
+text
+@d150 1
+a150 1
+	lock->block  = (struct node *) pos;
+@
+
+
+36.2
+log
+@Major recode, into seperate read and write() routines.  3M/s to 5M/s improvement.
+@
+text
+@@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d12 1
+d14 1
+a14 1
+transfer (lock,buf,bsize,reading)
+a17 1
+	int reading;		/* TRUE or FALSE */
+d19 59
+d91 1
+a91 1
+	max = (pos == NULL ? 0 : (reading ? pos->size : MAX_WRITE));
+d97 2
+a98 1
+	if (!reading && pos)
+a113 3
+				if (reading)
+					break;	/* EOF */
+
+d115 1
+a115 1
+					mygetvec(DATA_BLOCK_SIZE);
+d130 1
+a130 1
+			max    = reading ? pos->size : MAX_WRITE;
+d136 3
+a138 6
+		if (reading)
+			xfer(((char *) pos) + offset,
+			     ((char *) buf) + count, tsize);
+		else
+			xfer(((char *) buf) + count,
+			     ((char *) pos) + offset, tsize);
+d144 3
+a146 4
+		/* update number of bytes available in current block if needed */
+		if (!reading)
+			if (offset > pos->size)
+				pos->size = offset-1; /* max valid byte */
+d155 1
+a155 3
+	if (!reading)
+	{
+		lock->flags |= LOCK_MODIFY;
+d157 2
+a158 3
+		if (curpos > node->size)
+			node->size = curpos;
+	}
+d166 2
+a167 1
+/* +8 is for the requirements of getvec (size + 1 lw spare (ugh)) */
+d174 1
+a174 1
+	if (*(((long *) p) - 1) != (DATA_BLOCK_SIZE*sizeof(LONG)) + 8)
+d177 2
+a178 2
+		p = swapblock(p,DATA_BLOCK_SIZE,node->size +
+			      DATA_EXTRA*sizeof(LONG));
+@

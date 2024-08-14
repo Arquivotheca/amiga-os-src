@@ -1,0 +1,199 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     91.02.07.10.41.02;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@
+/*
+ * Network primitives for Rexx
+ */
+
+#include <rexxinet.h>
+
+int controlsock;		/* used to force load/init of inet.lib	*/
+struct RxsLib *RexxSysBase;	/* Rexx library base pointer		*/
+fd_set wait;			/* sockets waiting for events		*/
+static char *portname = "socketrexx"; /* portname of this program		*/
+static int running;		/* main commutating loop runs while == 1*/
+static struct MsgPort *mp;	/* rexx msg port			*/
+
+/*
+ * socketrexx main proc.  Flow of control:
+ *
+ *	open rexx
+ *	initialize port variables
+ *	setup server port
+ *	do forever {
+ *		selectwait - wait for socket or signal event
+ *		if control-C signal then {
+ * 			exit to cleanup
+ *		}
+ *
+ * 		foreach socket {
+ * 			if sock_was_event then {
+ *				rerun rexx op on socket
+ * 			}
+ *		}
+ *
+ *		while new rexx messages present do {
+ *			get message from port
+ *			parse new message and reply/retain as necessary
+ *		}
+ *
+ *	}
+ *	cleanup - see netquit comments
+ */
+main(argc, argv)
+	int	argc;
+	char	**argv;
+{
+	register struct RexxMsg *rm;
+	register int i, op, num;
+	fd_set rd, wr, ex;
+	long evnt;
+
+	Enable_Abort = 0;	/* Manx specific: do our own ^C processing */
+
+	RexxSysBase = (struct RxsLib *)OpenLibrary(RXSNAME, 0L);
+	if(!RexxSysBase){
+		fprintf(stderr, "Could not open %s\n", RXSNAME);
+		exit(RETURN_FAIL);
+	}
+
+	initports();
+
+	/*
+	 * We allow the user to specify a unique portname in case it is
+	 * desired to have a separate instance of this program running.
+	 * This sort of arrangement is useful for programs that are very
+	 * busy, or in the case of debugging.
+	 */
+	if(argc > 1){
+		portname = argv[1];
+	}
+
+	Forbid();
+	mp = 0;	op = 0;
+	if(FindPort(portname) != 0){
+		op++;
+	} else {
+		mp = CreatePort(portname, 0);
+	}
+	Permit();
+
+	if(!mp){
+		CloseLibrary(RexxSysBase);
+		fprintf(stderr, "socketrexx: %s\n", op?
+			"already running":"could not create port");
+		exit(RETURN_FAIL);
+	}
+
+	/*
+	 * The first network call we will issue is select(), yet the
+	 * inet.library isn't actually opened until an application does
+	 * an socket() call.  We solve this catch-22 by opening a socket
+	 * here.  We will use this socket for certain ioctl()'s too.
+	 */
+	controlsock = socket(AF_INET, SOCK_DGRAM, 0);
+
+	/*
+	 * What follows is the main commutating loop.  All activity centers
+	 * around a selectwait() statement that is used to detect the two
+	 * main causative events: arrival of rexx packets and events on various
+	 * open sockets.
+	 */
+	FD_ZERO(&wait);
+	running = 1;
+	while(running) {
+
+		/*
+		 * Issue a selectwait() to discover any relevant events
+		 */
+		ex = wr = rd = wait;
+		evnt = SIGBREAKF_CTRL_C | (1L << mp->mp_SigBit);
+		num = selectwait(_numdev, &rd, &wr, &ex, 0L, &evnt);
+	 	if(evnt & SIGBREAKF_CTRL_C){
+			running = 0;
+		}
+
+		/*
+		 * re-run anyone who may now be ready after earlier blocking
+		 */
+		if(num > 0){
+			for(i = 0; i < NUMPORTS; i++){
+				if(ports[i].rm){
+					op = ports[i].sock;
+				     	if(FD_ISSET(op, &rd) || FD_ISSET(op, &wr)  || FD_ISSET(op, &ex)){
+						rerun(i);
+					}
+				}
+			}
+		}
+
+		/*
+		 * check for new rexx command invocations
+		 */
+		while(rm = (struct RexxMsg *)GetMsg(mp)){
+			if(!CheckRexxMsg(rm)){
+				ReplyMsg(rm);
+			}
+
+			rexx_parse(rm);
+		}
+	}
+
+	netquit((struct port *)0, (struct RexxMsg *)0L, 0);
+}
+
+/*
+ * close control socket, return any blocked rexx messages with error,
+ * and return any pending messages on server port.  Delete server port.
+ */
+netquit(p, rm, first)
+	struct port *p;
+	struct RexxMsg *rm;
+	int first;
+{
+	register struct RexxMsg *rmp;
+	int i;
+
+	close(controlsock);
+
+	Forbid();
+	if(rm){
+		rm->rm_Result1 = 0; rm->rm_Result2 = 0;
+		ReplyMsg(rm);
+	}
+	for(i = 0; i < NUMPORTS; i++){
+		freeport(&ports[i]);
+	}
+	while(rmp = (struct RexxMsg *)GetMsg(mp)){
+		seterror(rmp, EINTR);
+		ReplyMsg(rmp);
+	}
+	DeletePort(mp);
+	Permit();
+
+	CloseLibrary(RexxSysBase);
+	exit(RETURN_OK);
+}
+@

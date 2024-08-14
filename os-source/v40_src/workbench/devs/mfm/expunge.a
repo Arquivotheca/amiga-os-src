@@ -1,0 +1,147 @@
+**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       expunge.a  -- device expunge code
+*
+**************************************************************************
+        section ,CODE
+        include "mfm.i"
+        include "mfm_ext.i"
+
+        XREF    Unit_Rem
+        XDEF    _Expunge
+        XDEF    ExpungeDev
+        XDEF    ExpungeUnit
+        XDEF    _Null
+
+;--------------------------------------------------------------------------
+; RemDevice Section
+;
+; This section of code is called by the RemDevice() function.  
+; It tries to close the device/library specified if LIB open count = 0,
+; otherwise the LIB delayed expunge flag will be set.
+;
+; If the LIB open count is zero for the DEVICE, all DEVICE 
+; resources must be deallocated. 
+;
+; Inputs:
+; =======
+; a6 = device pointer
+;
+; Results:
+; ========
+; d0 = 0 = device not removed.  Flag for LIB scheduled for delayed expunge set.
+;    = segment list ptr = device removed. Seglist of device code returned..
+;
+; IMPORTANT
+; Expunge is called from the supervisor state of the CPU which means it 
+; should not allow task switching calls within the code (ie. Wait(), 
+; WaitPort(), etc.).
+;--------------------------------------------------------------------------
+MM_Expunge      reg     d2/a5
+
+_Expunge:                ; ( a6:devptr )
+        movem.l MM_Expunge,-(sp)
+        move.l  a6,Device
+		move.l  md_AbsExecBase(Device),AbsExecBase  ; retrieve ExecBase addr
+
+******** see if anyone has us open
+        tst.w   LIB_OPENCNT(Device)
+        bne.s   Expunge_delay
+
+        bsr     ExpungeDev
+        bra.s   Expunge_End
+
+******** it is still open.  Set the delayed expunge flag
+Expunge_delay:
+        bset    #LIBB_DELEXP,md_Flags(a5)
+        CLEAR   d0
+
+Expunge_End:
+        movem.l (sp)+,MM_Expunge
+        rts
+
+;--------------------------------------------------------------------------
+; Remove Unit resources (ie. struct, Unit task and Unit ports)
+;
+; Inputs:
+; =======
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;--------------------------------------------------------------------------
+MM_ExpungeUnit  reg     d2/a2
+
+ExpungeUnit:            ; ( a3:unitptr, a5:devptr, a6:AbsExecBase )
+        movem.l MM_ExpungeUnit,-(sp)
+
+;****** Assume unit struct memory allocated
+        ;******* find unit number
+        CLEAR   d2
+        move.b  mdu_UnitNum(Unit),d2
+
+        ;****** clear out the unit vector in the device
+        lsl.l   #2,d2
+        clr.l   md_Units(Device,d2.l)
+
+;****** Get rid of the unit's task. 
+        jsr     Unit_Rem
+
+ExpungeUnit_End:        ;****** save the unit number
+        movem.l (sp)+,MM_ExpungeUnit
+        rts
+
+;--------------------------------------------------------------------------
+; Remove Device resources (ie. struct and DOS Lib)
+;
+; Inputs:
+; =======
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;--------------------------------------------------------------------------
+MM_ExpungeDev   reg     d2
+
+ExpungeDev:             ; ( a3:unitptr, a5:devptr, a6:AbsExecBase )
+        movem.l MM_ExpungeDev,-(sp)
+
+******** unlink from device list
+        move.l  Device,ArgA1           
+        CALLSYS Forbid                 ; Forbid other tasks
+        CALLSYS Remove                 ; Remove node from device list
+        CALLSYS Permit                 ; Permit other tasks
+
+******** free our memory
+        move.l  Device,ArgA1
+        CLEAR   ArgD0
+        move.w  LIB_NEGSIZE(Device),ArgD0       ; get size of jump table
+        
+        sub.l   ArgD0,ArgA1
+        add.w   LIB_POSSIZE(Device),ArgD0       ; get size of device struct
+        
+******** go ahead and get rid of us.  Temporarily store our seglist
+*       in d2.  Seglist needs to be put in d0 
+*       as a return value from Close or Expunge to free up the memory used
+*       by the device driver otherwise the memory will not be freed.
+
+        move.l  md_SegList(Device),d2
+
+        CALLSYS FreeMem
+
+******** return seglist of device code
+        move.l  d2,RetD0
+
+        movem.l (sp)+,MM_ExpungeDev
+        rts
+
+;----------------------------------------------------------------
+; Null Section (Do Nothing routine)
+;
+; Used for future expansion.
+;----------------------------------------------------------------
+
+_Null:
+        CLEAR   RetD0
+        rts
+
+        end

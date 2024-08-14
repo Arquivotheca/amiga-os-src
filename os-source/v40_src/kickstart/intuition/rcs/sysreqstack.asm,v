@@ -1,0 +1,268 @@
+head     38.1;
+branch   ;
+access   ;
+symbols  V40_85:38.1 V40_71:38.1 V40_68:38.1 V40_65:38.1 V40_47:38.1 V40_45:38.1 V40_37:38.1 V40_34:38.1 V40_29:38.1 V39_2415:38.1 V39_2369:38.1 V39_2339:38.1 V39_2332:38.1 V39_2275:38.1 V39_2256:38.1 V39_2210:38.1 V39_2192:38.1 V39_2084:38.1 V39_2082:38.1 V39_2076:38.1 V39_2073:38.1 V39_2058:38.1 V39_2051:38.1 V39_2031:38.1 V39_2017:38.1 V39_2012:38.1 V39_1985:38.1 V39_1933:38.1 V39_1819:38.1 V39_1805:38.1 V39_1783:38.1 V39_1695:38.1 V39_1621:38.1 V39_1620:38.1 V39_1508:38.1 V39_1485:38.1 V39_1461:38.1 V39_1458:38.1 V39_1456:38.1 V39_1405:38.1 V39_1368:38.1 V39_1360:38.1 V39_1324:38.1 V39_1147:38.0 V39_1143:38.0 V39_1141:38.0 V39_1120:38.0 V39_1116:38.0 V39_1104:38.0 V39_1100:38.0 V39_1078:38.0 V39_1073:38.0 V39_757:38.0 V39_702:38.0 V39_557:38.0 V39_553:38.0 V39_551:38.0 V39_510:38.0 V39_495:38.0 V39_416:38.0 V39_383:38.0 V39_371:38.0 V39_336:38.0 V39_323:38.0 V39_295:38.0 V39_277:38.0 V39_254:38.0 V39_222:38.0 V39_185:38.0 V39_171:38.0 V39_161:38.0 V38_159:38.0 V38_116:38.0 V38_59:38.0;
+locks    ; strict;
+comment  @*   @;
+
+
+38.1
+date     92.05.21.17.51.33;  author peter;  state Exp;
+branches ;
+next     38.0;
+
+38.0
+date     91.06.12.14.34.00;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.1
+log
+@New smaller faster version from Mike.
+@
+text
+@*** sysreqstack.asm *********************************************************
+*
+*  switch to dynamically allocated stack
+*
+*  $Id: sysreqstack.asm,v 38.0 91/06/12 14:34:00 peter Exp $
+*
+*  Confidential Information: Commodore-Amiga, Inc.
+*  Copyright (C) 1990, Commodore-Amiga, Inc.
+*  All Rights Reserved
+*
+****************************************************************************/
+
+    INCLUDE "exec/types.i"
+    INCLUDE "exec/tasks.i"
+    INCLUDE "exec/memory.i"
+    INCLUDE "exec/execbase.i"
+    INCLUDE "exec/macros.i"
+    INCLUDE "ibase.i"
+
+    xdef    _stackSwap
+
+    xref    _AllocMem		; smaller to use library stubs
+    xref    _FreeMem
+    xref    _Debug
+
+; BE VERY CAREFUL to make sure we're allocating enough stack for
+; the routine we call, and copying over all the parameters used
+
+NUMPARAMS	EQU	10	; commonBSR uses 9 parameters!
+STACKSWAPSIZE	EQU	2400	; pick a number :-)
+
+AbsExecBase	EQU	4
+
+_stackSwap:
+	; oldstack on entry:
+	;	parameters
+	;	routine to call
+	;	caller return addr
+	;
+	; on exit the routine to call is no longer on the stack
+	;
+
+	; First, decide if we need to switch the stack
+	; we must be careful of people who switch the stack without updating
+	; TC_SPxxxxx
+	move.l	ib_SysBase(a6),a0	; a6 has IntuitionBase ptr in it
+	move.l	ThisTask(a0),a0		; get my task structure
+	move.l	TC_SPLOWER(a0),a1	; lower stack bound
+	cmp.l	sp,a1			; use unsigned cmp's for the hell of it
+	bcc.s	alloc_stack		; splower >= sp, stack was switched
+	cmp.l	TC_SPUPPER(a0),sp
+	bhi.s	alloc_stack		; spupper < sp, stack was switched
+
+	; within stack ptrs, see if we have enough space
+	add.l	#STACKSWAPSIZE,a1	; stack ptr must be above here
+	cmp.l	sp,a1
+	bcc.s	alloc_stack		; splower+size >= sp, not enough space
+
+	; we have enough space on the stack.  Call the function without switch
+	; we must be tricky.  We'll copy the params to the top of the stack.
+	move.l	(sp)+,a1		; Get return address...
+	move.l	(sp)+,a0		; Get function address...
+	move.l	a1,-(sp)		; Save return address again...
+	jmp	(a0)			; Do function...
+*
+*******************************************************************************
+*
+alloc_stack:
+	; we'll keep new stack in a0, old stack in a1 and at
+	; top of newstack for restoration
+
+	movem.l	d2/a4/a5,-(sp)		; will use it for newstack
+	move.l	ib_SysBase(a6),a5	; Get ExecBase...
+
+	;Allocate memory for the new stack
+	moveq.l	#MEMF_ANY,d1		; Any memory for the stack...
+	move.l	#STACKSWAPSIZE,d0	; Size of stack...
+	exg	a5,a6			; Get exec...
+	JSRLIB	AllocMem		; Call AllocMem
+	exg	a5,a6			; Back to normal...
+
+	move.l  d0,a4			; I'm stashing it here
+	move.l  a4,d0			; set the flags
+	bne.s	newStack		; We have a new stack...
+****** Out of Memory 'handler'
+out_of_memory:		; fail and bail
+	moveq.l	#0,d2
+swap_exit:
+	move.l	d2,d0		; Set return result...
+	movem.l	(sp)+,d2/a4/a5	; restore
+	move.l	(sp)+,a0	; Get return address
+	addq.l	#4,sp		; remove the function pointer
+	jmp	(a0)		; "return"
+*
+*******************************************************************************
+*
+newStack:
+	lea	STACKSWAPSIZE(a4),a1	; Point at end of stack (lower)
+	lea	-8(a1),a0		; Point at stack frame...
+	move.l	a1,-(a0)		; stk_Upper
+	move.l	a4,-(a0)		; stk_Lower
+	move.l	a0,stk_Pointer(a0)	; stk_Pointer
+	move.l	a0,a4			; We will store this here...
+	exg	a5,a6			; Get execbase
+	JSRLIB	StackSwap		; Switch stacks
+	exg	a5,a6			; Get back...
+	move.l	stk_Pointer(a4),a0	; Get old stack pointer...
+	;
+	; push the last n parameters onto the new stack...
+	; a0 is the old stack.  It contains:
+	; <args> <function pointer> <return address> <a4/a5/d2>
+	;
+	lea.l	NUMPARAMS*4+5*4(a0),a0	; Move down...
+	moveq.l	#NUMPARAMS-1,d0		; number to copy...
+copy:	move.l	-(a0),-(sp)		; Copy them...
+	dbra	d0,copy			; loop around...
+	move.l	-(a0),a0		; Function pointer...
+	jsr	(a0)			; Call the function
+	move.l	d0,d2			; Store the result...
+	move.l	a4,a0			; Get StackSwap structure
+	exg	a5,a6			; Get execbase...
+	JSRLIB	StackSwap		; Swap it back in
+	move.l	(a4),a1			; Free mem work...
+	move.l	#STACKSWAPSIZE,d0	; Size of the memory
+	JSRLIB	FreeMem			; Free the memory...
+	exg	a5,a6			; Restore a6...
+	bra.s	swap_exit		; and done...
+*
+*******************************************************************************
+*
+    end
+
+@
+
+
+38.0
+log
+@Initial V38 check-in (matches V37 release).
+@
+text
+@d5 1
+a5 1
+*  $Id: sysreqstack.asm,v 1.2 90/12/01 22:03:37 peter Exp $
+d17 1
+d40 2
+d61 7
+a67 16
+
+	move.l	4(sp),a0		; routine to call
+
+	lea.l   NUMPARAMS*4+8(sp),a1	; return, routine = 8
+	moveq   #NUMPARAMS-1,d0		; We will move 10 longs to new stack
+
+1$:	move.l  -(a1),-(sp)		; One LWord at a time
+	dbra	d0,1$			; loop
+
+	jsr	(a0)			; call it!
+
+	; restore stack ptr
+	lea	NUMPARAMS*4(sp),sp
+	rts				; return value in d0
+
+
+d72 2
+a73 1
+	move.l	a4,-(sp)		; will use it for newstack
+d76 5
+a80 4
+	pea.l   MEMF_CLEAR		; type of memory
+	pea.l   STACKSWAPSIZE		; size (in bytes) to allocate memory
+	jsr  	_AllocMem		; allocate --- result in d0
+	addq.l  #8,sp
+d84 1
+a84 58
+	beq     out_of_memory		; if NULL, we are out of memory
+
+	;Set up new stack
+	link	a5,#0			; will unlk to restore
+
+	; get new top of stack and swap
+	lea.l	STACKSWAPSIZE(a4),a1
+	move.l	a1,sp			; switch to newstack
+
+	; save & set up exec stack bounds pointers!
+	move.l	ib_SysBase(a6),a0
+	move.l	ThisTask(a0),a0		; get my task structure
+	move.l	TC_SPLOWER(a0),-(sp)	; save task stack ptrs
+	move.l	TC_SPUPPER(a0),-(sp)	;  on new stack
+	move.l	a4,TC_SPLOWER(a0)
+	move.l	a1,TC_SPUPPER(a0)	; new stack ptrs
+
+	; push the 10 parameters to new stack
+	; start source pointer *past* params, func addr, rtaddr, a4, and link
+	lea.l   NUMPARAMS*4+4*4(a5),a1
+	moveq   #NUMPARAMS-1,d0		; We will move 10 longs to new stack
+
+l3: move.l  -(a1),-(sp)			; One Word at a time
+	dbra	d0,l3			; loop
+
+	move.l	12(a5),a0		; link, a4, rtaddr, func addr
+	; call function which needs more stack
+	jsr     (a0)
+
+	; drop args from new stack (makes it easier to get TC_SPxxxx back)
+	lea	NUMPARAMS*4(sp),sp
+
+	; restore exec stack bounds pointers!
+	move.l	ib_SysBase(a6),a0
+	move.l	ThisTask(a0),a0		; get my task structure
+	move.l	(sp)+,TC_SPUPPER(a0)	; new stack ptr correct, get stack back
+	move.l	(sp)+,TC_SPLOWER(a0)	; save task stack ptrs
+
+	unlk	a5			; switch back to old stack
+
+	; I have the address of 'newstack' in a4, and
+	; the return value of the function called in d0.
+
+	move.l	d0,-(sp)		; stash return value from function
+
+	; DEBUG
+	; jsr	    _Debug	; should see a4 pointing to dynamically
+				; allocated stack, where we want to
+				; see a good chunk of zeros.
+
+	pea.l	STACKSWAPSIZE	; size to free
+	move.l	a4,-(sp)		; I stashed newstack
+	jsr  	_FreeMem			; free the allocated stack
+	addq.l	#8,sp
+
+	movem.l	(sp)+,d0/a4		; pop return value old a4
+	rts				; bye.
+
+d87 45
+a131 3
+	moveq.l	#0,d0
+	move.l	(sp)+,a4	; restore
+	rts
+a132 1
+    end
+@

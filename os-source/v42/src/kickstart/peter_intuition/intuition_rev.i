@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	86
+DATE	MACRO
+		dc.b	'23.6.93'
+	ENDM
+VERS	MACRO
+		dc.b	'intuition 42.86'
+	ENDM
+VSTRING	MACRO
+		dc.b	'intuition 42.86 (23.6.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: intuition 42.86 (23.6.93)',0
+	ENDM

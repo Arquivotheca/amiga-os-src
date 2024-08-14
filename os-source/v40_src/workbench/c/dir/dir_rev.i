@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'4.6.91'
+	ENDM
+VERS	MACRO
+		dc.b	'dir 37.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'dir 37.5 (4.6.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: dir 37.5 (4.6.91)',0
+	ENDM

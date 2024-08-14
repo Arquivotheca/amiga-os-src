@@ -1,0 +1,663 @@
+head     39.12;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.12
+date     93.04.27.16.30.47;  author spence;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     92.11.03.11.42.04;  author spence;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     92.10.26.19.47.06;  author spence;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     92.06.25.15.06.23;  author spence;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     92.02.14.13.03.37;  author spence;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     92.01.30.19.58.19;  author spence;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.01.30.16.20.21;  author chrisg;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.01.28.14.10.39;  author spence;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.01.27.15.30.13;  author chrisg;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.01.06.12.09.53;  author spence;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     91.12.18.12.06.28;  author spence;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     91.11.07.12.51.58;  author spence;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     91.11.06.13.32.41;  author spence;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Loads and makes permanent the A2024 code
+@
+
+
+39.12
+log
+@Added MrgCop() vector.
+/.
+/
+@
+text
+@/******************************************************************************
+*
+*	$Id: a2024.c,v 39.11 92/11/03 11:42:04 spence Exp Locker: spence $
+*
+******************************************************************************/
+
+	#include <exec/types.h>
+	#include <exec/interrupts.h>
+	#include <exec/memory.h>
+	#include <hardware/intbits.h>
+	#include <graphics/displayinfo.h>
+	#include <graphics/gfxbase.h>
+	#include <graphics/monitor.h>
+	#include <internal/vp_internal.h>
+	#include "a2024vb.h"
+
+	#include <clib/exec_protos.h>
+	#include <pragmas/exec_pragmas.h>
+	#include <clib/graphics_protos.h>
+	#include <pragmas/graphics_pragmas.h>
+
+	#include <stdio.h>
+
+extern struct DosBase *DOSBase;
+extern struct GfxBase *GfxBase;
+extern struct ExecBase *SysBase;
+extern char FirstAddress;
+extern char LastAddress;
+
+APTR MakePermanent();
+BOOL LoadA2024Driver();
+
+#pragma libcall GfxBase SetDisplayInfoData 2ee 2109805
+ULONG SetDisplayInfoData( DisplayInfoHandle handle, UBYTE * buf, ULONG size, ULONG tagID, ULONG displayID );
+
+/*#define _DEBUG*/
+
+#ifdef _DEBUG
+#define D(x) {x}
+#else
+#define D(x)
+#endif
+
+APTR MakePermanent()
+{
+    APTR perm;
+    ULONG size;
+    /* Do some funky stuff,
+     * like copy the driver to another part of RAM.
+     */
+
+    size = (&LastAddress - &FirstAddress);
+
+    if (perm = AllocVec(size, 0))
+    {
+	CopyMem(&FirstAddress, perm, size);
+    }
+    D(kprintf("Permanent = 0x%lx\n", perm);)
+
+    return(perm);
+}
+
+extern void * __stdargs A2024MoveSprite();
+extern void * __stdargs A2024ChangeSprite();
+extern void * __stdargs A2024ScrollVP();
+extern void * __stdargs A2024PokeColours();
+extern void * __stdargs A2024BuildColours();
+extern void * __stdargs A2024BuildNmlCopList();
+extern void * __stdargs A2024vbasm();
+extern void * __stdargs A2024MrgCop();
+extern void * __stdargs A2024LoadView();
+extern void * __stdargs A2024KillView();
+extern APTR GfxBaseMrgCop;
+extern APTR GfxBaseLoadView;
+extern APTR VBlankStruct;
+extern UBYTE *A2024vbname;
+extern void *hsprites[8];
+
+#define MAXSPHEIGHT 50
+
+#define REALADR(x) ((void *)(perm-&FirstAddress+((char *) x)))
+#define MAKEITS 11
+
+BOOL LoadA2024Driver()
+{
+    /* find the VecTable and MakeItTable for the A2024, and fill it up */
+    struct VecInfo vinfo2024, vinfodef;
+    struct VecTable *vt, *vtdef;
+    ULONG *BuildData, *BuildDatadef;
+    char *perm;
+    BOOL result = FALSE;
+
+    D(kprintf("LoadA2024Driver()\n");)
+    if ((vt = AllocMem(sizeof(struct VecInfo), MEMF_CLEAR)) == NULL)
+    {
+        return(FALSE);
+    }
+    if ((BuildData = AllocMem((MAKEITS << 2), MEMF_CLEAR)) == NULL)
+    {
+    	FreeMem(vt, sizeof(struct VecInfo));
+	return(FALSE);
+    }
+
+    if (GetDisplayInfoData(NULL, (APTR)&vinfo2024, sizeof(struct VecInfo), DTAG_VEC, A2024TENHERTZ_KEY))
+    {
+	D(kprintf("Got vinfo2024\n");)
+	/* Can't use the Default monitor in case of promotion. NTSC and PAL
+	 * both use the same vec table.
+	 */
+	if (GetDisplayInfoData(NULL, (APTR)&vinfodef, sizeof(struct VecInfo), DTAG_VEC, (NTSC_MONITOR_ID | LORES_KEY)))
+	{
+		int i;
+		for(i=0;i<8;i++)
+			hsprites[i]=AllocMem(4*(MAXSPHEIGHT+2),MEMF_CHIP|MEMF_CLEAR);
+
+		D(kprintf("Got vinfodef\n");)
+		if (perm = MakePermanent())
+		{
+			/* get the VecTable */
+			vinfo2024.Vec = vt;
+			vtdef = vinfodef.Vec;
+			D(kprintf("vt = 0x%lx, vtdef = 0x%lx\n", vt, vtdef);)
+
+			/* and load it up */
+			vt->MoveSprite = REALADR(&A2024MoveSprite);
+			vt->ChangeSprite = REALADR(&A2024ChangeSprite);
+			vt->ScrollVP = REALADR(&A2024ScrollVP);
+			vt->PokeColors = REALADR(&A2024PokeColours);
+
+			/* now load up the BuildVP table */
+			vt->BuildVP = (APTR)BuildData;
+			BuildDatadef = (ULONG *)(((struct VecTable *)vinfodef.Vec)->BuildVP);
+			D(kprintf("BuildData = 0x%lx, BuildDatadef = 0x%lx\n", BuildData, BuildDatadef);)
+
+			/* take the following from the ROM (ie mode 0x0):
+			 * InitMVP()
+			 * CalcDispWindow()		
+			 * CalcDataFetch()
+			 * CalcScroll()
+			 * CalcAA/ECSFudge()
+			 * CalcModulos()
+			 * MakeAA/ECSBplcon()
+			 * CleanUpMVP()
+			 *
+			 * The BuildColors() and BuildCopList() are all from disk.
+			 */
+
+			*BuildData++ = *BuildDatadef++;	/* InitMVP */
+			*BuildData++ = *BuildDatadef++;	/* CalcDispWindow */
+			*BuildData++ = *BuildDatadef++;	/* CalcDataFetch */
+			*BuildData++ = *BuildDatadef++;	/* CalcScroll */
+			*BuildData++ = *BuildDatadef++;	/* Fudge */
+			*BuildData++ = *BuildDatadef++;	/* Modulos */
+			*BuildData++ = *BuildDatadef++;	/* Bplcon */
+			BuildDatadef++;		/* skip BuildColors */
+			*BuildData++ = perm;
+			*BuildData++ = *BuildDatadef++;	/* BuildColors */
+			*BuildData++ = *BuildDatadef++;	/* BuildCopList */
+			*BuildData++ = *BuildDatadef;	/* CleanUpMVP */
+			*BuildData = NULL;		/* terminator */
+			result = TRUE;
+		}
+	}
+	SetDisplayInfoData(NULL, (APTR)&vinfo2024, sizeof(struct VecInfo), DTAG_VEC, A2024TENHERTZ_KEY);
+	if (GetDisplayInfoData(NULL, (APTR)&vinfo2024, sizeof(struct VecInfo), DTAG_VEC, A2024FIFTEENHERTZ_KEY))
+	{
+		vinfo2024.Vec = vt;
+		SetDisplayInfoData(NULL, (APTR)&vinfo2024, sizeof(struct VecInfo), DTAG_VEC, A2024FIFTEENHERTZ_KEY);
+	}
+    }
+
+    if (result)
+    {
+
+	/* Let's allocate the SyncRaster,
+	 * add an interrupt server,
+	 * and vector LoadView().
+	 */
+
+	struct Interrupt *vbi = NULL;
+	struct A2024VB *vbdata = NULL;
+	APTR loadview, mrgcop;
+	ULONG *oldloadview, *oldmrgcop;
+	ULONG *vbicache;
+	int i;
+	BOOL err = TRUE;
+
+	if (GfxBase->a2024_sync_raster = (void *) AllocVec(128,MEMF_CHIP|MEMF_CLEAR))
+	{
+		for (i = 0;i < (128/4) ; i++)
+		{
+			GfxBase->a2024_sync_raster[i] = -1;
+		}
+		GfxBase->a2024_sync_raster[0] = 0x3ffffff; /* bart -- 01.31.89 */
+
+		if (vbi = (struct Interrupt *)AllocVec(sizeof(struct Interrupt), MEMF_PUBLIC | MEMF_CLEAR))
+		{
+			if (vbdata = (struct A2024VB *)AllocVec(sizeof(struct A2024VB), MEMF_PUBLIC | MEMF_CLEAR))
+			{
+				struct MonitorSpec *mspec;
+
+				GfxBase->hedley_flags = 0;
+				vbdata->gbhc = &GfxBase->hedley_count;
+				vbi->is_Data = vbdata;
+				vbi->is_Code = REALADR(&A2024vbasm);
+				vbi->is_Node.ln_Type = NT_INTERRUPT;
+				vbi->is_Node.ln_Pri = 11;	/* one more than gfxlib */
+				vbi->is_Node.ln_Name = REALADR(&A2024vbname);
+
+				Forbid();
+				if (mspec = OpenMonitor(NULL, 0x0))
+				{
+					oldloadview = REALADR(&GfxBaseLoadView);
+					oldmrgcop = REALADR(&GfxBaseMrgCop);
+					*oldloadview = mspec->ms_LoadView;
+					*oldmrgcop = mspec->ms_MrgCop;
+					CloseMonitor(mspec);
+					if (mspec = OpenMonitor("a2024.monitor", 0x41000))
+					{
+						mspec->ms_MrgCop = REALADR(&A2024MrgCop);
+						mspec->ms_LoadView = REALADR(&A2024LoadView);
+						mspec->ms_KillView = REALADR(&A2024KillView);
+						CloseMonitor(mspec);
+						GfxBase->hedley[7] = vbdata;
+						vbicache = REALADR(&VBlankStruct);
+						*vbicache = vbi;
+						err = FALSE;
+					}
+				}
+				Permit();
+				
+			}
+		}
+	}
+	if (err)
+	{
+		if (vbi)
+			FreeVec(vbi);
+		if (GfxBase->a2024_sync_raster)
+			FreeVec(GfxBase->a2024_sync_raster);
+		if (perm)
+			FreeVec(perm);
+		result = FALSE;
+	}
+		
+    }
+    return(result);
+}
+@
+
+
+39.11
+log
+@Use NTSC_MONITOR_ID to read the default vector table instead of
+the DEFAULT_MONITOR_ID, in case promotion is enabled when the A2024
+is added. The vector tables for both NTSC and PAL are the same, so
+there is no need to distinguish.
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.10 92/10/26 19:47:06 spence Exp Locker: spence $
+d70 1
+d73 1
+d182 2
+a183 2
+	APTR loadview;
+	ULONG *oldloadview;
+d214 1
+d216 1
+d220 1
+@
+
+
+39.10
+log
+@Cleaned up for Release 3.01.
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.9 92/06/25 15:06:23 spence Exp $
+d105 4
+a108 1
+	if (GetDisplayInfoData(NULL, (APTR)&vinfodef, sizeof(struct VecInfo), DTAG_VEC, 0x0))
+@
+
+
+39.9
+log
+@No longer AddIntServer(). This is done by the LoadView() code.
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.8 92/02/14 13:03:37 spence Exp Locker: spence $
+d11 4
+a14 4
+	#include "V39:src/kickstart/graphics/displayinfo.h"
+	#include "V39:src/kickstart/graphics/vp_internal.h"
+	#include "V39:src/kickstart/graphics/gfxbase.h"
+	#include "V39:src/kickstart/graphics/monitor.h"
+d33 2
+d36 8
+d58 1
+d80 1
+d91 11
+d104 1
+d111 1
+d115 1
+a115 1
+			vt = vinfo2024.Vec;
+d117 2
+d126 1
+a126 1
+			BuildData = (ULONG *)vt->BuildVP;
+d128 1
+d159 6
+d204 1
+a204 8
+#ifdef UNDEF
+				/* Now SetFunction LoadView() */
+				Forbid();
+					loadview = SetFunction(GfxBase, -222,REALADR(&A2024LoadView));
+					oldloadview = REALADR(&GfxBaseLoadView);
+					*oldloadview = loadview;
+				Permit();
+#endif
+a214 1
+						mspec->DeniseMaxDisplayColumn = 465;
+a216 1
+//						AddIntServer(INTB_VERTB, vbi);
+@
+
+
+39.8
+log
+@mspec->MaxDeniseDisplayColumn set to 465 (for 10hz 1024 wide screen).
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.7 92/01/30 19:58:19 spence Exp Locker: spence $
+d60 1
+d62 1
+d145 1
+d187 1
+d191 3
+a193 1
+						AddIntServer(INTB_VERTB, vbi);
+@
+
+
+39.7
+log
+@No longer SetFunction()s LoadView(), but goes through the MonitorSpec
+vector
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.6 92/01/30 16:20:21 chrisg Exp Locker: spence $
+d184 1
+@
+
+
+39.6
+log
+@ massive changes. Sprites now work!
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.5 92/01/28 14:10:39 spence Exp Locker: chrisg $
+d14 1
+d139 2
+a140 2
+	struct Interrupt *vbi;
+	struct A2024VB *vbdata;
+d144 1
+d158 2
+d167 1
+d173 17
+a189 1
+					GfxBase->hedley[7] = vbdata;
+d191 1
+a191 8
+				AddIntServer(INTB_VERTB, vbi);
+			}
+			else
+			{
+				FreeVec(vbi);
+				FreeVec(GfxBase->a2024_sync_raster);
+				FreeVec(perm);
+				result = FALSE;
+d194 6
+a199 2
+		else
+		{
+d201 1
+d203 1
+a203 2
+			result = FALSE;
+		}
+d205 1
+@
+
+
+39.5
+log
+@Allocate the sync-raster here.
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.4 92/01/27 15:30:13 chrisg Exp Locker: spence $
+@
+
+
+39.4
+log
+@ fixed bogus address calculations that caused me hours of pain!
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.3 92/01/06 12:09:53 spence Exp Locker: chrisg $
+d132 6
+a137 1
+    /* Let's add an interrupt server */
+d142 1
+d144 1
+a144 1
+	if (vbi = (struct Interrupt *)AllocVec(sizeof(struct Interrupt), MEMF_PUBLIC | MEMF_CLEAR))
+d146 7
+a152 1
+		if (vbdata = (struct A2024VB *)AllocVec(sizeof(struct A2024VB), MEMF_PUBLIC | MEMF_CLEAR))
+d154 25
+a178 15
+			GfxBase->hedley_flags = 0;
+			vbdata->gbhc = &GfxBase->hedley_count;
+			vbi->is_Data = vbdata;
+			vbi->is_Code = REALADR(&A2024vbasm);
+			vbi->is_Node.ln_Type = NT_INTERRUPT;
+			vbi->is_Node.ln_Pri = 11;	/* one more than gfxlib */
+			vbi->is_Node.ln_Name = REALADR(&A2024vbname);
+			/* Now SetFunction LoadView() */
+			Forbid();
+				loadview = SetFunction(GfxBase, -222,REALADR(&A2024LoadView));
+				oldloadview = REALADR(&GfxBaseLoadView);
+				*oldloadview = loadview;
+				GfxBase->hedley[7] = vbdata;
+			Permit();
+			AddIntServer(INTB_VERTB, vbi);
+d182 1
+a182 1
+			FreeVec(vbi);
+a186 5
+	else
+	{
+		FreeVec(perm);
+		result = FALSE;
+	}
+a187 1
+
+@
+
+
+39.3
+log
+@Calculate relocated MoveSprite, PokeColours etc.
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.2 91/12/18 12:06:28 spence Exp Locker: spence $
+d26 2
+a27 2
+extern ULONG FirstAddress;
+extern ULONG LastAddress;
+d41 1
+a41 1
+    size = ((&LastAddress - &FirstAddress) << 2);
+d61 1
+d63 4
+d73 1
+a73 1
+    APTR perm;
+d80 4
+d90 4
+a93 4
+			vt->MoveSprite = (APTR)((ULONG)perm + ((((ULONG)&A2024MoveSprite) - ((ULONG)&FirstAddress)) << 0));
+			vt->ChangeSprite = (APTR)((ULONG)perm + ((((ULONG)&A2024ChangeSprite) - ((ULONG)&FirstAddress)) << 0));
+			vt->ScrollVP = (APTR)((ULONG)perm + ((((ULONG)&A2024ScrollVP) - ((ULONG)&FirstAddress)) << 0));
+			vt->PokeColors = (APTR)((ULONG)perm + ((((ULONG)&A2024PokeColours) - ((ULONG)&FirstAddress)) << 0));
+d145 1
+a145 1
+			vbi->is_Code = (APTR)((ULONG)perm + ((((ULONG)&A2024vbasm) - ((ULONG)&FirstAddress)) << 0));
+d148 1
+a148 1
+			vbi->is_Node.ln_Name = (APTR)((ULONG)perm + ((((ULONG)&A2024vbname) - ((ULONG)&FirstAddress)) << 0));
+d151 2
+a152 2
+				loadview = SetFunction(GfxBase, -222, (APTR)((ULONG)perm + ((((ULONG)&A2024LoadView) - ((ULONG)&FirstAddress)) << 0)));
+				oldloadview = (APTR)((ULONG)perm + ((((ULONG)&GfxBaseLoadView) - ((ULONG)&FirstAddress)) << 0));
+@
+
+
+39.2
+log
+@SetFunction() LoadView().
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.1 91/11/07 12:51:58 spence Exp Locker: spence $
+d81 4
+a84 8
+//			vt->MoveSprite = A2024MoveSprite;
+//			vt->ChangeSprite = A2024ChangeSprite;
+//			vt->ScrollVP = A2024ScrollVP;
+//			vt->PokeColors = A2024PokeColours;
+			vt->MoveSprite = vtdef->MoveSprite;
+			vt->ChangeSprite = vtdef->ChangeSprite;
+			vt->ScrollVP = vtdef->ScrollVP;
+			vt->PokeColors = vtdef->PokeColors;
+@
+
+
+39.1
+log
+@Initialises vb IntServer
+@
+text
+@d3 1
+a3 1
+*	$Id: a2024.c,v 39.0 91/11/06 13:32:41 spence Exp Locker: spence $
+d58 2
+d130 2
+d144 7
+@
+
+
+39.0
+log
+@Initial check in.
+@
+text
+@d3 1
+a3 1
+*	$Id: Exp $
+d8 3
+a10 1
+	#include <dos/dosextens.h>
+d14 1
+a15 2
+	#include <clib/dos_protos.h>
+	#include <pragmas/dos_pragmas.h>
+d43 1
+a43 1
+    if (perm = AllocMem(size, 0))
+d57 2
+a59 1
+
+d64 1
+a64 1
+    struct VecTable *vt;
+d77 1
+d79 8
+a86 4
+			vt->MoveSprite = A2024MoveSprite;
+			vt->ChangeSprite = A2024ChangeSprite;
+			vt->ScrollVP = A2024ScrollVP;
+			vt->PokeColors = A2024PokeColours;
+d114 1
+d120 33
+@

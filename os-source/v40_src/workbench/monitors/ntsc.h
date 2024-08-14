@@ -1,0 +1,20 @@
+#include <graphics/monitor.h>
+#include <graphics/modeid.h>
+#include "monitorstuff.h"
+
+#define MONITOR_NUM   1
+#define MONITOR_NAME  "ntsc.monitor"
+#define ICON_NAME "PROGDIR:NTSC"
+#define MSFLAGS REQUEST_NTSC
+#define BEAMCON0 STANDARD_NTSC_BEAMCON
+#define TOTROWS STANDARD_NTSC_ROWS
+#define TOTCLKS STANDARD_COLORCLOCKS
+#define MINROW MIN_NTSC_ROW
+
+#define PREFERRED_MODEID (NTSC_MONITOR_ID | HIRES_KEY)
+#define COMPAT MCOMPAT_MIXED
+
+#undef MAX_DENISE
+#undef MIN_DENISE
+#define MAX_DENISE STANDARD_DENISE_MAX
+#define MIN_DENISE STANDARD_DENISE_MIN

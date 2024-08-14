@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	24
+DATE	MACRO
+		dc.b	'8.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'efs 40.24'
+	ENDM
+VSTRING	MACRO
+		dc.b	'efs 40.24 (8.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: efs 40.24 (8.2.94)',0
+	ENDM

@@ -1,0 +1,258 @@
+**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       BeginIO.a  -- device BeginIO code
+*
+**************************************************************************
+        section ,CODE
+
+        include "mfm.i"
+        include "mfm_ext.i"
+
+        XREF    _cmdtable
+		XREF 	TD_ChangeNum
+        XDEF    _PerformIO
+        XDEF    _TermIO
+
+
+        ;--------------------------------------------------------------------------
+        ; This define is used to tell which commands should not be queued.
+        ; Command 0 is bit 0, command 1 is bit 1, and so on.
+
+TESTSET         equ     $202C6DCC   ; Immediate CMD_WRITE, CMD_READ, TD_FORMAT
+IMMEDIATES      equ     $002C61C2
+;IMMEDIATES      equ     TESTSET
+
+;--------------------------------------------------------------------------
+; BeginIO Section
+;
+; This section of code is called by the BeginIO() function which was called
+; by DoIO() or SendIO() functions.  This code primarily determines if the
+; IO to be performed is IMMEDIATE (based on the IO_COMMAND given) or should
+; be queued to the Unit Task.
+;
+; Inputs:
+; =======
+; a1 = IORequest structure pointer
+; a6 = device pointer
+;
+; Registers used:
+; ===============  
+Temp       equr    d2
+;IOReq      equr    a2
+;Unit       equr    a3
+TDIOReq     equr    a4
+;Device     equr    a5
+;AbsExecBase equr    a6
+;
+; Results:
+; ========
+; If ERROR occurred -- set IO_ERROR field in IOReq
+;--------------------------------------------------------------------------
+        XDEF    _BeginIO
+
+MM_BeginIO      reg     d2/d4/a2/a3/a4/a5
+
+    ifd DEBUG
+CMD     dc.b    $0D,$0A,'CMD = %ld  Flags = %lx',0
+        cnop    0,4
+    endc
+
+_BeginIO:
+        movem.l MM_BeginIO,-(sp)
+
+        move.l  a6,Device                   ; store devptr in new reg
+		move.l  md_AbsExecBase(Device),AbsExecBase  ; retrieve ExecBase addr
+        move.l  IORequest,IOReq             ; another copy of ioReq
+
+        move.b  #0,IO_ERROR(IOReq)  ; set default IO_ERROR = NO Error.
+
+        ;------- bookkeeping
+        move.l  IO_UNIT(IOReq),Unit     ; store unit ptr in reg
+
+    ifd DEBUG
+ moveq  #0,d0
+ moveq  #0,d1
+ move.w IO_COMMAND(IOReq),d0
+ move.b mdu_DFLAGS(Unit),d1
+ KPRINTF    CMD,d0,d1
+    endc
+
+        ;------- see if the IO command is within range
+        move.w  IO_COMMAND(IOReq),d4    ; store IO command
+        bclr    #TDB_EXTCOM,d4          ; clear extended command bit
+		beq		not_extend
+
+		; ------ find ChangeNum 
+		move.w 	#TD_CHANGENUM,IO_COMMAND(IOReq)
+        bset    #IOB_IMMED,IO_FLAGS(IOReq) ; set IO_IMMED flag
+		jsr 	TD_ChangeNum
+
+		move.w 	d4,IO_COMMAND(IOReq)	;restore old IO Command 
+
+; check for error on ChangeNum
+; an error occurs on ChangeNum if IO_ERROR /= 0 
+; if error leave IO_ERROR and call TERM_IO
+
+		tst.b 	IO_ERROR(IOReq)
+		bne		Terminate_IO
+
+; check for count greater than changenum
+
+		move.l 	IOTD_COUNT(IOReq),D0
+		cmp.l	IO_ACTUAL(IOReq),D0
+
+; if IO_ACTUAL < COUNT then return error 29 and TERM_IO
+		bge		arnd
+
+		move.b 	#TDERR_DiskChanged,IO_ERROR(IOReq)	
+		bra.s	Terminate_IO
+
+arnd:
+not_extend:
+        cmp.w   #MD_LASTCOMM,d4         ; check against last command
+        bge     BeginIO_NoCmd           ; command outside of range
+
+        bset    #UNITB_ACTIVE,UNIT_FLAGS(Unit)
+
+        ;------- process all immediate commands no matter what
+        move.l  #IMMEDIATES,d1
+        btst    d4,d1
+        bne.s   BeginIO_Immediate
+
+        ;------- we need to queue the IOReq to the device.  Mark us as 
+        ;       needing task attention.  Clear the quick flag even if
+        ;       previously set.
+BeginIO_QueueMsg:
+        ;------- queueing messages.  Set UNIT IN TASK bit in UNIT_FLAGS.
+        bset    #UNITB_INTASK,UNIT_FLAGS(Unit) 
+        andi.b  #~(IOF_IMMED|IOF_QUICK),IO_FLAGS(IOReq) 
+                                        ; clr IO_QUICK and IO_IMMED flags -- so
+                                        ; reply to msg when done.
+        move.l  Unit,ArgA0
+        CALLSYS PutMsg
+
+        bra.s   BeginIO_End
+
+BeginIO_Immediate:
+        bset    #IOB_IMMED,IO_FLAGS(IOReq) ; set IO_IMMED flag
+
+
+; temp replace params of the MFM IOReq to TD IOReq.  The BeginIO() routine
+; when doing an IMMED will load the IOReq with the TD Req device and unit
+; ptrs.  The BeginIO() will have to retore those ptrs when returning.
+
+;---- for IMMEDIATE ACTION ONLY.  Remove when not required
+;----
+    IFEQ    TESTSET-IMMEDIATES
+        lea.l   mdu_TDREQ(Unit),TDIOReq     ; store TD ioReq ptr in reg
+        move.l  MN_REPLYPORT(TDIOReq),Temp
+        move.l  MN_REPLYPORT(IOReq),MN_REPLYPORT(TDIOReq) 
+                                            ; this task replyport
+    ENDC
+;----
+;---- FOR IMMEDIATE ACTION ONLY.  Remove when not required
+
+        bsr.s   _PerformIO                  ; do MFM cmd made now TD cmd
+
+;---- for IMMEDIATE ACTION ONLY.  Remove when not required
+;----
+    IFEQ    TESTSET-IMMEDIATES
+        move.l  Temp,MN_REPLYPORT(TDIOReq)
+                                            ; this task replyport
+    ENDC
+;----
+;---- FOR IMMEDIATE ACTION ONLY.  Remove when not required
+        bclr    #UNITB_ACTIVE,UNIT_FLAGS(Unit)
+
+BeginIO_End:
+        movem.l (sp)+,MM_BeginIO
+        rts
+
+BeginIO_NoCmd:
+        move.b  #IOERR_NOCMD,IO_ERROR(IOReq)
+Terminate_IO:
+        bsr.s   _TermIO
+        bra.s   BeginIO_End
+
+
+;--------------------------------------------------------------------------
+; PerformIO starts the command in an IO request.  Command range checking 
+; must be performed before this routine.
+;
+; Inputs:
+; =======
+; a1 = IOReq pointer
+; a2 = IOReq pointer
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;--------------------------------------------------------------------------
+
+MM_PerformIO    reg     a2
+
+_PerformIO:
+        btst    #IOB_ABORT,IO_FLAGS(IOReq)  ; test if IORequest to be aborted
+        bne.s   _PerformIO_end              ; go if aborted
+
+        move.w  IO_COMMAND(IOReq),d0
+        lsl.l   #1,d0                   ; make into longword disp in cmdtable
+        move.l  #_cmdtable,a0           ; get Cmd Table ptr
+        move.w  (a0,d0.w),d0            ; point to Cmd_XXXX subroutine
+
+        jsr     (a0,d0.w)               ; go Cmd_XXXX subroutine
+
+        bclr    #IOB_ABORT,IO_FLAGS(IOReq)  ; clear IORequest aborted bit if set
+
+_PerformIO_end:
+        bsr.s   _TermIO                 ; go reply to command if required
+
+        rts
+
+
+;--------------------------------------------------------------------------
+; TermIO sends the IO request back to the user if the IO_QUICK bit not set.
+;
+; Inputs:
+; =======
+; a2 = IOReq pointer
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;--------------------------------------------------------------------------
+MM_TermIO       reg     a2
+
+_TermIO:
+        btst    #IOB_ABORT,IO_FLAGS(IOReq)  ; test if IORequest to be aborted
+        beq.s   1$                        ; go if not aborted
+
+        move.b  #IOERR_ABORTED,IO_ERROR(IOReq)
+1$:
+        ;------- if the quick bit is still set then we don't need to reply
+        ;------- msg -- just return to the user
+        btst    #IOB_QUICK,IO_FLAGS(IOReq)
+        bne.s   TermIO_End
+
+        move.l  IOReq,ArgA1             ;pass IORequest ptr
+        CALLSYS ReplyMsg
+
+TermIO_End:
+        rts
+
+;--------------------------------------------------------------------------
+; AbortIO Section
+;
+; Immediately abort the specified IORequest if possible.
+;
+; Inputs:
+; =======
+; a1 = IOReq pointer
+; a6 = device pointer
+;--------------------------------------------------------------------------
+        XDEF    _AbortIO
+
+_AbortIO:
+        bset    #IOB_ABORT,IO_FLAGS(IORequest)  ; set IORequest to be aborted
+        rts
+        
+        end

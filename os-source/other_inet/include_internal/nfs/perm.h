@@ -1,0 +1,16 @@
+/*
+** NFS permission bits
+*/
+
+#define NFS_OWN_RDPERM	0400
+#define NFS_OWN_WRPERM	0200
+#define NFS_OWN_EXPERM	0100
+#define NFS_GID_RDPERM	0040
+#define NFS_GID_WRPERM	0020
+#define NFS_GID_EXPERM	0010
+#define NFS_PUB_RDPERM	0004
+#define NFS_PUB_WRPERM	0002
+#define NFS_PUB_EXPERM	0001
+#define NFS_SETUID	04000
+#define NFS_SETGID	02000
+#define NFS_TEXT	01000

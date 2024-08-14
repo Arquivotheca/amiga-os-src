@@ -1,0 +1,198 @@
+########################################
+MAKEMETA=	../../../../tools/makemeta
+
+
+OBJS0=\
+	Open.obj\
+	Close.obj\
+	Read.obj\
+	Write.obj\
+	Input.obj\
+	Output.obj\
+	Seek.obj\
+	DeleteFile.obj\
+	Rename.obj\
+	Lock.obj\
+	UnLock.obj\
+	DupLock.obj\
+	Examine.obj\
+	ExNext.obj\
+	Info.obj\
+	CreateDir.obj\
+	CurrentDir.obj\
+	IoErr.obj\
+	CreateProc.obj\
+	Exit.obj\
+	LoadSeg.obj\
+	UnLoadSeg.obj\
+	ClearVec.obj\
+	NoReqLoadSeg.obj\
+	DeviceProc.obj\
+	SetComment.obj\
+	SetProtection.obj\
+	DateStamp.obj\
+	Delay.obj\
+	WaitForChar.obj\
+	ParentDir.obj\
+	IsInteractive.obj\
+	Execute.obj\
+	AllocDosObject.obj\
+	AllocDosObjectTagList.obj\
+	AllocDosObjectTags.obj\
+	FreeDosObject.obj\
+	DoPkt.obj\
+	DoPkt0.obj\
+	DoPkt1.obj\
+	DoPkt2.obj\
+	DoPkt3.obj\
+	DoPkt4.obj\
+	SendPkt.obj\
+	WaitPkt.obj\
+	ReplyPkt.obj\
+	AbortPkt.obj\
+	LockRecord.obj\
+	LockRecords.obj\
+	UnLockRecord.obj\
+	UnLockRecords.obj\
+	SelectInput.obj\
+	SelectOutput.obj\
+	FGetC.obj\
+	FPutC.obj\
+	UnGetC.obj\
+	FRead.obj\
+	FWrite.obj\
+	FGets.obj\
+	FPuts.obj\
+	VFWritef.obj\
+	FWritef.obj\
+	VFPrintf.obj\
+	FPrintf.obj\
+	Flush.obj\
+	SetVBuf.obj\
+	DupLockFromFH.obj\
+	OpenFromLock.obj\
+	ParentOfFH.obj\
+	ExamineFH.obj\
+	SetFileDate.obj\
+	NameFromLock.obj\
+	NameFromFH.obj\
+	SplitName.obj\
+	SameLock.obj\
+	SetMode.obj\
+	ExAll.obj\
+	ReadLink.obj\
+	MakeLink.obj\
+	ChangeMode.obj\
+	SetFileSize.obj\
+	SetIoErr.obj\
+	Fault.obj\
+	PrintFault.obj\
+	ErrorReport.obj\
+	Cli.obj\
+	CreateNewProc.obj\
+	CreateNewProcTagList.obj\
+	CreateNewProcTags.obj\
+	RunCommand.obj\
+	GetConsoleTask.obj\
+	SetConsoleTask.obj\
+	GetFileSysTask.obj\
+	SetFileSysTask.obj\
+	GetArgStr.obj\
+	SetArgStr.obj\
+	FindCliProc.obj\
+	MaxCli.obj\
+	SetCurrentDirName.obj\
+	GetCurrentDirName.obj
+
+OBJS1=\
+	SetProgramName.obj\
+	GetProgramName.obj\
+	SetPrompt.obj\
+	GetPrompt.obj\
+	SetProgramDir.obj\
+	GetProgramDir.obj\
+	SystemTagList.obj\
+	System.obj\
+	SystemTags.obj\
+	AssignLock.obj\
+	AssignLate.obj\
+	AssignPath.obj\
+	AssignAdd.obj\
+	RemAssignList.obj\
+	GetDeviceProc.obj\
+	FreeDeviceProc.obj\
+	LockDosList.obj\
+	UnLockDosList.obj\
+	AttemptLockDosList.obj\
+	RemDosEntry.obj\
+	AddDosEntry.obj\
+	FindDosEntry.obj\
+	NextDosEntry.obj\
+	MakeDosEntry.obj\
+	FreeDosEntry.obj\
+	IsFileSystem.obj\
+	Format.obj\
+	Relabel.obj\
+	Inhibit.obj\
+	AddBuffers.obj\
+	CompareDates.obj\
+	DateToStr.obj\
+	StrToDate.obj\
+	InternalLoadSeg.obj\
+	InternalUnLoadSeg.obj\
+	NewLoadSeg.obj\
+	NewLoadSegTagList.obj\
+	NewLoadSegTags.obj\
+	AddSegment.obj\
+	FindSegment.obj\
+	RemSegment.obj\
+	CheckSignal.obj\
+	ReadArgs.obj\
+	FindArg.obj\
+	ReadItem.obj\
+	StrToLong.obj\
+	MatchFirst.obj\
+	MatchNext.obj\
+	MatchEnd.obj\
+	ParsePattern.obj\
+	MatchPattern.obj\
+	DosNameFromAnchor.obj\
+	FreeArgs.obj\
+	FilePart.obj\
+	PathPart.obj\
+	AddPart.obj\
+	StartNotify.obj\
+	EndNotify.obj\
+	SetVar.obj\
+	GetVar.obj\
+	DeleteVar.obj\
+	FindVar.obj\
+	CliInit.obj\
+	CliInitNewcli.obj\
+	CliInitRun.obj\
+	WriteChars.obj\
+	PutStr.obj\
+	VPrintf.obj\
+	Printf.obj\
+	ParsePatternNoCase.obj\
+	MatchPatternNoCase.obj\
+	DosGetString.obj\
+	SameDevice.obj\
+	ExAllEnd.obj\
+	SetOwner.obj
+
+lib.timestamp:	asm.timestamp
+	make objs0 objs1 ${MFLAGS} ${MARGS}
+	cat *.obj >../dos.lib
+	rm -f *.obj
+	touch lib.timestamp
+
+asm.timestamp:
+
+objs0:		${OBJS0}
+
+objs1:		${OBJS1}
+	rm -f *.asm
+	touch asm.timestamp
+
+.INCLUDE=${MAKEMETA}

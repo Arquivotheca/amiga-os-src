@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'23.6.93'
+	ENDM
+VERS	MACRO
+		dc.b	'shell 42.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'shell 42.1 (23.6.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: shell 42.1 (23.6.93)',0
+	ENDM

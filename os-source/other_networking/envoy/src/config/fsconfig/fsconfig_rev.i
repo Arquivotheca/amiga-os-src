@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'6.10.93'
+	ENDM
+VERS	MACRO
+		dc.b	'fsconfig 40.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'fsconfig 40.3 (6.10.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: fsconfig 40.3 (6.10.93)',0
+	ENDM

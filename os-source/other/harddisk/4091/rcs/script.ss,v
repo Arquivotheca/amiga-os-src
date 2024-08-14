@@ -1,0 +1,851 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     93.05.06.22.17.05;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@NCR53c710 assembler source
+Multithreaded.  Requires NASM 2.02.
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@ARCH 53c710
+
+;TABLE DSA_entry \
+;	move_data=8{??}, \
+;	save_data=8{??}, \
+;	final_ptr=4{??}, \
+;	select_data=4{??}, \
+;	status_data=8{??}, \
+;	recv_msg=8{??}, \
+;	send_msg=8{??}, \
+;	command_data=8{??}, \
+;	send_buf=8{??}, \
+;	recv_buf=8{??}, \
+;	status_buf=1{??}, \
+;	pad=3{??}, \
+;	reselect_entry=56{??}
+
+RELATIVE	move_data=0
+RELATIVE	save_data=move_data+8
+RELATIVE	final_ptr=save_data+8
+RELATIVE	select_data=final_ptr+4
+RELATIVE	status_data=select_data+4
+RELATIVE	recv_msg=status_data+8
+RELATIVE	send_msg=recv_msg+8
+RELATIVE	command_data=send_msg+8
+RELATIVE	send_buf=command_data+8
+RELATIVE	recv_buf=send_buf+8
+RELATIVE	status_buf=recv_buf+8
+RELATIVE	pad=status_buf+1
+RELATIVE	reselect_entry=pad+3
+;RELATIVE	head_tail_data=reselect_entry+?
+
+ABSOLUTE	io_complete=		0x01
+ABSOLUTE	scatter_dma=		0x02
+ABSOLUTE	sync_received=		0x03
+ABSOLUTE	modify_pointer_fetched=	0x04
+ABSOLUTE	unusual_message_in=	0x05
+ABSOLUTE	extended_not_len_3=	0x06
+ABSOLUTE	extended_not_sync=	0x07
+ABSOLUTE	target_rejected_msg=	0x08
+ABSOLUTE	data_eaten=		0x09
+ABSOLUTE	unknown_phase=		0x0A
+ABSOLUTE	no_msg_after_status=	0x0b
+ABSOLUTE	not_command_complete=	0x0c
+ABSOLUTE	bad_reselect=		0x0d
+ABSOLUTE	bad_address=		0x0e
+ABSOLUTE	selected_as_target=	0x0f
+ABSOLUTE	big_error_1=		0x10
+ABSOLUTE	big_error_2=		0x11
+ABSOLUTE	reselect_during_select= 0x12
+ABSOLUTE	target_disconnect=	0x13
+ABSOLUTE in_identify= 0x14
+ABSOLUTE in_get_tag= 0x15
+ABSOLUTE in_no_nexus= 0x16
+ABSOLUTE in_nexus= 0x17
+ABSOLUTE in_wait= 0x18
+
+EXTERN default_dsa,current_dsa,modify_data,Scheduler,_DSA
+EXTERN default_send_buf,sync_buf,_SCRATCH,_TEMP,zero,_SCRATCH3
+
+; external entry points
+ENTRY	start,phase_switch,eat_data,no_nexus_found,nexus_found
+ENTRY	message_ok,message_reply,resel,get_tag,find_addr_table,dataout,datain
+ENTRY	move_save_data
+ENTRY	new_addr
+ENTRY	patch_ownid_mask
+
+; Select SCRIPT
+;**************************************************************************
+; IO start location (jumped to by scheduler with DSA set to start an IO).
+
+start:
+; INT in_sel ; FIX!!!! remove!!!
+; Select with ATN.  If selected/reselected before success, go see if we got a
+; reselect, select, or a SIGP.
+;
+; If reselected, must restore entry so it will be rescheduled.  This should
+; be very rare.
+
+	SELECT ATN FROM select_data, REL(select_resel)
+
+; All phases return to here to figure out where to go next.  We're
+; COMPLETELY target-driven.  In cases where state matters, we take an
+; interrupt or modify the data structures (msg buffers, etc).
+; After reselect, we go directly to MSG_IN, and it ends up coming back here.
+; Therefore, there's no need to remember "where" we disconnected.
+phase_switch:
+	JUMP REL (msgin),	WHEN MSG_IN
+	JUMP REL (msgout),	IF MSG_OUT
+	JUMP REL (command_out),	IF CMD
+	JUMP REL (dataout),	IF DATA_OUT
+	JUMP REL (datain),	IF DATA_IN
+	JUMP REL (status_phase),IF STATUS
+	INT unknown_phase
+						; should never happen
+
+; Handle outgoing messages.  Normally this is just identify.
+; The NCR multi-threaded code moves the identify and the first byte of the
+; extended message in one move, and the rest of the sync in another.  Why?
+msgout:
+	MOVE FROM send_msg, WHEN MSG_OUT   ; move clears ATN before last byte
+	JUMP REL (phase_switch)
+
+; Time to send the command.
+command_out:
+;	CLEAR ATN		; Why do we need this?  The NCR script has it.
+	MOVE FROM command_data, WHEN CMD
+	JUMP REL (phase_switch)
+
+; FIX! we want to use block-sized moves, and test data phase after each.
+; changing the move_data address is the hard part (adding block_size to
+; it).  This way, we'll take an int on each disconnect during data xfer.
+; At least it looks like reselect won't cause an interrupt, nor will
+; disconnect before or after data transfer (only during).
+;
+; During data xfer, a disconnect will cause a phase mismatch error.  Since it
+; comes from dataout or datain, ncr.c knows to set the move_data values to
+; reflect the amount xferred so far, and then send us to phase_switch.  Almost
+; certainly the next phase will be Message In, Save Data Pointers, and 
+; Disconnect.
+;
+dataout:
+	MOVE FROM move_data, WHEN DATA_OUT
+
+; Instead of jumping straight back to phase_switch, check to see if we should
+; move more data.  If so, take an interrupt to decide whether to eat the
+; transfer (wrong xfer size), or call CachePreDMA to find the next location
+; for the gather-scatter.  scatter_dma will either GOTO() eat_data (if the
+; target has data we don't want) or RESTART() here if we have more data to
+; xfer to a different address (gather-scatter).
+	INT scatter_dma, WHEN DATA_OUT
+	JUMP REL(data_done) IF NOT DATA_OUT
+	JUMP REL (phase_switch)
+
+datain:
+	MOVE FROM move_data, WHEN DATA_IN
+; see data_out...
+	INT scatter_dma, WHEN DATA_IN
+	JUMP REL (phase_switch) IF DATA_IN
+
+; We've completed a data xfer with no errors.  Update the current pointer
+; values to reflect this.  The real reason for this is if the target 
+; disconnects (for save pointers) or for some reason goes back to data phase.
+; DAMN is math and indirect addressing hard!  Unless we do this, we need to
+; take an int on save pointers.
+data_done:
+; fix! scratch?
+	MOVE MEMORY 4,current_dsa,_SCRATCH ; &mode_data - DSA/TEMP gone
+	MOVE MEMORY 4,_SCRATCH,clear_len+8 ; DSA gone, &move_data->dest
+
+	; calculate destination for store of new address for move (addr+len)
+	MOVE SCRATCH0 + 0x04 to SCRATCH0	; addr is move_data+4
+	MOVE SCRATCH1 + 0x00 to SCRATCH1 WITH CARRY
+	MOVE SCRATCH2 + 0x00 to SCRATCH2 WITH CARRY
+	MOVE SCRATCH3 + 0x00 to SCRATCH3 WITH CARRY
+	MOVE MEMORY 4,_SCRATCH,new_addr+8	; set destination to addr
+
+	MOVE SCRATCH0 + 0x0c to SCRATCH0	; new addr is 12 bytes further
+						; 2*sizeof(move_data) - 4 = 12
+	MOVE SCRATCH1 + 0x00 to SCRATCH1 WITH CARRY
+	MOVE SCRATCH2 + 0x00 to SCRATCH2 WITH CARRY
+	MOVE SCRATCH3 + 0x00 to SCRATCH3 WITH CARRY
+	MOVE MEMORY 4,_SCRATCH,new_addr+4	; set scr to &(final_ptr)
+; int new_addr_ready
+new_addr:
+	MOVE MEMORY 4,0x00000000,0x00000000	; move final_ptr,move_data.addr
+
+	; now we can set len to 0 (all bytes transferred)
+clear_len:
+	MOVE MEMORY 4,zero,0x00000000	; destination is modified, *src = 0
+	MOVE MEMORY 4,current_dsa,_DSA	; restore DSA pointer
+	JUMP REL(phase_switch)		; and continue
+
+
+; NOTE: these "eat extra data" functions are _slow_.  We don't care.
+; perhaps could fold these by removing the WHEN from the move and assuming...
+eat_data:
+	JUMP REL(eat_data_in) IF DATA_IN	; we already did WHEN earlier
+
+; target wants more data than we have.  transfer junk until it goes away.
+; FIX! should we do this?  Someone at dec says we should do a bus reset(!)
+; (see scsi/cam.msgs)
+eat_data_out:
+	MOVE 1,modify_data, WHEN DATA_OUT
+	CALL REL (add_1)			; keep count of extras...
+	JUMP REL (eat_data_out), WHEN DATA_OUT
+	INT data_eaten				; let processor record scratch
+
+; target has more data than we want.  transfer to junk until it goes away.
+eat_data_in:
+	MOVE 1,modify_data, WHEN DATA_IN
+	CALL REL (add_1)			; keep count of extras...
+	JUMP REL (eat_data_in), WHEN DATA_IN
+	INT data_eaten				; let processor record scratch
+
+
+status_phase:
+	MOVE FROM status_data, WHEN STATUS
+	INT no_msg_after_status, WHEN NOT MSG_IN
+	MOVE FROM recv_msg, WHEN MSG_IN		; command complete
+	CLEAR ACK
+	INT not_command_complete IF NOT 0x00	; linked commands? FIX!
+	WAIT DISCONNECT
+	INT io_complete				; status data has result
+
+; wait for a reselect or sig_p.  Scheduler jumps here if nothing needs
+; scheduling, after setting DSA to default_DSA...
+resel:
+	MOVE MEMORY 4,default_dsa,current_dsa	; load up a default dsa value
+	MOVE MEMORY 4,default_dsa,_DSA		; load up a default dsa value
+	WAIT RESELECT REL (alt_sig_p1)		; ID is left in LCRC register
+
+handle_reselect:
+	MOVE LCRC to SFBR
+	MOVE SFBR to SCRATCH2			; Can't we leave it in the lcrc reg?
+	INT bad_reselect, WHEN NOT MSG_IN	; must be followed by msg_in
+	; fall through into msg_in....
+
+; Handle incoming messages.  Expected messages: extended (sync), disconnect,
+; simple queue tag, save data pointers, (maybe) message reject, (maybe)
+; restore data pointers.
+msgin:
+	MOVE FROM recv_msg, WHEN MSG_IN
+; int in_wait
+
+msg_switch:
+	; Not ACK'd yet...  we may want to set ATN before ACKing
+	; NOTE: mask is inverted AND!
+	JUMP REL (identify), IF 0x80 AND MASK 0x7F ; identify (reselect)
+	JUMP REL (disconnect_msg), IF 0x04	; disconnect message
+	JUMP REL (save_data_ptrs), IF 0x02	; save pointers
+	JUMP REL (ext_msg), IF 0x01		; extended message (sync)
+	JUMP REL (restore_data_ptrs), IF 0x03	; restore pointers
+	JUMP REL (phase_switch), IF 0x08		; nop
+	JUMP REL (message_reject), IF 0x07	; must have rejected sync
+	INT  unusual_message_in			; let processor handle this
+
+ext_msg:
+	CLEAR ACK			; yeah, fine, we got it
+	MOVE FROM recv_msg, WHEN MSG_IN	; get length of extended message
+	JUMP REL (modify_ptr) IF 0x05	; modify data ptr is length 5...
+	INT extended_not_len_3, IF NOT 0x03	; sync is len 3
+	CLEAR ACK
+	MOVE FROM recv_msg, WHEN MSG_IN ; get extended message code
+	INT extended_not_sync, IF NOT 0x01	; sync is extended message 1
+	CLEAR ACK
+
+	; fetch the two bytes of sync info
+	MOVE 2,sync_buf, WHEN MSG_IN	; get the sync negotiation values
+	INT sync_received		; don't clear ACK!  may need to set
+					; ATN so we can respond!  Let the
+					; processor handle this.
+
+; we have a length-5 extended message coming in, see if it's modify_ptrs
+; store modify data in global buffer
+modify_ptr:
+	CLEAR ACK			; yeah, we saw it, get the next one
+	MOVE FROM recv_msg, WHEN MSG_IN	; get next byte
+	INT extended_not_sync, IF NOT 0x00	; is it modify?
+	MOVE 4,modify_data, WHEN MSG_IN	; get longword of modifier
+
+	INT modify_pointer_fetched	; let CPU do this.  Exceedingly rare...
+
+	; execution continues here...
+; fix? reload scratch?
+	CLEAR ACK			; accept the message
+	JUMP REL (phase_switch)
+
+
+; execution will continue here if we want to accept a message
+message_ok:
+	CLEAR ACK
+	JUMP REL (phase_switch)
+
+; execution will continue here if we want to reply to an incoming message
+message_reply:
+	SET ATN				; target please go msg_out
+	CLEAR ACK			; we got the byte
+	JUMP REL (phase_switch)		; we'll go to msg_out, and send it
+
+disconnect_msg:
+	CLEAR ACK			; fine, disconnect
+	WAIT DISCONNECT			; target is diconnecting
+	JUMP Scheduler			; MUST BE PATCHED!
+
+message_reject:
+	INT target_rejected_msg		; almost certainly a sync negotiation..
+
+save_data_ptrs:
+	; we're probably going to disconnect in a second...
+	; save SCRATCH, which has the number of data blocks to go
+	; we need to keep DSA, since we don't know if we're disconnecting yet
+	; we only need to save the data pointer...
+; fix? scratch?
+
+	; ok, move current data pointers to the save area.
+	; since memory move instructions require absolute addresses, we must
+	; modify an instruction.
+	; ASSUMES that current_dsa is also &(current_dsa->move_data)!
+	; (i.e. move_data comes first)
+	MOVE MEMORY 4,current_dsa,_SCRATCH ; blows away DSA, puts it in scratch
+	MOVE MEMORY 4,_SCRATCH,move_save_data+4 ; set source address (move_data)
+
+	MOVE SCRATCH0 + 0x08 to SCRATCH0	; move data is 8 bytes
+	MOVE SCRATCH1 + 0x00 to SCRATCH1 WITH CARRY
+	MOVE SCRATCH2 + 0x00 to SCRATCH2 WITH CARRY
+	MOVE SCRATCH3 + 0x00 to SCRATCH3 WITH CARRY
+	MOVE MEMORY 4,_SCRATCH,move_save_data+8	; set destination to save_data
+
+; this instruction gets modified by the above
+; NOTE: 8 is sizeof(move_data)
+move_save_data:
+	MOVE MEMORY 8,0x00000000,0x00000000	; MODIFIED
+
+; fix? reload scratch from save_scratch?  Recalculate scratch value?
+	MOVE MEMORY 4,current_dsa,_DSA	; reload DSA
+	CLEAR ACK			; accept the message
+	JUMP REL (phase_switch)		; we should get a disconnect message...
+
+restore_data_ptrs:
+	; Very unusual...
+	; save SCRATCH, which has the number of data blocks to go
+	; we need to keep DSA, since we don't know if we're disconnecting yet
+	; we only need to save the data pointer...
+;fix? scratch?
+
+	; ok, move saved data pointers to current
+	; since memory move instructions require absolute addresses, we must
+	; modify an instruction.
+	MOVE MEMORY 4,current_dsa,_SCRATCH ; blows away DSA, puts it in scratch
+	MOVE MEMORY 4,_SCRATCH,move_restore_data+8 ; set dest address (move_data)
+
+	MOVE SCRATCH0 + 0x08 to SCRATCH0	   ; move_data = 8 bytes
+	MOVE SCRATCH1 + 0x00 to SCRATCH1 WITH CARRY
+	MOVE SCRATCH2 + 0x00 to SCRATCH2 WITH CARRY
+	MOVE SCRATCH3 + 0x00 to SCRATCH3 WITH CARRY
+	MOVE MEMORY 4,_SCRATCH,move_restore_data+4 ; set source to save_data
+
+; this instruction gets modified by the above
+; NOTE: 8 is sizeof(move_data)
+move_restore_data:
+	MOVE MEMORY 8,0x00000000,0x00000000	; MODIFIED
+
+; fix? reload scratch with older value? from save_scratch?
+	MOVE MEMORY 4,current_dsa,_DSA	; reload DSA
+	CLEAR ACK			; accept the message
+	JUMP REL (phase_switch)
+
+identify:
+; we were reselected, and this identifies the sender.  DSA is set to
+; default_dsa
+; SFBR has the identify message, ack still high
+; SCRATCH2 was set when we were reselected, from LCRC, with the ID
+; fix? don't accept after earlier identify! Of course, no target is THAT stupid
+	MOVE SFBR & 0x07 TO SCRATCH1	; save lun bits of Identify
+	MOVE 0x00 TO SCRATCH0		; default to no tag
+
+; we want to test this against all the SCSI ID's possible.  Since the
+; script is copied into ram, we can patch the values into here directly.
+; We will add one set of tests for each LUN/tag pair.  The tests will check
+; for each possible queue tag value.  The jumps are patched
+; to point to the allocated area for nexus identifiers (max 1 per command
+; allowed active).  Each calls get_tag if it needs an ITLQ nexus.
+; We set the SXFER value here, since we MUST set it before we call get_tag -
+; this is because the target will go data phase immediately if we're not
+; running tags.  The constants are patched when we negotiate synchronous.
+
+; mask off the ownid bit from the bus.  We can't reselect ourself.  Patched to be
+; ~(1<<ownid).
+patch_ownid_mask:
+	MOVE SCRATCH2 & 0xFF TO SFBR		; SCSI address of target
+; int in_identify
+
+find_addr_table:
+	JUMP REL (t1) IF NOT 0x01
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t1:	JUMP REL (t2) IF NOT 0x02
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t2:	JUMP REL (t3) IF NOT 0x04
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t3:	JUMP REL (t4) IF NOT 0x08
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t4:	JUMP REL (t5) IF NOT 0x10
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t5:	JUMP REL (t6) IF NOT 0x20
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t6:	JUMP REL (t7) IF NOT 0x40
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+t7:	JUMP REL (tn) IF NOT 0x80
+	MOVE SCRATCH1 TO SFBR
+	MOVE 0x00 TO SXFER
+	JUMP no_nexus_found
+tn:	INT bad_address			; should be impossible
+
+get_tag:
+;  int in_get_tag
+	; we have a valid unit, and need to verify the tag value
+; FIX!!??? if we clear ack, we've accepted the I_T_x nexus!  What if there is
+; no tag message, and yet we have no non-tagged IO's (or none at all)?
+; Well, we'll just reject it later.  It would be really wierd for someone to
+; reselect us when we don't expect it.
+
+; sxfer has already been set up in the address table, so it's safe to let the
+; target go to data phase.
+	CLEAR ACK			; LUN has been verified...
+	MOVE 0x00 to SCRATCH0		; no tag received
+	MOVE 0x00 to SCRATCH1		; no other message either
+
+	; see if there is a tag value...
+	JUMP REL (no_tag), WHEN NOT MSG_IN	; another message coming?
+
+	; fetch following message.  Normally will be SIMPLE_QUEUE_TAG.
+	; Otherwise it's likely to be a sync message.  If there is a following
+	; message that isn't a SIMPLE_QUEUE_TAG, don't ack it!  store for later
+	MOVE FROM recv_msg, WHEN MSG_IN	; get message (must be simple queue)
+	JUMP REL (not_simple), IF NOT 0x20
+	CLEAR ACK
+
+	MOVE FROM recv_msg, WHEN MSG_IN	; get the tag value
+	; don't accept yet...
+	MOVE SFBR TO SCRATCH0		; save tag in scratch
+	RETURN
+
+not_simple:
+	; we got some message other that SIMPLE_TAG following an identify.
+	; Act as though we got no tag, and then go handle the message
+	MOVE SFBR to SCRATCH2		; remember message value
+	MOVE 0x01 TO SCRATCH1		; flag we have it
+no_tag:
+	; target is usually already in data phase.  The reselect entry in the
+	; DSA will avoid clearing ACK if there was no tag for the IO, since
+	; that may nuke a data xfer.
+	MOVE SCRATCH0 to SFBR		; must return with tag in SFBR
+	RETURN
+
+no_nexus_found:
+; someone reselected me who I'm not expecting.  Respond with an abort or
+; abort tag message.
+; FIX! should somehow signal ncr.c about this - we'll get an unexpected disconnect
+; int in_no_nexus
+	SET ATN				; we want to send a message
+	CLEAR ACK			; we got the message
+	MOVE 0x06 TO SCRATCH3		; ABORT
+	MOVE SCRATCH0 TO SFBR
+	JUMP REL (set_abort) IF 0x00	; no tag, send simple abort
+	MOVE 0x0D TO SCRATCH3		; ABORT_TAG
+set_abort:
+	; we're running with a default_dsa.  Put abort in the send_buffer.
+	; This works because send_buf is the send_buf of default_dsa...
+	; send len for default_dsa is always 1!
+	; ALIGNMENT is important here!
+	MOVE MEMORY 1,_SCRATCH3,default_send_buf ; put ABORT in the output message
+					; buffer.  DESTROYS DSA.
+	MOVE MEMORY 4,default_dsa,_DSA	; get the default DSA back
+	JUMP REL (phase_switch)		; should go MSG_OUT next, send abort
+
+nexus_found:
+; we have a nexus match.  If the identify was followed by a non-simple_queue
+; message, we already grabbed one byte of it (in SCRATCH2).  If SCRATCH1
+; is 0, then goto phase_switch.  Otherwise, goto the message switch.
+; The only normal message I'd expect would be Sync and just maybe Command
+; Complete.
+; int in_nexus
+	MOVE SCRATCH1 to SFBR
+	JUMP REL (phase_switch) IF 0x00	; no unusual message
+	MOVE SCRATCH2 to SFBR		; the first byte of the message
+	JUMP REL (msg_switch)		; handle the message
+
+;***************************************************************************
+; Code for handling SIGP and target/initiator switching...
+; See Appendix C of the 710 programmer's guide...
+
+; we may have been reselected during selection.  Reset Scheduler entry so it
+; will be rescheduled.  We may also have been selected during selection...
+;alternate1:
+select_resel:
+	INT reselect_during_select		; let CPU handle it - RARE
+	; DSA and current_dsa have been set to default_dsa here
+
+	WAIT RESELECT REL (alternate2)
+	JUMP REL (handle_reselect)		; we really were reselected
+
+alternate2:
+	; either sig_p was set while awaiting reslection or we were selected
+	MOVE CTEST2 & 0x40 to SFBR		; reset sig_p and wait again
+	JUMP REL (resel) if 0x40		; sigp was set
+	; sigp had not been set, must have been selected
+alt2:
+	; can only have been selected as a target here, reselect impossible
+	WAIT SELECT REL (alternate3)		; only fails if CPU sets
+	SET TARGET				; sigp between 2 instructions
+	; we have been selected...
+ INT selected_as_target
+	JUMP REL(am_target)
+
+alternate3:
+	; got here because of SIG_P set or error
+	; Did the SIG_P bit get set after the select occurred and just before
+	; the Wait Select?
+	MOVE CTEST2 & 0x40 to SFBR		; reset and wait again
+	JUMP REL (alt2) if 0x40			; sigp was set, ignore
+
+	; sigp not set, but wait select failed AFTER wait reselect failed due
+	; to having been selected.  Impossible.
+	INT big_error_1
+
+; Comes here on failure from main Wait Reselect
+alt_sig_p1:
+	; error while waiting for reselect - select or sig_p
+	; NOTE: mask is inverted AND!
+; FIX! move once, use AND MASK!
+	MOVE SCNTL1 & 0x10 to SFBR		; SCNTLF_CON
+	JUMP REL (alt_sig_p2) IF 0x10 		; if connected (probable sel)
+	MOVE CTEST2 & 0x40 to SFBR		; reset and test sigp
+	JUMP Scheduler IF 0x40			; it was a sigp
+	INT big_error_2
+
+alt_sig_p2:
+	; bus initiated interrupt occurred if here --
+	; connected bit is on.  First reset the sig_p bit, so
+	; the alternate jump is NOT taken UNLESS we were selected instead of
+	; reselected - we know one has happened here.
+	; processor MUST check ISTATF_CON before setting SIGP, so that this
+	; can be safe.
+	MOVE CTEST2 to SFBR		; we know sigp is clear now
+	WAIT RESELECT REL (alt_sig_p3)
+	JUMP handle_reselect		; really reselected
+
+alt_sig_p3:
+	; we got selected
+	SET TARGET
+	INT 99 ; selected_as_target ; FIX!?????
+	; fall through...
+
+; end of code from manual
+;#;****************************************************************************
+;#; Target-mode code.  We've been selected
+;#;
+;#; fetch the identify message to verify it.
+;#; we're using DSA=default_dsa here...  Guaranteed.
+;#; this doesn't supprt tags.  to do so, we need a tag flag in scratch, and jump
+;#; back here after fetching it.
+;#; NOTE: we have Disable Halt On ATN/Parity set, so we must check for ATN
+;#; after every move, or close to every one.
+;#; We ASSUME select with ATN!
+;#;
+;#am_target:
+;#	MOVE LCRC to SFBR
+;#	MOVE SFBR to SCRATCH2			; save select data
+;#	MOVE FROM recv_msg, WITH MSG_OUT	; identify, of course
+;#	JUMP REL(more_messages), IF ATN		; probably a sync negotiation
+;#
+;#	MOVE SFBR to SCRATCH0			; save identify for later
+;#
+;#	; this actually transfers all the bytes of the command, even though
+;#	; the length field is 1.  FIX! how do we handle group5/6 lengths?
+;#	MOVE FROM command_data, WITH CMD
+;#	CALL REL(handle_messages), IF ATN	; "Can we talk?"
+;#
+;#	; sfbr has first byte of command, scratch0 has identify message
+;#	MOVE SFBR to SCRATCH1			; save command
+;#	MOVE SCRATCH0 & 0x20 to SFBR		; get identify luntar bit
+;#	JUMP REL(no_luntars), IF 0x20
+;#
+;#	; verify we handle this LUN
+;#	MOVE SCRATCH0 & 0x07 to SFBR		; get identify LUNTRN (lun #)
+;#;
+;#; These entries are patched by EnableLun()
+;#;
+;#target_lun_check:
+;#	JUMP REL(l1) IF NOT 0x00
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l1:	JUMP REL(l2) IF NOT 0x01
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l2:	JUMP REL(l3) IF NOT 0x02
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l3:	JUMP REL(l4) IF NOT 0x03
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l4:	JUMP REL(l5) IF NOT 0x04
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l5:	JUMP REL(l6) IF NOT 0x05
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l6:	JUMP REL(l7) IF NOT 0x06
+;#	JUMP lun_not_allowed			; patched if allowed
+;#l7:	JUMP REL(ln) IF NOT 0x07
+;#	JUMP lun_not_allowed			; patched if allowed
+;#ln:	INT bad_address			; absolutely impossible
+;#
+;#; This is a subroutine.  Be careful of move memory!
+;#
+;#handle_messages:
+;#	MOVE FROM recv_msg, WITH MSG_OUT	; fetch first byte
+;#	JUMP REL (t_identify), IF 0x80 AND MASK 0x7F ; identify
+;#	JUMP REL (t_reject), IF 0x04		; disconnect message
+;#	JUMP REL (t_abort), IF 0x06		; abort
+;#	JUMP REL (t_ext_msg), IF 0x01		; extended message (sync)
+;#	JUMP REL (t_rejected) IF 0x07		; we were rejected
+;#	JUMP REL (t_ignore), IF 0x08		; nop
+;#t_reject:
+;#	MOVE 1,reject_data, WITH MSG_IN		; send reject
+;#	RETURN
+;#
+;#t_identify:					; wierd, wants to change disc.
+;#	INT target_identify			; let cpu update disconnect
+;#	JUMP REL(handle_messages), IF ATN	; he wants to send more
+;#	RETURN
+;#
+;#t_abort:					; abort current IO, drop bus
+;#	INT target_abort			; let CPU handle what next
+;#; CPU must unconnect the active IOR, reset DSA to default, etc.  returns here
+;#	DISCONNECT				; just drop the bus
+;#	CLEAR TARGET				; and see if there's anything
+;#	JUMP Scheduler				;  to do.
+;#
+;#t_ext_msg:
+;#	MOVE FROM recv_msg, WITH MSG_OUT	; get length
+;#	JUMP REL (t_reject), IF NOT 0x03	; not sync
+;#	MOVE FROM recv_msg, WITH MSG_OUT	; get command
+;#	JUMP REL (t_reject), IF NOT 0x01	; make sure it's a sync
+;#	MOVE 2,sync_buf, WITH MSG_OUT		; get the sync info
+;#	INT target_sync_received
+;#
+;#; come back here if we want to reply/send a sync message
+;#t_reply_sync:
+;#	MOVE FROM send_msg, WITH MSG_OUT	; send sync message
+;#	JUMP REL(handle_message), IF ATN	; he wants to respond
+;#	INT target_sync_done			; he accepted the sync
+;#	RETURN
+;#
+;#t_rejected:					; initiator rejected us
+;#	INT target_rejected			; let cpu figure it out
+;#						; probably reject of sync
+;#	RETURN
+;#
+;#; He wants to talk to an illegal lun.  Response depends on command.  For
+;#; Inquiry, return 0x7f for device type, no error.  Any other command other
+;#; than REQUEST_SENSE, return CHECK_CONDITION.  For request_sense, return
+;#; ILLEGAL_REQUEST, LUN_NOT_SUPPORTED. (SCSI-2, 6.5.3)
+;#lun_not_allowed:
+;#	MOVE SCRATCH1 to SFBR			; command 1st byte
+;#	JUMP REL(bad_lun_inquiry), IF 0x12	; Inquiry
+;#	JUMP REL(bad_lun_sense), IF 0x03	; Request Sense
+;#
+;#	; send status CHECK_CONDITION, disconnect
+;#send_check:
+;#	MOVE 1,check_condition, WITH STATUS	; absolute reference
+;#sent_status:
+;#	CALL REL(handle_messages) IF ATN
+;#	MOVE 1,send_disconnect, WITH MSG_IN
+;#	CALL REL(handle_messages) IF ATN
+;#	DISCONNECT
+;#	INT target_disconnect			; may be IO complete, maybe not
+;#
+;#	; now that we've disconnected, reset stuff and check the scheduler.
+;#	; if no IO to start, we'll wait for reselect/select
+;#	CLEAR TARGET
+;#	JUMP Scheduler
+;#
+;#bad_lun_inquiry:
+;#	; return success with bad lun values.
+;#	MOVE 1,bad_inquiry_data, WITH DATA_IN	; send device type 7f (bad lun)
+;#
+;#send_success:					; IO complete, success
+;#	CALL REL(handle_messages), IF ATN
+;#	MOVE 1,good_condition, WITH STATUS
+;#	JUMP REL(sent_status)			; sent_status checks for ATN
+;#
+;#bad_lun_sense:
+;#	; return success with data ILLEGAL_REQUEST, LUN_NOT_SUPPORTED
+;#	MOVE 18,bad_lun_sense_data, WITH DATA_IN
+;#	JUMP REL(send_success)
+;#
+;#; code to handle luns that have been enabled.
+;#; template, code created at enable_lun
+;#; patched if a command of the given type is available
+;#lun_allowed:
+;#	; SFBR has first command byte, SCRATCH2 = select, SCRATCH0 = identify
+;#	; Let CPU figure out which CCB to connect with this command, if any.
+;#	;
+;#	; Basically, this is a state machine managed by the host.  It tells us
+;#	; what phase to do next, we do it, and interrupt to tell it that we're
+;#	; done.  Smarts are in the C driver.
+;#	MOVE SFBR to SCRATCH1			; cpu can't read sfbr
+;#	INT target_has_command
+;#
+;#get_data:
+;#	MOVE FROM move_data, WITH DATA_OUT	; get data from initiator
+;#	CALL REL(handle_messages), IF ATN
+;#	INT phase_complete			; in case we want to disconnect
+;#
+;#send_data:
+;#	MOVE FROM move_data, WITH DATA_IN	; send data to initiator
+;#	CALL REL(handle_messages), IF ATN
+;#	INT phase_complete			; in case we want to disconnect
+;#
+;#send_message:
+;#	MOVE FROM send_msg, WITH MSG_IN		; send message to initiator
+;#	CALL REL(handle_messages), IF ATN
+;#	INT phase_complete
+;#
+;#send_status:
+;#	MOVE FROM status_data, WITH STATUS	; send status from DSA
+;#	JUMP REL(sent_status)
+;#
+;#send_disconnect:
+;#	MOVE 1,send_disconnect, WITH MSG_IN
+;#	CALL REL(handle_messages) IF ATN
+;#	DISCONNECT
+;#
+;#	; now that we've disconnected, reset stuff and check the scheduler.
+;#	; if no IO to start, we'll wait for reselect/select/sigp
+;#	CLEAR TARGET
+;#	JUMP Scheduler
+;#
+;#; When reselecting as a target, the scheduler entry gets patched to point
+;#; here.  This sets target mode and attempts to reselect the person we're
+;#; talking to.
+;#start_reselect:
+;#	SET TARGET
+;#	RESELECT FROM select_data, REL(????)
+;#
+;#	; ok reselect success.  Send identify.
+;#	MOVE FROM send_msg, WITH MSG_IN		; set up by CPU
+;#	CALL REL(handle_messages) IF ATN
+;#	INT target_reselect_done		; similar to target_has_command
+;#	; we'll goto get_data/send_data/send_status/send_disconnect/etc.
+
+
+;****************************************************************************
+; support routines
+;
+; subroutine to add 1 to scratch
+add_1:	MOVE SCRATCH0 + 0x01 to SCRATCH0
+	JUMP REL(a1) IF NOT CARRY		; speed - usually taken
+	MOVE SCRATCH1 + 0x00 to SCRATCH1 WITH CARRY
+	MOVE SCRATCH2 + 0x00 to SCRATCH2 WITH CARRY
+	MOVE SCRATCH3 + 0x00 to SCRATCH3 WITH CARRY
+a1:	RETURN
+
+;(test for end of loop is JUMP xxx IF SFBR & 0x80= 0x80 - underflow)
+;
+;loop example:
+;(longer than sequence below, but faster on average (3 vs. 5 inst, normal case)
+;sub_1:	ADD       0xFF to SCRATCH0
+;	JUMP REL (s1) IF CARRY		; carry means no change to higher bytes
+;	ADD CARRY 0xFF to SCRATCH1
+;	ADD CARRY 0xFF to SCRATCH2
+;	ADD CARRY 0xFF to SCRATCH3
+;s1:	RETURN
+;
+;(test for end of loop is JUMP xxx IF SFBR & 0x80= 0x80 - underflow)
+;
+;add constant value to value in scratch:
+;addscratch:
+;	MOVE 0x00 to SFBR
+;	ADD       SFBR+((value&0xff)) TO SCRATCH0
+;	ADD CARRY SFBR+((value&0xff00)>>8) TO SCRATCH1
+;	ADD CARRY SFBR+((value&0xff0000)>>16) to SCRATCH2
+;	ADD CARRY SFBR+((value&0xff000000)>>24) to SCRATCH3
+;
+;add variable (memory) value to value in scratch:
+;(must write return addr to jump before calling)
+;(example: MOVE MEMORY 4,&(addr_of_return),addmem_return.addr; JUMP REL (addmemscratch)
+;
+;addmemscratch:
+;	MOVE MEMORY 4,block_size,TEMP	; get value to add - KILLS DSA
+;	MOVE TEMP(0) TO SFBR
+;	ADD       SFBR TO SCRATCH0
+;	MOVE TEMP(1) TO SFBR
+;	ADD CARRY SFBR TO SCRATCH1
+;	MOVE TEMP(2) TO SFBR
+;	ADD CARRY SFBR to SCRATCH2
+;	MOVE TEMP(3) TO SFBR
+;	ADD CARRY SFBR to SCRATCH3
+;	MOVE MEMORY 4,current_dsa,_DSA	; MUST BE PATCHED
+;	JUMP REL (return)		; this gets patched by caller
+;
+;Handle updating a block move block in the DSA structure	
+;data_out:
+;	MOVE FROM move_block WHEN DATA_IN
+;
+;	CALL REL (sub_1)
+;	JUMP REL (done) IF NOT CARRY	; no carry means result= -1
+;
+;	MOVE MEMORY 4,SCRATCH,scratch_save ; save loop counter (blows TEMP/DSA!)
+;
+;	MOVE MEMORY 4,block_ptr,SCRATCH	; MODIFIED BY SCHEDULER SCRIPT!
+;	MOVE MEMORY 4,block_size,TEMP	; get value to add - KILLS DSA
+;	MOVE TEMP(0) TO SFBR
+;	ADD       SFBR TO SCRATCH0
+;	MOVE TEMP(1) TO SFBR
+;	ADD CARRY SFBR TO SCRATCH1
+;	MOVE TEMP(2) TO SFBR
+;	ADD CARRY SFBR to SCRATCH2
+;	MOVE TEMP(3) TO SFBR
+;	ADD CARRY SFBR to SCRATCH3
+;	MOVE MEMORY 4,SCRATCH,block_ptr	; MODIFIED BY SCHEDULER SCRIPT!
+;
+;	MOVE MEMORY 4,scratch_save,_SCRATCH	; get loop counter back
+;	MOVE MEMORY 4,current_dsa,_DSA		; MUST BE PATCHED
+;	JUMP REL (data_out), WHEN DATA_IN
+;	JUMP REL (phase_switch)		; most likely a disconnect!
+;
+;done:	JUMP REL (phase_switch) WHEN NOT DATA_IN
+;
+;	; eat data until target gives up sending it, to garbage buffer
+;	; I don't care much how efficient it is
+;	MOVE eat_block IF DATA_IN
+;	JUMP REL (done)
+;
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'5.4.91'
+	ENDM
+VERS	MACRO
+		dc.b	'makedir 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'makedir 37.2 (5.4.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: makedir 37.2 (5.4.91)',0
+	ENDM

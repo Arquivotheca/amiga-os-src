@@ -1,0 +1,635 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  V36_57:1.10 L35_54:1.9 L35_53:1.8 L35_52:1.8 L35_51:1.8 L35_49:1.7;
+locks    ; strict;
+comment  @ * @;
+
+
+1.11
+date     90.04.06.20.16.05;  author daveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     89.10.05.15.30.56;  author daveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     88.05.03.21.49.52;  author daveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     88.04.05.02.29.53;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.01.28.10.24.07;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     87.11.17.13.07.13;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     87.10.27.15.47.47;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     87.10.01.09.28.26;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.09.04.14.32.01;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.08.24.10.56.05;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.08.20.11.31.13;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 2
+@
+
+
+1.11
+log
+@for rcs 4.x header change
+@
+text
+@/*
+	HP_PaintJet driver.
+	David Berezowski - August/87
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+
+#define NUMSTARTCMD	7	/* # of cmd bytes before binary data */
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD) /* total of above */
+#define NUMLFCMD	5	/* # of cmd bytes for linefeed */
+#define MAXCOLORBUFS	3	/* max # of color buffers */
+
+#define RLEMAX		256
+#define RLENUMSTARTCMD	7	/* # of cmd bytes before binary data */
+#define RLENUMENDCMD	0	/* # of cmd bytes after binary data */
+#define RLENUMTOTALCMD 	(RLENUMSTARTCMD + RLENUMENDCMD)	/* total of above */
+#define RLENUMLFCMD	5	/* # of cmd bytes for linefeed */
+				/* extra room required for overwrites */
+#define RLESAFETY	(RLENUMTOTALCMD + RLENUMLFCMD + 2)
+#define	RLE		0	/* last data was sent via rle */
+
+#define START_LEN	30	/* length of start_buf */
+#define END_LEN		5	/* length of end_buf */
+
+static UWORD NumColorBufs; /* actually # of color buffers */
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+	extern struct PrinterData *PD;
+
+	static UWORD RowSize, ColorSize, BufSize, TotalBufSize, dataoffset;
+	static UWORD colors[MAXCOLORBUFS]; /* color indexes */
+	static UWORD thous, huns, tens, ones; /* used to program buf size */
+	static UBYTE Mode; /* print mode, rle or non-rle */
+	/*
+		\033*b1M	00-04	- set transmission mode (rle data)
+		\033*t180R	05-11	- set 180 dpi mode
+		\033*r1440S	12-19	- set width to 1440 dots (the max)
+		\033*r3U	20-24	- set # of color planes
+		\033*r0A	25-29	- start raster gfx
+	*/
+	static UBYTE start_buf[START_LEN] =
+		"\033*b1M\033*t180R\033*r1440S\033*r3U\033*r0A";
+	/*
+		\033*r0B	00-04	end raster gfx
+	*/
+	static UBYTE end_buf[END_LEN] = "\033*r0B";
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start;
+	int i, err;
+
+	static UWORD RLEBufSize, rledataoffset;
+	static UBYTE *RLEBuf;
+	UBYTE *rleptrstart, *rleptr, *rleptrmark, rledata;
+	int rlesize, rlecount, j;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+			RowSize = (x + 7) / 8;
+			ColorSize = RowSize + NUMTOTALCMD;
+			NumColorBufs = (PD->pd_Preferences.PrintShade ==
+				SHADE_COLOR) ? MAXCOLORBUFS : 1;
+			BufSize = ColorSize * NumColorBufs + NUMLFCMD;
+			TotalBufSize = BufSize * 2;
+			RLEBufSize = BufSize + RLESAFETY;
+			TotalBufSize += RLEBufSize * 2;
+			for (i=0; i<NumColorBufs; i++) {
+				colors[i] = ColorSize * i;
+			}
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = NUMSTARTCMD;
+				RLEBuf = &PD->pd_PrintBuf[BufSize * 2];
+				rledataoffset = RLENUMSTARTCMD;
+				thous = x / 1000;
+				huns = (x % 1000) / 100;
+				tens = (x % 100) / 10;
+				ones = x % 10;
+				start_buf[15] = thous + '0';
+				start_buf[16] = huns + '0';
+				start_buf[17] = tens + '0';
+				start_buf[18] = ones + '0';
+				start_buf[23] = NumColorBufs + '0';
+				huns = RowSize / 100;
+				tens = (RowSize % 100) / 10;
+				ones = RowSize % 10;
+				Mode = RLE; /* start with RLE mode on */
+				err = (*(PD->pd_PWrite))
+					(start_buf, START_LEN);
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row # (0 to Height - 1).
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+			/* Run-Length Encode (rle) the data */
+			/* get ptr to rle buffer */
+			rleptrstart = rleptr = &RLEBuf[rledataoffset - RLENUMSTARTCMD];
+			ptrstart = &PD->pd_PrintBuf[dataoffset]; /* ptr to data */
+			for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+				rleptrmark = rleptr; /* save start posn for this color */
+				rleptr += RLENUMSTARTCMD; /* ptr to data */
+				x = 0; /* clear # of data bytes */
+				ptr = ptrstart; /* get ptr to bytes to rle */
+				j = RowSize; /* # of bytes left to rle */
+				do {
+					rledata = *ptr++; /* get goal byte */
+					i = RLEMAX - 1; /* this many repetitions left to go*/
+					/* while repeating and not too many and more to do */
+					while (*ptr == rledata && i > 0 && j > 0) {
+						i--; /* one more rle byte */
+						ptr++; /* advance ptr to next byte */
+						j--; /* one less byte to look at */
+					}
+					j--; /* dont forget the first byte */
+					/* calc repeating count */
+					rlecount = RLEMAX - i - 1;
+					*rleptr++ = rlecount; /* save repeat count */
+					*rleptr++ = rledata; /* save repeat byte */
+					x += 2; /* two more data bytes */
+					if (rleptr - rleptrstart >= BufSize) {
+						/* abort if rle too big */
+						goto rleover;
+					}
+				} while (j > 0); /* while more bytes to rle */
+				*rleptrmark++ = 27;
+				*rleptrmark++ = '*';
+				*rleptrmark++ = 'b';
+				*rleptrmark++ = (x / 100) | '0';
+				*rleptrmark++ = ((x % 100) / 10) | '0';
+				*rleptrmark++ = (x % 10) | '0';
+				*rleptrmark = 'V'; /* set # of data bytes to follow */
+			}
+			*rleptr++ = 27;
+			*rleptr++ = '*';
+			*rleptr++ = 'b';
+			*rleptr++ = '0';
+			*rleptr++ = 'W'; /* last plane, no data (ie. lf) */
+rleover:
+			i = rleptr - rleptrstart; /* calc size of rlebuf */
+			err = PDERR_NOERR; /* clear error code */
+			if (i < BufSize) { /* if rle data is less send it */
+
+				if (Mode != RLE) { /* if printer is not expecting rle data */
+					/* tell it that we are sending rle data */
+					err = (*(PD->pd_PWrite))("\033*b1M",5);
+					Mode = RLE;
+				}
+				if (err == PDERR_NOERR) { /* if no error during last write */
+					/* send rle data to printer */
+					err = (*(PD->pd_PWrite))(rleptrstart, i);
+				}
+			}
+			else { /* send non-rle data */
+				ptrstart = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD];
+				ptr = ptrstart + BufSize - NUMLFCMD;
+				*ptr++ = 27;
+				*ptr++ = '*';
+				*ptr++ = 'b';
+				*ptr++ = '0';
+				*ptr++ = 'W'; /* last plane, no data (ie. lf) */
+				if (Mode == RLE) { /* if printer is expecting rle data */
+					/* tell it that we are not sending rle data */
+					err = (*(PD->pd_PWrite))("\033*b0M",5);
+					Mode = !RLE;
+				}
+				if (err == PDERR_NOERR) { /* if no error during last write */
+					/* send non-rle data to printer */
+					err = (*(PD->pd_PWrite))(ptrstart, ptr - ptrstart);
+				}
+			}
+			if (err == PDERR_NOERR) { /* if no error during last write */
+				dataoffset =
+					(dataoffset == NUMSTARTCMD ? BufSize : 0) + NUMSTARTCMD;
+				rledataoffset = 
+					(rledataoffset == RLENUMSTARTCMD ? RLEBufSize : 0) +
+						RLENUMSTARTCMD;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ClearAndInit(&PD->pd_PrintBuf[dataoffset], BufSize);
+			for (ct=0; ct<NumColorBufs; ct++) {
+				ptr = &PD->pd_PrintBuf[dataoffset -
+					NUMSTARTCMD + ct * ColorSize];
+				*ptr++ = 27;
+				*ptr++ = '*';
+				*ptr++ = 'b';
+				*ptr++ = huns | '0';
+				*ptr++ = tens | '0';
+				*ptr++ = ones | '0';
+				*ptr = 'V';
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print */
+			if (ct != PDERR_CANCEL) {
+				/* end raster gfx */
+				err = (*(PD->pd_PWrite))(end_buf, END_LEN);
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 : /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+
+ClearAndInit(ptr, size)
+BYTE *ptr;
+UWORD size;
+{
+	long *lptr, i, j, val;
+
+	/*
+		Note: Since 'NUMTOTAL + NUMLFCMD' is > 3 bytes it is safe
+		to do the following to speed things up.
+	*/
+	i = size - NUMTOTALCMD - NUMLFCMD;
+	j = (ULONG)ptr;
+	val = (NumColorBufs == MAXCOLORBUFS) ? ~0 : 0;
+	if (!(j & 1)) { /* if on a word boundary, clear by longs */
+		i = (i + 3) / 4;
+		lptr = (ULONG *)ptr;
+		do {
+			*lptr++ = val;
+		} while (--i);
+	}
+	else { /* clear bytes */
+		do {
+			*ptr++ = val;
+		} while (--i);
+	}
+}
+@
+
+
+1.10
+log
+@fixed bug in run-length encoding.  RLESAFTEY did not account for
+RLENUMTOTALCMD, it now does.  This fixes Gold Disk's problem with
+ProfessionalPage 1.3.
+@
+text
+@@
+
+
+1.9
+log
+@removed references to uni or bi directional text mode,
+this fixes the transparency mode annoyance
+V1.3 Gamma 15
+@
+text
+@d24 2
+a25 1
+#define RLESAFETY	10	/* extra room for overwrites */
+d149 3
+a151 2
+					if (rleptr - rleptrstart > BufSize) {
+						break; /* abort if too much rle bytes */
+d167 1
+@
+
+
+1.8
+log
+@converted bw and gs dumps to 1 bit plane
+V1.3 Gamma 10 release
+@
+text
+@d28 1
+a28 1
+#define END_LEN		10	/* length of end_buf */
+d51 4
+a54 1
+	static UBYTE end_buf[END_LEN] = "\033*r0B\033&k1W";
+d236 1
+a236 1
+				/* end raster gfx, set bi-direct text mode */
+@
+
+
+1.7
+log
+@moved intialization of 'Mode' from a static declare to inline code.  This
+fixed the bug which caused white or black horizontal stripe.
+V1.3 Gamma 7 release
+,
+@
+text
+@d13 4
+a16 4
+#define NUMSTARTCMD		7	/* # of cmd bytes before binary data */
+#define NUMENDCMD		0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD)	/* total of above */
+#define NUMLFCMD		5	/* # of cmd bytes for linefeed */
+d19 1
+a19 1
+#define RLEMAX			256
+d23 3
+a25 3
+#define RLENUMLFCMD		5	/* # of cmd bytes for linefeed */
+#define RLESAFETY		10	/* extra room for overwrites */
+#define	RLE				0	/* last data was sent via rle */
+d27 2
+a28 2
+#define START_LEN		30	/* length of start_buf */
+#define END_LEN			10	/* length of end_buf */
+d30 2
+d33 1
+a33 3
+long ct;
+long x, y;
+long status;
+d40 1
+a40 2
+	static UWORD thous, huns, tens, ones; /* used to program buffer size */
+	static UWORD NumColorBufs; /* actually # of color buffers */
+d43 5
+a47 7
+		The start_buf commands are :
+		command	 length	  description
+		\033*b1M	5	- set transmission mode (rle data)
+		\033*t180R	7	- set 180 dpi mode
+		\033*r1440S	8	- set picture width to 1440 dots (the maximum)
+		\033*r3U	5	- set 3 color planes
+		\033*r0A	5	- start raster gfx
+d63 1
+a63 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d67 4
+a70 3
+			RowSize = (x + 7) / 8; /* calc # of bytes of row data */
+			ColorSize = RowSize + NUMTOTALCMD; /* size of each color buf */
+			NumColorBufs = MAXCOLORBUFS;
+d80 1
+a80 1
+				err = PDERR_BUFFERMEMORY; /* couldn't get the memory */
+d94 1
+d98 3
+a100 2
+				Mode = RLE; /* we always start with RLE mode on */
+				err = (*(PD->pd_PWrite))(start_buf, START_LEN);
+d107 2
+a108 2
+				x	- NA
+				y	- row.
+d116 3
+a118 3
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+d205 3
+a207 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d209 1
+a209 5
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = BufSize - NUMTOTALCMD - NUMLFCMD;
+			do {
+				*ptr++ = 0xff;
+			} while (--i);
+d211 2
+a212 2
+				ptr = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD +
+					ct * ColorSize];
+d227 2
+a228 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d231 3
+a233 2
+			if (ct != PDERR_CANCEL) { /* if user did not cancel the print */
+				/* end raster gfx, set bi-directional text mode */
+d236 1
+a236 1
+			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+d238 1
+a238 1
+				FreeMem(PD->pd_PrintBuf, TotalBufSize); /* free memory */
+d244 3
+a246 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d252 27
+@
+
+
+1.6
+log
+@V1.3 Gamma 3 release
+@
+text
+@d42 1
+a42 1
+	static UBYTE Mode = RLE; /* assume we are starting with rle data */
+d99 1
+@
+
+
+1.5
+log
+@removed TRANSPERANCY mode selection via PAPERTYPE == CUSTOM
+V1.3 gamma 1 check-in
+@
+text
+@d117 1
+a117 1
+				y	- # of rows sent.
+@
+
+
+1.4
+log
+@V1.3 beta 4 check-in
+@
+text
+@d25 1
+a25 1
+#define	RLE			0	/* last data was sent via rle */
+d27 2
+a28 4
+#define PMODE_START		3	/* index into start_buf for print mode */
+#define PMODE_END		8	/* index into end_buf for print mode */
+#define START_LEN		35
+#define END_LEN			10
+a45 1
+		\033&k0W	5	- set unbidirectional mode
+d53 1
+a53 1
+		"\033&k0W\033*b1M\033*t180R\033*r1440S\033*r3U\033*r0A";
+d92 4
+a95 4
+				start_buf[20] = thous + '0';
+				start_buf[21] = huns + '0';
+				start_buf[22] = tens + '0';
+				start_buf[23] = ones + '0';
+a98 6
+				if (PD->pd_Preferences.PaperSize == CUSTOM) {
+					start_buf[PMODE_START] = '3'; /* transparency mode */
+				}
+				else {
+					start_buf[PMODE_START] = '0'; /* uni-directional mode */
+				}
+d235 1
+a235 7
+				if (PD->pd_Preferences.PaperSize == CUSTOM) {
+					start_buf[PMODE_END] = '3'; /* transparency mode */
+				}
+				else {
+					start_buf[PMODE_END] = '1'; /* bi-directional mode */
+				}
+				/* end raster gfx, set text mode */
+@
+
+
+1.3
+log
+@added code for selecting transparency mode via a PaperType of CUSTOM
+@
+text
+@a11 1
+#include "../printer/prtprivate.h"
+@
+
+
+1.2
+log
+@added some comments
+@
+text
+@a25 1
+
+d28 5
+d47 1
+a47 1
+		The init_buf commands are :
+d56 1
+a56 1
+	static UBYTE init_buf[35] =
+d58 1
+d96 4
+a99 4
+				init_buf[20] = thous + '0';
+				init_buf[21] = huns + '0';
+				init_buf[22] = tens + '0';
+				init_buf[23] = ones + '0';
+d103 7
+a109 1
+				err = (*(PD->pd_PWrite))(init_buf, 35);
+d245 8
+a252 2
+				/* end raster gfx, set bi-directional text mode */
+				err = (*(PD->pd_PWrite))("\033*r0B\033&k1W", 10);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d234 1
+a234 1
+				/* end raster gfx, set bi-directional mode */
+@

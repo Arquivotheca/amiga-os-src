@@ -1,0 +1,149 @@
+News flash:
+
+Peter added a lock between VIEWLOCK and RPLOCK, which is the
+VIEWCPRLOCK.  This corresponds to the GfxBase ActiViewCprSemaphore,
+which is used to protect the time between MakeVPort() and MrgCop().
+
+Intuition locking
+
+Intuition has an involved locking protocol to keep things
+deadlock-free.  There are seven layers of locking at present, namely:
+
+	ISTATELOCK	0
+	LAYERINFOLOCK	1
+	GADGETSLOCK	2
+	LAYERROMLOCK	3
+	IBASELOCK	4
+	VIEWLOCK	5
+	VIEWCPRLOCK	6
+	RPLOCK		7
+
+The strict rule is:  never obtain a lock lower in number than one you
+hold.
+
+There is a critically important exception involving the ISTATELOCK
+and the layer locks (see below)!
+
+Note that the LAYERINFOLOCK and the LAYERROMLOCK are dummy locks,
+which is to say that IBase doesn't maintain a semaphore for them, but
+they do have a place in the order.
+
+Note also that a call to LockIBase() gets both the ISTATELOCK and the
+IBASELOCK.
+
+You can turn on "lock debugging" (modify intuall.h and lockstub.asm
+and do a "make clean").  Lock debugging is supposed to flag (via serial
+debugging) instances where locks are obtained in illegal order.  Also,
+sprinkled throughout the code are calls to assertLock(), which check
+if the named lock is held.  If it's not held, it checks if it could be
+legally obtained.  It's not clear yet that all calls to assertLock()
+are still necessary.  And there certainly are important ones missing.
+
+The way it's currently set up is this:  If you define LOCKDEBUG to be
+zero (in lockstub.asm and intuall.h), then lock-debugging is off.
+Setting LOCKDEBUG to 1 in intuall.h and any non-zero value in
+lockstub.asm gives you light lock-debugging.  This means that each
+lock-violation is denoted by an enforcer hit and a recoverable alert.
+Set LOCKDEBUG=2 to get descriptive print-outs instead of recoverable
+alerts.
+
+What each lock is supposed to protect:
+
+ISTATELOCK:
+* State-machine re-entrancy protection.  Always held while the state
+  machine is running.
+- Apparently somewhat equivalent to the IBASELOCK, but I don't
+  understand that quite yet.
+- Is not obtained anywhere else in Intuition except by state-machine
+  entry points and things that need to synchronize briefly with the
+  state machine (eg. in order to post a token).
+- See important note below!
+
+LAYERINFOLOCK:
+* Any call to LockLayerInfo() or LockLayers().
+- See important note below!
+
+GADGETSLOCK:
+* All windows' gadget lists.  Also needed to provide re-entrancy
+  protection for boopsi class implementors.  The latter function
+  is messed up under V37.  DoGadgetMethodA() is a big part of
+  achieving that benefit under V39.
+
+LAYERROMLOCK:
+* Any call to LockLayerRom() or LockLayer() or LockLayers().
+- See important note below!
+
+IBASELOCK:
+* Protects modification of IntuitionBase fields.
+- Apparently, ISTATELOCK has a similar function, but I don't understand
+  the relationship.
+
+VIEWLOCK:
+- Protects modification to the view and viewport.  Held across calls
+  to graphics viewport functions.
+- Protects pointer changes.  I'm not 100% clear as to why the same
+  lock is used for both purposes.
+
+VIEWCPRLOCK:
+- Equivalent to the Graphics ActiViewCprSemaphore lock.  Held across
+  calls to MakeVPort/MrgCop.
+
+RPLOCK:
+- Protects against multiple users of the IBase->RP.  Note that the
+  same task can re-enter obtainRP(), which blows the OldClipRegion
+  pointer.  This does apparently happen sometimes through
+  SetGadgetAttrsA().
+
+Intuition routinely violates its own locking protocol.  During menu
+state or window size/dragging state, the system is left with layers
+locked, but lesser locks like the ISTATELOCK are not held between
+input events.  In fact, the ISTATELOCK cannot be held during that
+time.  When a new event comes in, input.device must obtain the
+ISTATELOCK even though it holds all the layer locks.
+
+This behavior is strictly necessary, and there is a lot of implicit
+stuff going on to keep this from being a problem.  How this works
+without deadlocking goes something like this:
+
+The input device task may exceptionally obtain the ISTATELOCK in a
+manner which violates the locking order.  This happens when every
+input token is processed during menu and window size/drag states.
+This creates a very dangerous situation, since it exposes a deadlock
+possibility.
+
+Any other task (and that includes other tasks executing under the
+state machine) must respect locking order.  Further, when Intuition is
+in its dangerous state, other tasks must NEVER obtain any of the layer
+locks during the time that the ISTATELOCK is held.  Thus, most
+Intuition tokens must be deferred during menu and window size/drag
+states.
+
+
+
+
+Here are a list of callers to LOCKIBASE.  These are the only routines
+that might hold the IBASELOCK and not the ISTATELOCK:
+setMouse	- can't find
+reportMouse	- can't find
+newMakeScreen
+findWorkBench
+RemakeDisplay
+RethinkDisplay
+doDefault
+freePubScreenNode
+attachScreen
+PubScreenStatus
+openSysScreen
+findPubScreen
+defaultPubScreen
+LockIBase
+IDisplayBeep
+LockPubScreenList
+NextPubScreen
+initPubScreen
+openScreenTagList
+SetEditHook
+
+IScreenDepth
+IOpenWindow
+ICloseScreen

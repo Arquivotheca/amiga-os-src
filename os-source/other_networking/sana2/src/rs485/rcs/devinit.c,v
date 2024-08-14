@@ -1,0 +1,518 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    kcd:1.7; strict;
+comment  @ * @;
+
+
+1.7
+date     91.12.30.18.40.06;  author dlarson;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.12.13.11.53.27;  author dlarson;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.12.03.14.29.29;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.12.03.14.06.56;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.27.15.49.35;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.11.19.09.48.49;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.21.15.37.26;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Original snapshot from Ameristar
+@
+
+
+1.7
+log
+@Includes various optimizations and the long packet Christmas fix.  Probably
+>> last working version before enhancements and Novell "ARCNET Packet Header
+>> Definition Standard."
+>> .
+@
+text
+@
+/*
+ * rs485Init/rs485Open/rs485Close/rs485Expunge
+ *
+ * These functions perform device specific processing for their counterparts
+ * in libinit.c
+ */
+
+#ifndef RS485_H
+#include "rs485.h"
+#endif
+
+/*
+ * OpenLibrary() processing
+ */
+void __saveds
+rs485Open(struct rs485Device *libbase, struct IOSana2Req *iob,
+	     long unit, long flags)
+{
+struct rs485Unit *up;
+struct buffmgmt *functions;
+
+	functions = NULL;
+/*
+**  fail if asked for promicuous mode
+*/
+	if(flags & SANA2OPB_PROM){
+		iob->ios2_Req.io_Error = S2ERR_NOT_SUPPORTED;
+		return;
+	}
+	/* init unit list if first time through */
+	if(!rs485Units.lh_Head){
+		NewList(&rs485Units);
+	}
+/*
+**  discover what boards are in the system
+*/
+	iob->ios2_Req.io_Error = getboards();
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR){
+		return;
+	}
+/*
+**  find requested unit on internal list
+*/
+	FORALL(&rs485Units, up, struct rs485Units *)
+	{
+		if(up->unitnum == unit)
+		{
+			break;
+		}
+	}
+	if(!up->node.ln_Succ)
+	{
+		iob->ios2_Req.io_Error = IOERR_OPENFAIL;
+		return;
+	}
+/*
+**  if sole ownership requested or in progress, fail open
+*/
+	if(((flags | up->flags) & SANA2OPF_MINE) && (up->opencnt != 0))
+	{
+		iob->ios2_Req.io_Error = IOERR_UNITBUSY;
+		goto quit;
+	}
+/*
+**  Alloc Buffer Management Function structure
+*/
+	if( !(functions = (struct buffmgmt *)AllocMem(sizeof(struct buffmgmt), 0L)) )
+	{
+		iob->ios2_Req.io_Error = IOERR_OPENFAIL;
+		goto quit;
+	}
+/*
+**  Parse TagList, if OK, fill Buffer Management structure
+*/
+	if(!UtilityBase)
+	{
+		UtilityBase = OpenLibrary("utility.library", 0L);
+		if(!UtilityBase)
+		{
+			iob->ios2_Req.io_Error = IOERR_OPENFAIL;
+			goto quit;
+		}
+	}
+#undef CopyToBuff
+#undef CopyFromBuff
+	functions->CopyToBuff	= (buffnc)
+	   GetTagData(S2_CopyToBuff, NULL, iob->ios2_BufferManagement);
+	functions->CopyFromBuff = (buffnc)
+	   GetTagData(S2_CopyFromBuff, NULL, iob->ios2_BufferManagement);
+	if( !(functions->CopyToBuff && functions->CopyFromBuff) )
+	{
+		iob->ios2_Req.io_Error = IOERR_OPENFAIL;
+		goto quit;
+	}
+	iob->ios2_BufferManagement = functions;
+/*
+**  do basic setup of board
+*/
+	up->libbase = libbase;
+	iob->ios2_Req.io_Error = initboard(up);
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR)
+	{
+		goto quit;
+	}
+/*
+**  start unit task, if necessary
+*/
+	iob->ios2_Req.io_Error = starttask(up);
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR)
+	{
+		goto quit;
+	}
+/*
+**  instantiate int server, if necessary
+*/
+	iob->ios2_Req.io_Error = interrupts_on(up);
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR){
+		goto quit;
+	}
+	up->flags |= flags;
+	up->opencnt++;
+	UNIT(iob) = up;
+
+quit:	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR && up->opencnt == 0)
+	{
+		if(functions)
+			FreeMem(functions, sizeof(struct buffmgmt));
+		interrupts_off(up);
+		stoptask(up);
+	}
+}
+
+
+/*
+** device specific close processing; if OpenCnt == 0, no reason to keep Util
+** Lib open. Take away unit pntr from user, in case a later mistake is made..
+**/
+void __saveds
+rs485Close(struct rs485Device *libbase, struct IOSana2Req *iob)
+{
+	iob->ios2_Req.io_Error = S2ERR_NO_ERROR;
+	if(UNIT(iob))
+	{
+		UNIT(iob)->opencnt--;
+		FreeMem(iob->ios2_BufferManagement, sizeof(struct buffmgmt));
+		if(UtilityBase && libbase->ml_Lib.lib_OpenCnt == 0)
+		{
+			CloseLibrary(UtilityBase);
+			UtilityBase = NULL;
+		}
+		UNIT(iob) = NULL;
+	}
+}
+
+
+/*
+** expunge processing: free unit structures.  Only called if lib opencnt == 0.
+*/
+void __saveds
+rs485Expunge(struct rs485Device *libbase)
+{
+struct rs485Unit *up, *next;
+
+	up = (struct rs485Unit *)rs485Units.lh_Head;
+	while(up->node.ln_Succ)
+	{
+		next = (struct rs485Unit *)up->node.ln_Succ;
+		shutupboard(up);
+		stoptask(up);
+		interrupts_off(up);
+		free_alltracked(up);
+		freeunit(up);
+		up = next;
+	}
+	NewList(&rs485Units);
+}
+@
+
+
+1.6
+log
+@raw reads and writes work now.
+@
+text
+@a123 2
+KPrintF("OpenDevice():  iob = %lx\n", iob);
+KPrintF("To:%lx  From:%lx\n", functions->CopyToBuff, functions->CopyFromBuff);
+d159 1
+a159 1
+* */
+a163 1
+struct Library *ut;
+a174 6
+	}
+	if(UtilityBase)
+	{
+		ut = UtilityBase;
+		UtilityBase = NULL;
+		CloseLibrary(ut);
+@
+
+
+1.5
+log
+@doesn't print debugging messages...  (bad programmer)
+@
+text
+@@
+
+
+1.4
+log
+@Fixed online/offline/onevent.
+@
+text
+@@
+
+
+1.3
+log
+@First version which works with inet.library!!!
+@
+text
+@@
+
+
+1.2
+log
+@Getting it up to current spec...
+@
+text
+@d3 1
+a3 1
+ * AmiganetInit/AmiganetOpen/AmiganetClose/AmiganetExpunge
+d9 2
+a10 2
+#ifndef AMIGANET_H
+#include "amiganet.h"
+d17 1
+a17 1
+AmiganetOpen(struct AmiganetDevice *libbase, struct IOSana2Req *iob,
+d20 1
+a20 1
+struct AmiganetUnit *up;
+d24 3
+a26 3
+
+KPrintF("got to open\n");
+	/* fail if asked for promicuous mode */
+a30 2
+
+KPrintF("one\n");
+d32 2
+a33 2
+	if(!AmiganetUnits.lh_Head){
+		NewList(&AmiganetUnits);
+d35 3
+a37 3
+KPrintF("two\n");
+
+	/* discover what boards are in the system */
+d42 4
+a45 4
+KPrintF("three\n");
+
+	/* find requested unit on internal list */
+	FORALL(&AmiganetUnits, up, struct AmiganetUnits *)
+a51 2
+KPrintF("four\n");
+
+d57 3
+a59 3
+KPrintF("five\n");
+
+	/* if sole ownership requested or in progress, fail open */
+a64 2
+KPrintF("six\n");
+
+a67 1
+KPrintF("got to allocating memory\n");
+a75 1
+KPrintF("got to opening util base\n");
+a84 2
+KPrintF("got to parse tags\n");
+
+d88 1
+a88 1
+	   FindTagItem(S2_CopyToBuff, iob->ios2_BufferManagement);
+d90 1
+a90 1
+	   FindTagItem(S2_CopyFromBuff, iob->ios2_BufferManagement);
+a95 1
+
+d97 3
+a99 3
+KPrintF("got to board setup\n");
+
+	/* do basic setup of board */
+d102 2
+a103 1
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR){
+d106 3
+a108 2
+
+	/* start unit task, if necessary */
+d110 2
+a111 1
+	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR){
+d114 3
+a116 2
+
+	/* instantiate int server, if necessary */
+a120 1
+
+a123 1
+
+d136 1
+d138 3
+a140 3
+ * device specific close processing; if OpenCnt == 0, then pull int server and
+ * stop task. Take away unit pntr from user, in case a later mistake is made..
+ */
+d142 1
+a142 1
+AmiganetClose(struct AmiganetDevice *libbase, struct IOSana2Req *iob)
+d147 1
+a147 8
+		if(--UNIT(iob)->opencnt == 0)
+		{
+			shutupboard(UNIT(iob));
+			stoptask(UNIT(iob));
+			interrupts_off(UNIT(iob));
+			free_alltracked(UNIT(iob));
+			UNIT(iob)->flags &= ~SANA2OPF_MINE;
+		}
+d158 1
+d160 2
+a161 2
+ * expunge processing: free unit structures.
+ */
+d163 1
+a163 2
+AmiganetExpunge(libbase)
+	struct AmiganetDevice *libbase;
+d165 2
+a166 2
+	struct AmiganetUnit *up, *next;
+	struct Library *ut;
+d168 8
+a175 3
+	up = (struct AmiganetUnit *)AmiganetUnits.lh_Head;
+	while(up->node.ln_Succ){
+		next = (struct AmiganetUnit *)up->node.ln_Succ;
+d185 1
+a185 1
+	NewList(&AmiganetUnits);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d17 2
+a18 4
+AmiganetOpen(libbase, iob, unit, flags)
+	struct AmiganetDevice *libbase;
+	struct IOSana2Req *iob;
+	long unit, flags;
+d20 4
+a23 1
+	struct AmiganetUnit *up;
+d25 1
+d28 1
+a28 1
+		iob->S2io_Error = S2ERR_NOT_SUPPORTED;
+d32 1
+d37 1
+d40 2
+a41 2
+	iob->S2io_Error = getboards();
+	if(iob->S2io_Error != S2ERR_NO_ERROR){
+d44 1
+d47 4
+a50 2
+	FORALL(&AmiganetUnits, up, struct AmiganetUnits *){
+		if(up->unitnum == unit){
+d54 5
+a58 2
+	if(!up->node.ln_Succ){
+		iob->S2io_Error = S2ERR_UNKNOWN_ENTITY;
+d61 1
+d64 3
+a66 2
+	if(((flags | up->flags) & SANA2OPF_MINE) && (up->opencnt != 0)){
+		iob->S2io_Error = S2ERR_SOFTWARE;
+d69 1
+d71 19
+a89 6
+	/* try to open netbuff library */
+	if(!NetBuffBase){
+		NetBuffBase = OpenLibrary("netbuff.library", 0);
+		if(!NetBuffBase){
+			iob->S2io_Error = S2ERR_SOFTWARE;
+			iob->S2io_WireError = S2WERR_NETBUFF_ERROR;
+d93 16
+d112 2
+a113 2
+	iob->S2io_Error = initboard(up);
+	if(iob->S2io_Error != S2ERR_NO_ERROR){
+d118 2
+a119 2
+	iob->S2io_Error = starttask(up);
+	if(iob->S2io_Error != S2ERR_NO_ERROR){
+d124 2
+a125 2
+	iob->S2io_Error = interrupts_on(up);
+	if(iob->S2io_Error != S2ERR_NO_ERROR){
+d133 7
+a139 5
+quit:	if(iob->S2io_Error != S2ERR_NO_ERROR && up->opencnt == 0){
+		if(NetBuffBase && libbase->ml_Lib.lib_OpenCnt == 0){
+			CloseLibrary(NetBuffBase);
+			NetBuffBase = 0;
+		}
+d150 1
+a150 3
+AmiganetClose(libbase, iob)
+	struct AmiganetDevice *libbase;
+	struct IOSana2Req *iob;
+d152 5
+a156 3
+	iob->S2io_Error = S2ERR_NO_ERROR;
+	if(UNIT(iob)){
+		if(--UNIT(iob)->opencnt == 0){
+d163 5
+a167 4
+
+		if(NetBuffBase && libbase->ml_Lib.lib_OpenCnt == 0){
+			CloseLibrary(NetBuffBase);
+			NetBuffBase = 0;
+d169 1
+a169 2
+
+		UNIT(iob) = 0;
+d174 1
+a174 1
+ * expunge processing: close netbuff library, free unit structures. 
+d181 1
+a181 1
+	struct Library *nb;
+d189 5
+a193 5
+
+	if(NetBuffBase){
+		nb = NetBuffBase;
+		NetBuffBase = 0;
+		CloseLibrary(nb);
+@

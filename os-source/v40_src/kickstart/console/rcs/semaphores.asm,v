@@ -1,0 +1,320 @@
+head     36.4;
+access   ;
+symbols  V36_316:36.4 V36_313:36.3 V36_311:36.3 V36_310:36.3 V36_300:36.3 V36_299:36.3 V36_297:36.3 V36_295:36.3 V36_278:36.3 V36_274:36.3 V36_221:36.2 V36_205:36.2 V36_171:36.1 V36_167:36.1 V36_165:36.1 V36_153:36.1 V36_146:36.0 V36_140:36.0 V36_129:36.0 V36_113:36.0;
+locks    ; strict;
+comment  @*   @;
+
+
+36.4
+date     89.12.17.19.34.52;  author kodiak;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.12.02.11.37.21;  author kodiak;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.11.03.12.24.48;  author kodiak;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.07.10.18.18.56;  author kodiak;  state Exp;
+branches ;
+next     36.0;
+
+36.0
+date     89.06.28.14.15.10;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.4
+log
+@fix ExecBase corruption/SetSignal failure in ObtainSemaphoreShared
+@
+text
+@**
+**	$Header: semaphores.asm,v 36.3 89/12/02 11:37:21 kodiak Exp $
+**
+**      signal semaphores with shared access
+**
+**      (C) Copyright 1989 Commodore-Amiga, Inc.
+**          All Rights Reserved
+**
+	SECTION	console
+
+**	Includes
+
+	INCLUDE	"cddata.i"
+
+	INCLUDE	"exec/execbase.i"
+	INCLUDE	"exec/ables.i"
+	INCLUDE	"exec/alerts.i"
+
+
+**	Exports
+
+	XDEF	ObtainSemaphoreShared
+	XDEF	ReleaseSemaphore
+
+
+**	Imports
+
+	XLVO	AddTail			; Exec
+	XLVO	Alert			;
+	XLVO	Permit			;
+	XLVO	Signal			;
+	XLVO	Wait			;
+
+
+*****i* ObtainSemaphoreShared ****************************************
+*
+*   NAME
+*	ObtainSemaphoreShared -- gain shared access to a semaphore
+*
+*   SYNOPSIS
+*	ObtainSemaphoreShared(signalSemaphore)
+*	                      a0
+*
+*   FUNCTION
+*	Signal semaphores are used to gain access to an
+*	object.  ObtainSemaphoreShared is the call used to gain this
+*	access.  If another user currently has the semaphore locked
+*	the call will block until the object is available.
+*
+*	If the current task already has locked the semaphore and
+*	attempts to lock it again the call will still succeed.  A
+*	"nesting count" is incremented each time the current owning
+*	task of the semaphore calls ObtainSemaphoreShared().  This counter
+*	is decremented each time ReleaseSemaphoreShared() is called.  When
+*	the counter returns to zero the semaphore is actually
+*	released, and the next waiting task is called.
+*
+*	A queue of waiting tasks is maintained.  Each will be called
+*	in turn as soon as the current task releases the semaphore.
+*
+*   INPUT
+*       signalSemaphore -- an initialized signal semaphore structure
+*
+*   RESULT
+*
+*   SEE ALSO
+*	InitSemaphore(), ReleaseSemaphore()
+*
+**********************************************************************
+
+ObtainSemaphoreShared:
+		FORBID	a1
+		addq.w	#1,SS_QUEUECOUNT(a0)
+		bne.s	ossInUse
+
+		;------ grant semaphore w/ clear SS_OWNER indicating "shared"
+ossBumpNest:
+		addq.w	#1,SS_NESTCOUNT(a0)
+		PERMIT	a1
+		rts
+
+ossInUse:
+		;------ the semaphore is in use.  See if it is sharable
+		move.l	SS_OWNER(a0),d1
+		beq.s	ossBumpNest
+
+		;------ someone else has it.  wait for it
+		lea	-SSR_SIZE(a7),a7	; local storage
+		move.l	cd_ExecLib(a6),a1
+		move.l	ThisTask(a1),a1
+		;------ clear out old signals
+		bclr.b	#SIGB_SINGLE,TC_SIGRECVD+3(a1)
+		addq.l	#1,a1			; set low bit of TCB
+		move.l	a1,SSR_WAITER(a7)	; ...indicated shared request
+
+
+		;------ link us onto waiter's list
+		lea	SS_WAITQUEUE(a0),a0
+		move.l	a7,a1
+		LINKEXE	AddTail
+
+		;------ wait for the semaphore
+		moveq	#SIGF_SINGLE,d0
+		LINKEXE	Wait
+
+		lea	SSR_SIZE(a7),a7
+		bra.s	ossBumpNest
+
+
+
+*****i* ReleaseSemaphore *********************************************
+*
+*   NAME
+*	ReleaseSemaphore -- make signal semaphore available to others
+*
+*   SYNOPSIS
+*	ReleaseSemaphore(signalSemaphore)
+*	                 a0
+*
+*   FUNCTION
+*	ReleaseSemaphore() is the inverse of ObtainSemaphoreShared().
+*	It makes the semaphore lockable to other users.  If tasks
+*	are waiting for the semaphore and this this task is done
+*	with the semaphore then the next waiting tasks are signalled.
+*
+*	Each ObtainSemaphoreShared() call must be ballanced by exactly
+*	one ReleaseSemaphore() call.  This is because there is a
+*	nesting count maintained in the semaphore of the number of
+*	times that the current task has locked the semaphore.
+*	The semaphore is not released to other tasks until the
+*	number of releases matches the number of obtains.
+*
+*   INPUT
+*       signalSemaphore -- an initialized signal semaphore structure
+*
+*   RESULT
+*
+*   SEE ALSO
+*	ObtainSemaphore()
+*
+**********************************************************************
+
+ReleaseSemaphore:
+		subq.w	#1,SS_NESTCOUNT(a0)
+		bne.s	rsStillNested
+
+		FORBID	a1
+		clr.l	SS_OWNER(a0)
+		;------ this task is done.  is anyone waiting?
+		subq.w	#1,SS_QUEUECOUNT(a0)
+		bge.s	rsWakeWaiters
+
+rsPermitRts:
+		PERMIT	a1
+		rts
+
+rsStillNested:
+		bmi.s	rsAlert		; release more times than obtain...
+		subq.w	#1,SS_QUEUECOUNT(a0)
+		rts
+
+rsWakeWaiters:
+		move.l	a2,-(a7)
+		;------ wake up the next one(s) on the list
+		move.l	a0,a2
+
+		lea	SS_WAITQUEUE(a2),a0
+		REMHEAD
+
+		move.l	d0,a1
+		move.l	SSR_WAITER(a1),d0
+		bclr	#0,d0
+		move.l	d0,a1
+		bne.s	rsWakeAllShared
+		move.l	a1,SS_OWNER(a2)
+		moveq	#SIGF_SINGLE,d0
+		LINKEXE	Signal
+
+rsPopPermitRts:
+		move.l	(a7)+,a2
+		bra.s	rsPermitRts
+
+
+rsWakeAllShared:
+		move.l	SS_WAITQUEUE(a2),a2
+
+rsWake:
+		moveq	#SIGF_SINGLE,d0
+		LINKEXE	Signal
+
+		;------	check for more waiters that are be shared
+rsNextInQueue:
+		move.l	(a2),d0
+		beq.s	rsPopPermitRts	; end of WAITQUEUE list
+		move.l	SSR_WAITER(a2),d1
+		bclr	#0,d1
+		move.l	d0,a2
+		beq.s	rsNextInQueue
+		move.l	d1,a1
+		bra.s	rsWake
+
+
+rsAlert:
+		DEADALERT AN_SemCorrupt
+
+	END
+@
+
+
+36.3
+log
+@
+@
+text
+@d2 1
+a2 1
+**	$Header$
+d90 1
+a90 4
+		move.l	ThisTask(a1),d0
+		bset	#0,d0			; indicated shared request
+		move.l	d0,SSR_WAITER(a7)	; ThisTask
+
+d93 3
+@
+
+
+36.2
+log
+@coalesce XREF_XXX into XLVO
+@
+text
+@d2 1
+a2 1
+**	$Header: semaphores.asm,v 36.1 89/07/10 18:18:56 kodiak Exp $
+d4 1
+a4 1
+**      Signal Semaphores with shared access
+d9 1
+a9 1
+	SECTION	rawinput
+d11 2
+d14 1
+d19 3
+d24 3
+@
+
+
+36.1
+log
+@fix stack bug in ObtainSemaphoreShared
+@
+text
+@d2 1
+a2 1
+**	$Header: semaphores.asm,v 36.0 89/06/28 14:15:10 kodiak Exp $
+d19 5
+a23 5
+	XREF_EXE	AddTail
+	XREF_EXE	Alert
+	XREF_EXE	Permit
+	XREF_EXE	Signal
+	XREF_EXE	Wait
+@
+
+
+36.0
+log
+@prototype ObtainSemaphoreShared and corresponding ReleaseSemaphore
+@
+text
+@d2 1
+a2 1
+**	$Header$
+d79 1
+a79 1
+		lea	SSR_SIZE(a7),a7		; local storage
+@

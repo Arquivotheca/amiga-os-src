@@ -1,0 +1,323 @@
+; :ts=8 
+*
+*	addvcounter.a -- Vertical Interrupt counter routines.
+*
+*	William A. Ware			C206
+*
+*************************************************************************
+*   This information is CONFIDENTIAL and PROPRIETARY			*
+*   Copyright (C) 1992, Silent Software Incorporated.			*
+*   All Rights Reserved.						*
+*************************************************************************
+
+	include 	"exec/types.i"
+	include		"exec/memory.i"
+	include		"exec/interrupts.i"
+	include		"macros.i"
+	include		"hardware/intbits.i"
+	include		"hardware/custom.i"
+	include 	"graphics/gfx.i"
+		CSECT	text
+
+	xref	_LVOAllocMem
+	xref	_LVOFreeMem
+	xref	_LVOAddIntServer
+	xref	_LVORemIntServer
+	xref	_LVOSignal
+
+	xref	_custom
+
+	xdef	_VBlankCode
+
+	STRUCTURE	VBlankData,0
+		STRUCT	vb_SpriteData,2*2
+		STRUCT	vb_SpriteMoveData,8*4
+		STRUCT	vb_SpriteData,16*4
+		LONG	vb_CountUp
+		WORD	vb_DecompFrame
+		BYTE	vb_Bank
+		LABEL	vb_SIZEOF
+
+
+_VBlankCode:		   
+	move.b		vb_Bank(a1),d0
+	blt		nosprite
+	
+	movem.l		d0-d7/a0,-(sp)
+
+	lea		_custom,a0
+	
+	move.w		vposr(a0),d0
+	bpl.s		1$
+	
+	movem.l		vb_SpriteData+0(a1),d0-d7
+	move.w		#1,vb_DecompFrame(a1)
+	bra.s		2$
+
+1$
+	movem.l		vb_SpriteData+4*8(a1),d0-d7
+	move.w		#0,vb_DecompFrame(a1)
+
+2$
+	movem.l		d0-d7,sprpt(a0)
+	
+	movem.l		(sp)+,d0-d7/a0
+	addq.l		#1,vb_CountUp(a1)
+	moveq		#0,d0
+	rts
+
+nosprite:
+	movem.l		d1/a0,-(sp)
+	lea		_custom,a0
+	move.w		vposr(a0),d0
+	bpl.s		1$
+	
+	move.w		#1,vb_DecompFrame(a1)
+	bra.s		2$
+
+1$	move.w		#0,vb_DecompFrame(a1)
+
+2$	movem.l		(sp)+,d1/a0
+	moveq		#0,d0
+	rts
+	
+
+
+********************************************************************
+*
+	xdef	_AddVBlank
+	xdef	_FreeVBlank
+
+_AddVBlank:	; a0 - data
+			movem.l d2/a2-a3/a6,-(sp)
+		
+			movea.l	a0,a2
+		
+		; allocate interrupt.
+			LSYSBASE
+			moveq	#IS_SIZE,d0
+			move.l	#MEMF_PUBLIC+MEMF_CLEAR,d1 
+			jsr	_LVOAllocMem(a6)
+			tst.l	d0
+			beq.s	2$
+			
+		; initilize interrupt.
+			movea.l	d0,a3
+			move.b	#NT_INTERRUPT,LN_TYPE(a3)
+			move.l	a0,LN_NAME(a3)
+			move.b	#-60,LN_PRI(a3)
+			move.l	a2,IS_DATA(a3)	; in->is_Data = counterloc
+			
+			lea	_VBlankCode(pc),a0
+1$			move.l	a0,IS_CODE(a3)
+
+		; AddIntServer( INTB_VERTB, in );
+			moveq	#INTB_VERTB,d0
+			movea.l	a3,a1
+			LSYSBASE
+			jsr	_LVOAddIntServer(a6)
+			
+			move.l	a3,d0		; put answer in d0
+
+2$	; either everyting added or something failed.
+			movem.l	(sp)+,d2/a2-a3/a6
+			rts
+********************************************************************
+*
+		xdef	_FreeVBlank
+
+; 'C' source
+;
+; VOID FreeVCounter( struct Interrupt *in )
+; {
+;	if (in)
+;	{
+;		RemIntServer( INTB_VERTB, in );
+;		FreeMem( in, sizeof (struct Interrupt ));
+;	}
+; }
+
+_FreeVBlank:	; a0 interrupt.
+			move.l	d2,-(sp)
+			move.l	a0,d2
+			beq.s	1$	; skip if NULL
+			
+		; RemIntServer( INTB_VERTB, in );
+			LSYSBASE
+			moveq	#INTB_VERTB,d0
+			movea.l	a0,a1
+			jsr	_LVORemIntServer(a6)
+		; FreeMem( in, sizeof (struct Interrupt ));
+			LSYSBASE
+			move.l	d2,a1
+			moveq	#IS_SIZE,d0
+			jsr	_LVOFreeMem(a6)
+		; finish
+1$			moveq	#0,d0
+			move.l	(sp)+,d2
+			rts
+
+******* ss.lib/rnd ************************************
+*
+*   NAME
+*	Rnd - Random number Generator
+*
+*   SYNOPSIS
+*	number = rnd( range )
+*	d0		d0:16
+*
+*	WORD rnd( WORD )
+*
+*   FUNCTION
+*	Generates a positive pheodo random between 0 and range.
+*	If range is negitive it sets the seed before a number is generated
+*
+*   INPUTS
+*	range - positive means range, neg - set the seed value.
+*
+*   RESULT
+*	random number between 0 and the range.
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*********************
+		xdef	_Rnd
+
+		section "rnd",code
+
+; __asm Rnd( register __a0 LONG *seed, register __d0 WORD range ); 
+
+_Rnd
+		move.w	d0,d1
+		ble.s	setseed		; Go reset seed
+
+		move.l	(a0),d0		; Get seed
+		ADD.L	D0,D0
+		BHI.S	over
+		EORI.L	#$1D872B41,D0
+over:
+		move.l	d0,(a0)		; Save new seed
+		andi.l	#$ffff,d0	; Coerce into word
+		divu	d1,d0		; Divide by range
+		swap	d0		;  and get remainder (modulus)
+		ext.l	d0
+		rts
+
+setseed 	ext.l	d1
+		neg.l	d1		; Probably don't need this
+		move.l	d1,(a0)
+		rts
+	
+
+; :ts=8
+
+
+;-----------------------------------------------------------------------
+	xref		_Bm
+	xref		_YTable
+	xdef		_QWPixel
+	
+	section		"qw",code
+tblon:		dc.b	$80,$40,$20,$10,$08,$04,$02,$01
+tbloff:		dc.b	$7f,$bf,$df,$ef,$f7,$fb,$fd,$fe
+
+; 
+
+
+; WORD __asm QWPixel(	register __a0 struct BitMap *,
+;			register __a1 UWORD *YTable,
+;			register __d0 WORD,register __d1 WORD,register __d2 WORD);
+_QWPixel:	
+		; d0 color
+		; d1 x
+		; d2 y
+		
+		movem.l	d2-d4,-(sp)
+
+		asl.w	#1,d2
+		move.w	0(a1,d2.w),d2
+		move.w	d1,d3		; save x for now
+		lsr.w	#3,d1		; x /= 3
+		ext.l	d1
+		add.l	d1,d2		; d2 is now the offset
+		and.w	#7,d3
+		move.b	tbloff(pc,d3.w),d4
+		move.b	tblon(pc,d3.w),d3
+		
+		moveq	#0,d1
+		move.b	bm_Depth(a0),d1
+		lea	bm_Planes(a0),a0
+		bra.s	3$
+
+1$		movea.l	(a0)+,a1
+		asr.b	#1,d0
+		bcc	2$
+		; turn on bit
+		or.b	d3,0(a1,d2.w)
+		dbra	d1,1$
+		bra.s	4$
+2$		; turn off bit
+		and.b	d4,0(a1,d2.w)
+3$		dbra	d1,1$
+
+4$		move.l	d2,d0		; Answer = Offset
+		movem.l	(sp)+,d2-d4
+		rts
+
+
+;-------------------------------------------------------------
+
+		xdef	_RestoreBB
+
+;void __asm RestoreBB( 	register __a0 struct BitMap *,
+;			register __a1 struct BitMap *,
+;			register __d0 WORD offset);
+
+_RestoreBB:
+		movem.l	a2/a3,-(sp)
+		lea	bm_Planes(a0),a0
+		lea	bm_Planes(a1),a1
+		; 0
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 1		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 2		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 3		
+		move.l	(a0)+,d1
+		beq.s	1$		; short cut for 3 bitmap.
+		movea.l	d1,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 4		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 5		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 6		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+		; 7		
+		movea.l	(a0)+,a2
+		movea.l	(a1)+,a3
+		move.b	0(a2,d0.w),0(a3,d0.w)
+
+1$		movem.l	(sp)+,a2/a3
+		rts
+		
+		END
+

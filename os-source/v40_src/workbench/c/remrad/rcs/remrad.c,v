@@ -1,0 +1,456 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.6
+date     90.12.10.22.25.30;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.09.26.16.42.19;  author eric;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.09.24.21.05.36;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.09.06.19.47.20;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.03.01.19.19.24;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.02.02.22.09.54;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.02.02.22.06.23;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@CDOS RemRad command
+@
+
+
+1.6
+log
+@Correct B10206 - Correct template for FORCE, clean up a compiler warning.
+@
+text
+@; /*
+lc -d -j73 -O -o/obj/remrad.o -i/include -v -csf remrad
+blink /obj/remrad.o to /bin/remrad sc sd nd
+protect /bin/remrad +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**     (C) Copyright 1989 Commodore-Amiga, Inc.
+ **         All Rights Reserved
+**/
+
+/*----------------------------------------------------------------------*/
+/* Command: remrad                                                      */
+/* Author:  John A. Toebes, VIII                                        */
+/* Change History:                                                      */
+/*  Date    Person        Action                                        */
+/* -------  ------------- -----------------                             */
+/* 01FEB90  John Toebes   Initial Creation                              */
+/* 26AUG90  John Toebes   B9137 - reworded no ram drive message         */
+/* 10DEC90  John Toebes   B10206 - Template is wrong                    */
+/* Notes:                                                               */
+/*----------------------------------------------------------------------*/
+
+#include "internal/commands.h"
+#include "dos/filehandler.h"
+#include "remrad_rev.h"
+
+#define MSG_RAMDRIVE "ramdrive.device"
+#define MSG_BADDEV   "Invalid Device name %s\n"
+#define MSG_IDUNNO   "Unable to access Device list\n"
+#define MSG_NOTFOUND "%s: is not a mounted device\n"
+#define MSG_NODEVICE "Missing Device Node for %s:\n"
+#define MSG_NOTRAD   "%s: is not a Recoverable Ram Drive\n"
+#define MSG_NORAD0   "No Recoverable Ram Drive Mounted on Unit 0\n"
+#define MSG_NOLOCK   "Unable to access %s:\n"
+#define MSG_INUSE    "%s is currently still in use - Use FORCE to override\n"
+
+#define TEMPLATE "DEVICE,FORCE/S" CMDREV
+#define OPT_DEVICE 0
+#define OPT_FORCE  1
+#define OPT_COUNT 2
+
+#pragma libcall RamdriveBase KillRAD 30 1
+void KillRAD( ULONG );
+
+long cmd_remrad(void)
+{
+   struct Library *SysBase = (*((struct Library **) 4));
+   struct DosLibrary *DOSBase;
+   long opts[OPT_COUNT];
+   int rc;
+   char *msg, *name, *p;
+   BPTR lock;
+   char buf[5];
+   struct RDargs *rdargs;
+   struct MsgPort *task;
+   struct DosList *DosList, *RootDosList;
+   struct FileSysStartupMsg *fssm;
+   struct FileLock *flock;
+   struct Library *RamdriveBase;
+
+   rc = RETURN_FAIL;
+
+   if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)))
+   {
+      memset((char *)opts, 0, sizeof(opts));
+      rdargs = ReadArgs(TEMPLATE, opts, NULL);
+
+      if (rdargs == NULL)
+      {
+         PrintFault(IoErr(), NULL);
+      }
+      else
+      {
+         if(!(RootDosList = LockDosList(LDF_ALL|LDF_READ)))
+         {
+            msg = MSG_IDUNNO;
+         }
+         else
+         {
+            rc = RETURN_ERROR;
+            name = (char *)opts[OPT_DEVICE];
+            if (name != NULL)
+            {
+               p = name;
+               while ((*p) && (*p != ':')) p++;
+               if (p[0] != ':' || p[1] != '\0' || p == name)
+               {
+                  DosList = NULL;
+                  msg = MSG_BADDEV;
+               }
+               else
+               {
+                  *p = '\0';
+
+                  /* If they gave us a name then we need to search the device */
+                  /* list for their requested item                            */
+                  msg = MSG_NOTFOUND;
+                  DosList = FindDosEntry(RootDosList, name, LDF_ALL);
+                  if ((DosList != NULL) &&
+                      (DosList->dol_Type != DLT_DEVICE))
+                  {
+                     task = DosList->dol_Task;
+                  
+                     msg = MSG_NODEVICE;
+                     DosList = RootDosList;
+                     while(DosList=NextDosEntry(DosList, LDF_DEVICES))
+                        if (DosList->dol_Task == task) break;
+                  }
+                  if (DosList != NULL)
+                  {
+                     /* We found a device entry.  Make sure it is ramdrive    */
+                     /* that they are asking us for.                          */
+                     fssm = (struct FileSysStartupMsg *)
+                            BADDR(DosList->dol_misc.dol_handler.dol_Startup);
+                     if (((long)fssm <= 0x100) ||
+                         (BADDR(fssm->fssm_Device) == NULL) ||
+                         (strcmp(((char *)BADDR(fssm->fssm_Device))+1,
+                                 MSG_RAMDRIVE)))
+                     {
+                        /* Not Ramdrive.device, let them know                 */
+                        msg = MSG_NOTRAD;
+                        DosList = NULL;
+                     }
+                  }
+               }
+            }
+            else
+            {
+               /* They didn't give us one, we need to search the device    */
+               /* list looking one with a FSSM that indicates a device of  */
+               /* ramdrive.device with a unit number of zero               */
+               msg = MSG_NORAD0;
+               DosList = RootDosList;
+               while(DosList=NextDosEntry(DosList, LDF_DEVICES))
+               {
+                  fssm = (struct FileSysStartupMsg *)
+                         BADDR(DosList->dol_misc.dol_handler.dol_Startup);
+                  if (((long)fssm > 0x100) &&
+                      (fssm->fssm_Unit == 0))
+                  {
+                     name = (char *)BADDR(fssm->fssm_Device);
+                     if (name != NULL && !strcmp(name+1, MSG_RAMDRIVE))
+                     {
+                        opts[OPT_DEVICE] = (long)
+                                  ((char *)BADDR(DosList->dol_Name))+1;
+                        break;
+                     }
+                  }
+               }
+            }
+            /* At this point, DosList will either be NULL in the event  */
+            /* we could not locate the entry they requested, OR it      */
+            /* will be a pointer to the entry.                          */
+            /* fssm will point to the startup message                   */
+            if (DosList != NULL)
+            {
+               msg = MSG_NOLOCK;
+               if (DosList->dol_Task != NULL)
+               {
+                  /* Now see if we have any locks outstanding.  To do this,*/
+                  /* We need to get a lock on the device (the root will be */
+                  /* fine) and then inhibit the device.  If we are the only*/
+                  /* lock on the list then all is fine.                    */
+                  name = BADDR(MKBADDR(buf+3));
+                  name[0] = 1;
+                  name[1] = ':';
+                  lock = (BPTR)DoPkt(DosList->dol_Task,
+                                     ACTION_LOCATE_OBJECT,
+                                     NULL, MKBADDR(name), SHARED_LOCK, 0);
+                  if (lock != NULL)
+                  {
+                     DoPkt(DosList->dol_Task, ACTION_INHIBIT,
+                                              DOSTRUE, 0, 0, 0);
+                     flock = BADDR(lock);
+                      if (!opts[OPT_FORCE] &&
+                        (flock->fl_Volume == NULL ||
+                         ((struct DeviceList *)
+                           BADDR(flock->fl_Volume))->dl_LockList != lock  ||
+                         flock->fl_Link != NULL))
+                     {
+                        /* Device in use, let them know */
+                        msg = MSG_INUSE;
+                        DoPkt(DosList->dol_Task, ACTION_INHIBIT,
+                                                 DOSFALSE, 0, 0, 0);
+                     }
+                     else
+                     {
+                        /* It looks good, it is already inhibited so remove */
+                        /* the ramdrive.                                    */
+                        RamdriveBase = (struct Library *)
+                                       FindName(&EXECBASE->DeviceList,
+                                                MSG_RAMDRIVE);
+                        if (RamdriveBase != NULL)
+                        {
+                           KillRAD(fssm->fssm_Unit);
+                        }
+                        rc = RETURN_OK;
+                        msg = NULL;
+                     }
+                  }
+               }
+            }
+            UnLockDosList(LDF_ALL|LDF_READ);
+         }
+         if (msg != NULL) VPrintf(msg, opts);
+         /*-------------------------------------------------------------*/
+         /* Finally we clean up and exit                                */
+         /*-------------------------------------------------------------*/
+         FreeArgs(rdargs);
+      }
+      CloseLibrary((struct Library *)DOSBase);
+   }
+   else
+   {
+      OPENFAIL;
+   }
+   return(rc);
+}
+@
+
+
+1.5
+log
+@changed UnlockDosList to UnLockDosList
+@
+text
+@d30 1
+d48 1
+a48 1
+#define TEMPLATE "DEVICE,FORCE" CMDREV
+d155 1
+a155 1
+                        opts[OPT_DEVICE] =
+@
+
+
+1.4
+log
+@Corrected B9137 - reworded no ram drive message
+@
+text
+@d213 1
+a213 1
+            UnlockDosList(LDF_ALL|LDF_READ);
+@
+
+
+1.3
+log
+@release 2.0 version
+@
+text
+@d29 1
+d43 1
+a43 1
+#define MSG_NORAD0   "No Recoverable Ram Drive Mounted\n"
+@
+
+
+1.2
+log
+@version number update
+@
+text
+@d28 1
+a28 3
+/* 19MAR89  John Toebes   Initial Creation                              */
+/* 25OCT89  John Toebes   Revamp for DOS36.21                           */
+/* 02DEC89  John Toebes   Cleanup after code review                     */
+a35 3
+#define MSG_BADDEV  "Invalid Device name %s\n"
+#define MSG_BADRC   "Bad return code spec for remrad\n"
+#define MSG_LIMIT   "Fail limit: %ld\n"
+d37 8
+a44 5
+#define MSG_IDUNNO  "Say what?"
+#define MSG_NOTFOUND "Unable to locate Device entry for %s\n"
+#define MSG_NODEVICE "Missing Device Node for %s\n"
+#define MSG_NOTRAD  "%s does not use " MSG_RAMDRIVE "\n"
+#define MSG_NORAD0  "No RAD device for unit 0\n"
+d51 3
+d56 1
+d59 1
+a59 1
+   int rc, rc2;
+d61 2
+a62 1
+   long args[5];
+d67 2
+a85 1
+            rc2 = IoErr();
+d89 1
+d97 1
+a123 16
+                     args[0] = DosList->dol_misc.dol_handler.dol_Startup;
+                     args[1] = fssm;
+                     if ((long)fssm > 0x100)
+                     {
+                        args[2] = fssm->fssm_Unit;
+                        args[3] = ((char *)BADDR(fssm->fssm_Device))+1;
+                     }
+                     else
+                     {
+                        args[2] = -1;
+                        args[3] = "????";
+                     }
+/*
+                     VPrintf("dol=%08lx fssm=%08lx unit=%ld Devname=%s\n",
+                                args);
+*/
+d147 2
+a148 3
+                  args[0] = DosList->dol_misc.dol_handler.dol_Startup;
+                  args[1] = fssm;
+                  if ((long)fssm > 0x100)
+d150 7
+a156 7
+                     args[2] = fssm->fssm_Unit;
+                     args[3] = ((char *)BADDR(fssm->fssm_Device))+1;
+                  }
+                  else
+                  {
+                     args[2] = -1;
+                     args[3] = "????";
+a157 10
+/*
+                  VPrintf("dol=%08lx fssm=%08lx unit=%ld Devname=%s\n",
+                             args);
+*/
+                  if (((long)fssm > 0x100) &&
+                      (fssm->fssm_Unit == 0) &&
+                      (BADDR(fssm->fssm_Device) != NULL) &&
+                      (!strcmp(((char *)BADDR(fssm->fssm_Device))+1,
+                               MSG_RAMDRIVE)))
+                     break;
+d160 4
+a163 4
+   
+            /* At this point, DosList will either be NULL in the event we  */
+            /* could not locate the entry they requested, OR it will be    */
+            /* A pointer to the entry.                                     */
+d166 45
+a210 5
+               name = BADDR(DosList->dol_Name);
+               PutStr("Found it:");
+               PutStr(name);
+               PutStr("\n");
+               msg = NULL;
+a211 21
+#if 0
+1. If name is given, find the dos entry for it
+   a. if device is not ramdrive.device, report an error and exit
+                or
+  Get a lock on the volume node
+  Send an action inhibit
+   if the lock ->next field is not null OR the volume ->lock != lock
+         then device is busy.
+      
+1. if no name is given, locate the entry for ramdrive.device/0
+     lockDosList(DEVICES)
+      nextDosEntry on each one
+             check FSSM
+     unlockDosList(DEVICES)
+     
+
+2. If the handler has locks outstanding AND the FORCE flag is not set,
+    report an error and exit
+
+3. Se
+#endif
+@
+
+
+1.1
+log
+@removed debugging info
+@
+text
+@@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d130 1
+d133 1
+d169 1
+d172 1
+@

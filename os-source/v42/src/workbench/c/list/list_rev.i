@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	7
+DATE	MACRO
+		dc.b	'14.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'list 42.7'
+	ENDM
+VSTRING	MACRO
+		dc.b	'list 42.7 (14.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: list 42.7 (14.9.93)',0
+	ENDM

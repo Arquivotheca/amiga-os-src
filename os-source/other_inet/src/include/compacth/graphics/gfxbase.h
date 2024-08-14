@@ -1,0 +1,42 @@
+€ˆGRAPHICS_GFXBASE_H€GRAPHICS_GFXBASE_Hˆ·Œ<exec/lists.h>‡ˆEXEC_LIBRARIES_HŒ<exec/libraries.h>‡ˆEXEC_INTERRUPTS_HŒ<exec/interrupts.h>‡
+ƒ
+{
+ƒLibrary LibNode;
+ƒView*ActiView;
+ƒcopinit*copinit;
+*cia;
+*blitter;
+‰*LOFlist;
+‰*SHFlist;
+ƒbltnode*blthd,*blttl;
+ƒbltnode*bsblthd,*bsblttl;
+ƒInterrupt vbsrv,timsrv,bltsrv;
+ƒ®TextFonts;
+ƒTextFont*DefaultFont;
+‰Modes;
+šVBlank;
+šDebug;
+•BeamSync;
+•system_bplcon0;
+ŠSpriteReserved;
+Šbytereserved;
+™¦;
+•BlitLock;
+ŸBlitNest;
+ƒ®BlitWaitQ;
+ƒTask*BlitOwner;
+ƒ®TOF_WaitQ;
+‰DisplayFlags;
+ƒSimpleSprite**SimpleSprites;
+‰MaxDisplayRow;
+‰MaxDisplayColumn;
+‰NormalDisplayRows;
+‰NormalDisplayColumns;
+‰NormalDPMX;
+‰NormalDPMY;
+ƒSignalSemaphore*LastChanceMemory;
+‰*LCMptr;
+‰MicrosPerLine;
+‰MinDisplayColumn;
+—reserved[23];
+};€NTSC 1€GENLOC 2€PAL 4€BLITMSG_FAULT 4‡

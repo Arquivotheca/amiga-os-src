@@ -1,0 +1,511 @@
+head     38.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+38.7
+date     92.06.20.16.31.34;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     92.03.03.15.32.39;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.03.03.14.12.50;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.03.03.14.00.08;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.03.03.13.44.19;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.01.24.14.46.17;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.12.02.14.17.39;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.7
+log
+@Changed "Abr" to "abr"
+@
+text
+@	OPTIMON
+
+;---------------------------------------------------------------------------
+
+	NOLIST
+
+	INCLUDE	"exec/types.i"
+	INCLUDE	"exec/libraries.i"
+	INCLUDE	"exec/lists.i"
+	INCLUDE	"exec/alerts.i"
+	INCLUDE	"exec/initializers.i"
+	INCLUDE	"exec/resident.i"
+	INCLUDE	"libraries/dos.i"
+        INCLUDE "internal/languagedrivers.i"
+
+	INCLUDE	"espanol_rev.i"
+
+	LIST
+
+;---------------------------------------------------------------------------
+
+	XREF	_LVOFreeMem
+	XREF	_LVOAlert
+
+;---------------------------------------------------------------------------
+
+	XDEF	LibInit
+	XDEF	LibOpen
+	XDEF	LibClose
+	XDEF	LibExpunge
+	XDEF	LibReserved
+	XDEF	GetDriverInfo
+	XDEF	GetLocaleStr
+
+;---------------------------------------------------------------------------
+
+   STRUCTURE DriverBase,LIB_SIZE
+	ULONG   db_SegList
+	ULONG   db_SysLib
+   LABEL DriverBase_SIZEOF
+
+;---------------------------------------------------------------------------
+
+CALL MACRO <Function_Name>
+ 	jsr _LVO\1(A6)
+     ENDM
+
+;---------------------------------------------------------------------------
+
+; First executable location, must return an error to the caller
+Start:
+	moveq   #-1,d0
+	rts
+
+;-----------------------------------------------------------------------
+
+ROMTAG:
+	DC.W    RTC_MATCHWORD		; UWORD RT_MATCHWORD
+	DC.L    ROMTAG			; APTR  RT_MATCHTAG
+	DC.L    ENDTAG			; APTR  RT_ENDSKIP
+	DC.B    RTF_AUTOINIT		; UBYTE RT_FLAGS
+	DC.B    VERSION			; UBYTE RT_VERSION
+	DC.B    NT_LIBRARY		; UBYTE RT_TYPE
+	DC.B    LibPriority		; BYTE  RT_PRI
+	DC.L    LibName			; APTR  RT_NAME
+	DC.L    LibId			; APTR  RT_IDSTRING
+	DC.L    LibInitTable		; APTR  RT_INIT
+
+LibName     DC.B "español.language",0
+LibId       VSTRING
+LibPriority EQU -100
+
+	CNOP	0,4
+
+LibInitTable:
+	DC.L	DriverBase_SIZEOF ; size of library base data space
+	DC.L	LibFuncTable
+	DC.L	LibDataTable
+	DC.L	LibInit
+
+LibFuncTable:
+	DC.W	-1
+	DC.W	LibOpen-LibFuncTable
+	DC.W	LibClose-LibFuncTable
+	DC.W	LibExpunge-LibFuncTable
+	DC.W	LibReserved-LibFuncTable
+	DC.W	GetDriverInfo-LibFuncTable
+	DC.W	LibReserved-LibFuncTable
+	DC.W	LibReserved-LibFuncTable
+	DC.W	LibReserved-LibFuncTable
+	DC.W	GetLocaleStr-LibFuncTable
+	DC.W   -1
+
+LibDataTable:
+	INITBYTE   LN_PRI,LibPriority
+	INITBYTE   LN_TYPE,NT_LIBRARY
+	INITLONG   LN_NAME,LibName
+	INITBYTE   LIB_FLAGS,(LIBF_SUMUSED!LIBF_CHANGED)
+	INITWORD   LIB_VERSION,VERSION
+	INITWORD   LIB_REVISION,REVISION
+	INITLONG   LIB_IDSTRING,LibId
+	DC.W       0
+
+	CNOP	0,4
+
+;-----------------------------------------------------------------------
+
+; Library Init entry point called when library is first loaded in memory
+; On entry, D0 points to library base, A0 has lib seglist, A6 has SysBase
+; Returns 0 for failure or the library base for success.
+LibInit:
+	move.l	d0,a1
+        move.l	a0,db_SegList(a1)
+        move.l	a6,db_SysLib(a1)
+	rts
+
+;-----------------------------------------------------------------------
+
+; Library open entry point called every OpenLibrary()
+; On entry, A6 has DriverBase, task switching is disabled
+; Returns 0 for failure, or DriverBase for success.
+LibOpen:
+	addq.w	#1,LIB_OPENCNT(a6)
+	bclr	#LIBB_DELEXP,LIB_FLAGS(a6)
+	move.l	a6,d0
+	rts
+
+;-----------------------------------------------------------------------
+
+; Library close entry point called every CloseLibrary()
+; On entry, A6 has DriverBase, task switching is disabled
+; Returns 0 normally, or the library seglist when lib should be expunged
+;   due to delayed expunge bit being set
+LibClose:
+	subq.w	#1,LIB_OPENCNT(a6)
+
+	; if delayed expunge bit set, then try to get rid of the library
+	btst	#LIBB_DELEXP,LIB_FLAGS(a6)
+	bne.s	CloseExpunge
+	moveq	#0,d0
+	rts
+
+CloseExpunge:
+	; if no library users, then just remove the library
+	tst.w	LIB_OPENCNT(a6)
+	beq.s	DoExpunge
+
+	; still some library users, so just return
+	moveq	#0,d0
+	rts
+
+;-----------------------------------------------------------------------
+
+; Library expunge entry point called whenever system memory is lacking
+; On entry, A6 has LocaleBase, task switching is disabled
+; Returns the library seglist if the library open count is 0, returns 0
+; otherwise and sets the delayed expunge bit.
+LibExpunge:
+	tst.w	LIB_OPENCNT(a6)
+	beq.s	DoExpunge
+
+	bset	#LIBB_DELEXP,LIB_FLAGS(a6)
+	moveq	#0,d0
+	rts
+
+DoExpunge:
+	movem.l	d2/a5/a6,-(sp)
+	move.l	a6,a5
+	move.l	db_SysLib(a5),a6
+	move.l	db_SegList(a5),d2
+
+	move.l  a5,a1
+	REMOVE
+
+	move.l	a5,a1
+	moveq	#0,d0
+	move.w	LIB_NEGSIZE(a5),d0
+	sub.l	d0,a1
+	add.w	LIB_POSSIZE(a5),d0
+	CALL	FreeMem
+
+	move.l	d2,d0
+	movem.l	(sp)+,d2/a5/a6
+	rts
+
+;-----------------------------------------------------------------------
+
+LibReserved:
+	moveq	#0,d0
+	rts
+
+;---------------------------------------------------------------------------
+
+GetDriverInfo:
+	move.l	#GDIF_GETLOCALESTR,d0
+	rts
+
+;---------------------------------------------------------------------------
+
+Strings:
+S000 DC.B       "",0
+S001 DC.B	"domingo",0
+S002 DC.B	"lunes",0
+S003 DC.B	"martes",0
+S004 DC.B	"miércoles",0
+S005 DC.B	"jueves",0
+S006 DC.B	"viernes",0
+S007 DC.B	"sábado",0
+
+S008 DC.B	"dom",0
+S009 DC.B	"lun",0
+S010 DC.B	"mar",0
+S011 DC.B	"mie",0
+S012 DC.B	"jue",0
+S013 DC.B	"vie",0
+S014 DC.B	"sab",0
+
+S015 DC.B	"enero",0
+S016 DC.B	"febrero",0
+S017 DC.B	"marzo",0
+S018 DC.B	"abril",0
+S019 DC.B	"mayo",0
+S020 DC.B	"junio",0
+S021 DC.B	"julio",0
+S022 DC.B	"agosto",0
+S023 DC.B	"septiembe",0
+S024 DC.B	"octubre",0
+S025 DC.B	"noviembre",0
+S026 DC.B	"diciembre",0
+
+S027 DC.B	"ene",0
+S028 DC.B	"feb",0
+S029 DC.B	"mar",0
+S030 DC.B	"abr",0
+S031 DC.B	"may",0
+S032 DC.B	"jun",0
+S033 DC.B	"jul",0
+S034 DC.B	"ago",0
+S035 DC.B	"sep",0
+S036 DC.B	"oct",0
+S037 DC.B	"nov",0
+S038 DC.B	"dic",0
+
+S039 DC.B	"Sí",0
+S040 DC.B	"No",0
+
+S041 DC.B	"AM",0
+S042 DC.B	"PM",0
+
+S043 DC.B	"-",0
+S044 DC.B	"-",0
+
+S045 DC.B	'"',0
+S046 DC.B	'"',0
+
+S047 DC.B	"Ayer",0
+S048 DC.B	"Hoy",0
+S049 DC.B	"Mañana",0
+S050 DC.B	"Futuro",0
+
+	CNOP 0,4
+
+;---------------------------------------------------------------------------
+
+GetLocaleStr:
+	cmp.l	#51,d0		; 50 being the maximum # of strings
+	bcc.s	1$
+	asl.w	#2,d0
+	move.l	StringTable(pc,d0.w),d0
+	rts
+
+1$	moveq	#0,d0
+	rts
+
+StringTable:
+P000 DC.L S000
+P001 DC.L S001
+P002 DC.L S002
+P003 DC.L S003
+P004 DC.L S004
+P005 DC.L S005
+P006 DC.L S006
+P007 DC.L S007
+P008 DC.L S008
+P009 DC.L S009
+P010 DC.L S010
+P011 DC.L S011
+P012 DC.L S012
+P013 DC.L S013
+P014 DC.L S014
+P015 DC.L S015
+P016 DC.L S016
+P017 DC.L S017
+P018 DC.L S018
+P019 DC.L S019
+P020 DC.L S020
+P021 DC.L S021
+P022 DC.L S022
+P023 DC.L S023
+P024 DC.L S024
+P025 DC.L S025
+P026 DC.L S026
+P027 DC.L S027
+P028 DC.L S028
+P029 DC.L S029
+P030 DC.L S030
+P031 DC.L S031
+P032 DC.L S032
+P033 DC.L S033
+P034 DC.L S034
+P035 DC.L S035
+P036 DC.L S036
+P037 DC.L S037
+P038 DC.L S038
+P039 DC.L S039
+P040 DC.L S040
+P041 DC.L S041
+P042 DC.L S042
+P043 DC.L S043
+P044 DC.L S044
+P045 DC.L S045
+P046 DC.L S046
+P047 DC.L S047
+P048 DC.L S048
+P049 DC.L S049
+P050 DC.L S050
+
+;---------------------------------------------------------------------------
+
+ENDTAG:
+
+;---------------------------------------------------------------------------
+
+	END
+@
+
+
+38.6
+log
+@*** empty log message ***
+@
+text
+@d234 1
+a234 1
+S030 DC.B	"Abr",0
+@
+
+
+38.5
+log
+@*** empty log message ***
+@
+text
+@d259 1
+a259 1
+S050 DC.B	"Future",0
+@
+
+
+38.4
+log
+@*** empty log message ***
+@
+text
+@a260 1
+
+@
+
+
+38.3
+log
+@*** empty log message ***
+@
+text
+@d256 3
+a258 3
+S047 DC.B	"Hoy",0
+S048 DC.B	"Mañana",0
+S049 DC.B	"Ayer",0
+@
+
+
+38.2
+log
+@*** empty log message ***
+@
+text
+@d202 58
+a259 50
+S001 DC.B	"Dimanche",0	; Sunday
+S002 DC.B	"Lundi",0	; Monday
+S003 DC.B	"Mardi",0	; Tuesday
+S004 DC.B	"Mercredi",0	; Wednesday
+S005 DC.B	"Jeudi",0	; Thursday
+S006 DC.B	"Vendredi",0	; Friday
+S007 DC.B	"Samedi",0	; Saturday
+
+S008 DC.B	"Dim",0		; Sun
+S009 DC.B	"Lun",0		; Mon
+S010 DC.B	"Mar",0		; Tue
+S011 DC.B	"Mer",0		; Wed
+S012 DC.B	"Jeu",0		; Thu
+S013 DC.B	"Ven",0		; Fri
+S014 DC.B	"Sam",0		; Sat
+
+S015 DC.B	"Janvier",0	; January
+S016 DC.B	"Février",0	; February
+S017 DC.B	"Mars",0	; March
+S018 DC.B	"Avril",0	; April
+S019 DC.B	"Mai",0		; May
+S020 DC.B	"Juin",0	; June
+S021 DC.B	"Juillet",0	; July
+S022 DC.B	"Août",0	; August
+S023 DC.B	"Septembre",0	; September
+S024 DC.B	"Octobre",0	; October
+S025 DC.B	"Novembre",0	; November
+S026 DC.B	"Décembre",0	; December
+
+S027 DC.B	"Jan",0		; Jan
+S028 DC.B	"Fév",0		; Feb
+S029 DC.B	"Mars",0	; Mar
+S030 DC.B	"Avr",0		; Apr
+S031 DC.B	"Mai",0		; May
+S032 DC.B	"Juin",0	; Jun
+S033 DC.B	"Juil",0	; Jul
+S034 DC.B	"Août",0	; Aug
+S035 DC.B	"Sep",0		; Sep
+S036 DC.B	"Oct",0		; Oct
+S037 DC.B	"Nov",0		; Nov
+S038 DC.B	"Déc",0		; Dec
+
+S039 DC.B	"Oui",0		; Yes
+S040 DC.B	"Non",0		; No
+
+S041 DC.B	"AM",0		; AM
+S042 DC.B	"PM",0		; PM
+
+S043 DC.B	"-",0		; -
+S044 DC.B	"-",0		; -
+a260 2
+S045 DC.B	"«",0		; "
+S046 DC.B	"»",0		; "
+d267 1
+a267 1
+	cmp.l	#47,d0		; 46 being the maximum # of strings
+d324 4
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d69 1
+a69 1
+LibName     DC.B "espanol.language",0
+@

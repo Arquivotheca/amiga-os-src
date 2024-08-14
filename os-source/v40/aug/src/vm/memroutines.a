@@ -1,0 +1,363 @@
+CALLSYS	macro	*
+	jsr	LVO\1(a6)
+	endm
+
+JUMPSYS macro	*
+	jmp	LVO\1(a6)
+	endm
+
+GURU	macro	*
+	move.l	4,a6			; Load ExecBase address
+	move.l	#\1,d7			; Load Guru number
+	CALLSYS	Alert
+	endm
+
+CHANGE	macro	*
+	movea.l	4,a1
+	movea.w	#LVO\1,a0
+	move.l	#_New\1,d0
+	CALLSYS	SetFunction
+	endm
+
+QUERY	macro	*
+	jsr	_Disabled
+	jsr	_Forbiden
+	endm
+
+OBTAIN	macro	*
+	movem.l	d0-d7/a0-a6,-(sp)
+	jsr	_Obtain
+	movem.l	(sp)+,d0-d7/a0-a6
+	endm
+
+RELEASE	macro	*
+	movem.l	d0-d7/a0-a6,-(sp)
+	jsr	_Release
+	movem.l	(sp)+,d0-d7/a0-a6
+	endm
+
+LVOSupervisor	EQU	-30
+LVOAlert	EQU	-$6c
+LVOSetFunction	EQU	-$1a4
+LVOAllocate	EQU	-$ba
+LVODeallocate	EQU	-$c0
+LVOAllocMem	EQU	-$c6
+LVOFreeMem	EQU	-$d2
+LVOTypeOfMem	EQU	-$216
+LVOAllocAbs	EQU	-$cc
+LVOAvailMem	EQU	-$d8
+MEMF_VIRTUAL	EQU	3
+MEMF_PUBLIC	EQU	0
+
+;======================================================================
+;
+;	section text,code
+	csect	text,0,,0,4
+;		name,type,align,rtype,rsize
+;				0 = Absolute short or long address
+;				1 = PC-relative offset
+;				2 = Address-register-relative offset
+;
+;======================================================================
+
+	XDEF	_MemRoutines
+	XREF	_Obtain
+	XREF	_Release
+
+_MemRoutines:
+	move.l	4,a6
+	CHANGE	TypeOfMem
+	CHANGE	FreeMem
+	CHANGE	AllocMem
+	CHANGE	AllocAbs
+	CHANGE	AvailMem
+	rts
+
+;---------------------------------------------------------------------------
+;  Note, all these routines have been disassembled by Markus Wandel, and the
+;  comments are his. I only removed the calls to Forbid() and Permit() and
+;  replaced them with calls to semaphores. I also modified AllocMem in such
+;  a way that if MEMF_VIRTUAL memory is not specifically requested, then
+;  MEMF_PUBLIC memory is allocated.
+;
+;  memoryBlock = AllocMem( byteSize, requirements )
+;  D0                      D0        D1
+;---------------------------------------------------------------------------
+
+_NewAllocMem:
+	OBTAIN
+	movem.l   D2/D3/A2,-(SP)
+	move.l    D0,D3
+	move.l    D1,D2
+	lea       $0142(A6),A2      Point to the system free memory list.
+
+        ; Loop:  Step through the system free memory list looking for
+        ; a MemHeader which can satisfy the memory request.
+
+	btst	  #MEMF_VIRTUAL,D2  Was the virtual flag set?
+	bne.s     2$                Jump is so
+        bset      #MEMF_PUBLIC,D2   Force public memory allocation
+
+2$	move.l    (A2),A2           Get pointer to a MemHeader.
+	tst.l     (A2)              End of memory list reached?
+	bne.s     0$
+	moveq     #0,D0             If so, return a null pointer and exit.
+	bra.s     1$
+0$	move.w    $0E(A2),D0        Get the MemHeader's attributes.
+	and.w     D2,D0             Check against needed attributes.
+	cmp.w     D2,D0
+	bne.s     2$                Go to next MemHeader if not present.
+
+        ; The current MemHeader has the right attribute flags, now try
+        ; to get a block of the required size out of its free list.
+
+	move.l    A2,A0             Point to the MemHeader.
+	move.l    D3,D0             Indicate size of block required.
+	CALLSYS   Allocate          Allocate()
+	tst.l     D0                Did we get the memory?
+	beq.s     2$                If not, go to next MemHeader.
+
+        ; We got a memory block.  Clear it if necessary.
+
+	btst      #$10,D2           Was the MEMF_CLEAR flag set?
+	beq.s     1$                Just return if not.
+	moveq     #0,D1
+	addq.l    #3,D3             Convert number of bytes to nearest number
+	lsr.l     #2,D3             of longwords.
+	move.l    D0,A0             Point to the memory block.
+	bra.s     4$                Enter the loop at the bottom.
+
+        ; Loop: Clear the memory block.
+
+5$      move.l    D1,(A0)+          Clear one longword.
+4$      dbra      D3,5$             Loop back until none remain.
+
+	swap      D3                DBRA instruction only uses low 16 bits
+	tst.w     D3                 as program counter, so if any remain
+	beq.s     1$                 set in the upper half of D3, decrement
+	subq.w    #1,D3              them manually and loop back.
+	swap      D3
+	bra.s     5$    
+
+1$	RELEASE
+	movem.l   (SP)+,D2/D3/A2
+	rts       
+
+;---------------------------------------------------------------------------
+;  FreeMem( memoryBlock, byteSize )
+;           A1           D0
+;---------------------------------------------------------------------------
+
+_NewFreeMem:
+	OBTAIN
+	tst.l     D0                Is number of bytes to free zero?
+	beq.s     1$                If so, just exit.
+	lea       $0142(A6),A0      Point to system free memory list.
+
+        ; Loop: Look for the right MemHeader to put the block back into.
+
+0$	move.l    (A0),A0           Point to the next MemHeader.
+	tst.l     (A0)              End of list reached?
+
+        ; If no MemHeader can be found to put this block on, something
+        ; is wrong, so it's guru time.
+
+	beq       3$                Guru time if end of list reached.
+
+        ; See if the block falls into the address range covered by this
+        ; MemHeader.
+
+	cmp.l     $14(A0),A1        Does block start before mh_Lower?
+	bcs.s     0$                If so, try next MemHeader.
+	cmp.l     $18(A0),A1        Does block start after mh_Upper?
+	bcc.s     0$                If so, try next MemHeader.
+
+        ; The block belongs to this MemHeader, so go link it back into
+        ; the free list.
+
+	CALLSYS   Deallocate
+1$      RELEASE
+	rts       
+
+3$	move.l    #$81000005,d7     Alert number
+	move.l    4,a6              Get ExecBase
+	jsr       -$6c(a6)          Put up the alert
+
+;---------------------------------------------------------------------------
+;  attributes = TypeOfMem( address )
+;  D0                      A1
+;---------------------------------------------------------------------------
+
+_NewTypeOfMem:
+	OBTAIN
+	lea       $0142(A6),A0      Point to system free memory list.
+	moveq     #0,D0
+0$	move.l    (A0),A0           Point to next MemHeader.
+	tst.l     (A0)              End of list reached?
+	beq.s     1$                If so, return zero and exit.
+	cmp.l     $14(A0),A1        Check if the block is in the address
+	bcs.s     0$                range covered by this MemHeader.
+	cmp.l     $18(A0),A1
+	bcc.s     0$                If it is, return the contents of the
+	move.w    $0E(A0),D0        MemHeader's attribute field.
+1$	RELEASE
+	rts       
+
+;---------------------------------------------------------------------------
+;  memoryBlock = AllocAbs( byteSize, location )
+;  D0                      D0        A1
+;---------------------------------------------------------------------------
+
+_NewAllocAbs:
+	OBTAIN
+	movem.l   D2-D4/A2/A3,-(SP)
+	move.l    A1,D2             Get the start address.
+	and.l     #$000007,D2       Truncate down to nearest multiple of 8.
+	sub.l     D2,A1
+	add.l     D2,D0             Add any difference to number of bytes
+	addq.l    #7,D0             wanted, then round number of bytes
+	and.b     #$F8,D0           up to nearest multiple of 8.
+	lea       $0142(A6),A0      Point to the system free memory list.
+
+        ; Loop: Scan through all the MemHeaders in the free list.
+
+1$      move.l    (A0),A0           Point to next MemHeader.
+	tst.l     (A0)              End of list reached?
+	beq.s     0$                If so, allocation failed, return zero.
+
+        ; Check whether the block we want is covered by this MemHeader.
+
+	cmp.l     $14(A0),A1        If block starts before this MemHeader's
+	bcs.s     1$                area, go on to the next one.
+	cmp.l     $18(A0),A1        If block starts after this MemHeader's
+	bcc.s     1$                area, go on to next one.
+
+        ; The desired block starts in the address range covered by this
+        ; MemHeader, so it's either this one or nothing.
+
+        ; Quick check:  If the total number of bytes free in this MemHeader's
+        ; free list is less than the size of the block wanted, then the
+        ; allocation is going to fail anyway.
+
+	cmp.l     $1C(A0),D0         Check block size against mh_Free.
+	bhi.s     0$                 Allocation failed if higher.
+	move.l    A1,A3              Get start address of block wanted.
+	move.l    A1,D2
+	add.l     D0,D2              Compute end address of block wanted.
+	lea       $10(A0),A2         Point to link to first MemChunk.
+
+        ; Loop:  Find the MemChunk in the free list which contains the
+        ; wanted block.
+
+3$      move.l    (A2),D3            Get pointer to next MemChunk.
+	beq.s     0$                 Allocation failed if no more MemChunks.
+	move.l    D3,A1
+	move.l    4(A1),D4           Get the MemChunk's size.
+	add.l     D3,D4              Compute its end address.
+	cmp.l     D2,D4              Check against needed end address.
+	bcc.s     2$                 Exit loop if equal or higher.
+	move.l    A1,A2
+	bra.s     3$                 Go to the next MemChunk.
+
+        ; We have a MemChunk whose end address is greater than or equal
+        ; to the end address of the block we want.  It's either this
+        ; MemChunk or none at all.
+
+2$	cmp.l     A3,D3              Check start addresses.
+	bhi.s     0$                 Allocation failed if needed block
+                                     ; starts before this MemChunk.
+
+        ; The block we want is entirely within this MemChunk, so now we
+        ; cut it out and make zero, one or two MemChunks out of what's left.
+
+	sub.l     D0,$1C(A0)         Remove block size from free count.
+	sub.l     D2,D4              Compare end addresses.
+	bne.s     4$    
+
+        ; The end addresses of the allocated block and the MemChunk it
+        ; was in were exactly equal.
+
+	move.l    (A1),A0
+	bra.s     6$    
+
+        ; Memory was left over between the allocated block and the end of
+        ; the MemChunk.  Make a new MemChunk out of this and link it into
+        ; the free list.
+
+4$	lea       0(A3,D0.l),A0      Compute base address of new MemChunk.
+	move.l    (A1),(A0)          Store pointer to next MemChunk.
+	move.l    A0,(A1)            Link to previous MemChunk.
+	move.l    D4,4(A0)           Store number of bytes in MemChunk.
+
+        ; At this point, whatever was left after the block was taken
+        ; care of, and a pointer to the next MemChunk after the block is
+        ; in A0.
+
+6$	cmp.l     A3,D3              Compare start addresses.
+	beq.s     5$    
+
+        ; The block started after the beginning of this MemChunk, so we
+        ; just truncate the MemChunk to contain the leftover memory before
+        ; the allocated block.
+
+	sub.l     A3,D3
+	neg.l     D3                 Compute remaining size.
+	move.l    D3,4(A1)           Store in the MemChunk.
+	bra.s     7$                 All done.
+
+        ; The block started exactly at the beginning of the MemChunk, so
+        ; the MemChunk must be deleted.
+
+5$	move.l    A0,(A2)            Unlink this MemChunk from the chain.
+7$	move.l    A3,D0              Return address of allocated block.
+8$	movem.l   (SP)+,D2-D4/A2/A3
+	RELEASE
+	rts
+
+0$	moveq     #0,D0              Return zero if allocation failed.
+	bra.s     8$
+
+;---------------------------------------------------------------------------
+;  size = AvailMem( requirements )
+;  D0               D1
+;---------------------------------------------------------------------------
+
+_NewAvailMem:
+	movem.l   D3/A2,-(SP)
+	moveq     #0,D3             Initialize free memory counter.
+	lea       $0142(A6),A1      Point at the ExecBase->MemList.
+	OBTAIN
+1$      move.l    (A1),A1
+	tst.l     (A1)              Get address of first MemHeader.
+	beq.s     0$                Exit if list is empty.
+	move.w    $0E(A1),D0        Get this MemHeader's attributes.
+	and.w     D1,D0             Mask with required attributes.
+	cmp.w     D1,D0             Check if all attributes are satisfied.
+	bne.s     1$                Go to next MemHeader if not.
+	btst      #$11,D1           Are we looking for the largest
+                                    ; contiguous block of memory?
+	bne.s     2$    
+	add.l     $1C(A1),D3        If not, just add the size,
+	bra.s     1$                and loop back.
+
+        ; We are looking for the largest contiguous block of memory.
+
+2$      move.l    $10(A1),D0        Get address of first MemChunk.
+4$      beq.s     1$                Loop back if there is no MemChunk.
+	move.l    D0,A0
+	cmp.l     4(A0),D3          See if this MemChunk is the biggest yet.
+	bge.s     3$    
+	move.l    A0,A2             If it is, keep its base address (why?),
+	move.l    4(A0),D3          and its size.
+3$      move.l    (A0),D0
+	bra.s     4$                Go to next MemChunk.
+0$      RELEASE
+	move.l    D3,D0             Return the accumulated or largest size.
+	movem.l   (SP)+,D3/A2
+	rts
+
+;	csect	data,1,,0,4
+
+	end
+
+

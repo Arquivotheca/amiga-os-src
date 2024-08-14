@@ -1,0 +1,366 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  Distillery:1.5;
+locks    ; strict;
+comment  @ * @;
+
+
+1.5
+date     91.01.06.20.58.24;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.12.30.15.51.09;  author Doug;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.12.13.03.15.52;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.11.25.16.01.48;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.03.00.02.39;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@handler debug routine
+@
+
+
+1.5
+log
+@Allow for serial debugging
+@
+text
+@
+/*
+ *  HANDD.C
+ */
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/ports.h>
+#include <libraries/dos.h>
+#include <libraries/dosextens.h>
+#include <libraries/filehandler.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+
+#undef GLOBAL
+/* my version of BADDR() has no problems with casting */
+#undef	BADDR
+#undef MKBADDR
+
+#define BADDR(x)        ((APTR)((long)x << 2))
+#define MKBADDR(x)      ((BPTR)((long)x >> 2))
+
+#define ACTION_HANDLER_DEBUG	2010L
+#define DEBUG_SPECIAL 0x40000000
+#define DEBUG_WAIT    0x40000001
+#define DEBUG_INFO    0x40000002   /* Send transmit info to msgport in */
+#define DEBUG_OPKTS   0x40000003   /* Send info on outstanding hpkts   */
+#define DEBUG_TERM    0x40000004   /* Terminate specified connection   */
+#define DEBUG_MEMCHK  0x40000005   /* Change memory check frequency    */
+
+char windowname[50] = "CON:0/1/640/160/Debug ";
+
+LONG sendpkt(struct MsgPort *, long, long*, long, long*);
+
+void main(int, char **);
+
+#define NODESIZE 50
+
+void main(argc, argv)
+int argc;
+char **argv;
+{
+   struct MsgPort *proc;
+   long myargs[8];
+   long myres[2];
+   char *filename, *cmdname, *devname;
+   int freeflag, handler, len;
+   char node[NODESIZE];
+
+   cmdname = argv[0];
+   if(argc < 3 || argc > 4)
+   {
+USAGE:
+      fprintf(stderr, "Usage: %s <node> OPEN|CLOSE|TERM [<logfile>]\n", cmdname);
+      fprintf(stderr, "   where OPEN opens a debug window\n"
+                      "         CLOSE closes a debug window\n",
+                      "         TERM terminates the node's connection\n"
+                      "   <logfile> of SERIAL indicates use kprintf\n"
+                      );
+      fprintf(stderr, "Or   : %s <device> MEM [1|0]\n", cmdname);
+      fprintf(stderr, 
+         "   where 1 indicates to check memory for trashes every packet\n");
+      return;
+   }
+   devname = argv[1];
+
+   if ((proc = (struct MsgPort *)DeviceProc(devname)) == NULL)
+   {
+      fprintf(stderr, "Unknown device %s\n", devname);
+      goto USAGE;
+   }
+
+   /* This is going to the server if there is anything after the ':' */
+   for(handler=0; devname[handler] && devname[handler] != ':'; handler++);
+
+   freeflag = handler = (devname[handler] == '\0' || devname[handler+1] == '\0');
+
+   /* Now we must make the name into a BPTR */
+   len = strlen(devname);
+   node[0] = min(len, NODESIZE-1);
+   memcpy(node+1, devname, node[0]);
+   myargs[2] = (long)node;
+
+   if(!stricmp(argv[2], "TERM"))
+   {
+      freeflag = 0;
+      myargs[0] = DEBUG_TERM;
+   }
+   else if(!stricmp(argv[2], "CLOSE"))
+   {
+      myargs[0] = myargs[1] = 0;
+   }
+   else if(!stricmp(argv[2], "OPEN"))
+   {
+      
+      myargs[0] = 2;  /* >1 tells handler there is a name in dp_Arg2 */
+      if(handler)
+      {
+         if(argc == 4)
+            filename = argv[3];
+         else
+            filename = windowname;
+
+         if(!stricmp(filename, "SERIAL"))
+         {
+            myargs[1] = 1;  /* Special debug value indicating kprintf */
+         }
+         else
+         {
+            if(!(myargs[1] = (long)Open(filename, 1006)))
+            {
+               fprintf(stderr, "Can't open log %s '%s'\n", 
+                  filename == windowname ? "window" : "file", filename);
+               goto USAGE;
+            }
+         }
+      }
+      else
+      {
+         /* This goes to the server - do not supply a window */
+         myargs[1] = NULL;
+      }
+   }
+   else if(!stricmp(argv[2], "MEM"))
+   {
+      freeflag = 0;
+      myargs[0] = DEBUG_MEMCHK;
+      myargs[1] = (argv[3][0] == '1' ? 1 : 0);
+   }
+   else
+   {
+      fprintf(stderr, "Unknown debugging command '%s'\n", argv[2]);
+      goto USAGE;
+   }
+
+   sendpkt(proc,ACTION_HANDLER_DEBUG,myargs,3,myres);
+
+   if(freeflag && myres[0] != 0 && myres[1])
+      Close((BPTR)myres[1]);
+}
+
+LONG sendpkt(pid,action,args,nargs,res)
+struct MsgPort *pid;  /* process indentifier ... (handlers message port ) */
+LONG action,	      /* packet type ... (what you want handler to do )   */
+     args[],	      /* a pointer to a argument list		*/
+     nargs,	      /* number of arguments in list		*/
+     res[];	      /* pointer to 2 longs for result, or NULL */
+   {
+   struct MsgPort	 *replyport;
+   struct StandardPacket *packet;
+
+   LONG  count, lres, *pargs;
+
+   replyport = (struct MsgPort *) CreatePort(NULL,0);
+   if(!replyport) return(0L);
+
+   packet = (struct StandardPacket *)
+      AllocMem((long)sizeof(struct StandardPacket),MEMF_PUBLIC|MEMF_CLEAR);
+   if(!packet)
+      {
+      DeletePort(replyport);
+      return(0L);
+      }
+
+   packet->sp_Msg.mn_Node.ln_Name = (char *)&(packet->sp_Pkt);
+   packet->sp_Pkt.dp_Link	  = &(packet->sp_Msg);
+   packet->sp_Pkt.dp_Port	  = replyport;
+   packet->sp_Pkt.dp_Type	  = action;
+
+   /* copy the args into the packet */
+   pargs = &(packet->sp_Pkt.dp_Arg1);       /* address of first argument */
+   for(count=0;count < nargs;count++)
+      pargs[count]=args[count];
+
+   PutMsg(pid,(struct Message *)packet); /* send packet */
+
+   WaitPort(replyport);
+   GetMsg(replyport);
+
+   if(res)
+   {
+      lres = res[0] = packet->sp_Pkt.dp_Res1;
+      res[1] = packet->sp_Pkt.dp_Res2;
+   }
+
+   FreeMem((char *)packet,(long)sizeof(struct StandardPacket));
+   DeletePort(replyport);
+
+   return(lres);
+}
+@
+
+
+1.4
+log
+@add MEM keyword
+@
+text
+@d62 3
+a64 1
+                      "         TERM terminates the node's connection\n");
+d109 1
+a109 1
+         if(!(myargs[1] = (long)Open(filename, 1006)))
+d111 10
+a120 3
+            fprintf(stderr, "Can't open log %s '%s'\n", 
+               filename == windowname ? "window" : "file", filename);
+            goto USAGE;
+@
+
+
+1.3
+log
+@Remove WAIT option, add TERM option
+@
+text
+@d34 1
+d60 6
+d119 6
+@
+
+
+1.2
+log
+@New handd that handles multiple servers
+@
+text
+@d31 3
+a33 2
+#define DEBUG_SERVER  0x20000000
+#define DEBUG_SERVWT  0x10000000
+d58 1
+a58 1
+      fprintf(stderr, "Usage: %s <node> OPEN|CLOSE|WAIT [<logfile>]\n", cmdname);
+d80 1
+a80 1
+   if(!stricmp(argv[2], "WAIT"))
+d83 1
+a83 1
+      myargs[0] = DEBUG_WAIT;
+d92 1
+a92 1
+      myargs[0] = 2;  /* >1 tells handler there is a name in dp_Arg3 */
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d40 2
+d50 2
+a51 1
+   int freeflag, server, handler;
+d54 1
+a54 1
+   if(argc != 3 && argc != 4 && argc != 5)
+d57 1
+a57 3
+      fprintf(stderr,
+	 "Usage: %s device <SERVER|BOTH> [OPEN|CLOSE|WAIT] <logfile>\n",
+	 cmdname);
+d64 1
+a64 1
+      fprintf(stderr, "Unable to get a device proc for %s\n", devname);
+d68 10
+a77 9
+   handler = 0;
+   if((server=(!stricmp(argv[2], "SERVER"))) ||
+      (server=handler=(!stricmp(argv[2], "BOTH"))))
+   {
+      if(argc < 4) goto USAGE;
+      argc--, argv++;
+   }
+   else
+      handler = 1;
+d86 1
+a86 2
+      freeflag = 1;
+      myargs[0] = 0;
+d90 2
+a91 2
+      freeflag = 1;
+      myargs[0] = 1;
+d94 16
+a109 13
+	 if(argc == 4) filename = argv[3];
+	 else
+	 {
+	    strcat(windowname, devname);
+	    strcat(windowname, "/a");
+	    filename = windowname;
+	 }
+	 if(!(myargs[1] = (long)Open(filename, 1006)))
+	 {
+	    fprintf(stderr, "Can't open output %s '%s'\n",
+	       (argc == 4 ? "file" : "window"), filename);
+	    goto USAGE;
+	 }
+d118 1
+a118 12
+   if(handler)
+   {
+      sendpkt(proc,ACTION_HANDLER_DEBUG,myargs,2,myres);
+      if(freeflag && myres[0] != 0 && myres[1])
+	 Close((BPTR)myres[1]);
+   }
+
+   if(server)
+   {
+      myargs[0] |= (DEBUG_SERVER|DEBUG_SPECIAL);
+      sendpkt(proc,ACTION_HANDLER_DEBUG,myargs,2,myres);
+   }
+d120 2
+@

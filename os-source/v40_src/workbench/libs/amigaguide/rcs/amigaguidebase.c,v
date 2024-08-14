@@ -1,0 +1,366 @@
+head     39.6;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.6; strict;
+comment  @ * @;
+
+
+39.6
+date     92.07.23.17.08.47;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.06.23.03.07.47;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.06.22.04.08.06;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.06.05.03.57.53;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.01.15.23.44;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.01.13.04.05;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.01.12.11.31;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.6
+log
+@expunge wasn't freeing library base
+@
+text
+@/* amigaguidebase.c
+ *
+ */
+
+#include "amigaguidebase.h"
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+/****** amigaguide.library/--background-- ****************************************
+*
+*   PURPOSE
+*	The amigaguide.library provides a means whereby developers
+*	can easily add on-line help abilities to their applications.
+*
+*******************************************************************************
+*
+* Created:  27-Feb-92, David N. Junod
+*
+*/
+
+/*****************************************************************************/
+
+struct Library *ASM LibInit (REG (d0) struct AmigaGuideLib * ag, REG (a0) BPTR seglist, REG (a6) struct Library * sysbase)
+{
+    DB (kprintf ("ag : libinit\n"));
+
+    /********************************/
+    /* Initialize all the variables */
+    /********************************/
+
+    ag->ag_SegList = seglist;
+    ag->ag_SysBase = sysbase;
+
+    InitSemaphore (&ag->ag_Lock);
+
+    /*******************************************/
+    /* Open all the ROM libraries that we need */
+    /*******************************************/
+
+    if (sysbase->lib_Version >= 39)
+    {
+	DB (kprintf ("ag : open ROM libraries\n"));
+	ag->ag_DOSBase       = OpenLibrary ("dos.library", 39);
+	ag->ag_UtilityBase   = OpenLibrary ("utility.library", 39);
+	ag->ag_GfxBase       = OpenLibrary ("graphics.library", 39);
+	ag->ag_IntuitionBase = OpenLibrary ("intuition.library", 39);
+	ag->ag_GadToolsBase  = OpenLibrary ("gadtools.library", 39);
+	ag->ag_WorkbenchBase = OpenLibrary ("workbench.library", 39);
+	return ((struct Library *) ag);
+    }
+    return (NULL);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibOpenLVO (REG (a6) struct AmigaGuideLib * ag)
+{
+    struct ExecBase *eb = (struct ExecBase *) ag->ag_SysBase;
+    LONG retval = (LONG) ag;
+    BOOL success = FALSE;
+    BYTE nest;
+
+    DB (kprintf ("ag : libopen\n"));
+
+    /**********/
+    /* Forbid */
+    /**********/
+    ObtainSemaphore (&ag->ag_Lock);
+    nest = eb->TDNestCnt;
+    Permit ();
+
+    /* Use an internal use counter */
+    ag->ag_UseCnt++;
+    ag->ag_Lib.lib_Flags &= ~LIBF_DELEXP;
+
+    if (ag->ag_UseCnt == 1)
+    {
+	/* Create a memory pool */
+	if (ag->ag_MemoryPool = CreatePool (MEMF_PUBLIC | MEMF_CLEAR, 512, 512))
+	{
+	    /* Open disk libraries here */
+	    DB (kprintf ("ag : open rexxsyslib.library\n"));
+	    ag->ag_RexxSysBase = OpenLibrary ("rexxsyslib.library", 0);
+	    DB (kprintf ("ag : open locale.library\n"));
+	    if (ag->ag_LocaleBase = OpenLibrary ("locale.library", 38))
+		ag->ag_Catalog = OpenCatalogA (NULL, "amigaguide.catalog", NULL);
+
+	    DB (kprintf ("ag : open asl.library\n"));
+	    if (ag->ag_AslBase = OpenLibrary ("asl.library", 38))
+	    {
+		DB (kprintf ("ag : open datatypes.library\n"));
+		if (ag->ag_DataTypesBase = OpenLibrary ("datatypes.library", 39))
+		{
+		    DB (kprintf ("ag : open amigaguide.datatype\n"));
+		    if (ag->ag_AmigaGuideClassBase = OpenLibrary ("datatypes/amigaguide.datatype", 39))
+		    {
+			DB (kprintf ("ag : init window class\n"));
+			if (ag->ag_WindowClass = initWindowClass (ag))
+			{
+			    success = TRUE;
+			}
+		    }
+		}
+	    }
+	}
+	else
+	{
+	    DB (kprintf ("ag : couldn't create memory pool\n"));
+	}
+    }
+    else
+    {
+	success = TRUE;
+    }
+
+    if (success)
+    {
+	DB (kprintf ("ag : obtain xref\n"));
+	ag->ag_Token = ObtainXRefToken (ag);
+    }
+    else
+    {
+	DB (kprintf ("ag : failure\n"));
+	CloseLibrary (ag->ag_AmigaGuideClassBase);
+	CloseLibrary (ag->ag_DataTypesBase);
+	CloseLibrary (ag->ag_AslBase);
+	CloseLibrary (ag->ag_LocaleBase);
+	CloseLibrary (ag->ag_RexxSysBase);
+	ag->ag_AmigaGuideClassBase = ag->ag_DataTypesBase = NULL;
+	ag->ag_AslBase = ag->ag_LocaleBase = ag->ag_RexxSysBase = NULL;
+	ag->ag_UseCnt--;
+	retval = NULL;
+    }
+
+    /**********/
+    /* Permit */
+    /**********/
+    eb->TDNestCnt = nest;
+    ReleaseSemaphore (&ag->ag_Lock);
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibCloseLVO (REG (a6) struct AmigaGuideLib * ag)
+{
+    struct ExecBase *eb = (struct ExecBase *) ag->ag_SysBase;
+    BYTE nest;
+
+    /**********/
+    /* Forbid */
+    /**********/
+    ObtainSemaphore (&ag->ag_Lock);
+    nest = eb->TDNestCnt;
+    Permit ();
+
+    if (ag->ag_UseCnt)
+	ag->ag_UseCnt--;
+
+    if (ag->ag_UseCnt == 0)
+    {
+	/* Free up the things we opened */
+	if (ag->ag_LocaleBase)
+	{
+	    CloseCatalog (ag->ag_Catalog);
+	    CloseLibrary (ag->ag_LocaleBase);
+	}
+	CloseLibrary (ag->ag_AmigaGuideClassBase);
+	CloseLibrary (ag->ag_DataTypesBase);
+	CloseLibrary (ag->ag_RexxSysBase);
+	CloseLibrary (ag->ag_AslBase);
+	freeWindowClass (ag, ag->ag_WindowClass);
+	DeletePool (ag->ag_MemoryPool);
+	ag->ag_RexxSysBase = ag->ag_LocaleBase = ag->ag_DataTypesBase = NULL;
+	ag->ag_AmigaGuideClassBase = NULL;
+	ag->ag_WindowClass = NULL;
+	ag->ag_MemoryPool = NULL;
+	ag->ag_Catalog = NULL;
+    }
+
+    /**********/
+    /* Permit */
+    /**********/
+    eb->TDNestCnt = nest;
+    ReleaseSemaphore (&ag->ag_Lock);
+
+    if (ag->ag_Lib.lib_Flags & LIBF_DELEXP)
+	return (LibExpungeLVO (ag));
+
+    return (NULL);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibExpungeLVO (REG (a6) struct AmigaGuideLib * ag)
+{
+    BPTR seg = ag->ag_SegList;
+
+    if (ag->ag_UseCnt)
+    {
+	ag->ag_Lib.lib_Flags |= LIBF_DELEXP;
+	return (NULL);
+    }
+
+    Remove ((struct Node *) ag);
+
+    CloseLibrary (ag->ag_WorkbenchBase);
+    CloseLibrary (ag->ag_GadToolsBase);
+    CloseLibrary (ag->ag_IntuitionBase);
+    CloseLibrary (ag->ag_GfxBase);
+    CloseLibrary (ag->ag_UtilityBase);
+    CloseLibrary (ag->ag_DOSBase);
+
+    /* Free the library base */
+    FreeMem ((APTR)((ULONG)(ag) - (ULONG)(ag->ag_Lib.lib_NegSize)), ag->ag_Lib.lib_NegSize + ag->ag_Lib.lib_PosSize);
+
+    return ((LONG) seg);
+}
+@
+
+
+39.5
+log
+@open datatypes/amigaguide.datatype instead of amigaguide.class
+@
+text
+@d200 1
+d217 4
+a220 1
+    return ((LONG) ag->ag_SegList);
+@
+
+
+39.4
+log
+@cleaned library init.
+@
+text
+@d96 2
+a97 2
+		    DB (kprintf ("ag : open amigaguide.class\n"));
+		    if (ag->ag_AmigaGuideClassBase = OpenLibrary ("amigaguide.class", 39))
+@
+
+
+39.3
+log
+@*** empty log message ***
+@
+text
+@d27 1
+d44 4
+a47 3
+	ag->ag_DOSBase       = OpenLibrary ("dos.library",       39);
+	ag->ag_UtilityBase   = OpenLibrary ("utility.library",   39);
+	ag->ag_GfxBase       = OpenLibrary ("graphics.library",  39);
+d49 1
+a49 1
+	ag->ag_GadToolsBase  = OpenLibrary ("gadtools.library",  39);
+d62 1
+a62 1
+    BOOL success = TRUE;
+d65 2
+d84 1
+d86 1
+d90 1
+d92 19
+a110 4
+	    if (ag->ag_DataTypesBase = OpenLibrary ("datatypes.library", 39))
+		if (ag->ag_AmigaGuideClassBase = OpenLibrary ("sys:classes/datatypes/amigaguide.class", 39))
+		    if (ag->ag_WindowClass = initWindowClass (ag))
+			success = TRUE;
+d113 4
+d120 1
+d125 8
+@
+
+
+39.2
+log
+@open amigaguide.class using SYS:classes/datatypes
+@
+text
+@d84 1
+d139 1
+@
+
+
+39.1
+log
+@changed classes
+@
+text
+@d83 1
+d85 1
+a85 1
+		if (ag->ag_AmigaGuideClassBase = OpenLibrary ("classes/datatypes/amigaguide.class", 39))
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d84 1
+a84 1
+		if (ag->ag_AmigaGuideClassBase = OpenLibrary ("classes/amigaguide.class", 39))
+@

@@ -1,0 +1,824 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.7
+date     91.03.07.15.07.53;  author eric;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.03.06.16.02.39;  author eric;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.08.30.12.22.04;  author eric;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.08.21.16.43.12;  author eric;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.08.20.10.57.20;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.03.12.07.13;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.04.02.16.39.55;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.7
+log
+@Update from Joe Katz 6 Mar 91
+@
+text
+@
+*P-UNITI can also be incorretly set if input is in error eg AA(9\0 or AA (-\0
+
+	TTL	'PARSE.ASM'
+
+
+*************************************************************************	
+*                                                                    	*
+*   Copyright 1990, Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted, or stored   *
+*   in any language or computer system, in any form, whatsoever,	*
+*   without the prior written permission of the authors.   		*
+*                                                                    	*
+*************************************************************************
+
+
+          SECTION      speech
+
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*                                                                     	;
+*                        PHONEME PARSER                               	;
+*                                                                     	;
+*    INPUT IS ASCII PHONEME STRING.  OUTPUT IS PHON, STRESS, DUR.     	;
+*    ERRORS IN INPUT ARE NOTED BY RETURNING THE -IVE POSITION IN      	;
+*    D3.                                                              	;
+*                                                                     	;
+*                                                                     	;
+*    A0 - Address of ASCII string    A1 - PHON array			;
+*    A2 - STRESS array		     A3 - DUR array			;
+*    A4 - Features matrix            A5 - Globals area			;
+*    A6 - Graphemes table            A7 - Stack				;
+*                                                                     	;
+*    D0 - ASCII char		     D1 - Scratch			;
+*    D2 - Scratch		     D3 - Output count			;
+*    D4 - Phoneme features           D5 - Last phon features		;
+*    D6 - Internal phoneme code	     D7 - Previous phon			;
+*                                                                     	;
+*    Update history
+*
+*	8/27/90  -  Narrator had a problem dealing with input not 
+*		    terminated by a '\0'.  Added code at ParChkLen
+*		    and modified branches to ParMain (they now branch
+*		    to ParChkLen) in section ParTestWordBreak to check
+*		    for input length.
+*    
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+*	  ;--------- A few handy equates
+
+PARSTEND  EQU       '#'       			;Alternate end-of-input marker
+						;        (Macintosh relic)
+
+
+*	  ;-------- Syllable bits contained in the STRESS array
+
+SYLSTART  EQU       $80				;Start of syllable
+SYLPOLY   EQU       $40       			;Poly-syllablic
+SYLSTRD   EQU       $20       			;Stressed phoneme
+SYLSGMT   EQU       $10       			;Stressed segment
+
+
+*	  ;-------- Syllable bits contained in the DUR array
+
+SYLWORDF  EQU       $80       			;Word final
+SYLPHRSF  EQU       $40       			;Phrase final
+SYLPUNTI  EQU	    $20	      			;P-UNIT initiator
+SYLPUNTT  EQU	    $10	      			;P-UNIT terminator
+
+
+	  INCLUDE   'exec/types.i'
+          INCLUDE   'featequ.i'
+          INCLUDE   'pcequs.i'
+          INCLUDE   'gloequs.i'
+	  INCLUDE   'narrator.i'
+	  INCLUDE   'parse.i'
+
+
+          XREF      FEAT
+          XDEF      PARSE
+
+
+*	  ;-------- Initialize.
+
+PARSE	  MOVE.L    PARSTART(A5),A0		;Get beginning of ASCII string
+	  MOVE.L    PHON(A5),A1
+          MOVE.L    STRESS(A5),A2
+          MOVE.L    DUR(A5),A3
+          LEA       FEAT,A4
+
+
+          CLR.W     (A1)+      			;Insert two blanks at beginning
+          CLR.W     (A2)+			;   of output arrays
+          CLR.W     (A3)+
+
+          MOVE.B    #PHCQX,(A1)+		;Move in silent phon
+	  CLR.B	    (A2)+			;Clear STRESS
+	  CLR.B	    (A3)+			;   and DUR
+
+          CLR.B     (A1)+        		;Move in a blank
+	  CLR.B	    (A2)+			;Clear STRESS
+	  CLR.B	    (A3)+			;   and DUR
+
+          MOVEQ     #4,D3        		;Start output count at 4
+
+          MOVEQ     #0,D0			;Input char
+	  MOVEQ	    #0,D1
+          MOVEQ     #0,D2
+          MOVEQ     #0,D4
+	  MOVEQ	    #0,D5
+	  MOVEQ	    #0,D6
+          MOVEQ     #0,D7			;Phoneme code
+
+
+
+*	  ;------  PARSE main loop.  Get a character from the input array.
+	  ;	   If it is a number (range 0-9 allowed), check that it
+	  ;	   follows a vowel, and if so, store in stress array.
+	  ;  	   If it is in the range A-Z or a special character, form
+	  ;	   an index into the Grapheme pointer table, and use this
+	  ;	   index to get the offset to the allowable graphemes that
+	  ;	   begin with this letter.
+
+ParMain   MOVEQ	    #0,D0
+	  MOVE.B    (A0)+,D0       		;Get a char from input
+	  BEQ	    ParDone	  		;Null terminates input string
+          CMP.B     #PARSTEND,D0  		;'#' also terminates input
+          BEQ       ParDone			;   (relic of Macintosh days)
+
+
+	  LEA	    GraphemePointers,A6		;Grapheme table pointers
+	  MOVE.W    D0,D1			;Input char
+	  SUB.W	    #' ',D1			;Form table index
+	  BLT	    ParError			;Char less than SPACE, error
+	  CMP.W	    #MAXGRAPHEME,D1		;Check against max table entry
+	  BGT	    ParError			;Char not in table, error
+	  LSL.W	    #2,D1			;Table entries are longwords
+	  MOVE.L    0(A6,D1),A6			;Pointer to allowable graphemes
+
+ParSearch MOVE.B    (A6)+,D2			;Second char of digraph
+	  BEQ.S	    ParEOList			;End of digraph list
+	  MOVE.B    (A6)+,D6			;Internal phoneme code
+	  CMP.B	    (A0),D2			;Second char matches?
+	  BNE.S	    ParSearch			;   No, continue searching
+	  ADDQ.L    #1,A0			;   Yes, bump input string ptr
+	  BRA.S	    ParProcess			;      and process phoneme
+
+ParEOList MOVE.B    (A6),D6			;Get internal phoneme code
+	  CMP.B	    #PHCNULL,D6			;If PHCNULL,
+	  BEQ.S	    ParError			;   Digraph error
+						;   Else process phoneme
+
+
+*	  ;------   Check for a stress number in the range 0-9 and, if so,
+	  ;	    check previous phon for vowel feature.  If number and
+	  ;	    previous phon is a vowel, store number in stress array.
+	  ;	    If previous phon is not a vowel, mark as error.
+
+ParProcess:
+	  MOVEQ	    #0,D4			;Clear for use as FM index
+	  MOVE.B    D6,D4			;Copy phoneme code
+	  LSL.W     #2,D4			;Create FM index
+          MOVE.L    0(A4,D4),D4         	;Get phoneme features
+
+          MOVE.B    -1(A1),D7 		       	;Get previous phoneme code
+	  MOVEQ	    #0,D5			;Clear for use as FM index
+	  MOVE.B    D7,D5			;Copy phon
+          LSL.W     #2,D5               	;Convert it to FM index
+          MOVE.L    0(A4,D5),D5         	;Get phoneme features
+
+	  BTST	    #NUMBERBIT,D4		;A number?
+	  BEQ.S	    ParTestWordBreak		;No, skip
+          BTST      #VOWELBIT,D5        	;Is previous phon a vowel?
+          BEQ       ParError            	;No, mark as error and return
+
+          AND.B     #$0F,D0             	;Convert ASCII number to binary
+          OR.B      #SYLSTRD|SYLSGMT,D0        	;Set stressed seg and syl flags
+          MOVE.B    D0,-1(A2)        		;Store in stress array
+          BRA  	    ParMain			;Continue parsing
+
+
+
+*	  ;------  Process word breaks.  If adjacent word breaks, overwrite the 
+	  ; 	   old phoneme code with the new one.  If D3 <= 4, then there 
+	  ;        is no real text preceeding the wordbreak.  In this case, 
+	  ; 	   just ignore word break.  Also, don't store a blank over any
+	  ;   	   previous punctuation.
+
+ParTestWordBreak:
+	  BTST      #WORDBRKBIT,D4      	;Word break?
+          BEQ.S     ParTestPUnit		;  No, test for P-UNIT 
+          BTST      #WORDBRKBIT,D5      	;  Yes, is prev phon WORDBREAK?
+          BEQ.S     ParStore            	;    No, store phoneme
+          CMP.W     #4,D3               	;Any previous text?
+          BLE       ParChkLen             	;  No, dont store anything
+          CMP.B	    #PHCBL,D6			;Is this phoneme a blank?
+          BEQ       ParChkLen             	;  Yes, don't overwrite
+	  MOVE.B    D6,-1(A1)			;  No, overwrite old phon
+          BRA       ParChkLen	            	;Store new WORDBRK phon
+
+
+*	  ;-------- Check for P-Unit initiators or terminators
+
+ParTestPUnit:
+	  CMP.B     #PHCLP,D6           	;P-UNIT initiator?
+          BNE.S     ParPUTerm             	;  No, try P-UNIT terminator
+          OR.B      #SYLPUNTI,(A3)    		;  Yes, set P-UNIT initiator bit
+          BRA       ParMain             	;     and continue parsing
+
+ParPUTerm:
+	  CMP.B     #PHCRP,D6           	;P-UNIT terminator?
+          BNE.S     ParPhonemeCheck		;  No, process phoneme codes
+          OR.B      #SYLPUNTT,-1(A3)   		;  Yes, set P-UNIT term bit
+          BRA       ParMain			;     and continue parsing
+
+
+
+*	  ;------   Do some special phoneme parsing.  Replace certain 
+	  ;	    VOWEL+R forms with new MITALK type diphthongs, and
+	  ;	    replace OH with OW.
+
+ParPhonemeCheck:
+	   CMP.B     #PHCRR,D6			;Is this phon an R?
+	   BNE.S     ParOHCheck			;  No, skip 
+
+	   CMP.B     #PHCIY,D7			;Last phon IY?
+	   BNE.S     ParEHCheck			;  No, try EH
+	   MOVE.B    #PHCIXR,-1(A1)		;  Yes, replace IY with IXR
+	   BRA       ParMain			;Continue parsing
+
+ParEHCheck:
+	  CMP.B      #PHCEH,D7			;Last phon EH?
+	  BNE.S      ParAACheck			;  No, try AA
+	  MOVE.B     #PHCEXR,-1(A1)		;  Yes, replace EH with EXR
+	  BRA	     ParMain			;Continue parsing
+
+ParAACheck:
+	  CMP.B      #PHCAA,D7			;Last phon AA?
+	  BNE.S      ParOWCheck			;  No, try OW
+	  MOVE.B     #PHCAXR,-1(A1)		;  Yes, replace AA with AXR
+	  BRA	     ParMain			;Continue parsing
+
+ParOWCheck:
+	  CMP.B      #PHCOW,D7			;Last phon OW?
+	  BNE.S      ParUWCheck			;  No, try UW
+	  MOVE.B     #PHCOXR,-1(A1)		;  Yes, replace OW with OXR
+	  BRA	     ParMain			;Continue parsing
+
+ParUWCheck:
+	  CMP.B      #PHCUW,D7			;Last phon UW?
+	  BNE.S      ParStore			;  No, store R phon
+	  MOVE.B     #PHCUXR,-1(A1)		;  Yes, replace UW with UXR
+	  BRA	     ParMain			;Continue parsing
+
+ParOHCheck:
+	  CMP.B      #PHCOH,D6			;Is this phon OH?
+	  BNE.S      ParStore			;  No, branch
+	  MOVE.B     #PHCOW,D6			;  Yes, replace with OW
+
+ParStore  MOVE.B    D6,(A1)+			;Store phoneme code
+	  ADDQ.L    #1,A2			;Bump STRESS pointer
+	  ADDQ.L    #1,A3			;Bump DUR pointer
+          ADDQ.W    #1,D3               	;Increment output count
+
+*          CMP.B     #PHCPE,D6           	;This phon a period?
+*          BEQ.S     ParDone             	;  Yes, speak to me
+*          CMP.B     #PHCQM,D6           	;This phon a question mark?
+*          BEQ.S     ParDone             	;  Yes, speak to me
+
+
+*	;------	Check how far we've parsed.  Stop if the amount parsed
+*		is equal to Io_Length in IORB.  This code added 8/27/90.
+*		(except for the "BRA   ParMain" which was always there).
+
+ParChkLen:
+	  MOVE.L   A0,D0			;Get ptr to next phoneme
+	  SUB.L	   PARSTART(A5),D0		;Compute length we've parsed
+	  CMP.L	   PARLENTH(A5),D0		;Compare it to max length
+	  BEQ.S	   ParDone			;Same, reached end of input
+	  BRA	   ParMain			;Continue parsing.
+
+
+
+*	  ;-------- Found an error in input string.  Since the synthesizer may
+	  ;	    have already completed previous sentences, we must compute
+	  ;	    the position of the error with reference to the beginning
+	  ;	    of the original input string.
+
+ParError  MOVE.L    A0,D3               	;Current pos in string
+	  MOVE.L    USERIORB(A5),A1		;Get user IORB
+          SUB.L     IO_DATA(A1),D3     		;Cur pos - very beginning of string
+	  SUBQ.L    #1,D3			;        - 1
+	  NEG.W	    D3				;Negative length ==> input error
+	  MOVE.W    D3,PHONLEN(A5)		;Store in globals area
+	  MOVEQ	    #ND_PhonErr,D3		;Set return code
+          BRA	    ParRTS			;And go away
+
+
+
+*	  ;-------- Done processing input.  Insure that there is some form
+	  ;	    of punctuation at end of utterance.  Also if D3 <= 4,
+	  ;	    then there is nothing to say.
+
+ParDone   CMP.W     #4,D3               ;Do we have something real to say?
+          BGT.S     ParCheckPunc        ;   Yes, check terminated by punctuation
+	  MOVEQ	    #0,D3		;   No, set output length to zero
+	  BRA.S	    ParReturn		;      and return
+
+ParCheckPunc:
+	  MOVEQ     #0,D0		;Clear for FM index
+          MOVE.B    -1(A1),D0        	;Get last code in PHON array
+	  BNE.S	    ParNotASpace	;Not a space, branch
+	  MOVE.B    #PHCDA,-1(A1)	;Its a space, overwrite with a dash
+	  CLR.B	    -1(A2)		;Clear STRESS
+	  CLR.B	    -1(A3)		;Clear DUR
+	  BRA.S	    ParCleanup		;Fixup end of arrays and go away
+
+ParNotASpace:
+	  LSL.W     #2,D0               ;Convert phon to FM index
+          MOVE.L    0(A4,D0),D0         ;Get phoneme features
+          BTST      #PAUSEBIT,D0        ;Is last phon a pause?
+          BNE.S     ParCleanup          ;Yes, don't need to add anything
+          MOVE.B    #PHCDA,(A1)+     	;No, insert dash at end of PHON array
+          CLR.B     (A2)+            	;Clear STRESS
+          CLR.B     (A3)+            	;Clear DUR
+          ADDQ.W    #1,D3               ;Increase length of output arrays
+
+
+
+*	  ;-------- Time to cleanup PHON, STRESS, and DUR arrays and return
+	  ;	    to main routine.  We currently add two QX'x to PHON array,
+	  ;	    clearing STRESS and DUR, and terminate all three arrays
+	  ;	    with an X'FF'.
+
+ParCleanup:
+	  MOVE.B    #PHCQX,(A1)+	;Add 'QX' to end of PHON
+	  CLR.B	    (A2)+		;Clear STRESS
+	  CLR.B	    (A3)+		;Clear DUR
+	  ADDQ.W    #1,D3		;Bump length of output arrays
+
+	  MOVE.B    #PHCQX,(A1)+	;Add 'QX' to end of PHON
+	  CLR.B	    (A2)+		;Clear STRESS
+	  CLR.B	    (A3)+		;Clear DUR
+	  ADDQ.W    #1,D3		;Bump length of output arrays
+
+          MOVE.B    #$FF,(A1)       	;Insert X'FF' in PHON,
+          MOVE.B    #$FF,(A2)       	;                STRESS, and 
+          MOVE.B    #$FF,(A3)	        ;                DUR arrays
+          ADDQ.W    #1,D3               ;Bump length of output arrays
+
+
+
+*	  ;-------- Back to main we go.  D3 contains the output length of
+	  ;	    the PHON, STRESS, and DUR arrays (or if there was an
+	  ;	    input error, D3 contains ND_PhonErr and PHONLEN(A5) 
+	  ;	    contains the -ive of the position in the ASCII string 
+	  ;	    of the error).  Leave the "TST.W    D3" just above the
+	  ;	    RTS to insure the CC's are set properly.
+
+ParReturn MOVE.W    D3,PHONLEN(A5)	;Save length in globals
+
+ParRTS	  TST.W	    D3			;Set CC's
+	  RTS
+
+          END 
+
+
+@
+
+
+1.6
+log
+@Update from Joe Katz 5 Mar 91
+@
+text
+@d85 1
+a85 6
+PARSE     TST.L     LFT2PARS(A5)        ;ANYTHING TO SAY?
+          BGT.S     P1                  ;YES
+          MOVEQ     #0,D3               ;NO, RETURN 0
+          RTS
+
+P1	  MOVE.L    PARSTART(A5),A0		;Get beginning of ASCII string
+@
+
+
+1.5
+log
+@New version from Joe Katz
+@
+text
+@d85 1
+a85 1
+PARSE     TST.W     LFT2PARS(A5)        ;ANYTHING TO SAY?
+d90 2
+a91 1
+P1        MOVE.L    PHON(A5),A1
+d283 1
+a283 1
+	  CMP.W	   LFT2PARS(A5),D0		;Compare it to max length
+d295 3
+a297 2
+          SUB.L     PARVERYB(A5),D3     	;  - very beginning of string
+	  SUBQ.L    #1,D3			;  - 1
+a355 3
+*          SUB.L     PARSTART(A5),A0     ;COMPUTE REMAINING LENGTH OF ASCII STRING
+*          MOVE.L    A0,PARLENTH(A5)     ;SAVE
+*          MOVE.W    A0,D0               ;GET LENGTH IN D REGISTER AND
+a357 1
+
+d367 1
+a367 2
+ParRTS    CLR.W     LFT2PARS(A5)        ;************** FORCE COMPLETION
+	  TST.W	    D3			;Set CC's
+@
+
+
+1.4
+log
+@New version: 36.10
+@
+text
+@d38 8
+d128 2
+a129 1
+ParMain   MOVE.B    (A0)+,D0       		;Get a char from input
+d199 1
+a199 1
+          BLE       ParMain             	;  No, dont store anything
+d201 1
+a201 1
+          BEQ       ParMain             	;  Yes, don't overwrite
+d203 1
+a203 1
+          BRA       ParMain	            	;Store new WORDBRK phon
+d274 11
+a284 1
+	  BRA	    ParMain			;Continue parsing.
+@
+
+
+1.3
+log
+@y
+@
+text
+@@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@d6 2
+a7 1
+*************************************************************************
+d9 5
+a13 8
+*   Copyright 1986, 1989 Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted,          	*
+*   transcribed, stored in retrieval system, or translated into      	*
+*   any language or computer language, in any form or by any         	*
+*   means, electronic, mechanical, magnetic, optical, chemical,      	*
+*   manual or otherwise, without the prior written permission of     	*
+*   the authors.						     	*
+*								     	*
+d15 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 17
+a17 27
+	TTL	'$Header: parse.asm,v 33.1 86/03/05 13:21:29 sam Exp $'
+**********************************************************************
+*                                                                    *
+*   Copyright 1986, Commodore-Amiga Inc.   All rights reserved.      *
+*   No part of this program may be reproduced, transmitted,          *
+*   transcribed, stored in retrieval system, or translated into      *
+*   any language or computer language, in any form or by any         *
+*   means, electronic, mechanical, magnetic, optical, chemical,      *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030                                     *
+*                                                                    *
+**********************************************************************
+*
+* $Header: parse.asm,v 33.1 86/03/05 13:21:29 sam Exp $
+*
+* $Locker:  $
+*
+* $Log:	parse.asm,v $
+* Revision 33.1  86/03/05  13:21:29  sam
+* fixed 'string ending with number' bug
+* 
+* Revision 32.1  86/01/22  00:24:17  sam
+* placed under source control
+* 
+*
+**********************************************************************
+d20 20
+a40 21
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*                                                                     ;
+*                        PHONEME PARSER                               ;
+*                                                                     ;
+*    INPUT IS ASCII PHONEME STRING.  OUTPUT IS PHON, STRESS, DUR      ;
+*    ERRORS IN INPUT ARE NOTED BY RETURNING THE -IVE POSITION IN      ;
+*    D3.                                                              ;
+*                                                                     ;
+*                                                                     ;
+*    A0 - ADDRESS OF ASCII STRING    A1 - ADDRESS OF DIGRAPH TABLE    ;
+*         (SET BY CALLING ROUTINE)                                    ;
+*    A2 - PHON ARRAY                 A3 - STRESS ARRAY                ;
+*    A4 - FEATURES MATRIX            A5 - GLOBALS AREA                ;
+*    A6 - DURATION ARRAY             A7 - STACK POINTER               ;
+*                                                                     ;
+*    D0 - INDEX INTO ASCII STRING    D1 - INDEX INTO DIGRAPH TABLE    ;
+*    D2 - ASCII STRING INCREMENT     D3 - INDEX INTO OUTPUT ARRAYS    ;
+*    D4 - PHONEME FEATURE            D5 - SCRATCH                     ;
+*    D6 - DIGRAPH COUNT              D7 - ADDR OF DIGRAPH TABLE       ;
+*                                                                     ;
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+d42 1
+d44 2
+a45 1
+*--------- A few handy equates
+a46 5
+PARSTEND  EQU       '#'       ;END OF INPUT MARKER
+QMARK     EQU       '?'
+PERIOD    EQU       '.'
+PUNITI    EQU       5         ;P-UNIT INITIATOR BIT (IN DUR ARRAY)
+PUNITT    EQU       4         ;P-UNIT TERMINATOR BIT (IN DUR ARRAY)
+d48 1
+d50 4
+a53 4
+          INCLUDE     'digraphs.i'
+          INCLUDE     'featequ.i'
+          INCLUDE     'pcequs.i'
+          INCLUDE     'gloequs.i'
+a54 2
+          XREF        FEAT
+          XDEF        PARSE
+d56 1
+d58 4
+a61 1
+*-------- Initialize
+d63 15
+d83 3
+a85 3
+P1        LEA       DIGRAPHS,A1
+          LEA       PHON(A5),A2
+          LEA       STRESS(A5),A3
+a86 2
+          LEA       DUR(A5),A6
+          MOVE.L    A1,D7     ;SAVE START ADDRESS OF DIGRAPHS TABLE
+a87 6
+          CLR.W     (A2)      ;CLEAR FIRST TWO BYTES OF OUTPUT ARRAYS
+          CLR.L     (A3)
+          CLR.L     (A6)
+          MOVE.B    #PHCQX,2(A2) ;MOVE IN SILENT PHON
+          CLR.B     3(A2)        ;AND A BLANK
+          MOVEQ     #4,D3        ;START OUTPUT COUNT AT 4
+d89 16
+a104 1
+          MOVEQ     #0,D0
+d107 3
+a109 4
+          MOVEQ     #0,D5
+          MOVE.W    #DIGRAFCT,D6        ;COUNT OF DIGRAPHS
+          CLR.B     0(A3,D3)            ;CLEAR STRESS
+          CLR.B     0(A6,D3)            ;CLEAR DUR
+a111 1
+*-------- Main parse loop.  Find a match in the digraphs table
+d113 7
+a119 7
+PARMAIN   MOVE.B    (A0),D0       ;GET A CHAR FROM INPUT
+	  BEQ	    PARDONE	  ;NULL TERMINATES INPUT STRING
+          CMP.B     #PARSTEND,D0  ;END OF INPUT?
+          BEQ       PARDONE       ;YES, GO AWAY
+          LSL.W     #8,D0         ;NO, MOVE TO UPPER BYTE
+          MOVE.B    1(A0),D0      ;GET NEXT CHAR FROM INPUT
+          MOVEQ     #2,D2         ;START WITH ASSUMPTION IT'S A DIGRAPH
+d121 4
+a125 4
+PARAGAIN  MOVEQ     #DIGRAFCT-1,D1      ;DBF COUNT
+          MOVE.L    D7,A1               ;RESET DIGRAPH ADDR TO START
+PARLOOP   CMP.W     (A1)+,D0            ;COMPARE ASCII WITH DIGRAPH
+          DBEQ      D1,PARLOOP          ;LOOP THRU ALL DIGRAPHS
+d127 8
+a134 7
+          TST.W     D1
+          BPL.S     PARGOT              ;IF D1 NOT NEGATIVE, GOT IT
+          CMP.B     #1,D2               ;IF D2=1, CHAR NOT VALID
+          BEQ       PARERROR
+          AND.W     #$FF00,D0           ;CHECK TO SEE IF ITS A SINGLE CHAR
+          MOVEQ     #1,D2               ;D2 HAS NUMBER OF CHARS
+          BRA.S     PARAGAIN            ;GO THRU DIGRAPHS AGAIN
+d136 7
+d144 4
+a147 1
+*-------- Found an entry in the table
+a148 2
+PARGOT    NEG.W     D1                  ;COMPUTE INTERNAL
+          ADD.W     #DIGRAFCT-1,D1      ;    PHONEME CODE
+d150 4
+a153 7
+          CMP.W     #$3000,D0           ;RANGE CHECK FOR ASCII NUMBER
+          BLT.S     PARNOTNM
+	  BNE.S     PARGOT1
+	  ADD.L	    D2,A0		;SKIP OVER ZERO STRESS
+	  BRA	    PARNXT1
+PARGOT1   CMP.W     #$3900,D0
+          BGT.S     PARNOTNM
+d155 5
+d161 5
+a165 2
+*-------- If number and follows a vowel put in stress array.
+*         If number not following a vowel, mark as error.
+d167 4
+a170 6
+          MOVEQ     #0,D4               ;CLEAR FOR USE AS INDEX
+          MOVE.B    -1(A2,D3),D4        ;GET PREVIOUS PHONEME CODE
+          LSL.W     #2,D4               ;CONVERT IT TO AN INDEX INTO F.M.
+          MOVE.L    0(A4,D4),D4         ;GET PHONEME FEATURES
+          BTST      #VOWELBIT,D4        ;TEST FOR VOWEL
+          BEQ       PARERROR            ;NOT A VOWEL...ERROR
+d172 4
+a175 1
+*-------- Convert ASCII number to binary and store in stress array
+a176 7
+          ADD.L     D2,A0               ;BUMP POINTER INTO ASCII STRING
+          LSR.W     #8,D0               ;MOVE ASCII CODE INTO LOWER BYTE
+          AND.B     #$0F,D0             ;ISOLATE NUMBER PORTION
+          OR.B      #$30,D0             ;'OR' IN STRESSED SEGMENT AND
+*                                        ;     SYLLABLE MARKERS
+          MOVE.B    D0,-1(A3,D3)        ;STORE INTO STRESS ARRAY
+          BRA       PARNXT1             ;DON'T BUMP INDEX INTO PHON ARRAY
+d179 5
+a183 1
+*-------- Not a stress number, must be a phoneme code
+d185 11
+a195 15
+PARNOTNM  ADD.L     D2,A0               ;BUMP POINTER INTO ASCII STRING
+          MOVEQ     #0,D4
+          MOVE.B    D1,D4               ;GET PC
+          LSL.W     #2,D4               ;FM INDEX
+          MOVE.L    0(A4,D4),D4         ;GET FEATURES
+          BTST      #INVALIDBIT,D4      ;INVALID PHONEME CODE?
+          BNE       PARERROR            ;YES, RETURN AN ERROR
+          BTST      #WORDBRKBIT,D4      ;WORD BREAK?
+          BEQ.S     PARPUNI             ;NO, BRANCH
+          MOVEQ     #0,D5               ;YES, CLEAR FOR USE AS INDEX
+          MOVE.B    -1(A2,D3),D5        ;     GET LEFT PHONEME CODE
+          LSL.W     #2,D5               ;     CONVERT TO F.M. INDEX
+          MOVE.L    0(A4,D5),D5         ;     GET FEATURES
+          BTST      #WORDBRKBIT,D5      ;     IS IT A WORD BREAK?
+          BEQ.S     PARSTORE            ;     NO, STORE PHON
+d198 1
+a198 5
+*-------- Found two word breaks next to one another.
+*         Overwrite the old pc with the new one.  If
+*         D3 <= 4, then there is no real text preceeding
+*         the wordbreak.  In this case, just ignore word break.
+*         Also, don't store a blank over any previous punctuation.
+d200 5
+a204 6
+          CMP.W     #4,D3               ;ANY PREVIOUS TEXT?
+          BLE       PARNXT1             ;NO, DONT STORE ANYTHING
+          TST.B     D1
+          BEQ       PARNXT1             ;IF BLANK, DON'T OVERSTORE
+          SUBQ.W    #1,D3               ;BACKUP IN PHON ARRAY
+          BRA.S     PARSTORE            ;STORE PUNCTUATION MARK
+d206 5
+a211 1
+*-------- Check for P-Unit initiators or terminators
+a212 4
+PARPUNI   CMP.B     #PHCLP,D1           ;P-UNIT INITIATOR?
+          BNE.S     PARPUNF             ;NO
+          BSET      #PUNITI,0(A6,D3)    ;YES, SET P-UNIT INITIATOR BIT
+          BRA       PARMAIN             ;     DO NOT STORE ANY PHON CODE
+d214 3
+a216 4
+PARPUNF   CMP.B     #PHCRP,D1           ;P-UNIT TERMINATOR?
+          BNE.S     PARSTORE            ;NO
+          BSET      #PUNITT,-1(A6,D3)   ;YES, SET P-UNIT TERMINATOR BIT
+          BRA       PARMAIN             ;     DO NOT STORE ANY PHON CODE
+d218 3
+d222 4
+a225 1
+*-------- Store phoneme code and clear stress and dur arrays
+d227 5
+a231 6
+PARSTORE  MOVE.B    D1,0(A2,D3)         ;STORE PHONEME CODE
+          ADDQ.W    #1,D3               ;BUMP INDEX
+          CMP.B     #PHCPE,D1           ;PERIOD?
+          BEQ.S     PARDONE             ;YES
+          CMP.B     #PHCQM,D1           ;QUESTION MARK?
+          BEQ.S     PARDONE             ;YES
+d233 5
+a237 6
+PARNEXT   CMP.W     #MAXPHONL,D3        ;DO WE OVERFLOW PHON ARRAY?
+          BLT.S     PARNXT1             ;NO
+          SUB.L     PARSTART(A5),A0     ;YES,
+          MOVE.L    A0,PARLENTH(A5)     ;     COMPUTE LENGTH,
+          MOVE.W    #$02,CCR            ;     SET OVERFLOW,
+          RTS                           ;     AND RETURN
+d239 5
+a243 8
+PARNXT1   MOVE.L    A0,A1               ;COMPUTE LENGTH OF INPUT THAT
+          SUB.L     PARSTART(A5),A1     ;     WE'VE PARSED SO FAR
+*;;;;;;;          ADDQ.W    #1,A1
+          CMP.W     MAX2PARS(A5),A1     ;MAX ALLOWED TO PARSE?
+          BGE.S     PARDONE             ;YES, RETURN TO MAIN
+          CLR.B     0(A3,D3)            ;NO, CLEAR NEXT STRESS
+          CLR.B     0(A6,D3)            ;    CLEAR NEXT DUR
+          BRA       PARMAIN             ;    CONTINUE PARSING
+d245 5
+d251 4
+a254 1
+*-------- Found an error in input string
+d256 4
+a259 4
+PARERROR  MOVE.L    A0,D3               ;CURRENT POS IN STRING
+          SUB.L     PARVERYB(A5),D3     ;  - VERY BEGINNING OF STRING
+          ADDQ.W    #1,D3               ;  + 1 = POS OF ERROR
+          RTS                           ;RETURN
+d261 4
+d266 1
+a266 1
+*-------- Done processing input
+a267 15
+PARDONE   MOVEQ     #0,D0
+          MOVE.B    -1(A2,D3),D0        ;GET LAST CODE IN PHON ARRAY
+          BNE.S     PARDON1             ;NOT A SPACE
+          SUBQ.W    #1,D3               ;LAST PHON A SPACE, OVERWRITE
+          BRA.S     PARDON1X            ;       WITH A DASH
+PARDON1   LSL.W     #2,D0               ;CONVERT TO F.M. INDEX
+          MOVE.L    0(A4,D0),D0         ;GET PHONEME FEATURES
+          BTST      #PAUSEBIT,D0        ;IS LAST PHON A PAUSE?
+          BNE.S     PARDON2             ;YES, DON'T NEED TO ADD ANYTHING
+PARDON1X  CMP.W     #3,D3               ;DO WE ONLY HAVE A 'QX' ?
+          BLE.S     PARDON2             ;YES, DO NOT INSERT A DASH
+          MOVE.B    #PHCDA,0(A2,D3)     ;NO, INSERT A DASH IN PHON
+          CLR.B     0(A3,D3)            ;             CLEAR STRESS
+          CLR.B     0(A6,D3)            ;             CLEAR DUR
+          ADDQ.W    #1,D3               ;  INCREASE SIZE OF OUTPUT ARRAYS
+d269 85
+a353 16
+PARDON2   MOVE.B    #$FF,0(A2,D3)       ;INSERT 'FF' IN PHON ARRAY,
+          MOVE.B    #$FF,0(A3,D3)       ;               STRESS ARRAY, AND
+          MOVE.B    #$FF,0(A6,D3)       ;               DUR ARRAY
+          ADDQ.W    #1,D3               ;BUMP LENGTH OF OUTPUT ARRAYS
+          SUB.L     PARSTART(A5),A0     ;COMPUTE LENGTH OF ASCII STRING
+          MOVE.L    A0,PARLENTH(A5)     ;SAVE
+          MOVE.W    A0,D0               ;GET LENGTH IN D REGISTER AND
+*;;;;          SUB.W     D0,LFT2PARS(A5)     ;    REDUCE AMOUNT LEFT TO PARSE
+          CMP.W     #4,D3               ;ANYTHING TO SAY?
+          BGT.S     RETURN              ;YES
+          MOVEQ     #0,D3               ;NO
+          RTS                           ;JUST RETURN
+*
+RETURN    MOVE.W    D3,PHONLEN(A5)      ;SAVE PHON ARRAY LENGTH
+          MOVE.W    #$08,CCR            ;SET CC TO NEGATIVE (NO ERROR)
+          RTS
+@

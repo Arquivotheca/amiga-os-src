@@ -1,0 +1,14 @@
+VERSION		EQU	2
+REVISION	EQU	146
+DATE	MACRO
+		dc.b	'25.7.91'
+	ENDM
+VERS	MACRO
+		dc.b	'pcwindow 2.146'
+	ENDM
+VSTRING	MACRO
+		dc.b	'pcwindow 2.146 (25.7.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: pcwindow 2.146 (25.7.91)',0
+	ENDM

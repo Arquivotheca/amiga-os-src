@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'11.3.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cdmpeg 1.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdmpeg 1.10 (11.3.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdmpeg 1.10 (11.3.94)',0
+	ENDM

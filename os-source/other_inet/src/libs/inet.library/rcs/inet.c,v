@@ -1,0 +1,828 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ;
+comment  @ * @;
+
+
+1.6
+date     92.08.14.14.14.32;  author gregm;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.01.23.13.33.29;  author gregm;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.11.07.12.45.41;  author gregm;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.10.09.16.02.15;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.02.02.00.16.05;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.12.01.19.38.23;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.6
+log
+@Wedged in the SANA-II interface in if_s2.c; disconnected (commented, but not deleted) the 
+hookups for the hardcoded ethernet, slip, and arcnet code.  Each interface has a signal bit,
+and code to jump to the correct interface when each signal bit is set.
+@
+text
+@/*
+** startINET() instantiates the inet supervisor process.  The process
+** calls the network clocks and handles events coming in from
+** the various network device handlers.
+*/
+
+#include <exec/types.h>
+#include <exec/tasks.h>
+#include <exec/memory.h>
+#include <exec/execbase.h>
+#include <devices/timer.h>
+#include <dos/dosextens.h>
+#include <stdarg.h>
+#include <string.h>
+
+#include <netinet/inet.h>
+
+#ifdef LATTICE
+#include <proto/exec.h>
+#include <proto/dos.h>
+#endif
+
+#ifdef AZTEC_C
+#include <functions.h>
+#endif
+
+#include <sys/types.h>
+#include <sys/kernel.h>
+
+#include "proto.h"
+
+extern struct ExecBase *SysBase;
+
+static char *inetname = "inet.supervisor";
+static struct FileHandle *debugfh=NULL;
+static struct timerequest tr;
+struct Task *netpid;
+static int netbit;
+//static int slipbit, ifbit, aabit;
+
+static long timerevent;
+extern long s2event;
+static void do_timeouts(void);
+
+short  hz = 10;
+
+#define STACKSIZE       (4*1024L)
+
+int startINET()
+{
+        struct Process *pid=NULL;
+        extern void NetSegment();
+
+        Forbid();
+        if(!FindTask(inetname))
+                pid = (struct Process *)CreateProc(inetname, 10L, dtob(NetSegment), STACKSIZE);
+        Permit();
+
+        return pid ? 0:-1;
+}
+
+void killINET()
+{
+        if(netpid){
+                Signal(netpid, SIGBREAKF_CTRL_C);
+        }
+}
+
+void __saveds netPROCESS(void)
+{
+        register long event;
+        long waitmask, netevent;
+//        long ifevent, aaevent, slipevent;
+
+        netbit = AllocSignal(-1L);
+        if(netbit == -1){
+                return;
+        }
+/*
+        ifbit = AllocSignal(-1L);
+        if(ifbit == -1){
+                return;
+        }
+        aabit = AllocSignal(-1L);
+        if(aabit == -1){
+                return;
+        }
+        slipbit = AllocSignal(-1L);
+        if(slipbit == -1){
+                return;
+        }
+*/
+        s2init(NULL);
+        bzero(&tr, sizeof(tr));
+        tr.tr_node.io_Message.mn_ReplyPort = CreateMsgPort();
+        timerevent = 1L << tr.tr_node.io_Message.mn_ReplyPort->mp_SigBit;
+        if (OpenDevice(TIMERNAME, UNIT_VBLANK, (struct IORequest *)&tr, 0L)) {
+                return ;
+        }
+
+        tr.tr_node.io_Command = TR_ADDREQUEST;
+        tr.tr_time.tv_secs = 0L;
+        tr.tr_time.tv_micro = 1000000/hz;
+        SendIO((struct IORequest *)&tr);
+
+        netevent = 1L << netbit;
+//        ifevent  = 1L << ifbit;
+//        aaevent = 1L << aabit;
+//        slipevent = 1L << slipbit;
+//        waitmask = netevent | timerevent | ifevent | aaevent | slipevent;
+        waitmask = netevent | timerevent | s2event;
+
+        if(!netpid){
+                netpid = FindTask(0L);
+        }
+
+        while(1){
+
+                event = Wait(waitmask);
+
+                Forbid();
+                if(event & timerevent){
+                        do_timeouts();
+                }
+/*
+                if(event & ifevent){
+                        aepoll();
+                }
+
+                if(event & aaevent)
+                        aapoll();
+
+                if(event & slipevent){
+                        slpoll();
+                }
+*/
+                if(event & s2event)
+                        s2poll();
+
+                if((event & netevent) || (SetSignal(0L, netevent) & netevent)){
+                        rawintr();
+                        ipintr();
+                }
+
+/*              if(event & SIGBREAKF_CTRL_C){
+                        break;
+                }
+*/
+
+                Permit();
+        }
+
+/*
+        if(debugfh){
+                Close((BPTR)debugfh);
+                debugfh = 0;
+        }
+
+        netpid = 0;
+
+        if(!CheckIO((struct IORequest *)&tr)){
+                AbortIO((struct IORequest *)&tr);
+                WaitIO((struct IORequest *)&tr);
+        }
+        DeletePort(tr.tr_node.io_Message.mn_ReplyPort);
+        CloseDevice((struct IORequest *)&tr);
+
+        return;
+*/
+}
+
+void setsoftnet()
+{
+        if(netpid){
+                Signal(netpid, 1L << netbit);
+        }
+}
+
+/*
+void setsoftif()
+{
+        if(netpid){
+                Signal(netpid, 1L << ifbit);
+        }
+}
+
+void setsoftifaa()
+{
+        if(netpid){
+                Signal(netpid, 1L << aabit);
+        }
+}
+*/
+
+/*
+ * Call the given function after <tick> timer ticks.
+*/
+#define MAX_TIMEOUTS 8
+static struct to {
+        void    (*func)(caddr_t);
+        caddr_t arg;
+        short   ticks;
+} timeouts[MAX_TIMEOUTS];
+
+int timeout(func, arg, ticks)
+        void    (*func)(caddr_t);
+        caddr_t arg;
+        int     ticks;
+{
+        register struct to *to;
+
+        for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+                if(func == to->func){
+                        break;
+                }
+        }
+
+        if(to < timeouts){
+                for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+                        if(!to->func){
+                                break;
+                        }
+                }
+                if(to < timeouts){
+                        return -1;
+                }
+        }
+
+        to->ticks = ticks;
+        to->arg = arg;
+        to->func = ticks? func:0;
+
+        return 0;
+}
+
+static void
+do_timeouts()
+{
+        register struct to *to;
+
+        tr.tr_node.io_Command = TR_ADDREQUEST;
+        tr.tr_time.tv_secs = 0L;
+        tr.tr_time.tv_micro = 1000000/hz;
+        SendIO((struct IORequest *)&tr);
+
+        for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+                if(to->func && (to->ticks-- == 0)){
+                        (*to->func)(to->arg);
+                        if(to->ticks == 0){ /* may be != 0 if func reset it */
+                                to->func = 0;
+                        }
+                }
+        }
+}
+
+
+void free()
+{
+        printf("someone called free!!\n");
+}
+
+/*
+ * This here is catch anyone who does a kernel printf
+ */
+
+
+/* 2.0 ONLY! */
+void printf(char *fmt, ...)
+{
+    va_list args;
+
+    if (debugfh==NULL) {
+        debugfh = Open("con:0/0/640/100/INET.LIBRARY", MODE_NEWFILE);
+    }
+    va_start(args,fmt);
+    VFPrintf((BPTR) debugfh,(STRPTR)fmt,(LONG *)args);
+    va_end(args);
+}
+
+
+@
+
+
+1.5
+log
+@Pulled all interfaces except loopback and sana ii.
+@
+text
+@d12 1
+a12 1
+#include <libraries/dosextens.h>
+a32 2
+extern long s2event;
+extern struct MsgPort *returnport;
+d38 3
+a40 1
+static int netbit, ifbit, aabit;
+d42 1
+a45 1
+int slipbit;
+d73 1
+d79 15
+a93 2
+
+        s2init();
+d95 1
+a95 1
+        tr.tr_node.io_Message.mn_ReplyPort = CreatePort(0L, 0L);
+d107 4
+d118 1
+d125 14
+a149 3
+                if (event & s2event)
+                        s2poll();
+
+d179 1
+d193 1
+d267 1
+a267 2
+extern int vsprintf __ARGS((char *, char *, va_list));
+
+a269 1
+
+a270 1
+    char buf[256];
+d273 1
+a273 1
+        debugfh = (struct FileHandle *)Open("con:0/0/640/100/NETPROC", MODE_NEWFILE);
+d276 1
+a276 2
+    vsprintf(buf, fmt, args);
+    Write((BPTR)debugfh, buf, strlen(buf));
+d278 1
+a280 1
+}
+@
+
+
+1.4
+log
+@*** empty log message ***
+@
+text
+@a32 1
+long event;
+a48 13
+/*
+ * This terrible kludge is necessary to get a seglist aligned on a
+ * longword boundary.  If MANX's cnop primitive worked, I would not
+ * have to do this.
+ */
+#define JMPINST 0x4ef9          /* jmp abs.l */
+struct JMPstub {
+        long    size;
+        long    zero;           /* must be zero */
+        short   opcode;         /* JMP opcode */
+        void    (*stub)();      /* actual proc call stub */
+};
+
+d51 2
+a52 27
+#ifdef LATTICE
+        extern void __stdargs __saveds netPROCESS();
+        extern void __saveds NetSegment();
+#else
+        extern void inet_proc_stub();
+#endif
+        register struct JMPstub *seg;
+        struct Process *pid;
+
+        if(FindTask(inetname)){
+                return -1;
+        }
+
+        seg = (struct JMPstub *)AllocMem(sizeof(*seg), MEMF_PUBLIC|MEMF_CLEAR);
+        if(!seg){
+                return -1;
+        }
+
+        seg->size = sizeof(*seg);
+        seg->opcode = JMPINST;
+#ifdef LATTICE
+        seg->stub = NetSegment;
+#else
+        seg->stub = inet_proc_stub;
+#endif
+
+        pid = (struct Process *) CreateProc(inetname, 10L, ((long)&seg->zero)>>2, STACKSIZE);
+d54 4
+a57 3
+/* Need to wait until process is done before freeing */
+/* Punt on this for now.  We can't free library anyway */
+/*      FreeMem(seg, sizeof(*seg)); */
+d69 1
+a69 5
+#ifdef LATTICE
+void __stdargs __saveds netPROCESS()
+#else
+void netPROCESS()
+#endif
+d71 1
+@
+
+
+1.3
+log
+@changed splimp/splx to Forbid/Permit
+changed inet.supervisor stacksize to 4K (from 8K)
+changed inet.supervisor priority from 0 to 10
+inet.supervisor no longer breaks on ^C
+@
+text
+@d33 3
+d48 1
+a48 1
+#define STACKSIZE 	(4*1024L)
+d55 1
+a55 1
+#define JMPINST 0x4ef9		/* jmp abs.l */
+d57 4
+a60 4
+	long	size;
+	long	zero;		/* must be zero */
+	short	opcode;		/* JMP opcode */
+	void	(*stub)();	/* actual proc call stub */
+d66 2
+a67 2
+	extern void __stdargs __saveds netPROCESS();
+	extern void __saveds NetSegment();
+d69 1
+a69 1
+	extern void inet_proc_stub();
+d71 2
+a72 2
+	register struct JMPstub *seg;
+	struct Process *pid;
+d74 8
+a81 8
+	if(FindTask(inetname)){
+		return -1;
+	}
+
+	seg = (struct JMPstub *)AllocMem(sizeof(*seg), MEMF_PUBLIC|MEMF_CLEAR);
+	if(!seg){
+		return -1;
+	}
+d83 2
+a84 2
+	seg->size = sizeof(*seg);
+	seg->opcode = JMPINST;
+d86 1
+a86 1
+	seg->stub = NetSegment;
+d88 1
+a88 1
+	seg->stub = inet_proc_stub;
+d91 1
+a91 1
+	pid = (struct Process *)CreateProc(inetname, 10L, ((long)&seg->zero)>>2, STACKSIZE);
+d95 1
+a95 1
+/*	FreeMem(seg, sizeof(*seg)); */
+d97 1
+a97 1
+	return pid ? 0:-1;
+d102 3
+a104 3
+	if(netpid){
+		Signal(netpid, SIGBREAKF_CTRL_C);
+	}
+d113 1
+a113 2
+	register long event;
+	long waitmask, netevent, ifevent, aaevent, slipevent;
+d115 37
+a151 63
+	netbit = AllocSignal(-1L);
+	if(netbit == -1){
+		return;
+	}
+	ifbit = AllocSignal(-1L);
+	if(ifbit == -1){
+		return;
+	}
+	aabit = AllocSignal(-1L);
+	if(aabit == -1){
+		return;
+	}
+	slipbit = AllocSignal(-1L);
+	if(slipbit == -1){
+		return;
+	}
+
+	bzero(&tr, sizeof(tr));
+	tr.tr_node.io_Message.mn_ReplyPort = CreatePort(0L, 0L);
+	timerevent = 1L << tr.tr_node.io_Message.mn_ReplyPort->mp_SigBit;
+	if (OpenDevice(TIMERNAME, UNIT_VBLANK, (struct IORequest *)&tr, 0L)) {
+		return ;
+	}
+
+	tr.tr_node.io_Command = TR_ADDREQUEST;
+	tr.tr_time.tv_secs = 0L;
+	tr.tr_time.tv_micro = 1000000/hz;
+	SendIO((struct IORequest *)&tr);
+
+	netevent = 1L << netbit;
+	ifevent  = 1L << ifbit;
+	aaevent = 1L << aabit;
+	slipevent = 1L << slipbit;
+	waitmask = netevent | timerevent | ifevent | aaevent | slipevent;
+
+	if(!netpid){
+		netpid = FindTask(0L);
+	}
+
+	while(1){
+
+		event = Wait(waitmask);
+
+		Forbid();
+		if(event & timerevent){
+			do_timeouts();
+		}
+
+		if(event & ifevent){
+			aepoll();
+		}
+
+		if(event & aaevent)
+			aapoll();
+
+		if(event & slipevent){
+			slpoll();
+		}
+
+		if((event & netevent) || (SetSignal(0L, netevent) & netevent)){
+			rawintr();
+			ipintr();
+		}
+d153 3
+a155 3
+/*		if(event & SIGBREAKF_CTRL_C){
+			break;
+		}
+d158 2
+a159 2
+		Permit();
+	}
+d161 3
+d165 4
+a168 4
+	if(debugfh){
+		Close((BPTR)debugfh);
+		debugfh = 0;
+	}
+d170 8
+a177 8
+	netpid = 0;
+
+	if(!CheckIO((struct IORequest *)&tr)){
+		AbortIO((struct IORequest *)&tr);
+		WaitIO((struct IORequest *)&tr);
+	}
+	DeletePort(tr.tr_node.io_Message.mn_ReplyPort);
+	CloseDevice((struct IORequest *)&tr);
+d179 1
+a179 1
+	return;
+d185 3
+a187 3
+	if(netpid){
+		Signal(netpid, 1L << netbit);
+	}
+d192 3
+a194 3
+	if(netpid){
+		Signal(netpid, 1L << ifbit);
+	}
+d199 3
+a201 3
+	if(netpid){
+		Signal(netpid, 1L << aabit);
+	}
+d209 3
+a211 3
+	void	(*func)(caddr_t);
+	caddr_t	arg;
+	short	ticks;
+d215 3
+a217 3
+	void	(*func)(caddr_t);
+	caddr_t	arg;
+	int	ticks;
+d219 22
+a240 22
+	register struct to *to;
+
+	for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+		if(func == to->func){
+			break;
+		}
+	}
+
+	if(to < timeouts){
+		for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+			if(!to->func){
+				break;
+			}
+		}
+		if(to < timeouts){
+			return -1;
+		}
+	}
+
+	to->ticks = ticks;
+	to->arg = arg;
+	to->func = ticks? func:0;
+d242 1
+a242 1
+	return 0;
+d248 1
+a248 1
+	register struct to *to;
+d250 13
+a262 13
+	tr.tr_node.io_Command = TR_ADDREQUEST;
+	tr.tr_time.tv_secs = 0L;
+	tr.tr_time.tv_micro = 1000000/hz;
+	SendIO((struct IORequest *)&tr);
+
+	for(to = &timeouts[MAX_TIMEOUTS]; --to >= timeouts;){
+		if(to->func && (to->ticks-- == 0)){
+			(*to->func)(to->arg);
+			if(to->ticks == 0){ /* may be != 0 if func reset it */
+				to->func = 0;
+			}
+		}
+	}
+d268 1
+a268 1
+	printf("someone called free!!\n");
+d285 1
+a285 1
+	debugfh = (struct FileHandle *)Open("con:0/0/640/100/NETPROC", MODE_NEWFILE);
+@
+
+
+1.2
+log
+@added slip and arcnet support
+@
+text
+@d10 1
+d32 2
+d45 1
+a45 1
+#define STACKSIZE 	(8*1024)
+a68 1
+	struct Task *FindTask();
+d87 2
+a88 1
+	pid = (struct Process *)CreateProc(inetname, 0, ((long)&seg->zero)>>2, STACKSIZE);
+a111 1
+/*	int debug = 1; */
+d138 1
+a138 1
+	tr.tr_time.tv_secs = 0L;	
+a141 5
+
+/*	if(debug){
+		debugfh = (struct FileHandle *)Open("con:0/0/640/100/NETPROC", MODE_NEWFILE);
+	}
+*/
+d146 1
+a146 1
+	waitmask = netevent | timerevent | ifevent | aaevent | slipevent | SIGBREAKF_CTRL_C;
+a152 1
+		int	s;
+d156 1
+a156 1
+		s = splimp();
+d164 1
+a164 1
+		
+d177 1
+a177 1
+		if(event & SIGBREAKF_CTRL_C){
+d180 1
+d182 1
+a182 1
+		splx(s);
+d185 2
+a186 1
+/*	if(debugfh){
+d190 1
+a190 1
+*/
+d201 1
+d256 1
+a256 1
+		}	
+d272 1
+a272 1
+	tr.tr_time.tv_secs = 0L;	
+d303 1
+a303 1
+    static char buf[256];
+d305 1
+a305 1
+    if (debugfh==NULL) {  
+d312 1
+a312 1
+    
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d13 1
+d34 2
+a35 2
+static struct Task *netpid;
+static int netbit, ifbit;
+d40 1
+d60 1
+a60 1
+	extern void __saveds netPROCESS();
+d88 1
+d102 1
+a102 1
+void __saveds netPROCESS()
+d107 2
+a108 1
+	register long event, waitmask, netevent, ifevent;
+d110 1
+d119 8
+d131 1
+a131 1
+	if (OpenDevice(TIMERNAME, UNIT_VBLANK, &tr, 0L)) {
+d138 1
+a138 1
+	SendIO(&tr);
+d147 3
+a149 2
+	waitmask = netevent | timerevent | ifevent | SIGBREAKF_CTRL_C;
+
+a150 1
+/*	printf("Start %s\n", inetname); */
+a154 1
+
+a165 1
+/*	kprintf("Got an ifevent\n"); */
+d168 7
+a176 1
+/*	kprintf("Got a netevent\n");           */
+d195 3
+a197 3
+	if(!CheckIO(&tr)){
+		AbortIO(&tr);
+		WaitIO(&tr);
+d200 1
+a200 1
+	CloseDevice(&tr);
+d219 7
+d231 1
+a231 1
+	void	(*func)();
+d237 1
+a237 1
+	void	(*func)();
+d275 1
+a275 1
+	SendIO(&tr);
+d296 3
+@

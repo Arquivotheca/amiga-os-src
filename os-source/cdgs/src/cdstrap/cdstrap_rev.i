@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	21
+DATE	MACRO
+		dc.b	'26.1.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cdstrap 40.21'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdstrap 40.21 (26.1.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdstrap 40.21 (26.1.94)',0
+	ENDM

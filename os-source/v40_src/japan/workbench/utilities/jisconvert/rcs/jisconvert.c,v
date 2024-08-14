@@ -1,0 +1,2156 @@
+head     1.2;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.2
+date     93.05.18.09.47.29;  author Unknown;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     93.04.30.16.25.24;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial check in.
+@
+
+
+1.2
+log
+@single file conversion version, use str gadgets for file select status. 
+@
+text
+@
+#include <ctype.h>
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <intuition/intuition.h>
+#include <dos/dos.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>	/* temp */
+
+#include "JISConvert.h"
+//#include "JISConvert_rev.h"
+
+#include <clib/exec_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/diskfont_protos.h>
+#include <clib/asl_protos.h>
+#include "clib/dos_protos.h"
+#include <clib/icon_protos.h>
+#include <clib/locale_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/locale_pragmas.h>
+
+
+#include <workbench/startup.h>
+#include <workbench/icon.h>
+#include <workbench/workbench.h>
+
+#include <libraries/locale.h>
+
+#define CATCOMP_NUMBERS
+#include "jisconvert_strings.h"
+
+
+extern struct Library *SysBase;
+struct Library *LocaleBase;
+
+
+STRPTR __asm GetString(register __a0 struct LocaleInfo *li,
+                       register __d0 LONG stringNum);
+
+#include "jcc_protos.h"
+#include "pragmas/jcc_pragmas.h"
+
+char vers[] = VERSTAG;
+
+struct Library *IntuitionBase;
+struct Library *IconBase;
+struct Library *GadToolsBase;
+struct Library *UtilityBase;
+struct Library *GfxBase;
+struct Library *DiskfontBase;
+struct Library *AslBase;
+struct Library *DOSBase;
+
+struct LocaleInfo li;
+
+struct Library *JCCBase = NULL;
+struct JConversionCodeSet *jcc = NULL;
+struct JConversionCodeSet *jccID = NULL;
+
+
+struct IntuiText BodyText = {0,1,JAM2,20,8,NULL,NULL,NULL};
+struct IntuiText NegText  = {0,1,JAM2, 6,4,NULL,NULL,NULL};
+
+
+struct GeneralData GData;               /* general data */
+struct GeneralData *data = &GData;      /* pointer to GData */
+
+struct strbuffer strbuf;                /* string buffers for status strings */
+
+struct Gadget *jgadgets[9];		/* pointers to the first gadgets list */
+struct Gadget *j2gadgets[4];		/* pointers to the 2nd gadgets list */
+
+struct TextAttr coral16 =		/* text attribute used */
+    {
+    (STRPTR)"coral.font",
+    16,
+    FS_NORMAL,
+    0x0
+    };
+
+int ArgCount;
+
+
+
+LONG OutputCode = CTYPE_EUC;		/* Output code type */
+LONG InputCode = CTYPE_UNKNOWN;		/* input code type */
+BOOL DetInCode = TRUE;			/* try to detect input code */
+
+LONG ctype[4] = {CTYPE_EUC, CTYPE_SJIS, CTYPE_NEWJIS, CTYPE_OLDJIS};
+char  *ext[] = {".euc", ".sjs",".new", ".old" };
+
+UWORD ext_index = EUC;
+UWORD filter_flag = 0;
+UBYTE err_convert;
+
+struct FileRequester *in_req, *out_req;	/* pointers to source and target file requesters */
+
+
+VOID main (int argc, char **argv)
+    {
+    struct strbuffer *sbuf;
+    struct WBStartup *WBenchMsg;
+    struct DiskObject *diskobj = NULL;
+    char  *str, *wbname;
+
+    char *CodeSel[] = {"EUC", "SJIS", "NEWJIS", "OLDJIS"};
+
+    int i;
+
+
+    li.li_Catalog = NULL;
+
+    /* First open locale library so messeges can be displayed */
+    if (LocaleBase = OpenLibrary("locale.library",39L))
+	{
+        li.li_LocaleBase = LocaleBase;
+        li.li_Catalog    = OpenCatalogA(NULL,"jisconvert.catalog",NULL);
+	}
+
+
+    BodyText.IText = (UBYTE *)GetString(&li,TEXT_NORELEASE2);
+    NegText.IText = (UBYTE *)GetString(&li,TEXT_OK);
+
+    sbuf = &strbuf;
+
+    ArgCount = argc;
+
+//    printf ("argc = %d\n", argc);		/* debug */
+//    printf ("arg = %s\n", argv[1]);		/* debug */
+
+
+    /* Pars command line */
+
+    if ( (ArgCount > 9) || (ArgCount == 2 && *argv[1] == '?') )
+	{
+	DispHelp();
+	exit (RETURN_FAIL);
+	}
+
+    if (ArgCount > 1)
+	{
+	while (--argc > 0)
+	    {
+            argv++;
+	    if ( !(stricmp(*argv, "INCODE")) )
+		{
+		argv++;
+		argc--;
+		for (i=0; i<4; i++)
+		    {
+		    if ( !(stricmp (*argv, CodeSel[i])) )
+			{
+			DetInCode = FALSE;
+			InputCode = ctype[i];
+			}
+		    }
+		}
+
+	    else if ( !(stricmp(*argv, "OUTCODE")) )
+		{
+		argv++;
+		argc--;
+		for (i=0; i<4; i++)
+		    {
+		    if ( !(stricmp (*argv, CodeSel[i])) )
+			{
+			OutputCode = ctype[i];
+			printf ("output code = %lx\n", OutputCode); /* debug */
+			ext_index = i;
+			}
+		    }
+		}
+
+	    else if ( !(stricmp(*argv, "FILTER")) )
+		{
+		argv++;
+		argc--;
+		if ( !(stricmp(*argv, "ON")) )
+		    filter_flag = 1;
+		if ( !(stricmp(*argv, "OFF")) )
+		    filter_flag = 0;
+		}
+	    else if ( !(stricmp(*argv, "EUC")) || !(stricmp(*argv, "SJIS")) ||
+			!(stricmp(*argv, "NEWJIS")) || !(stricmp(*argv, "OLDJIS")) )
+		{
+		for (i=0; i<4; i++)
+		    {
+		    if ( !(stricmp(*argv, CodeSel[i])) )
+			{
+			if (OutputCode == CTYPE_UNKNOWN)
+			    {
+			    OutputCode = ctype[i];
+			    ext_index = i;
+			    }
+			else
+			    {
+			    InputCode = OutputCode;
+			    OutputCode = ctype[i];
+			    DetInCode = FALSE;
+			    }
+			}
+		    }
+		}
+	    else if ( !(stricmp(*argv, "ON")) )
+		filter_flag = 1;
+	    else if ( !(stricmp(*argv, "OFF")) )
+		filter_flag = 0;
+
+	    else if (sbuf->fstr_in[0] == 0)
+		{
+		strcpy (sbuf->fstr_in, *argv);
+//		printf ("inarg = %s\n",*argv);     /* debug */
+//		printf ("argc = %d\n",argc);	/* debug */
+		}
+	    else if (sbuf->fstr_out[0] == 0)
+		strcpy (sbuf->fstr_out, *argv);
+	    else
+		{
+//		printf ("infile: %s\n",sbuf->fstr_in);  /*debug */
+//		printf ("inarg = %s\n",*argv);     /* debug */
+
+		printf ("%s\n", GetString(&li,TEXT_ERRBADARGS) );
+	    	DispHelp();
+		exit (RETURN_FAIL);
+		}
+
+	    }   /* while */
+
+	if (sbuf->fstr_in[0] == 0)
+	    {
+	    printf ("%s\n", GetString(&li,TEXT_ERRNOINPUT));
+	    DispHelp();
+	    exit (RETURN_FAIL);
+	    }
+
+	if (sbuf->fstr_out[0] == 0)
+	    {
+	    strcpy (sbuf->fstr_out, sbuf->fstr_in);
+	    strcat (sbuf->fstr_out, ext[ext_index]);
+	    }
+
+        }
+
+
+//  printf ("argv = %s\n", argv[0]); /* debug */
+
+    /* Open all the libraries needed */
+
+    if (ArgCount <= 1)
+	{
+	if(!(IntuitionBase = OpenLibrary((UBYTE *)"intuition.library", 39L)))
+	    {
+	    if(IntuitionBase = OpenLibrary((UBYTE *)"intuition.library", 0L))
+		{
+		AutoRequest(NULL, &BodyText, NULL, &NegText, 0, 0, 320, 80);
+		CloseLibrary(IntuitionBase);
+		}
+	    cleanexit(NULL, RETURN_FAIL);
+	    }
+
+	if(!(GadToolsBase = OpenLibrary((UBYTE *)"gadtools.library", 39L)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "gadtools.library V39");
+	    cleanexit(NULL, RETURN_FAIL);
+	    }
+
+	if(!(UtilityBase = OpenLibrary((UBYTE *)"utility.library", 39L)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "utility.library V39");
+	    cleanexit(NULL, RETURN_FAIL);
+	    }
+
+	if(!(GfxBase = OpenLibrary((UBYTE *)"graphics.library", 39L)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "graphics.library V39");
+	    cleanexit(NULL, RETURN_FAIL);
+	    }
+
+	if(!(DiskfontBase = OpenLibrary((UBYTE *)"diskfont.library", 39L)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "diskfont.library V39");
+	    cleanexit(NULL, RETURN_FAIL);
+	    }
+
+	if( !(AslBase = OpenLibrary ("asl.library",39L)) )
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "asl.library V39");
+	    cleanexit(NULL, RETURN_FAIL);
+            }
+
+	IconBase = OpenLibrary("icon.library",39L);
+
+
+	}
+
+
+    if( !(DOSBase = OpenLibrary ("dos.library",39L)) )
+	{
+	TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "dos.library V39");
+	cleanexit(NULL, RETURN_FAIL);
+        }
+
+    if  ( !(JCCBase = OpenLibrary("jcc.library", 0L) ) )
+	{
+	TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOLIBRARY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "jcc.library V39");
+	cleanexit(NULL, RETURN_FAIL);
+        }
+
+    if ( !(jcc = AllocConversionHandle(TAG_DONE) ) )
+	{
+	TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOJCCHANDLE), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	cleanexit(NULL, RETURN_FAIL);
+        }
+
+    if ( !(jccID = AllocConversionHandle(TAG_DONE) ) )	/* wc */
+	{
+	TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOJCCHANDLE), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	cleanexit(NULL, RETURN_FAIL);
+        }
+
+
+
+    if (ArgCount <= 1)
+
+	{
+
+	/* Open font */
+
+	if( !(data->TextFont = OpenDiskFont(&coral16)) )
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOFONT), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, "coral.font", 16);
+            cleanexit (NULL, RETURN_FAIL);
+	    }
+
+	/* Get WB startup stuff */
+
+        WBenchMsg = (struct WBStartup *)argv;
+	if (ArgCount == 0)
+	    wbname = WBenchMsg->sm_ArgList->wa_Name;
+	else
+	    wbname = *argv;
+//	printf ("wbname = %s\n",wbname);	/* debug */
+
+	if ( diskobj = GetDiskObject(wbname) )
+	    {
+	    if (str = FindToolType(diskobj->do_ToolTypes, "INCODE") )
+		{
+		printf ("input code = %c", str[0]); /*debug */
+
+		for (i=0; i<4; i++)
+		    {
+		    if ( !(stricmp (str, CodeSel[i])) )
+			{
+			DetInCode = FALSE;
+			InputCode = ctype[i];
+			}
+		    }
+		}
+
+	    if (str = FindToolType(diskobj->do_ToolTypes, "OUTCODE") )
+		{
+		printf ("     output code = %c", str[0]); /* debug */
+
+		for (i=0; i<4; i++)
+		    {
+		    if ( !(stricmp (str, CodeSel[i])) )
+			{
+			OutputCode = ctype[i];
+			printf ("output code = %lx\n", OutputCode); /* debug */
+			ext_index = i;
+			}
+		    }
+		}
+
+
+	    if (str = FindToolType(diskobj->do_ToolTypes, "TEXT_FILTER") )
+		{
+		if ( !(stricmp(str, "ON")) )
+		    {
+		    printf ("     filter flag = %s\n", str); /* debug */
+		    filter_flag = 1;
+		    }
+		else
+		    filter_flag = 0;
+
+		}
+
+	    FreeDiskObject (diskobj);
+	    }
+
+
+	/* Lock Workbench screen and get VisualInfo needed for GadTools stuff */
+
+	if(!(OpenScreenWB(data)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOSCREEN), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	    cleanexit(data, RETURN_FAIL);
+	    }
+
+	/* Open our window */
+
+	if(!(OpenWin(data)))
+	    {
+	    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOWINDOW), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	    cleanexit(data, RETURN_FAIL);
+	    }
+	}
+
+
+    /* Allocate memory buffers for conversion */
+
+    if ( !(data->inbuf = AllocVec (BUFSIZE+16L, MEMF_CLEAR) ) )
+	{
+	TM_Request (NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOMEMORY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	cleanexit(data, RETURN_FAIL);
+	}
+
+    if ( !(data->outbuf = AllocVec (BUFSIZE*3+16L, MEMF_CLEAR) ) )
+	{
+	TM_Request (NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NOMEMORY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+	cleanexit(data, RETURN_FAIL);
+	}
+
+    /* Handle window events or pars command line arguments, do conversion work */
+
+    if (ArgCount <= 1)
+	HandleEvent(data);
+    else
+	{
+//	printf ("incode: %lx\n", InputCode);	/* debug */
+//      printf ("outcode: %lx\n", OutputCode);  /* debug */
+//	printf ("input file: %s\n", sbuf->fstr_in); /* debug */
+//	printf ("output file: %s\n", sbuf->fstr_out); /* debug */
+
+	if (err_convert = ConvertFile (data, sbuf, 0)  )
+	    {
+	    switch (err_convert)
+		{
+		case UNKWNCODE:
+		    printf ("\n%s\n",GetString(&li,TEXT_UNKWNCODE));
+                    break;
+		case NONTEXT:
+		    printf ("\n%s\n",GetString(&li,TEXT_NONTEXT) );
+                    break;
+		case ERROPENIN:
+		    printf ("\n%s\n",GetString(&li,TEXT_ERROPENIN));
+                    break;
+		case ERROPENOUT:
+		    printf ("\n%s\n",GetString(&li,TEXT_ERROPENOUT));
+                    break;
+		case ERRCOPY:
+		    printf ("\n%s\n",GetString(&li,TEXT_ERRCOPY));
+                    break;
+		case ASCIITEXT:
+		    printf ("\n%s\n",GetString(&li,TEXT_ERRASCII));
+                    break;
+		default:
+		    break;
+		}
+	    }
+
+	}
+
+    /* Done */
+
+    if (!err_convert)
+	cleanexit(data, RETURN_OK);
+    else
+	cleanexit(data, RETURN_FAIL);
+    }
+
+
+/**************************************************************************/
+
+VOID DispHelp (VOID)
+    {
+    printf ("\n%s", GetString(&li,H_Usage) );
+    printf ("  JISConvert [[INCODE] %s]", GetString(&li, H_Incode));
+    printf (" [[OUTCODE] %s]\n %17c [[FILTER] ON|OFF] ", GetString(&li,H_Outcode), ' ');
+
+    printf ("%s\n", GetString(&li,H_IOFileName) );
+    printf ("\n%5c %s \n%16c %s \n%16c %s \n%16c %s \n%16c %s\n",
+		' ', GetString(&li,H_INOUT),' ', GetString(&li,H_EUC),
+		' ', GetString(&li,H_SJIS), ' ',GetString(&li, H_New),
+		' ', GetString(&li,H_Old) );
+    }
+
+/* -------------------------------------------------------------------- */
+
+
+BOOL OpenScreenWB(struct GeneralData *data)
+    {
+    if(data->screen)
+	{
+	ScreenToFront(data->screen);
+	return(TRUE);
+	}
+    else
+	{
+	if((data->screen) = LockPubScreen(NULL))
+	    {
+	    if((data->VisualInfo) = GetVisualInfo(data->screen, TAG_DONE))
+		{
+		return(TRUE);
+		}
+	    UnlockPubScreen(NULL, data->screen);
+	    }
+	}
+
+    return(FALSE);
+    }
+
+
+/* -------------------------------------------------------------------- */
+
+VOID CloseScreenWB(struct GeneralData *data)
+    {
+    if(data->VisualInfo)
+	{
+	FreeVisualInfo(data->VisualInfo);
+	data->VisualInfo = NULL;
+	}
+    if(data->screen)
+	{
+	UnlockPubScreen(NULL, data->screen);
+	data->screen = NULL;
+	}
+    }
+
+/* -------------------------------------------------------------------- */
+
+
+VOID cleanexit(struct GeneralData *data, int returnvalue)
+    {
+    if (data->inbuf)	FreeVec (data->inbuf);
+    if (data->outbuf)	FreeVec (data->outbuf);
+
+    if (jccID)		FreeConversionHandle (jccID);
+    if (jcc)		FreeConversionHandle (jcc);
+
+    if (JCCBase)	CloseLibrary (JCCBase);
+    if (DOSBase)	CloseLibrary(DOSBase);
+
+    if (LocaleBase)
+	{
+        CloseCatalog(li.li_Catalog);
+        CloseLibrary(LocaleBase);
+	}
+
+    if (ArgCount <= 1)
+	{
+	if (data->win)	CloseWin(data);
+	if (data->screen)	CloseScreenWB(data);
+	if (data->TextFont)	CloseFont(data->TextFont);
+
+//  TM_Close(TMData);
+
+	if (IconBase)	CloseLibrary (IconBase);
+	if (AslBase)	CloseLibrary (AslBase);
+	if (DiskfontBase)	CloseLibrary (DiskfontBase);
+	if (GfxBase)	CloseLibrary(GfxBase);
+	if (UtilityBase)	CloseLibrary (UtilityBase);
+	if (GadToolsBase)	CloseLibrary (GadToolsBase);
+	if (IntuitionBase)	CloseLibrary (IntuitionBase);
+        }
+
+    exit(returnvalue);
+    }
+
+/* -------------------------------------------------------------------- */
+
+/* Routine to display requesters */
+
+LONG TM_Request(struct Window *Window, UBYTE *Title, UBYTE *TextFormat, UBYTE *GadgetFormat, ULONG *IDCMP_ptr, APTR Arg1, ...)
+    {
+    struct EasyStruct es;
+
+    es.es_StructSize = sizeof(struct EasyStruct);
+    es.es_Flags = 0;
+    es.es_Title = Title;
+    es.es_TextFormat = TextFormat;
+    es.es_GadgetFormat = GadgetFormat;
+
+    return(EasyRequestArgs(Window, &es, IDCMP_ptr, &Arg1));
+    }
+
+/* -------------------------------------------------------------------- */
+
+
+BOOL OpenWin(struct GeneralData *data)
+
+    {
+    struct strbuffer *sbuf;
+
+    int i;
+    WORD WA_Zoom_win[] = {10,20,70,30};		/* define zoom size */
+
+
+    struct NewMenu jmenu[] =
+
+        {
+            { NM_TITLE,  NULL, 0, 0, 0, 0, },
+            {   NM_ITEM,    NULL, 0, 0, 0, 0,},
+	    { NM_TITLE,  NULL, 0, 0, 0, 0, },
+	    {   NM_ITEM, NULL, 0, CHECKIT, ~1, 0,},
+	    {   NM_ITEM, NULL, 0, CHECKIT, ~2, 0, },
+	    {   NM_ITEM, NULL, 0, CHECKIT, ~4, 0,},
+	    {   NM_ITEM, NULL, 0, CHECKIT, ~8, 0,},
+	    {   NM_ITEM, NULL, 0, CHECKIT, ~16, 0,},
+            { NM_END,	 NULL, 0, 0, 0, 0,},
+        };
+
+
+    struct TagItem frtags[] =                   /* tags for ASL requesters */
+	{
+	ASL_Hail,       (ULONG) "",
+        ASL_Height,     FR_HEIGHT,
+	ASL_Width,      FR_WIDTH,
+	ASL_LeftEdge,   FR_LEFT,
+	ASL_TopEdge,    FR_TOP,
+	ASL_FuncFlags,	FILF_PATGAD,
+	ASLFR_TextAttr,	&coral16,
+        TAG_DONE
+	};
+
+    sbuf = &strbuf;
+
+    jmenu[0].nm_Label = GetString(&li,MENUTITLE_project);
+    jmenu[1].nm_Label = GetString(&li,MENUITEM_Quit);
+    jmenu[2].nm_Label = GetString(&li,MENUTITLE_incode);
+    jmenu[3].nm_Label = GetString(&li,MENUITEM_AutoDet);
+//    printf("input code = %lx\n",InputCode);     /* debug */
+    jmenu[4].nm_Label = GetString(&li,MENUSUB_EUC);
+    jmenu[5].nm_Label = GetString(&li,MENUSUB_SJIS);
+    jmenu[6].nm_Label = GetString(&li,MENUSUB_NEWJIS);
+    jmenu[7].nm_Label = GetString(&li,MENUSUB_OLDJIS);
+
+    if (DetInCode)
+	jmenu[3].nm_Flags |= CHECKED;
+    else
+	{
+	for (i=0; i<4; i++)
+	    {
+	    if (InputCode == ctype[i])
+		jmenu[4+i].nm_Flags |= CHECKED;
+	    }
+	}
+
+    if(data->win)
+	{
+	WindowToFront(data->win);
+	ActivateWindow(data->win);
+	return(TRUE);
+	}
+    else
+	{
+
+	if ( CreateGadgetList1 (data) )
+	    {
+	    if((data->win) = OpenWindowTags(NULL,
+					WA_PubScreen, data->screen,
+					WA_Title, GetString(&li,WINDOWTEXT_jwin),
+					WA_Gadgets, data->G1_FstGadget,
+					WA_Left, 0,
+					WA_Top, 0,
+					WA_InnerWidth, WINDOW_W,
+					WA_InnerHeight, WINDOW_H,
+					WA_MinWidth, 70,
+					WA_MinHeight, 30,
+					WA_MaxWidth, -1,
+				 	WA_MaxHeight, -1,
+					WA_Zoom, WA_Zoom_win,
+					WA_DragBar, TRUE,
+					WA_CloseGadget, TRUE,
+					WA_DepthGadget, TRUE,
+					WA_Activate, TRUE,
+//					WA_SimpleRefresh, TRUE,
+					WA_SmartRefresh, TRUE,
+					WA_IDCMP,IDCMP_REFRESHWINDOW |
+					CHECKBOXIDCMP |
+					BUTTONIDCMP |
+					MXIDCMP |
+					IDCMP_GADGETDOWN |
+					IDCMP_GADGETUP |
+                                        IDCMP_MENUPICK |
+					IDCMP_CLOSEWINDOW,
+					TAG_END) )
+                {
+                /* open window ok, continue */
+
+	        GT_RefreshWindow(data->win, NULL);
+
+		if (GetCurrentDirName (sbuf->fstr_out, 64))
+		    GT_SetGadgetAttrs (jgadgets[G_OSTR], data->win,
+		  			NULL, GTST_String, sbuf->fstr_out, TAG_END );
+
+
+        	if (data->MStrip = CreateMenus (jmenu, TAG_END) )
+		    if (LayoutMenus (data->MStrip, data->VisualInfo, GTMN_TextAttr, &coral16,  TAG_END) )
+			SetMenuStrip (data->win, data->MStrip);
+
+
+//        	WindowInfo_jwin.Flags |= TMWF_OPENED;
+
+		/* Allocate ASL request structures */
+
+		in_req = AllocAslRequest (ASL_FileRequest, frtags);
+		out_req = AllocAslRequest (ASL_FileRequest, frtags);
+	        return(TRUE);
+        	}
+
+	    /* Open window failed, free gadgets and return with error */
+	    FreeGadgets(data->G1_FstGadget);
+	    }
+	}
+	return(FALSE);
+    }
+
+/* ---------------------------------------------------------------------- */
+
+
+VOID CloseWin(struct GeneralData *data)
+    {
+    if (in_req)	 FreeAslRequest (in_req);
+    if (out_req) FreeAslRequest (out_req);
+
+    if (data->win)
+	{
+	ClearMenuStrip (data->win);
+	if (data->MStrip)
+	    FreeMenus (data->MStrip);
+
+	CloseWindow(data->win);
+	data->win = NULL;
+	}
+    if(data->G1_FstGadget)
+	{
+	FreeGadgets(data->G1_FstGadget);
+	data->G1_FstGadget = NULL;
+	}
+    }
+
+/* ---------------------------------------------------------------------- */
+
+
+BOOL CreateGadgetList1 (struct GeneralData *data)
+
+    {
+    struct Gadget *gad;
+    struct NewGadget ng;
+
+    char *GTMX_Labels_code[5];
+
+
+
+    GTMX_Labels_code[0] = GetString(&li,GTMX_Labels_code_EUC);
+    GTMX_Labels_code[1] = GetString(&li,GTMX_Labels_code_SJIS);
+    GTMX_Labels_code[2] = GetString(&li,GTMX_Labels_code_NEWJIS);
+    GTMX_Labels_code[3] = GetString(&li,GTMX_Labels_code_OLDJIS);
+    GTMX_Labels_code[4] = NULL;
+
+    (data->G1_FstGadget) = NULL;
+    gad = CreateContext(&(data->G1_FstGadget));
+
+    ng.ng_VisualInfo = data->VisualInfo;
+    ng.ng_LeftEdge = 256;
+    ng.ng_TopEdge = 78+(data->screen->BarHeight);
+    ng.ng_Width = 26;
+    ng.ng_Height = 20;
+    ng.ng_Flags = PLACETEXT_RIGHT;
+    ng.ng_TextAttr = &coral16;
+    ng.ng_GadgetText = (UBYTE *) GetString(&li,GADGETTEXT_filter);
+    ng.ng_GadgetID = ID_FILTER;
+
+    if (filter_flag)
+	jgadgets[G_FILTER] = gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, TRUE, TAG_END);
+    else
+	jgadgets[G_FILTER] = gad = CreateGadget(CHECKBOX_KIND, gad, &ng, TAG_END);
+
+
+    ng.ng_LeftEdge = 232;
+    ng.ng_TopEdge = 20+(data->screen->BarHeight);
+    ng.ng_Width = 220;
+    ng.ng_Flags = PLACETEXT_IN;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_input);
+    ng.ng_GadgetID = ID_INPUT;
+
+    jgadgets[G_INPUT] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+
+
+    ng.ng_LeftEdge = 232;
+    ng.ng_TopEdge = 50+(data->screen->BarHeight);
+    ng.ng_Width = 220;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_output);
+    ng.ng_GadgetID = ID_OUTPUT;
+
+    jgadgets[G_OUTPUT] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+
+    ng.ng_LeftEdge = 32;
+    ng.ng_TopEdge = 26+(data->screen->BarHeight);
+    ng.ng_Width = 18;
+    ng.ng_Height = 18;
+    ng.ng_Flags = PLACETEXT_RIGHT;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_code);
+    ng.ng_GadgetID = ID_CODE;
+    jgadgets[G_CODE] = gad = CreateGadget(MX_KIND, gad, &ng,
+				GTMX_Active, ext_index,
+    				GTMX_Labels, GTMX_Labels_code,
+    				GTMX_Spacing, 2, TAG_END);
+
+    ng.ng_LeftEdge = 16;
+    ng.ng_TopEdge = 6+(data->screen->BarHeight);
+    ng.ng_Width = 88;
+    ng.ng_Flags = PLACETEXT_IN | NG_HIGHLABEL;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_cstr);
+    ng.ng_GadgetID = ID_CSTR;
+    jgadgets[G_CSTR] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+    				GTTX_Text, GetString(&li,GTTX_Text_cstr), TAG_END);
+
+    ng.ng_LeftEdge = 16;
+    ng.ng_TopEdge = 160+(data->screen->BarHeight);
+    ng.ng_Width = 72;
+    ng.ng_Height = 20;
+    ng.ng_Flags = PLACETEXT_IN;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_convert);
+    ng.ng_GadgetID = ID_CONVERT;
+    jgadgets[G_CONVERT] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+
+    ng.ng_LeftEdge = 402;
+    ng.ng_Flags = PLACETEXT_IN;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_quit);
+    ng.ng_GadgetID = ID_QUIT;
+    jgadgets[G_QUIT] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+
+    ng.ng_LeftEdge = 160;
+    ng.ng_TopEdge = 106+(data->screen->BarHeight);
+    ng.ng_Width = 312;
+    ng.ng_Flags = PLACETEXT_LEFT; /* | NG_HIGHLABEL;*/
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_istr);
+    ng.ng_GadgetID = ID_ISSTR;
+    jgadgets[G_ISTR] = gad = CreateGadget(STRING_KIND, gad, &ng, TAG_END);
+
+    ng.ng_TopEdge = 132+(data->screen->BarHeight);
+    ng.ng_Flags = PLACETEXT_LEFT; /* | NG_HIGHLABEL;*/
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_ostr);
+    ng.ng_GadgetID = ID_OSSTR;
+    jgadgets[G_OSTR] = gad = CreateGadget(STRING_KIND, gad, &ng, TAG_END);
+
+
+    return (gad ? TRUE : FALSE);
+    }
+
+
+/* ---------------------------------------------------------------------- */
+
+
+BOOL CreateGadgetList2 (struct GeneralData *data)
+    {
+    struct Gadget *gad;
+    struct NewGadget ng;
+
+    (data->G2_FstGadget) = NULL;
+    gad = CreateContext(&(data->G2_FstGadget));
+
+    ng.ng_VisualInfo = data->VisualInfo;
+    ng.ng_LeftEdge = 190;
+    ng.ng_TopEdge = 156+(data->screen->BarHeight);
+    ng.ng_Width = 100;
+    ng.ng_Height = 20;
+    ng.ng_Flags = PLACETEXT_IN;
+    ng.ng_TextAttr = &coral16;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_abort);
+    ng.ng_GadgetID = ID_abort;
+    j2gadgets[G_ABORT] = gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+
+    ng.ng_LeftEdge = 190;
+    ng.ng_TopEdge = 66+(data->screen->BarHeight);
+    ng.ng_Width = 100;
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_tostr);
+    ng.ng_GadgetID = ID_tostr;
+    j2gadgets[G_TOSTR] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, GetString(&li,GTTX_Text_tostr), TAG_END);
+
+    ng.ng_TopEdge = 6+(data->screen->BarHeight);
+    ng.ng_GadgetText = (UBYTE *)GetString(&li,GADGETTEXT_constr);
+    ng.ng_GadgetID = ID_constr;
+    j2gadgets[G_CONSTR] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+		GTTX_Text, GetString(&li,GTTX_Text_constr), TAG_END);
+
+    return (gad ? TRUE : FALSE);
+
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+VOID HandleEvent(struct GeneralData *data)
+    {
+    BOOL done=FALSE;
+    ULONG windowsignal, signals;
+
+    windowsignal = 1L << data->win->UserPort->mp_SigBit;
+
+    while(!done)
+	{
+	signals = Wait(windowsignal);
+	if(signals & windowsignal)
+	    done = ProcWindowSignal(data);
+	}
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+
+BOOL ProcWindowSignal (struct GeneralData *data)
+    {
+    struct IntuiMessage *msg;
+    struct Gadget *gad;
+    BOOL done = FALSE;
+    ULONG class;
+    UWORD code;
+    char str[64];
+
+    struct strbuffer *sbuf;
+
+    USHORT len;
+    struct WBArg *args;
+    int i;
+
+    UWORD  menu_number, m_num, i_num, s_num;
+    struct MenuItem *item;
+
+
+    sbuf = &strbuf;
+    while ( msg = (struct IntuiMessage *)GT_GetIMsg(data->win->UserPort) )
+	{
+        gad = msg->IAddress;
+        class = msg->Class;
+        code  = msg->Code;
+
+	GT_ReplyIMsg (msg);
+
+        switch (class)
+	    {
+	    case IDCMP_REFRESHWINDOW:
+		GT_BeginRefresh(data->win);
+
+		if (data->G1_FstGadget)
+		    {
+		    ;
+		    }
+		else
+		    {
+		    DispTextCenter (data->win, sbuf->fstr_in, FIN_TOP);
+		    DispTextCenter (data->win, sbuf->fstr_out,FOUT_TOP);
+		    RenderBBox (data->win, SBAR_LEFT, SBAR_TOP, SBAR_W, SBAR_H,
+				GT_VisualInfo, data->VisualInfo,
+				GTBB_Recessed, TRUE, TAG_DONE);
+		    }
+		GT_EndRefresh(data->win, TRUE);
+		break;
+
+	    case IDCMP_GADGETDOWN:
+		switch(code)
+		    {
+		    case ID_CODE_EUC:
+			ext_index = EUC;
+			OutputCode = CTYPE_EUC;
+			break;
+
+		    case ID_CODE_SJIS:
+			ext_index = SJIS;
+			OutputCode = CTYPE_SJIS;
+			break;
+
+		    case ID_CODE_NEWJIS:
+			ext_index = NEWJIS;
+			OutputCode = CTYPE_NEWJIS;
+			break;
+
+		    case ID_CODE_OLDJIS:
+			ext_index = OLDJIS;
+			OutputCode = CTYPE_OLDJIS;
+			break;
+
+		    }
+
+		break;
+
+	    case IDCMP_GADGETUP:
+
+		switch(gad->GadgetID)
+		    {
+		    case ID_FILTER:		/* Text Filter */
+		    /* gadget_filter->Flags & GFLG_SELECTED */
+			filter_flag = jgadgets[G_FILTER]->Flags & GFLG_SELECTED;
+			break;
+
+		    case ID_INPUT:		/* Select Input Files... */
+
+			if (AslRequestTags (in_req, ASL_Hail, (ULONG) GetString(&li,TEXT_ASL_in),
+						TAG_DONE) )
+			    {
+			    strcpy ( sbuf->fstr_in, in_req->rf_Dir);
+			    if ( ((len = strlen(sbuf->fstr_in)) > 0) && ((sbuf->fstr_in)[len - 1] != '/')
+					 && ((sbuf->fstr_in)[len - 1] != ':') )
+				strcat ( sbuf->fstr_in, "/");
+
+			    strcat ( sbuf->fstr_in, in_req->rf_File);
+
+			    DispFSelStatus (data, sbuf, in_req);
+
+                            }
+
+			break;
+
+		    case ID_OUTPUT:		/* Select Output Files... */
+		        sbuf->sstr_out[0] = NULL;
+
+			if (AslRequestTags (out_req, ASL_Hail, (ULONG) GetString(&li,TEXT_ASL_out),
+						TAG_DONE) )
+			    {
+			    strcpy ( sbuf->fstr_out, out_req->rf_Dir);
+
+			    if (!(*(sbuf->fstr_out)) )
+				GetCurrentDirName (sbuf->fstr_out, 64);
+
+			    if (*(out_req->rf_File) )
+				{
+				if ( ((len = strlen(sbuf->fstr_out)) > 0) && ((sbuf->fstr_out)[len - 1] != '/')
+					 && ((sbuf->fstr_out)[len - 1] != ':') )
+	    			    strcat ( sbuf->fstr_out, "/");
+				strcat ( sbuf->fstr_out, out_req->rf_File);
+
+				}
+
+			    DispDSelStatus (data, sbuf, out_req);
+			    }
+
+			break;
+
+		    case ID_ISSTR:
+
+			strcpy (sbuf->fstr_in,
+				((struct StringInfo *)jgadgets[G_ISTR]->SpecialInfo)->Buffer );
+                        break;
+
+		    case ID_OSSTR:
+
+			strcpy (sbuf->fstr_out,
+				((struct StringInfo *)jgadgets[G_OSTR]->SpecialInfo)->Buffer );
+                        break;
+
+		    case ID_CONVERT:		/* Convert... */
+
+			/* flash screen if no input file is selected */
+			if (sbuf->fstr_in[0] == NULL)
+			    {
+			    DisplayBeep (data->screen);
+			    break;
+			    }
+			RemoveGList (data->win, data->G1_FstGadget, -1);
+		        FreeGadgets(data->G1_FstGadget);
+			data->G1_FstGadget = NULL;
+                        ClearRect (data->win, WIN_LEFT, WIN_TOP, WIN_RIGHT, WIN_BOT, 0);
+
+                    	if (CreateGadgetList2(data))
+			    {
+			    AddGList (data->win, data->G2_FstGadget, -1, -1, NULL);
+			    RefreshGList (data->G2_FstGadget, data->win, NULL, -1);
+			    GT_RefreshWindow (data->win, NULL);
+			    RenderBBox (data->win, SBAR_LEFT, SBAR_TOP, SBAR_W, SBAR_H,
+					GT_VisualInfo, data->VisualInfo,
+					GTBB_Recessed, TRUE, TAG_DONE);
+
+			    }
+			else
+			    ;
+			DoConvertion(data, sbuf, in_req, out_req);
+
+			RemoveGList (data->win, data->G2_FstGadget, -1);
+			FreeGadgets (data->G2_FstGadget);
+			data->G2_FstGadget = NULL;
+			ClearRect (data->win, WIN_LEFT, WIN_TOP, WIN_RIGHT, WIN_BOT, 0);
+
+			CreateGadgetList1 (data);
+			AddGList (data->win, data->G1_FstGadget, -1, -1, NULL);
+			RefreshGList (data->G1_FstGadget, data->win, NULL, -1);
+		        GT_RefreshWindow(data->win, NULL);
+
+			DispFSelStatus (data, sbuf, in_req);
+			DispDSelStatus (data, sbuf, out_req);
+
+			break;
+
+		    case ID_QUIT:		/* Quit */
+			done = TRUE;
+			break;
+		    }
+                break;
+
+	    case IDCMP_MENUPICK:
+
+		menu_number = msg->Code;
+		while (menu_number != MENUNULL && (!done) )
+		    {
+		    item = ItemAddress (data->MStrip, menu_number);
+		    m_num = MENUNUM(menu_number);
+		    i_num = ITEMNUM(menu_number);
+		    s_num = SUBNUM(menu_number);
+
+		    if ( (m_num == 0) && (i_num == 0) )
+			done = TRUE;
+
+		    if ( (m_num == 1) && (i_num == 0) )
+			DetInCode = TRUE;
+
+		    if ( (m_num == 1) && (i_num != 0) )
+			{
+			DetInCode = FALSE;
+			switch (i_num-1)
+			    {
+			    case EUC:
+				InputCode = CTYPE_EUC;
+				break;
+			    case SJIS:
+				InputCode = CTYPE_SJIS;
+				break;
+			    case NEWJIS:
+				InputCode = CTYPE_NEWJIS;
+				break;
+			    case OLDJIS:
+				InputCode = CTYPE_OLDJIS;
+				break;
+			    }
+			}
+		    menu_number = item->NextSelect;
+		    }
+		break;
+
+	    case IDCMP_CLOSEWINDOW:
+		done = TRUE;
+		break;
+            }
+	}
+    return(done);
+    }
+
+/* --------------------------------------------------------------------- */
+
+
+VOID RenderBBox (struct Window *win, SHORT left, SHORT top, SHORT w, SHORT h, ULONG tags, ...)
+    {
+    DrawBevelBoxA (win->RPort, left, top+(win->BorderTop), w, h,
+		(struct TagItem *)&tags);
+    }
+
+/* --------------------------------------------------------------------- */
+
+
+VOID ClearRect (struct Window *win, SHORT left, SHORT top, SHORT right, SHORT bottom, UBYTE pen)
+    {
+    SetAPen (win->RPort, pen);
+    RectFill (data->win->RPort, left, top+(win->BorderTop), right, bottom+(win->BorderTop) );
+    SetAPen (win->RPort, 1);
+
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+VOID DispFSelStatus ( struct GeneralData *data, struct strbuffer *sbuf,
+		struct FileRequester *in_req)
+
+    {
+    USHORT len;
+
+    GT_SetGadgetAttrs (jgadgets[G_ISTR], data->win,
+			NULL, GTST_String, sbuf->fstr_in, TAG_END );
+
+    }
+
+/* --------------------------------------------------------------------- */
+
+VOID DispDSelStatus ( struct GeneralData *data, struct strbuffer *sbuf,
+		struct FileRequester *out_req)
+
+    {
+    USHORT len;
+
+    GT_SetGadgetAttrs (jgadgets[G_OSTR], data->win,
+			NULL, GTST_String, sbuf->fstr_out, TAG_END );
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+
+VOID DispText (struct Window *win, UBYTE *str, WORD left, WORD top)
+    {
+    struct IntuiText intext = {0,0,JAM2,0,0,&coral16,NULL,NULL};
+
+    intext.FrontPen = 1;
+    intext.BackPen = win->RPort->BgPen;
+    intext.IText = str;
+    PrintIText (win->RPort, &intext, left, top+(win->BorderTop) );
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+VOID DoConvertion( struct GeneralData *data, struct strbuffer *sbuf,
+		struct FileRequester *in_req, struct FileRequester *out_req)
+    {
+    int i;
+    char *str;
+    SHORT len;
+    struct FileInfoBlock *fib;
+    BPTR lock;
+    LONG ShowSize = 0;
+    BOOL UsrAbort = FALSE;
+    BOOL temp; /* debug */
+    UBYTE *anch;
+
+    fib = (struct FileInfoBlock *)AllocDosObject (DOS_FIB, TAG_DONE);
+
+
+        ClearRect (data->win, FIN_LEFT, FIN_TOP, FIN_RIGHT, FIN_BOT, 0);
+        ClearRect (data->win, FOUT_LEFT, FOUT_TOP, FOUT_RIGHT, FOUT_BOT, 0);
+	ClearRect (data->win, SBAR_LEFT+1, SBAR_TOP+1, SBAR_RIGHT, SBAR_BOT, 0);
+
+	/* Display source file name */
+
+	DispTextCenter (data->win, sbuf->fstr_in, FIN_TOP);
+
+	/* Display target file name */
+
+//	strcpy ( sbuf->fstr_out, out_req->rf_Dir);
+
+	lock = Lock (sbuf->fstr_out, ACCESS_READ);
+
+
+	if (lock && Examine(lock,fib) && (fib->fib_DirEntryType > 0) )
+
+	    {
+	    if ( ((len = strlen(sbuf->fstr_out)) > 0) && ((sbuf->fstr_out)[len - 1] != '/')
+						  && ((sbuf->fstr_out)[len - 1] != ':') )
+		strcat ( sbuf->fstr_out, "/");
+
+	    str = FilePart (sbuf->fstr_in);
+	    strcat (sbuf->fstr_out, str);
+
+	    strcat ( sbuf->fstr_out, ext[ext_index]);
+	    }
+
+//	printf("Examine result = %lx", temp); /*debug */
+//	printf ("dir entry type = %lx\n", fib->fib_DirEntryType); /* debug */
+
+	DispTextCenter (data->win, sbuf->fstr_out,FOUT_TOP);
+
+	UnLock (lock);
+
+
+	/* get source file size -- will show proceding status about every 1/16 of the file */
+
+	lock = Lock (sbuf->fstr_in, ACCESS_READ);
+	if (Examine (lock, fib))
+	    {
+	    ShowSize = fib->fib_Size / 16;
+            if (ShowSize == 0)
+		ShowSize++;
+	    }
+	UnLock (lock);
+
+	if (err_convert = ConvertFile (data, sbuf, ShowSize)  )
+	    {
+	    switch (err_convert)
+		{
+		case UNKWNCODE:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_UNKWNCODE), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+                    break;
+		case NONTEXT:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_NONTEXT), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+                    break;
+		case ERROPENIN:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_ERROPENIN), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+                    break;
+		case ERROPENOUT:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_ERROPENOUT), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+                    break;
+		case ERRCOPY:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_ERRCOPY), (UBYTE *)GetString(&li,TEXT_ABORT), NULL, NULL);
+                    break;
+		case ASCIITEXT:
+		    TM_Request(NULL, (UBYTE *)GetString(&li,TEXT_ERROR), (UBYTE *)GetString(&li,TEXT_ERRASCII), (UBYTE *)GetString(&li,TEXT_OK), NULL, NULL);
+                    break;
+
+		case USRABORT:
+		    UsrAbort = TRUE;
+		    break;
+
+		default:
+		    break;
+		}
+	    }
+
+        if (UsrAbort)
+	    DeleteFile (sbuf->fstr_out);
+
+	if (fib)
+	    FreeDosObject (DOS_FIB, fib);
+
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+VOID DispTextCenter (struct Window *win, UBYTE *str, WORD strtop)
+
+    {
+    WORD left;
+    short len, line;
+    int j;
+    UBYTE *s;
+
+    line = 1;
+    if ( (len = strlen(str) * 8) > WINDOW_W)
+	{
+	line = len / WINDOW_W + (len % WINDOW_W ? 1 : 0);
+	len /= line;
+	}
+    left = (WINDOW_W - len) / 2;
+    for (j=0,s=str; j < line; j++, s+=len)
+	DispText (win, s, left, strtop + j*20);
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+UBYTE ConvertFile (struct GeneralData *data, struct strbuffer *sbuf, ULONG ShowSize)
+    {
+    ULONG r, length = 0;
+    int	len, l;
+    BPTR InHandle = 0, OutHandle = 0;
+    UBYTE ErrCode = NOERROR;
+    LONG  WrtCount;
+
+    if ( !(InHandle = Open (sbuf->fstr_in, MODE_OLDFILE)) )
+	{
+	ErrCode = ERROPENIN;
+	return (ErrCode);
+	}
+
+    /* First scan the whole source file to determine its code type */
+
+    if (DetInCode)
+	InputCode = DetCodeSet (jccID, InHandle, data->inbuf);
+
+    switch (InputCode)
+        {
+	case CTYPE_BINARY:
+	    ErrCode = NONTEXT;
+            break;
+	case CTYPE_UNKNOWN:
+	    ErrCode = UNKWNCODE;
+            break;
+	case CTYPE_ASCII:
+	    ErrCode = ASCIITEXT;
+            break;
+        default:
+            break;
+        }
+
+    if (!ErrCode)
+	{
+//	printf ("input code = %lx\n", InputCode); /* debug */
+
+	/* source code type determined.  It's time to convert */
+
+	Seek (InHandle, 0, OFFSET_BEGINNING);	/* back to the beginning of the file */
+
+//	printf ("file pos = %lx\n", Seek(InHandle, OFFSET_CURRENT, 0) );	/* debug */
+
+	if ( !(OutHandle = Open (sbuf->fstr_out, MODE_NEWFILE)) )
+	    ErrCode = ERROPENOUT;
+	}
+//  printf ("ErrCode = %lx\n", ErrCode);	/* debug */
+
+    if (!ErrCode )
+	{
+	while ( (len = Read (InHandle, data->inbuf, BUFSIZE)) > 0  )
+	    {
+
+	    data->inbuf[len] = 0;
+	    length += len;
+
+	    if (ArgCount <= 1)
+
+		{
+		r = length / ShowSize;
+
+		if (r > 0 && r < 16)
+		    ClearRect (data->win, SBAR_LEFT+1, SBAR_TOP+1, 20 * r, SBAR_BOT, 3);
+		if (r >= 16)
+		    ClearRect (data->win, SBAR_LEFT+1, SBAR_TOP+1, SBAR_RIGHT, SBAR_BOT, 3);
+		}
+
+	    if (filter_flag)
+		{
+		WrtCount = JStringConvert (jcc, data->inbuf, data->outbuf, InputCode, OutputCode, -1, JCT_TextFilter, TRUE );
+//		printf ("text filter selected\n");  /* debug */
+		}
+	    else
+		WrtCount = JStringConvert (jcc, data->inbuf, data->outbuf, InputCode, OutputCode, -1, TAG_END );
+
+//          printf ("inbuf[0] = %lx\n", data->inbuf[0]);   /* debug */
+//          printf ("WrtCount = %lx\n", WrtCount);   /* debug */
+
+	    if ( (l = Write(OutHandle, data->outbuf, WrtCount)) < 0)
+
+		{
+//              printf ("write error. l = %lx\n", l);   /* debug */
+		ErrCode = ERRCOPY;
+		break;
+		}
+
+	    if (ArgCount <= 1)
+		{
+		if ( CheckUsrAbort(data) )
+		    {
+		    ErrCode = USRABORT;
+		    break;
+		    }
+		}
+	    }   /* while */
+
+	if (len < 0)
+	    ErrCode = ERRCOPY;
+
+	}
+
+    if (InHandle)	Close (InHandle);
+    if (OutHandle)	Close (OutHandle);
+
+    return (ErrCode);
+
+    }
+
+
+/* --------------------------------------------------------------------- */
+
+
+LONG DetCodeSet (struct JConversionCodeSet *jcc, BPTR handle, UBYTE *inbuf)
+    {
+    int len = 0;
+    LONG InputCode = CTYPE_UNKNOWN, InputCodeSave = CTYPE_UNKNOWN;
+
+    /* clear internal buffer for identifying data code set. */
+    SetJConversionAttrs(jcc, JCC_FirstByte, 0x00, JCC_ESC, 0, JCC_HanKata, 0, TAG_DONE);
+
+    if ( (len = Read (handle, inbuf, BUFSIZE)) > 0)
+	InputCode = IdentifyCodeSet (jccID, inbuf, len);
+
+    if (InputCode == CTYPE_BINARY)
+	return (InputCode);
+
+    Seek (handle, 0, OFFSET_BEGINNING);	 /* back to the beginning of the file */
+
+    InputCode = CTYPE_UNKNOWN;
+
+    while ( (len = Read (handle, inbuf, BUFSIZE)) > 0  )
+	{
+
+        inbuf[len] = 0;
+
+	InputCode = IdentifyCodeSet(jccID, inbuf, -1);
+
+	if (InputCode != CTYPE_CONTINUE && InputCode != CTYPE_ASCII
+					&& InputCodeSave != CTYPE_SJIS )
+	    InputCodeSave = InputCode;
+
+	if (InputCode == CTYPE_BINARY)
+	    break;
+
+	}
+    if (InputCodeSave != CTYPE_UNKNOWN && InputCode != CTYPE_BINARY)
+	InputCode = InputCodeSave;
+    return (InputCode);
+    }
+
+/* ---------------------------------------------------------------------- */
+
+BOOL CheckUsrAbort (struct GeneralData *data)
+
+    {
+    BOOL abort = FALSE;
+    struct IntuiMessage *msg;
+    struct Gadget *gad;
+    ULONG class;
+    UWORD code;
+
+    while ( msg = (struct IntuiMessage *)GT_GetIMsg(data->win->UserPort) )
+	{
+        gad = msg->IAddress;
+        class = msg->Class;
+        code  = msg->Code;
+
+	GT_ReplyIMsg (msg);
+
+        switch (class)
+	    {
+	    case IDCMP_GADGETUP:
+		{
+		if (gad->GadgetID == ID_abort)
+		    abort = TRUE;
+		break;
+		}
+	    break;
+	    }
+	}
+    return (abort);
+    }
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+
+d22 23
+d52 1
+d60 2
+d67 2
+a68 2
+struct IntuiText BodyText = {0,1,JAM2,20,8,NULL,(UBYTE *)TEXT_NORELEASE2,NULL};
+struct IntuiText NegText  = {0,1,JAM2, 6,4,NULL,(UBYTE *)TEXT_OK,NULL};
+d76 1
+a76 1
+struct Gadget *jgadgets[7];		/* pointers to the first gadgets list */
+d89 2
+d93 1
+a93 1
+BOOL DetInCode = TRUE;
+d95 1
+d108 18
+d127 3
+a130 1
+    memset (sbuf->sstr_in, 0x00, sizeof(struct strbuffer) );
+d133 1
+d135 2
+d138 1
+a138 1
+//    printf ("arg = %s\n", argv[1]);		/* debug */
+d140 1
+a140 1
+    if ( (ArgCount > 6) || (ArgCount == 2 && *argv[1] == '?') )
+d150 2
+a151 1
+	    if ((*++argv)[0] == '-')
+d153 3
+a155 1
+		switch ((*argv)[1])
+d157 7
+a163 15
+		    case 'I':
+			switch ((*argv)[2])
+			    {
+			    case 'e':
+				InputCode = CTYPE_EUC;
+				break;
+			    case 's':
+				InputCode = CTYPE_SJIS;
+				break;
+			    case 'j':
+				InputCode = CTYPE_NEWJIS;
+				break;
+			    case 'o':
+				InputCode = CTYPE_OLDJIS;
+				break;
+d165 14
+a178 3
+//			    case 'n':
+//				InputCode = CTYPE_NECJIS;
+//				break;
+d180 20
+a199 4
+			    default:
+				DispHelp();
+				exit (RETURN_FAIL);
+				break;
+d201 1
+a201 4
+			break;
+
+		    case 'O':
+			switch ((*argv)[2])
+d203 3
+a205 26
+			    case 'e':
+				OutputCode = CTYPE_EUC;
+				ext_index = EUC;
+				break;
+			    case 's':
+				OutputCode = CTYPE_SJIS;
+				ext_index = SJIS;
+				break;
+			    case 'j':
+				OutputCode = CTYPE_NEWJIS;
+				ext_index = NEWJIS;
+				break;
+			    case 'o':
+				OutputCode = CTYPE_OLDJIS;
+				ext_index = OLDJIS;
+				break;
+
+//			    case 'n':
+//				OutputCode = CTYPE_NECJIS;
+//				ext_index = NECJIS;
+//				break;
+
+			    default:
+				DispHelp();
+				exit (RETURN_FAIL);
+				break;
+d207 7
+a213 1
+			break;
+d215 17
+a231 3
+		    case 'F':
+			filter_flag = 1;
+			break;
+a232 22
+		    default:
+			DispHelp();
+			exit (RETURN_FAIL);
+			break;
+		    }
+		}
+	    else  /* (*++argv)[0] == '-' */
+		{
+		if (sbuf->fstr_in[0] == 0)
+		    {
+		    strcpy (sbuf->fstr_in, *argv);
+//		    printf ("inarg = %s\n",*argv);     /* debug */
+		    }
+		else if (sbuf->fstr_out[0] == 0)
+		    strcpy (sbuf->fstr_out, *argv);
+		else
+		    {
+//		    printf ("infile: %s\n",sbuf->fstr_in);  /*debug */
+	    	    DispHelp();
+		    exit (RETURN_FAIL);
+		    }
+		}
+d237 1
+d251 2
+d257 1
+a257 1
+	if(!(IntuitionBase = OpenLibrary((UBYTE *)"intuition.library", 37L)))
+d267 1
+a267 1
+	if(!(GadToolsBase = OpenLibrary((UBYTE *)"gadtools.library", 37L)))
+d269 1
+a269 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "gadtools.library V37");
+d273 1
+a273 1
+	if(!(UtilityBase = OpenLibrary((UBYTE *)"utility.library", 37L)))
+d275 1
+a275 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "utility.library V37");
+d279 1
+a279 1
+	if(!(GfxBase = OpenLibrary((UBYTE *)"graphics.library", 37L)))
+d281 1
+a281 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "graphics.library V37");
+d285 1
+a285 1
+	if(!(DiskfontBase = OpenLibrary((UBYTE *)"diskfont.library", 37L)))
+d287 1
+a287 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "diskfont.library V37");
+d291 1
+a291 1
+	if( !(AslBase = OpenLibrary ("asl.library",37L)) )
+d293 1
+a293 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "asl.library V37");
+d296 4
+d302 2
+a303 1
+    if( !(DOSBase = OpenLibrary ("dos.library",37L)) )
+d305 1
+a305 1
+	TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "dos.library V37");
+d311 1
+a311 1
+	TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOLIBRARY, (UBYTE *)TEXT_ABORT, NULL, "jcc.library V37");
+d315 1
+a315 1
+    if ( !(jcc = AllocConversionHandle(TAG_DONE) ) )        /* wc */
+d317 1
+a317 1
+	TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOJCCHANDLE, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d323 1
+a323 1
+	TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOJCCHANDLE, (UBYTE *)TEXT_ABORT, NULL, NULL);
+a327 1
+    /* Open font */
+d332 3
+d337 1
+a337 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOFONT, (UBYTE *)TEXT_ABORT, NULL, "coral.font", 16);
+d341 55
+a395 16
+//if(!(TMData = TM_Open(&error)))
+//    {
+//    switch(error)
+//      {
+//      case TMERR_MEMORY:
+//        TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOMEMORY, (UBYTE *)TEXT_ABORT, NULL, NULL);
+//        break;
+//      case TMERR_MSGPORT:
+//        TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOMSGPORT, (UBYTE *)TEXT_ABORT, NULL, NULL);
+//        break;
+//      case TMERR_coral16:
+//        TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOFONT, (UBYTE *)TEXT_ABORT, NULL, "coral.font", 16);
+//        break;
+//      }
+//    cleanexit(NULL, RETURN_FAIL);
+//    }
+d402 1
+a402 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOSCREEN, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d410 1
+a410 1
+	    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOWINDOW, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d420 1
+a420 1
+	TM_Request (NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOMEMORY, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d426 1
+a426 1
+	TM_Request (NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NOMEMORY, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d446 1
+a446 1
+		    printf ("\nCan not determine input code type\n");
+d449 1
+a449 1
+		    printf ("\nInput file is not a text file\n");
+d452 1
+a452 1
+		    printf ("\nError opening input file\n");
+d455 1
+a455 1
+		    printf ("\nError opening output file\n");
+d458 1
+a458 1
+		    printf ("\nError copying file\n");
+d461 1
+a461 1
+		    printf ("\nNo Kanji characters found\n");
+d483 9
+a491 6
+    printf ("\nUsage:  JISConvert [-Iincode] [-Ooutcode] input-file-name [output-file-name]\n");
+    printf ("\n   incode (outcode):\n"
+	    "       e -- EUC (.euc)\n"
+	    "       s -- Shift JIS (.sjs)\n"
+	    "       j -- New JIS (.new)\n"
+	    "       o -- Old JIS (.old)\n" );
+d550 6
+d564 3
+a566 2
+	if (AslBase)	CloseLibrary(AslBase);
+	if (DiskfontBase)	CloseLibrary(DiskfontBase);
+d568 3
+a570 3
+	if (UtilityBase)	CloseLibrary(UtilityBase);
+	if (GadToolsBase)	CloseLibrary(GadToolsBase);
+	if (IntuitionBase)	CloseLibrary(IntuitionBase);
+d599 1
+d601 1
+d608 9
+a616 13
+            { NM_TITLE,  "Project",		0, 0, 0, 0,},
+            {   NM_ITEM,    "Quit",		0, 0, 0, 0,},
+	    { NM_TITLE,  "Input Code",		0, 0, 0, 0,},
+	    {   NM_ITEM,    "Auto Detect",	0, CHECKIT | MENUTOGGLE | CHECKED, 0, 0,},
+	    {   NM_ITEM,    "Select",		0, NM_ITEMDISABLED, 0, 0,},
+	    {     NM_SUB,	"EUC",		0, 0, 0, 0,},
+	    {     NM_SUB,	"Shift JIS",	0, 0, 0, 0,},
+	    {     NM_SUB,	"New JIS",	0, 0, 0, 0,},
+	    {     NM_SUB,	"Old JIS",	0, 0, 0, 0,},
+
+//	    {     NM_SUB,	"NEC JIS",	0, 0, 0, 0,},
+
+            { NM_END,	  NULL,			0, 0, 0, 0,},
+d622 1
+a622 1
+	ASL_Hail,       (ULONG) "Select Files",
+d632 22
+d668 1
+a668 1
+					WA_Title, WINDOWTEXT_jwin,
+d683 2
+a684 1
+					WA_SimpleRefresh, TRUE,
+d699 5
+a708 1
+
+a710 6
+		/* Draw status box */
+
+		RenderBBox (data->win, BBOX_LEFT, BBOX_TOP, BBOX_W, BBOX_H,
+				GT_VisualInfo, data->VisualInfo,
+				GTBB_Recessed, TRUE, TAG_DONE);
+
+d758 1
+a758 6
+    char *GTMX_Labels_code[] =
+	{
+	GTMX_Labels_code_EUC,
+	GTMX_Labels_code_SJIS,
+	GTMX_Labels_code_NEWJIS,
+	GTMX_Labels_code_OLDJIS,
+a759 1
+//	GTMX_Labels_code_NECJIS,
+a760 2
+	NULL
+	};
+d762 5
+d773 1
+a773 1
+    ng.ng_TopEdge = 90+(data->screen->BarHeight);
+d778 1
+a778 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_filter;
+d788 1
+a788 1
+    ng.ng_TopEdge = 28+(data->screen->BarHeight);
+d791 1
+a791 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_input;
+d798 1
+a798 1
+    ng.ng_TopEdge = 62+(data->screen->BarHeight);
+d800 1
+a800 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_output;
+d810 1
+a810 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_code;
+d821 1
+a821 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_cstr;
+d824 2
+a825 1
+    				GTTX_Text, GTTX_Text_cstr, TAG_END);
+d831 1
+a831 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_convert;
+a834 1
+
+d837 1
+a837 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_quit;
+d841 15
+a870 29
+//    ng.ng_VisualInfo = data->VisualInfo;
+//    ng.ng_LeftEdge = 60;
+//    ng.ng_TopEdge = 128+(data->screen->BarHeight);
+//    ng.ng_Width = 360;
+//    ng.ng_Height = 20;
+//    ng.ng_Flags = PLACETEXT_ABOVE;
+//    ng.ng_TextAttr = &coral16;
+//    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_statbar;
+//    ng.ng_GadgetID = ID_statbar;
+//    j2gadgets[G_STATBAR] = gad = CreateGadget(SCROLLER_KIND, gad, &ng,
+//		GTSC_Total, 16,
+//		GTSC_Visible, 0, TAG_END);
+
+//    ng.ng_LeftEdge = 48;
+//    ng.ng_TopEdge = 82+(data->screen->BarHeight);
+//    ng.ng_Width = 400;
+//    ng.ng_Flags = PLACETEXT_IN;
+//    ng.ng_TextAttr = &coral16;
+//    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_fileout;
+//    ng.ng_GadgetID = ID_fileout;
+//    j2gadgets[G_FOUT] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+//		GTTX_Text, GTTX_Text_fileout, TAG_END);
+
+//    ng.ng_TopEdge = 40+(data->screen->BarHeight);
+//    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_filein;
+//    ng.ng_GadgetID = ID_filein;
+//    j2gadgets[G_FIN] = gad = CreateGadget(TEXT_KIND, gad, &ng,
+//		GTTX_Text, GTTX_Text_filein, TAG_END);
+
+d878 1
+a878 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_abort;
+d885 1
+a885 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_tostr;
+d888 1
+a888 1
+		GTTX_Text, GTTX_Text_tostr, TAG_END);
+d891 1
+a891 1
+    ng.ng_GadgetText = (UBYTE *)GADGETTEXT_constr;
+d894 1
+a894 1
+		GTTX_Text, GTTX_Text_constr, TAG_END);
+d929 1
+a929 1
+    char str[64] = "";
+d933 1
+a933 1
+    USHORT l, len;
+a940 15
+    struct TagItem frtags_in[] =
+	{
+	ASL_Hail,	(ULONG) "Select Files",
+	ASLFR_DoMultiSelect, TRUE,
+	TAG_DONE
+	};
+
+    struct TagItem frtags_out[] =
+	{
+	ASL_Hail,	(ULONG) "Select Drawer",
+	ASLFR_DrawersOnly, TRUE,
+	TAG_DONE
+	};
+
+
+d957 1
+a957 5
+		    RenderBBox (data->win, BBOX_LEFT, BBOX_TOP, BBOX_W, BBOX_H,
+				GT_VisualInfo, data->VisualInfo,
+				GTBB_Recessed, TRUE, TAG_DONE);
+		    DispText (data->win, sbuf->sstr_in, STAT1_LEFT, STAT1_TOP);
+		    DispText (data->win, sbuf->sstr_out, STAT2_LEFT, STAT2_TOP);
+d993 1
+a993 4
+//		    case ID_CODE_NECJIS:
+//			ext_index = NECJIS;
+//			OutputCode = CTYPE_NECJIS;
+//			break;
+a994 1
+		    }
+d1007 8
+a1014 1
+		        sbuf->sstr_in[0] = NULL;
+d1016 1
+a1016 1
+			if (AslRequest (in_req, frtags_in) )
+d1018 1
+a1018 29
+//			if (AslRequestTags (in_req, ASL_Hail, (ULONG) "Select Files",
+//						ASLFR_DoMultiSelect, TRUE,
+//						ASLFR_InitialFile, in_req->rf_ArgList[0].wa_Name,
+//						TAG_DONE) )
+
+
+			    {
+			    l = stci_d(sbuf->sstr_in, in_req->rf_NumArgs);
+			    sbuf->sstr_in[l] = 0;
+			    if (l == 1)
+				strcat (sbuf->sstr_in, (UBYTE *)STEXT_file_sel);
+			    else
+				strcat (sbuf->sstr_in, (UBYTE *)STEXT_files_sel);
+
+			    DispText (data->win, sbuf->sstr_in, STAT1_LEFT, STAT1_TOP);
+
+
+/* debug
+			    printf ("%d files selected:\n", in_req->rf_NumArgs);
+			    args = in_req->rf_ArgList;
+			    for (i=0; i < in_req->rf_NumArgs; i++)
+		        	{
+				strcpy ( str, in_req->rf_Dir);
+		        	if ( ((len = strlen(str)) > 0) && (str[len - 1] != '/') )
+                		    strcat ( str, "/");
+        			strcat ( str, args[i].wa_Name);
+        			printf ("  %s\n", str);
+				}
+*/
+d1021 1
+a1021 2
+			else
+			    ClearRect (data->win, STAT1_LEFT, STAT1_TOP, STAT1_RIGHT, STAT1_BOT, 0);
+d1026 3
+a1028 1
+			if (AslRequest (out_req, frtags_out) )
+d1030 1
+a1030 2
+			    strcat (sbuf->sstr_out, (UBYTE *)STEXT_draw_sel);
+			    DispText (data->win, sbuf->sstr_out,STAT2_LEFT, STAT2_TOP);
+d1032 9
+a1040 2
+//			    printf ("Output drawer:\n");       debug
+//			    printf (" %s\n", out_req->rf_Dir); debug
+d1042 3
+d1046 1
+a1046 2
+			else
+			    ClearRect (data->win, STAT2_LEFT, STAT2_TOP, STAT2_RIGHT, STAT2_BOT, 0);
+d1049 12
+d1062 3
+a1064 1
+			if (sbuf->sstr_in[0] == NULL)
+a1084 1
+//			    printf ("Can not create gadgets\n");
+d1097 4
+a1100 4
+			RenderBBox (data->win, BBOX_LEFT, BBOX_TOP, BBOX_W, BBOX_H,
+				    GT_VisualInfo, data->VisualInfo,
+				    GTBB_Recessed, TRUE, TAG_DONE);
+			sbuf->sstr_in[0] = sbuf->sstr_out[0] = NULL;
+d1121 1
+d1123 3
+a1125 13
+			{
+			if (item->Flags & CHECKED)
+			    {
+			    DetInCode = TRUE;
+			    OffMenu (data->win, FULLMENUNUM (m_num, i_num+1, NOSUB));
+			    }
+			else
+			    {
+			    DetInCode = FALSE;
+			    OnMenu (data->win, FULLMENUNUM (m_num, i_num+1, NOSUB));
+			    }
+			}
+		    if ( (m_num == 1) && (i_num == 1) )
+d1127 2
+a1128 1
+			switch (s_num)
+a1141 5
+
+//			    case NECJIS:
+//				InputCode = CTYPE_NECJIS;
+//				break;
+
+d1176 27
+a1218 1
+
+a1221 1
+    struct WBArg *args;
+d1223 1
+a1223 1
+//    char str[64] = "";
+a1227 1
+//    UBYTE err_convert;                  /* error code returned by ConvertFile */
+d1229 2
+a1230 1
+
+a1234 2
+    for (i=0; i < in_req->rf_NumArgs; i++)
+	{
+a1240 5
+	args = in_req->rf_ArgList;
+	strcpy ( sbuf->fstr_in, in_req->rf_Dir);
+       	if ( ((len = strlen(sbuf->fstr_in)) > 0) && ((sbuf->fstr_in)[len - 1] != '/') )
+	    strcat ( sbuf->fstr_in, "/");
+	strcat ( sbuf->fstr_in, args[i].wa_Name);
+d1245 21
+a1265 5
+	strcpy ( sbuf->fstr_out, out_req->rf_Dir);
+       	if ( ((len = strlen(sbuf->fstr_out)) > 0) && ((sbuf->fstr_out)[len - 1] != '/') )
+	    strcat ( sbuf->fstr_out, "/");
+	strcat ( sbuf->fstr_out, args[i].wa_Name);
+        strcat ( sbuf->fstr_out, ext[ext_index]);
+d1268 2
+d1275 1
+d1277 4
+d1287 1
+a1287 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_UNKWNCODE, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d1290 1
+a1290 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_NONTEXT, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d1293 1
+a1293 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_ERROPENIN, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d1296 1
+a1296 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_ERROPENOUT, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d1299 1
+a1299 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_ERRCOPY, (UBYTE *)TEXT_ABORT, NULL, NULL);
+d1302 1
+a1302 1
+		    TM_Request(NULL, (UBYTE *)TEXT_ERROR, (UBYTE *)TEXT_ERRASCII, (UBYTE *)TEXT_OK, NULL, NULL);
+d1313 1
+a1313 1
+	UnLock (lock);
+a1314 1
+	    {
+d1316 3
+a1318 3
+	    break;
+	    }
+        }
+a1352 1
+//    LONG InputCode = CTYPE_UNKNOWN,
+a1388 5
+//	int pos;					/* debug */
+//	pos = Seek(InHandle, OFFSET_CURRENT, 0);
+//	pos = Seek(InHandle, OFFSET_CURRENT, -pos);
+//	pos = Seek(InHandle, OFFSET_CURRENT, 0);	/*debug */
+
+d1418 1
+a1418 1
+//		printf ("text filer selected\n");
+@

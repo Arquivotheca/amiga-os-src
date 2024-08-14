@@ -1,0 +1,1414 @@
+head     40.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+40.6
+date     94.03.15.14.17.23;  author kcd;  state Exp;
+branches ;
+next     40.5;
+
+40.5
+date     94.03.15.09.57.03;  author kcd;  state Exp;
+branches ;
+next     40.4;
+
+40.4
+date     94.01.26.11.55.58;  author kcd;  state Exp;
+branches ;
+next     40.3;
+
+40.3
+date     93.10.23.01.04.20;  author kcd;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     93.10.21.08.40.40;  author kcd;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     93.09.13.21.24.04;  author kcd;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@CL450 Specific code.
+@
+
+
+40.6
+log
+@changed mpeg border colors to 17,17,17
+@
+text
+@/*
+** $Header: HOG:Other/cd32mpeg/RCS/cl450.c,v 40.5 94/03/15 09:57:03 kcd Exp Locker: kcd $
+**
+** Amiga MPEG Device Driver
+**
+** CL450 Specific Code
+**
+*/
+
+#include <exec/types.h>
+#include <graphics/gfxbase.h>
+#include <clib/exec_protos.h>
+#include <pragmas/exec_pragmas.h>
+
+#include "mpeg_device.h"
+#include "cl450.h"
+
+#ifndef _GENPROTO
+#include "cl450_protos.h"
+#include "datapump_protos.h"
+#endif
+
+/* Binary image of the CL450 Microcode */
+
+extern UBYTE CL450MicroCode[];
+
+#undef SysBase
+#define SysBase	mpegUnit->mu_SysBase
+
+#if 0
+#define D(x) x
+#else
+#define D(x)
+#endif
+
+/*
+** loadSeg - Transfer a code segment into the CL450's
+** DRAM and/or IMEM.
+**
+*/
+
+#define AUTO_INC_KLUDGE		// Kludge to fix possible HW problem with card and/or CL450
+
+extern ULONG ASM EndianFixLong(REG(d0) ULONG val);
+extern UWORD ASM EndianFixWord(REG(d0) ULONG val);
+extern VOID kprintf(STRPTR fmt,	...);
+
+static UWORD loadSeg(UBYTE **data, ULONG imem_start, struct MPEGUnit *mpegUnit)
+{
+    ULONG segsize, addr;
+    UWORD loadVal;
+    BOOL imemcode;
+
+
+    segsize = EndianFixLong(**(ULONG **)data);
+    *data = (UBYTE *)((ULONG)*data + 4);
+
+    addr = EndianFixLong(**(ULONG **)data);
+    *data = (UBYTE *)((ULONG)*data + 4);
+
+    D(kprintf("addr = %lx, imem_start = %lx, segsize = %lx\n",addr, imem_start, segsize));
+
+    if(segsize & 3)
+    	return(ERR_BAD_SEG_ALIGN);
+
+    segsize += addr;
+
+//    if((addr > DRAMSIZE) || (segsize > DRAMSIZE))
+//    	return(ERR_BAD_TARGET_ADDR);
+
+
+    if((addr >= imem_start) && (segsize < (imem_start + (UCODE_CACHE_END<<2))))
+    {
+    	imemcode = TRUE;
+    	D(kprintf("CPU_IADDR: %lx\n",((addr - imem_start) >> 1) & WADD_MASK));
+    	WriteCL450Register(CPU_IADDR, ((addr - imem_start) >> 1) & WADD_MASK);
+    	D(kprintf("CPU_IADDR: Done\n"));
+    }
+    else
+    	imemcode = FALSE;
+
+    for(; addr < segsize; addr += 2)
+    {
+    	loadVal = **(UWORD **)data;
+    	*data = (UBYTE *)((ULONG)*data + 2);
+    	WriteCL450Dram(addr, loadVal);
+
+    	if(imemcode)
+    	{
+    	    D(kprintf("CPU_IMEM: %lx\n",loadVal));
+    	    WriteCL450Register(CPU_IMEM, loadVal);
+    	    D(kprintf("CPU_IMEM: Done\n"));
+    	}
+    }
+    D(kprintf("loadSeg Done.\n"));
+    return(NO_ERR);
+}
+
+
+/*
+** DownloadCL450Microcode - Download microcode image into
+** the CL450's DRAM and/or IMEM.
+**
+*/
+
+static UWORD DownLoadCL450Microcode(UWORD *StartAddr, struct MPEGUnit *mpegUnit)
+{
+    UWORD Segment, Error;
+    ULONG StartIMEM;
+    UBYTE *data;
+    struct binary_hd *Header;
+
+    data = (UBYTE *)((ULONG)CL450MicroCode + sizeof(struct binary_hd));
+    Header = (struct binary_hd *)CL450MicroCode;
+
+    Error = NO_ERR;
+
+    *StartAddr = EndianFixWord(Header->init_pc);
+
+    D(kprintf("StartAddr = $%lx\n",*StartAddr));
+
+    StartIMEM = EndianFixWord(Header->imem_dram);
+
+    D(kprintf("StartIMEM = $%lx\n",StartIMEM));
+
+    Segment = EndianFixWord(Header->nseg);
+
+    D(kprintf("Segments: %ld\n",Segment));
+
+    for(; Segment && !Error; Segment--)
+    {
+    	Error = loadSeg(&data, StartIMEM,mpegUnit);
+        D(kprintf("loadSeg returned %ld\n",Error));
+    }
+    return(Error);
+}
+
+/*
+** StartCL450 - Load Microcode and start the CL450
+**
+*/
+static UWORD StartCL450(struct MPEGUnit *mpegUnit)
+{
+    UWORD StartAddr, Result;
+
+    if(!(Result = DownLoadCL450Microcode(&StartAddr,mpegUnit)))
+    {
+        D(kprintf("CPU_PC: %04lx\n", StartAddr & PC_MASK));
+    	WriteCL450Register(CPU_PC, StartAddr & PC_MASK);
+    	D(kprintf("CPU_PC: Done\n"));
+    }
+    return(Result);
+}
+
+/*
+** InitCL450
+**
+*/
+UWORD InitCL450(struct MPEGUnit *mpegUnit)
+{
+    UWORD Result;
+    ULONG i;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+    struct GfxBase *GfxBase;
+
+    D(kprintf("InitCL450: Entry.  CL450 Registers Located @@ $%lx\n",cl450Regs));
+
+    WrCL450Register(CMEM_CONTROL, RST | CRE | CRST);
+    WrCL450Register(CMEM_CONTROL, 0);
+    WrCL450Register(CMEM_DMACTRL, 0);
+    WrCL450Register(HOST_SCR2, CS | (DIV_MASK & (SYSTEM_CLOCK_DIVISOR(MPEG_CL450_GCLK_FREQ) << 3)));
+    WrCL450Register(DRAM_REFCNT, REFCNT_MASK & REFRESH_CLOCK_COUNT(MPEG_CL450_DRAM_REFRESH_NS,
+								       MPEG_CL450_GCLK_PERIOD_NS,
+								       MPEG_CL450_DRAM_ROWS));
+    WrCL450Register(VID_CONTROL, VID_SELMODE);
+    WrCL450Register(VID_REGDATA, 1);
+    WrCL450Register(HOST_RADDR1, 0x0a);
+    WrCL450Register(HOST_RDATA1, 0x01);
+
+    WrCL450Register(CPU_IADDR, 0);
+
+    for(i = 0; i < 512; i++)
+    {
+        WrCL450Register(CPU_IMEM,0);
+        WrCL450Register(CPU_IMEM,0);
+    }
+
+    WrCL450Register(CPU_TADDR, 0);
+    for(i = 0; i < 128; i++)
+    {
+        WrCL450Register(CPU_TMEM,0);
+    }
+
+#if 1
+    for(i = 0; i < 0x7ffff; i+=2)
+    {
+    	WriteCL450Dram(i, 0);
+    }
+#endif
+
+    D(kprintf("InitCL450: Starting CL450\n"));
+
+    if(!(Result = StartCL450(mpegUnit)))
+    {
+    	D(kprintf("InitCL450: Microcode loaded okay, starting CPU\n"));
+
+	WrCL450Register(HOST_RADDR1, 0xf);
+	WrCL450Register(HOST_RDATA1, 0xffff);
+
+    	WrCL450Register(CPU_CONTROL, CE_N);
+
+    	D(kprintf("Waiting for microcode initilization.\n"));
+
+	while(1)
+	{
+	    WrCL450Register(HOST_RADDR1, 0xf);
+	    if(RdCL450Register(HOST_RDATA1) == 0)
+	        break;
+	}
+
+	D(kprintf("Microcode initialization complete.\n"));
+
+	WrCL450Register(HOST_CONTROL, NON_VECTORED);
+	WrCL450Register(CMEM_DMACTRL, _3QE);
+
+    	SetCL450Threshold(8192,mpegUnit);
+	SetCL450Border(0,0,17,17,17,mpegUnit);		// AH: enabled 4/15/94
+
+	if(GfxBase = (struct GfxBase *)OpenLibrary("graphics.library",37L))
+	{
+	    if(GfxBase->DisplayFlags & PAL)
+	    	SetCL450VideoMode(3,mpegUnit);
+
+	    CloseLibrary((struct Library *)GfxBase);
+	}
+    }
+    return(Result);
+}
+
+
+/*
+** NewCommand - Sends a new command to the CL450.
+**
+*/
+BOOL NewCommand(UWORD commandWord, struct MPEGUnit *mpegUnit)
+{
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    D(kprintf("NewCommand: Waiting for CMD semaphore\n"));
+
+    WaitCL450Cmd(cl450Regs);
+
+    D(kprintf("NewCommand: Got Semaphore, sending command\n"));
+
+    if((RdCL450Register(CPU_NEWCMD) & CMD) == 0)
+    {
+    	WrCL450Register(HOST_RADDR1, 0);
+    	WrCL450Register(HOST_RDATA1, commandWord);
+    	return(TRUE);
+    }
+    return(FALSE);
+}
+
+/*
+** ResetCL450 - Reset CL450 Microcode.
+**
+*/
+BOOL ResetCL450(struct MPEGUnit *mpegUnit)
+{
+    /* Fist, we try to do this the _nice_ way by sending
+       the abort command.  If this fails, we call InitCL450
+       to reset the chip, as something bad has probably
+       happended. We will return FALSE in this case so
+       our called knows what we did. */
+
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_RESET,mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD,CMD);
+    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    {
+    	InitCL450(mpegUnit);
+    	stat=FALSE;
+    }
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** InquireCL450BufferFullness - Tell the CL450 to place the
+** current buffer fullness value into an internal register
+** that we can read.
+*/
+BOOL ASM InquireCL450BufferFullness(REG(a4) struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_INQUIRE_BUFFER_FULLNESS,mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD, CMD);
+	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+
+/*
+** NewPacket - Tell the CL450 we are about to send a new
+** packet of data to it, possibly with a timestamp.
+**
+*/
+BOOL NewPacket(UWORD length, struct IOMPEGReq *iomr, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_NEW_PACKET,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+    	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, length);
+
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+	WrCL450Register(HOST_RDATA1, (iomr->iomr_PTSHigh & 0x03) | (((iomr->iomr_MPEGFlags & MPEGF_VALID_PTS) && (mpegUnit->mu_PlayFlags & MPEGPF_SYNC)) ? 0x8000 : 0));
+//	WrCL450Register(HOST_RDATA1, (iomr->iomr_PTSHigh & 0x03));
+
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+    	WrCL450Register(HOST_RDATA1, 0x7fff & iomr->iomr_PTSMid);
+
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 4);
+#endif
+    	WrCL450Register(HOST_RDATA1, 0x7fff & iomr->iomr_PTSLow);
+
+    	WrCL450Register(CPU_NEWCMD, CMD);
+
+        WaitCL450Cmd(cl450Regs);
+#if 0
+        WaitCL450Cmd(cl450Regs);
+
+    	WrCL450Register(HOST_RADDR1, 0);
+
+    	if(RdCL450Register(HOST_RDATA1) != CL450CMD_NEW_PACKET)
+    	    kprintf("Length Mismatch!\n");
+
+    	WrCL450Register(HOST_RADDR1, 1);
+
+    	if(RdCL450Register(HOST_RDATA1) != length)
+    	    kprintf("Length Mismatch!\n");
+
+    	WrCL450Register(HOST_RADDR1, 2);
+
+    	if(RdCL450Register(HOST_RDATA1) != ((iomr->iomr_PTSHigh & 0x03) | ((iomr->iomr_MPEGFlags & MPEGF_VALID_PTS) ? 0x8000 : 0)))
+    	    kprintf("PTSHigh mismatch!\n");
+
+    	WrCL450Register(HOST_RADDR1, 3);
+
+    	if(RdCL450Register(HOST_RDATA1) != (0x7fff & iomr->iomr_PTSMid))
+    	    kprintf("PTSMid mismatch!\n");
+
+    	WrCL450Register(HOST_RADDR1, 4);
+
+    	if(RdCL450Register(HOST_RDATA1) != (0x7fff & iomr->iomr_PTSLow))
+    	    kprintf("PTSLow mismatch!\n");
+#endif
+    	stat=TRUE;
+    }
+    else
+        stat=FALSE;
+
+
+#if 0
+    if(iomr->iomr_MPEGFlags & MPEGF_VALID_PTS)
+    {
+        ULONG pts, minutes, seconds, frames;
+        pts = ((iomr->iomr_PTSHigh & 0x3) << 30) |
+               ((iomr->iomr_PTSMid & 0x7fff) << 15) |
+               (iomr->iomr_PTSLow & 0x7fff);
+
+        minutes = pts / (90000*60);
+        seconds = (pts - (minutes * 90000*60)) / 90000;
+        frames = pts - (minutes * 90000*60) - (seconds * 90000);
+
+	kprintf("%03ld:%02ld:%06ld\n",minutes,seconds,frames);
+
+        mpegUnit->mu_LastPTSHi = iomr->iomr_PTSHigh & 0x3;
+        mpegUnit->mu_LastPTSMid = iomr->iomr_PTSMid & 0x7fff;
+        mpegUnit->mu_LastPTSLo = iomr->iomr_PTSLow & 0x7fff;
+    }
+    else
+    	kprintf("--\n");
+#endif
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SetSCR - Set the CL450's System Clock Reference value
+**
+*/
+BOOL ASM SetSCR(REG(d2) UWORD hi,
+	        REG(d3) UWORD mid,
+	        REG(d4) UWORD lo,
+	        REG(a4) struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+    if(NewCommand(CL450CMD_ACCESS_SCR, mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, (hi & 0x03));
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+    	WrCL450Register(HOST_RDATA1, (mid & 0x7fff));
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+    	WrCL450Register(HOST_RDATA1, (lo & 0x7fff));
+    	WrCL450Register(CPU_NEWCMD,CMD);
+    	mpegUnit->mu_PlayFlags |= MPEGPF_SYNC;
+//    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+
+    return(stat);
+}
+
+/*
+** GetSCR - Set the CL450's System Clock Reference value
+**
+*/
+BOOL GetSCR(UWORD *hi, UWORD *mid, UWORD *lo, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_ACCESS_SCR, mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, 0x8000);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+    	WrCL450Register(HOST_RDATA1, 0);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+    	WrCL450Register(HOST_RDATA1, 0);
+    	WrCL450Register(CPU_NEWCMD,CMD);
+
+        WaitCL450Cmd(cl450Regs);
+
+    	WrCL450Register(HOST_RADDR1,1);
+
+    	*hi = RdCL450Register(HOST_RDATA1) & 0x3;
+    	WrCL450Register(HOST_RADDR1,2);
+
+    	*mid = RdCL450Register(HOST_RDATA1) & 0x7fff;
+
+    	WrCL450Register(HOST_RADDR1,3);
+    	*lo = RdCL450Register(HOST_RDATA1) & 0x7fff;
+
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** PlayCL450 - Tells the CL450 to begin decoding and
+** displaying video.
+**
+*/
+BOOL PlayCL450(struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_PLAY, mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+
+    do
+    {
+	WrCL450Register(HOST_CONTROL, NON_VECTORED);
+    }
+    while ((RdCL450Register(HOST_CONTROL) & 0x81) != NON_VECTORED);
+
+    return(stat);
+}
+
+/*
+** SetCL450Border - Sets the border color and display
+** window location.
+**
+*/
+BOOL SetCL450Border(UWORD windowLeft, UWORD windowTop, UWORD borderRed,
+		    UWORD borderGreen, UWORD borderBlue, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_BORDER,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowLeft);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowTop);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+    	WrCL450Register(HOST_RDATA1, borderRed);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 4);
+#endif
+    	WrCL450Register(HOST_RDATA1, (borderGreen) << 8 | borderBlue);
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SetCL450InterruptMask - Sets int enable bits on the CL450
+**
+*/
+BOOL SetCL450InterruptMask(UWORD eventMask, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_INTERRUPT_MASK,mpegUnit))
+    {
+    	Disable();
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, eventMask);
+    	WrCL450Register(CPU_NEWCMD, CMD);
+    	Enable();
+//	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    if(eventMask)
+    {
+        WrCL450Register(HOST_RADDR1, READ_INT_STATUS);
+        WrCL450Register(HOST_RDATA1, 0);
+    }
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SetThreshold - Sets the amount of free buffer space that will
+** cause the CL450 to send us a ready for data interrupt.
+**
+*/
+BOOL SetCL450Threshold(UWORD bufferLevel, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    ULONG i;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    D(kprintf("SetCL450Threshold: Entry\n"));
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_THRESHOLD,mpegUnit))
+    {
+    	D(kprintf("SetCL450Threshold: NewCommand() okay, writing parameters\n"));
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, bufferLevel);
+    	WrCL450Register(CPU_NEWCMD, CMD);
+
+    	D(kprintf("SetCL450Threshold: Waiting for command to complete.\n"));
+
+	for(i=500000;i;i--);
+
+//    	WaitCL450Cmd(cl450Regs);
+
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+
+    D(kprintf("SetCL450Threshold: Done\n"));
+    return(stat);
+}
+
+/*
+** SetCL450VideoMode - Set NTSC or PAL
+**
+*/
+BOOL SetCL450VideoMode(UWORD videoMode, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_VIDEO_FORMAT,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, videoMode);
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SetCL450Window - Set the decompression window
+**
+*/
+BOOL SetCL450Window(UWORD windowLeft, UWORD windowTop, UWORD windowWidth,
+		    UWORD windowHeight, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_WINDOW,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowLeft);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowTop);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowWidth);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 4);
+#endif
+    	WrCL450Register(HOST_RDATA1, windowHeight);
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//	WaitCL450Cmd(cl450Regs);
+
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** ScanCL450 - Put CL450 into scan mode.
+**
+*/
+BOOL ScanCL450(struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SCAN,mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//	WaitCL450Cmd(cl450Regs);
+        stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** PauseCL450 - Put CL450 into pause mode.
+**
+*/
+BOOL PauseCL450(struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_PAUSE,mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD, CMD);
+        stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** FlushCL450 - Flush the CL450's bitstream buffer.
+**
+*/
+BOOL FlushCL450(struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_FLUSH_BITSTREAM,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+        WrCL450Register(HOST_RDATA1, 0);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 2);
+#endif
+        WrCL450Register(HOST_RDATA1, 0);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 3);
+#endif
+        WrCL450Register(HOST_RDATA1, 0);
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 4);
+#endif
+        WrCL450Register(HOST_RDATA1, 0);
+
+        WrCL450Register(CPU_NEWCMD, CMD);
+
+        WaitCL450Cmd(cl450Regs);
+
+        stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SingleStepCL450 - Step ahead one video frame
+**
+*/
+BOOL SingleStepCL450(struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SINGLE_STEP,mpegUnit))
+    {
+    	WrCL450Register(CPU_NEWCMD, CMD);
+//    	WaitCL450Cmd(cl450Regs);
+    	stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** SlowMotionCL450 - Enter slow motion mode
+**
+*/
+BOOL SlowMotionCL450(UWORD speed, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SLOW_MOTION,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+        WrCL450Register(HOST_RDATA1, speed);
+        WrCL450Register(CPU_NEWCMD, CMD);
+//        WaitCL450Cmd(cl450Regs);
+        stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** BlankCL450 - Set CL450 blanking status
+**
+*/
+BOOL BlankCL450(ULONG blank, struct MPEGUnit *mpegUnit)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+    StartCL450Cmd();
+
+    if(NewCommand(CL450CMD_SET_BLANK,mpegUnit))
+    {
+#ifdef AUTO_INC_KLUDGE
+	WrCL450Register(HOST_RADDR1, 1);
+#endif
+        WrCL450Register(HOST_RDATA1, (blank) ? 1 : 0);
+        WrCL450Register(CPU_NEWCMD, CMD);
+        stat=TRUE;
+    }
+    else
+    	stat=FALSE;
+
+    EndCL450Cmd();
+    return(stat);
+}
+
+/*
+** ObtainCL450SeqSemaphore - Grab DRAM Variable Semaphore
+**
+*/
+VOID ObtainCL450SeqSemaphore(struct MPEGUnit *mpegUnit)
+{
+    volatile UBYTE delay;
+
+    Disable();
+    do
+    {
+    	while(ReadCL450Dram(SEQ_SEM) != 0);
+
+    	WriteCL450Dram(SEQ_SEM,HOST_CODE);
+
+    	/* Slimy way to delay a bit */
+
+    	delay = *(volatile UBYTE *) 0xbfe001;
+
+    } while(ReadCL450Dram(SEQ_SEM) != HOST_CODE);
+}
+
+/*
+** ReleaseCL450SeqSemaphore
+**
+*/
+VOID ReleaseCL450SeqSemaphore(struct MPEGUnit *mpegUnit)
+{
+    WriteCL450Dram(SEQ_SEM,0);
+    Enable();
+}
+
+@
+
+
+40.5
+log
+@Added SETBORDER back in init routine
+@
+text
+@d2 1
+a2 1
+** $Header: HOG:Other/cd32mpeg/RCS/cl450.c,v 40.4 94/01/26 11:55:58 kcd Exp Locker: kcd $
+d227 1
+a227 1
+	SetCL450Border(0,0,16,16,16,mpegUnit);		// AH: enabled 4/15/94
+@
+
+
+40.4
+log
+@""
+@
+text
+@d2 1
+a2 1
+** $Header: HOG:Other/cd32mpeg/RCS/cl450.c,v 40.3 93/10/23 01:04:20 kcd Exp Locker: kcd $
+d227 1
+a227 1
+//	SetCL450Border(0,0,16,16,16,mpegUnit);
+@
+
+
+40.3
+log
+@""
+@
+text
+@d2 1
+a2 1
+** $Header: HOG:Other/cd32mpeg/RCS/cl450.c,v 40.2 93/10/21 08:40:40 kcd Exp Locker: kcd $
+d20 1
+d42 2
+d337 3
+d341 4
+d347 4
+d352 4
+d357 1
+d435 3
+d439 3
+d443 3
+d473 3
+d477 3
+d481 3
+d555 7
+a561 1
+    	WrCL450Register (HOST_RDATA1, windowLeft);
+d563 3
+d567 3
+d596 3
+d636 3
+a638 1
+
+d672 3
+d701 3
+d705 3
+d709 3
+d713 3
+d789 3
+d793 3
+d797 3
+d801 3
+d856 3
+d884 3
+d906 1
+d927 1
+@
+
+
+40.2
+log
+@""
+@
+text
+@d2 1
+a2 1
+** $Header: HOG:Other/cd32mpeg/RCS/cl450.c,v 40.1 93/09/13 21:24:04 kcd Exp Locker: kcd $
+d224 1
+a224 1
+//	SetCL450Border(110,0,0,0,0,mpegUnit);
+a303 1
+//	kprintf("i");
+d335 4
+a338 4
+	WrCL450Register(HOST_RDATA1, (iomr->iomr_ClockHigh & 0x03) | (((iomr->iomr_MPEGFlags & MPEGF_VALID_PTS) && (mpegUnit->mu_PlayFlags & MPEGPF_SYNC)) ? 0x8000 : 0));
+//	WrCL450Register(HOST_RDATA1, (iomr->iomr_ClockHigh & 0x03));
+    	WrCL450Register(HOST_RDATA1, 0x7fff & iomr->iomr_ClockMid);
+    	WrCL450Register(HOST_RDATA1, 0x7fff & iomr->iomr_ClockLow);
+d357 1
+a357 1
+    	if(RdCL450Register(HOST_RDATA1) != ((iomr->iomr_ClockHigh & 0x03) | ((iomr->iomr_MPEGFlags & MPEGF_VALID_PTS) ? 0x8000 : 0)))
+d362 1
+a362 1
+    	if(RdCL450Register(HOST_RDATA1) != (0x7fff & iomr->iomr_ClockMid))
+d367 1
+a367 1
+    	if(RdCL450Register(HOST_RDATA1) != (0x7fff & iomr->iomr_ClockLow))
+d380 3
+a382 3
+        pts = ((iomr->iomr_ClockHigh & 0x3) << 30) |
+               ((iomr->iomr_ClockMid & 0x7fff) << 15) |
+               (iomr->iomr_ClockLow & 0x7fff);
+d390 3
+a392 3
+        mpegUnit->mu_LastPTSHi = iomr->iomr_ClockHigh & 0x3;
+        mpegUnit->mu_LastPTSMid = iomr->iomr_ClockMid & 0x7fff;
+        mpegUnit->mu_LastPTSLo = iomr->iomr_ClockLow & 0x7fff;
+a440 1
+//	kprintf("c");
+a480 1
+//	kprintf("P");
+a540 1
+//	kprintf("M",eventMask);
+d579 1
+a579 1
+//    StartCL450Cmd();
+d599 1
+a599 1
+//    EndCL450Cmd();
+a668 1
+//	kprintf("+");
+d692 1
+a692 1
+//	kprintf("|");
+d746 1
+a746 1
+//	kprintf(">");
+a748 7
+    WrCL450Register(HOST_RADDR1,0xc);
+    if(RdCL450Register(HOST_RDATA1) == 8)
+        kprintf("Seq Header\n");
+
+    WrCL450Register(HOST_RADDR1,0xc);
+    WrCL450Register(HOST_RDATA1, 0);
+
+d827 1
+a827 1
+    	delay = *(UBYTE *) 0xbfe001;
+@
+
+
+40.1
+log
+@""
+@
+text
+@d2 1
+a2 1
+** $Header: HOG:Other/cd32mpeg/RCScl450.c,v 1.1 93/09/13 21:07:57 kcd Exp Locker: kcd $
+d11 1
+d26 2
+a27 1
+#define SysBase	mpegDevice->md_SysBase
+d45 1
+a45 4
+static UWORD ASM loadSeg(REG(a3) UBYTE **data,
+		         REG(d7) ULONG imem_start,
+		         REG(a4) struct MPEGUnit *mpegUnit,
+		         REG(a6) struct MPEGDevice *mpegDevice)
+d74 1
+d86 2
+d89 2
+d92 1
+d103 1
+a103 3
+static UWORD ASM DownLoadCL450Microcode(REG(a2) UWORD *StartAddr,
+				        REG(a4) struct MPEGUnit *mpegUnit,
+				        REG(a6) struct MPEGDevice *mpegDevice)
+d129 2
+a130 1
+    	Error = loadSeg(&data, StartIMEM,mpegUnit,mpegDevice);
+d139 1
+a139 2
+static UWORD ASM StartCL450(REG(a4) struct MPEGUnit *mpegUnit,
+			    REG(a6) struct MPEGDevice *mpegDevice)
+d143 3
+a145 1
+    if(!(Result = DownLoadCL450Microcode(&StartAddr,mpegUnit,mpegDevice)))
+d147 2
+a148 1
+
+d156 1
+a156 2
+UWORD ASM InitCL450(REG(a4) struct MPEGUnit *mpegUnit,
+		    REG(a6) struct MPEGDevice *mpegDevice)
+d161 1
+d178 1
+d191 1
+d196 1
+d200 1
+a200 1
+    if(!(Result = StartCL450(mpegUnit, mpegDevice)))
+d222 11
+d242 1
+a242 3
+BOOL ASM NewCommand(REG(d0) UWORD commandWord,
+		    REG(a4) struct MPEGUnit *mpegUnit,
+		    REG(a6) struct MPEGDevice *mpegDevice)
+d248 1
+a248 1
+    WaitCL450Cmd();
+d265 1
+a265 2
+BOOL ASM ResetCL450(REG(a4) struct MPEGUnit *mpegUnit,
+		    REG(a6) struct MPEGDevice *mpegDevice)
+d278 1
+a278 1
+    if(NewCommand(CL450CMD_RESET,mpegUnit,mpegDevice))
+d281 1
+a281 1
+    	WaitCL450Cmd();
+d286 1
+a286 1
+    	InitCL450(mpegUnit,mpegDevice);
+d299 1
+a299 2
+BOOL ASM InquireCL450BufferFullness(REG(a4) struct MPEGUnit *mpegUnit,
+		    	           REG(a6) struct MPEGDevice *mpegDevice)
+d307 1
+a307 1
+    if(NewCommand(CL450CMD_INQUIRE_BUFFER_FULLNESS,mpegUnit,mpegDevice))
+d310 1
+a310 1
+	WaitCL450Cmd();
+d326 5
+a330 14
+BOOL ASM NewPacket(REG(d2) UWORD length,
+	           REG(d3) UWORD hi,
+	           REG(d4) UWORD mid,
+	           REG(d5) UWORD lo,
+	           REG(d6) ULONG valid,
+	           REG(a4) struct MPEGUnit *mpegUnit,
+	           REG(a6) struct MPEGDevice *mpegDevice)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+
+//	kprintf("n");
+//	if(valid)
+//	    kprintf("p");
+d333 1
+a333 1
+    if(NewCommand(CL450CMD_NEW_PACKET,mpegUnit,mpegDevice))
+d336 4
+a339 4
+	WrCL450Register(HOST_RDATA1, (hi & 0x03) | ((valid) ? 0x8000 : 0));
+//	WrCL450Register(HOST_RDATA1, hi & 0x03 );
+    	WrCL450Register(HOST_RDATA1, 0x7fff & mid);
+    	WrCL450Register(HOST_RDATA1, 0x7fff & lo);
+d341 30
+a370 1
+//    	WaitCL450Cmd();
+d376 22
+d409 1
+a409 2
+	        REG(a4) struct MPEGUnit *mpegUnit,
+	        REG(a6) struct MPEGDevice *mpegDevice)
+a413 1
+//	kprintf("C");
+d415 1
+a415 1
+    if(NewCommand(CL450CMD_ACCESS_SCR, mpegUnit, mpegDevice))
+d421 2
+a422 1
+//    	WaitCL450Cmd();
+a429 4
+    mpegUnit->mu_LastPTSHi = hi & 0x3;
+    mpegUnit->mu_LastPTSMid = mid & 0x7fff;
+    mpegUnit->mu_LastPTSLo = lo & 0x7fff;
+
+d437 1
+a437 5
+BOOL ASM GetSCR(REG(d2) UWORD *hi,
+	        REG(d3) UWORD *mid,
+	        REG(d4) UWORD *lo,
+	        REG(a4) struct MPEGUnit *mpegUnit,
+	        REG(a6) struct MPEGDevice *mpegDevice)
+d445 1
+a445 1
+    if(NewCommand(CL450CMD_ACCESS_SCR, mpegUnit, mpegDevice))
+d452 1
+a452 1
+        WaitCL450Cmd();
+d478 1
+a478 2
+BOOL ASM PlayCL450(REG(a4) struct MPEGUnit *mpegUnit,
+	           REG(a6) struct MPEGDevice *mpegDevice)
+d486 1
+a486 1
+    if(NewCommand(CL450CMD_PLAY, mpegUnit, mpegDevice))
+d489 1
+a489 1
+//    	WaitCL450Cmd();
+d511 5
+a515 10
+BOOL ASM SetCL450Border(REG(d2) UWORD windowLeft,
+			REG(d3) UWORD windowTop,
+			REG(d4) UWORD borderRed,
+		    	REG(d5) UWORD borderGreen,
+		    	REG(d6) UWORD borderBlue,
+		    	REG(a4) struct MPEGUnit *mpegUnit,
+		    	REG(a6) struct MPEGDevice *mpegDevice)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+d519 1
+a519 1
+    if(NewCommand(CL450CMD_SET_BORDER,mpegUnit,mpegDevice))
+d521 1
+a521 1
+    	WrCL450Register(HOST_RDATA1, windowLeft);
+d526 1
+a526 1
+//    	WaitCL450Cmd();
+d540 1
+a540 3
+BOOL ASM SetCL450InterruptMask(REG(d2) UWORD eventMask,
+			       REG(a4) struct MPEGUnit *mpegUnit,
+			       REG(a6) struct MPEGDevice *mpegDevice)
+d548 1
+a548 1
+    if(NewCommand(CL450CMD_SET_INTERRUPT_MASK,mpegUnit,mpegDevice))
+d554 1
+a554 1
+//	WaitCL450Cmd();
+d575 1
+a575 3
+BOOL ASM SetCL450Threshold(REG(d2) UWORD bufferLevel,
+		           REG(a4) struct MPEGUnit *mpegUnit,
+		           REG(a6) struct MPEGDevice *mpegDevice)
+d585 1
+a585 1
+    if(NewCommand(CL450CMD_SET_THRESHOLD,mpegUnit,mpegDevice))
+d596 1
+a596 1
+//    	WaitCL450Cmd();
+d613 1
+a613 3
+BOOL ASM SetCL450VideoMode(REG(d2) UWORD videoMode,
+		           REG(a4) struct MPEGUnit *mpegUnit,
+		           REG(a6) struct MPEGDevice *mpegDevice)
+d620 1
+a620 1
+    if(NewCommand(CL450CMD_SET_VIDEO_FORMAT,mpegUnit,mpegDevice))
+d624 1
+a624 1
+//    	WaitCL450Cmd();
+d638 5
+a642 9
+BOOL ASM SetCL450Window(REG(d2) UWORD windowLeft,
+		        REG(d3) UWORD windowTop,
+		    	REG(d4) UWORD windowWidth,
+		    	REG(d5) UWORD windowHeight,
+		    	REG(a4) struct MPEGUnit *mpegUnit,
+		    	REG(a6) struct MPEGDevice *mpegDevice)
+{
+    BOOL stat;
+    CL450Regs *cl450Regs = mpegUnit->mu_CL450;
+d646 1
+a646 1
+    if(NewCommand(CL450CMD_SET_WINDOW,mpegUnit,mpegDevice))
+d653 1
+a653 1
+//	WaitCL450Cmd();
+d668 1
+a668 2
+BOOL ASM ScanCL450(REG(a4) struct MPEGUnit *mpegUnit,
+	       	   REG(a6) struct MPEGDevice *mpegDevice)
+d676 1
+a676 1
+    if(NewCommand(CL450CMD_SCAN,mpegUnit,mpegDevice))
+d679 1
+a679 1
+//	WaitCL450Cmd();
+d693 1
+a693 2
+BOOL ASM PauseCL450(REG(a4) struct MPEGUnit *mpegUnit,
+	       	   REG(a6) struct MPEGDevice *mpegDevice)
+d700 1
+a700 1
+    if(NewCommand(CL450CMD_PAUSE,mpegUnit,mpegDevice))
+d716 1
+a716 2
+BOOL ASM FlushCL450(REG(a4) struct MPEGUnit *mpegUnit,
+	       	    REG(a6) struct MPEGDevice *mpegDevice)
+d720 1
+a720 1
+//	kprintf("f");
+d723 1
+a723 1
+    if(NewCommand(CL450CMD_FLUSH_BITSTREAM,mpegUnit,mpegDevice))
+d729 1
+d731 3
+a733 1
+        WaitCL450Cmd();
+d747 1
+a747 2
+BOOL ASM SingleStepCL450(REG(a4) struct MPEGUnit *mpegUnit,
+		         REG(a6) struct MPEGDevice *mpegDevice)
+d754 8
+a761 1
+    if(NewCommand(CL450CMD_SINGLE_STEP,mpegUnit,mpegDevice))
+d764 1
+a764 1
+//    	WaitCL450Cmd();
+d778 1
+a778 3
+BOOL ASM SlowMotionCL450(REG(d2) UWORD speed,
+		         REG(a4) struct MPEGUnit *mpegUnit,
+		         REG(a6) struct MPEGDevice *mpegDevice)
+d785 1
+a785 1
+    if(NewCommand(CL450CMD_SLOW_MOTION,mpegUnit,mpegDevice))
+d789 25
+a813 1
+//        WaitCL450Cmd();
+d827 1
+a827 2
+VOID ASM ObtainCL450SeqSemaphore(REG(a4) struct MPEGUnit *mpegUnit,
+				 REG(a6) struct MPEGDevice *mpegDevice)
+d848 1
+a848 2
+VOID ASM ReleaseCL450SeqSemaphore(REG(a4) struct MPEGUnit *mpegUnit,
+				  REG(a6) struct MPEGDevice *mpegDevice)
+d851 1
+a851 1
+};
+@

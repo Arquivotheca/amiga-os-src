@@ -1,0 +1,11 @@
+VERSION		EQU	36
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'27 Jun 1991'
+	ENDM
+VERS	MACRO
+		dc.b	'postscript 36.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'postscript 36.1 (27 Jun 1991)',13,10,0
+	ENDM

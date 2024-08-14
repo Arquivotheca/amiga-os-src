@@ -1,0 +1,1816 @@
+head     39.9;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+39.9
+date     93.10.08.16.45.11;  author jesup;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     93.07.16.18.24.08;  author peter;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     93.06.02.15.49.57;  author peter;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.05.21.17.32.13;  author peter;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     93.05.07.17.05.49;  author peter;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.05.03.14.37.57;  author peter;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     93.04.27.14.39.24;  author peter;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.12.03.11.30.43;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.10.30.16.12.39;  author peter;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.10.30.15.19.05;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Wack key and symbol support.
+@
+
+
+39.9
+log
+@Added code to support ReadBlock/WriteBlock (for all but envoy)
+@
+text
+@/*
+ * Amiga Grand Wack
+ *
+ * define.c -- Wack key and symbol support
+ *
+ * $Id: define.c,v 39.8 93/07/16 18:24:08 peter Exp Locker: jesup $
+ *
+ * Routines to handle building symbol tables, and binding commands to
+ * functions in various ways.
+ *
+ */
+
+#include "symbols.h"
+#include "special.h"
+#include "parse.h"
+
+#include <exec/types.h>
+#include "parse_proto.h"
+#include "link_proto.h"
+#include "sys_proto.h"
+#include "asm_proto.h"
+#include "ops_proto.h"
+#include "bind_proto.h"
+#include "define_proto.h"
+#include "find_proto.h"
+#include "io_proto.h"
+#include "rexxhandler_proto.h"
+#include "wackbase_proto.h"
+
+extern long LastNum;
+
+struct SymbolMap TopSymMap = {0};
+
+extern long CurrAddr;
+
+extern LONG Hash();
+
+char *TypeNames[] =
+{
+    "constant",
+    "command",
+    "offset",
+    "base",
+};
+
+char *
+UnCtrl( char c, char *s )
+{
+    char *t = s;
+
+    if (c < ' ')
+    {
+	*t++ = '^';
+	*t++ = 'A' - 1 + c;
+    }
+    else
+	if (c != 0x7f)
+	{
+	    *t++ = c;
+	}
+    *t = 0;
+
+    return s;
+}
+
+void
+BindMacro( char *name, short *type, char *body )
+{
+
+}
+
+/* Allocate and return a Symbol of the supplied name and link it
+ * into the specified SymbolMap.
+ */
+struct Symbol *
+NewSymbol( char *name, struct SymbolMap *symMap )
+{
+    char *newName;
+    struct Symbol *sym;
+
+    if ( sym = (struct Symbol *) malloc( sizeof( struct Symbol ) ) )
+    {
+	if ( newName = (char *) malloc( strlen( name ) + 1 ) )
+	{
+	    strcpy( newName, name );
+	    sym->sym_Name = newName;
+	    if (symMap->tail[ Hash( name ) ] == 0)
+	    {
+		symMap->head[ Hash( name ) ] = sym;
+	    }
+	    else
+	    {
+		symMap->tail[ Hash( name ) ]->sym_Next = sym;
+	    }
+	    symMap->tail[ Hash( name ) ] = sym;
+	    sym->sym_Next = (struct Symbol *) 0;
+	    sym->sym_Type = 0;
+	    sym->sym_Value1 = 0;
+	    sym->sym_Value2 = 0;
+	}
+	else
+	{
+	    free( sym );
+	    sym = NULL;
+	}
+    }
+    return( sym );
+}
+
+
+/* Locate a symbol by name in a specified SymbolMap */
+struct Symbol *
+FindSymbol( char *name, struct SymbolMap *symMap )
+{
+    struct Symbol *sym;
+
+    for ( sym = symMap->head[ Hash( name ) ]; sym; sym = sym->sym_Next )
+    {
+	if ( !stricmp( name, sym->sym_Name ) )
+	{
+	    return( sym );
+	}
+    }
+    return( NULL );
+}
+
+
+static void
+ShowSymbol( struct Symbol *sym )
+{
+    PPrintf( "%10s  %08lx  %08lx  %s\n", TypeNames[ sym->sym_Type ],
+	sym->sym_Value1, sym->sym_Value2, sym->sym_Name );
+}
+
+
+static void
+ShowSymbolMap( struct SymbolMap *symMap )
+{
+    struct Symbol *sym;
+    int h;
+
+    for ( h = 0; h < HASHSIZE; h++ )
+    {
+	for ( sym = symMap->head[ h ]; sym; sym = sym->sym_Next )
+	{
+	    ShowSymbol( sym );
+	}
+    }
+}
+
+
+STRPTR
+ShowTopSymMap( void )
+{
+    ShowSymbolMap( &TopSymMap );
+
+    return( NULL );
+}
+
+void
+UnBindSymbols( void )
+{
+    UnBindSymbolMap( &TopSymMap );
+}
+
+void
+UnBindSymbolMap( struct SymbolMap *symMap )
+{
+    struct Symbol *sym;
+    struct Symbol *succ;
+    int h;
+
+    for ( h = 0; h < HASHSIZE; h++ )
+    {
+	sym = symMap->head[ h ];
+	while ( sym )
+	{
+	    succ = sym->sym_Next;
+	    if ( sym->sym_Type == ACT_COMMAND )
+	    {
+		free( sym->sym_Args );
+	    }
+	    free( sym->sym_Name );
+	    free( sym );
+	    sym = succ;
+	}
+    }
+}
+
+
+void
+dumpNearestSymbol( ULONG addr )
+{
+    struct Symbol *sym;
+    struct Symbol *cp;
+    long v;
+    long lv;
+    int	h;
+
+    cp = 0;
+    lv = 0x1000000;
+
+    for ( h = 0; h < HASHSIZE; h++ )
+    {
+	for ( sym = TopSymMap.head[ h ]; sym; sym = sym->sym_Next )
+	{
+	    if ( ( sym->sym_Type == ACT_CONSTANT ) || ( sym->sym_Type == ACT_PGMSYMBOL ) )
+	    {
+		v = sym->sym_Value1;
+		if ( ( addr - v >= 0 ) && ( addr - v < lv ) )
+		{
+		    cp = sym;
+		    lv = addr - v;
+		}
+	    }
+
+	}
+    }
+    if ( cp != 0 )
+    {
+	PPrintf( "%s + %lx   (%lx + %lx = %lx)\n", cp->sym_Name, lv,
+		cp->sym_Value2, cp->sym_Value1, v );
+    }
+    else
+    {
+	PPrintf( "You're lost (%lx).\n", addr );
+    }
+}
+
+
+STRPTR
+ApproxSym( char *arg )
+{
+    ULONG addr;
+
+    if ( parseAddress( arg, &addr ) )
+    {
+	dumpNearestSymbol( addr );
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+
+STRPTR
+ApproxSymIndirect( char *arg )
+{
+    ULONG addr;
+
+    if ( parseAddress( arg, &addr ) )
+    {
+	addr = ReadLong( (APTR)addr ) & 0xFFFFFFFE;
+	dumpNearestSymbol( addr );
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+
+/* Create or replace the named symbol, giving it the
+ * specified type and value.  Will reuse an existing
+ * symbol of the same name.
+ */
+struct Symbol *
+BindValue( char *name, short vtype, long value )
+{
+    struct Symbol *symbol;
+
+    if ( ( symbol = FindSymbol( name, &TopSymMap ) ) ||
+	( symbol = NewSymbol( name, &TopSymMap ) ) )
+    {
+	symbol->sym_Type = vtype;
+	symbol->sym_Value1 = value;
+    }
+    return( symbol );
+}
+
+
+/* Create the named symbol, giving it the specified
+ * type and value.  Does not check for duplicate
+ * symbols, so it's faster than BindValue().
+ */
+struct Symbol *
+BindValueQuick( char *name, short vtype, long value )
+{
+    struct Symbol *symbol;
+
+    if ( symbol = NewSymbol( name, &TopSymMap ) )
+    {
+	symbol->sym_Type = vtype;
+	symbol->sym_Value1 = value;
+    }
+    return( symbol );
+}
+
+
+void
+BindCommand( char *name, CMDFUNC function )
+{
+    BindValue( name, ACT_COMMAND, (long) function );
+}
+
+void
+BindCommand2( char *name, CMDFUNC function, char *arg1 )
+{
+    struct Symbol *sym;
+
+    if ( sym = BindValue( name, ACT_COMMAND, (long) function ) )
+    {
+	char *args;
+	if ( arg1 )
+	{
+	    if ( args = malloc( strlen( arg1 ) + 1 ) )
+	    {
+		strcpy( args, arg1 );
+		sym->sym_Args = args;
+	    }
+	}
+    }
+}
+
+
+void
+TryIt( void )
+{
+    int     h;
+
+    for (h = 0; h < HASHSIZE; h++)
+    {
+	TopSymMap.head[h] = 0;
+	TopSymMap.tail[h] = 0;
+    }
+
+    InitTopMap ();
+}
+
+
+long
+isAlpha( char ch )
+{
+    return( ( ( ch >= 'a' ) && ( ch <= 'z' ) ) || ( ( ch >= 'A' ) && ( ch <= 'Z' ) ) );
+}
+
+
+long
+processLine( char *line )
+{
+    char command[ MAXTOKENLEN ];
+    char *arg;
+    long ok = TRUE;
+    char singlekeycmd[ 2 ];
+    struct Symbol *sym;
+
+    while ( line )
+    {
+	if ( arg = parseToken( line, command ) )
+	{
+	    /* Non-alphanumeric commands (normally punctuation keys)
+	     * don't require a delimeter, they just take the whole line
+	     * as an argument.  Let's scan for one of those and handle
+	     * it if there.
+	     */
+	    singlekeycmd[ 0 ] = command[ 0 ];
+	    singlekeycmd[ 1 ] = '\0';
+	    if ( ( !isAlpha( command[ 0 ] ) ) &&
+		( sym = FindSymbol( singlekeycmd, &TopSymMap ) ) )
+	    {
+		/* Found such a command.  Its argument will be everything
+		 * on the command line after the single character.  We
+		 * use parseRemainder() to strip off the same leading blanks
+		 * stripped by parseToken() above, without losing any of
+		 * the rest of the line.
+		 */
+		arg = parseRemainder( line );
+		line = evaluateSymbol( sym, arg+1 );
+	    }
+	    else if ( sym = FindSymbol( command, &TopSymMap ) )
+	    {
+		line = evaluateSymbol( sym, arg );
+	    }
+	    else if ( IsHexNum( command, &LastNum ) )
+	    {
+		CurrAddr = LastNum;
+		ShowFrame();
+		line = NULL;
+	    }
+	    else
+	    {
+		ok = FALSE;
+		line = NULL;
+	    }
+	}
+	else
+	{
+	    /* Just hitting <Enter> causes the current frame
+	     * to be redisplayed
+	     */
+	    ShowFrame();
+	    line = NULL;
+	}
+	line = parseRemainder( line );
+    }
+    return( ok );
+}
+
+
+/* Makes a symbol which is a synonym for another symbol.
+ * argument line is supposed to be "verb equivalentverb"
+ */
+STRPTR
+bindAlias( char *arg )
+{
+    char symbol[ MAXTOKENLEN ];
+    char *equiv;
+    struct Symbol *sym;
+
+    if ( equiv = parseRemainder( parseToken( arg, symbol ) ) )
+    {
+	if ( sym = FindSymbol( equiv, &TopSymMap ) )
+	{
+	    if ( sym->sym_Type == ACT_COMMAND )
+	    {
+		BindCommand2( symbol, sym->sym_Function, sym->sym_Args );
+	    }
+	    else
+	    {
+		PPrintf("Cannot bind to '%s'\n", equiv);
+	    }
+	}
+	else
+	{
+	    PPrintf("Symbol '%s' not found\n", equiv);
+	}
+    }
+    else
+    {
+	PPrintf("Bad syntax\n");
+    }
+
+    return( NULL );
+}
+
+
+/* Makes a symbol which will invoke an external Wack program with
+ * the supplied arguments.
+ * The argument line is supposed to be "verb command [fixed_args]"
+ * Later, when the line "verb [args]" is processed, the
+ * command emitted will be:
+ *
+ *	command WACKPORT=wack.n [fixed_args] [args]
+ */
+STRPTR
+bindXWack( char *arg )
+{
+    char symbol[ MAXTOKENLEN ];
+    char *command;
+
+    if ( command = parseRemainder( parseToken( arg, symbol ) ) )
+    {
+	BindCommand2( symbol, runWackCommand, command );
+    }
+    else
+    {
+	PPrintf("Bad syntax\n");
+    }
+
+    return( NULL );
+}
+
+
+/* Makes a symbol which will invoke a Shell command with the
+ * supplied arguments.
+ * The argument line is supposed to be "verb command [fixed_args]"
+ * Later, when the line "verb [args]" is processed, the
+ * Shell command emitted will be:
+ *
+ *	command [fixed_args] [args]
+ */
+STRPTR
+bindSystem( char *arg )
+{
+    char symbol[ MAXTOKENLEN ];
+    char *command;
+
+    if ( command = parseRemainder( parseToken( arg, symbol ) ) )
+    {
+	BindCommand2( symbol, runCommand, command );
+    }
+    else
+    {
+	PPrintf("Bad syntax\n");
+    }
+
+    return( NULL );
+}
+
+
+/* Makes a symbol which will invoke an ARexx script with the
+ * supplied arguments.
+ * The argument line is supposed to be "verb command [fixed_args]"
+ * Later, when the line "verb [args]" is processed, the
+ * command emitted will be:
+ *
+ *	command [fixed_args] [args]
+ */
+STRPTR
+bindRexx( char *arg )
+{
+    char symbol[ MAXTOKENLEN ];
+    char *command;
+
+    if ( command = parseRemainder( parseToken( arg, symbol ) ) )
+    {
+	BindCommand2( symbol, ARexx_Execute, command );
+    }
+    else
+    {
+	PPrintf("Bad syntax\n");
+    }
+
+    return( NULL );
+}
+
+
+/* Makes a symbol which is a constant.  Invoking this symbol
+ * will set the current address to that constant.
+ */
+STRPTR
+bindConstant( char *arg )
+{
+    char symbol[ MAXTOKENLEN ];
+    ULONG value;
+
+    if ( parseAddress( parseToken( arg, symbol ), &value ) )
+    {
+	BindValue( symbol, ACT_CONSTANT, value );
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+@
+
+
+39.8
+log
+@Removed ACT_OFFSET and Fixup() stuff.  ACT_PGMSYMBOL now recognized.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.7 93/06/02 15:49:57 peter Exp Locker: peter $
+d36 1
+a36 1
+int Hash();
+@
+
+
+39.7
+log
+@ApproxSym() cleaned up.  ApproxSymIndirect() moved here.  No longer
+double-emit the current frame after !, [, {, and ] commands.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.6 93/05/21 17:32:13 peter Exp Locker: peter $
+a21 1
+#include "symbols_proto.h"
+a151 31
+/* For all ACT_OFFSET symbols, fill in their hunk-bases by looking
+ * for symbols of the form "`hunk_%lx".
+ */
+static void
+Fixup( struct SymbolMap *symMap )
+{
+    struct Symbol *sym;
+    int h;
+    char s[40];
+
+    PPrintf("  generating symbol addresses ...\n");
+    for ( h = 0; h < HASHSIZE; h++ )
+    {
+	for ( sym = symMap->head[h]; sym; sym = sym->sym_Next )
+	{
+	    if ( ( sym->sym_Type ) == ACT_OFFSET )
+	    {
+		sprintf( s, "`hunk_%lx", sym->sym_Value2 );
+		sym->sym_Value2 = GetValue( s );
+	    }
+	}
+    }
+}
+
+
+void
+FixupTopMap( void )
+{
+    Fixup( &TopSymMap );
+}
+
+d207 1
+a207 10
+	    if ( sym->sym_Type == ACT_OFFSET )
+	    {
+		v = ( sym->sym_Value2 ) + ( sym->sym_Value1 );
+		if ( ( addr - v >= 0 ) && ( addr - v < lv ) )
+		{
+		    cp = sym;
+		    lv = addr - v;
+		}
+	    }
+	    else if ( sym->sym_Type == ACT_CONSTANT )
+@
+
+
+39.6
+log
+@Command functions now return NULL string.  ApproxSym() now reports
+ACT_CONSTANTs as well as ACT_OFFSETs.  Line parser loops back on line
+residuals.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.5 93/05/07 17:05:49 peter Exp Locker: peter $
+d19 1
+d222 3
+a224 2
+STRPTR
+ApproxSym( char *arg )
+d231 3
+a233 1
+    CPTR addr;
+d235 1
+a235 1
+    if ( parseAddress( arg, (ULONG *)&addr ) )
+d237 1
+a237 4
+	cp = 0;
+	lv = 0x1000000;
+
+	for ( h = 0; h < HASHSIZE; h++ )
+d239 1
+a239 1
+	    for ( sym = TopSymMap.head[ h ]; sym; sym = sym->sym_Next )
+d241 2
+a242 1
+		if ( sym->sym_Type == ACT_OFFSET )
+d244 2
+a245 6
+		    v = ( sym->sym_Value2 ) + ( sym->sym_Value1 );
+		    if ( ( addr - v >= 0 ) && ( addr - v < lv ) )
+		    {
+			cp = sym;
+			lv = addr - v;
+		    }
+d247 5
+a251 1
+		else if ( sym->sym_Type == ACT_CONSTANT )
+d253 2
+a254 6
+		    v = sym->sym_Value1;
+		    if ( ( addr - v >= 0 ) && ( addr - v < lv ) )
+		    {
+			cp = sym;
+			lv = addr - v;
+		    }
+d256 1
+a257 1
+	    }
+d259 40
+a298 9
+	if ( cp != 0 )
+	{
+	    PPrintf( "%s + %lx   (%lx + %lx = %lx)\n", cp->sym_Name, lv,
+		    cp->sym_Value2, cp->sym_Value1, v );
+	}
+	else
+	{
+	    PPrintf( "You're lost (%lx).\n", addr );
+	}
+d450 1
+@
+
+
+39.5
+log
+@Removed key-command/keymap stuff.  Cleaned up struct Symbol.  Switched
+to new parsing routines.  Cleaned up BindValueX() and BindPrim().
+Line processing is now entirely in a single routine, processLine().
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.4 93/05/03 14:37:57 peter Exp Locker: peter $
+d183 1
+a183 1
+void
+d187 2
+d221 1
+a221 1
+void
+d249 10
+d275 2
+d318 1
+a318 1
+BindCommand( char *name, voidfunc function )
+d324 1
+a324 1
+BindCommand2( char *name, voidfunc function, char *arg1 )
+d374 1
+a374 1
+    if ( arg = parseToken( line, command ) )
+d376 6
+a381 15
+	/* Non-alphanumeric commands (normally punctuation keys)
+	 * don't require a delimeter, they just take the whole line
+	 * as an argument.  Let's scan for one of those and handle
+	 * it if there.
+	 */
+	singlekeycmd[ 0 ] = command[ 0 ];
+	singlekeycmd[ 1 ] = '\0';
+	if ( ( !isAlpha( command[ 0 ] ) ) &&
+	    ( sym = FindSymbol( singlekeycmd, &TopSymMap ) ) )
+	{
+	    /* Found such a command.  Its argument will be everything
+	     * on the command line after the single character.  We
+	     * use parseRemainder() to strip off the same leading blanks
+	     * stripped by parseToken() above, without losing any of
+	     * the rest of the line.
+d383 29
+a411 2
+	    arg = parseRemainder( line );
+	    evaluateSymbol( sym, arg+1 );
+d413 1
+a413 1
+	else if ( sym = FindSymbol( command, &TopSymMap ) )
+d415 3
+a417 5
+	    evaluateSymbol( sym, arg );
+	}
+	else if ( IsHexNum( command, &LastNum ) )
+	{
+	    CurrAddr = LastNum;
+d419 1
+a419 4
+	}
+	else
+	{
+	    ok = FALSE;
+a421 7
+    else
+    {
+	/* Just hitting <Enter> causes the current frame
+	 * to be redisplayed
+	 */
+	ShowFrame();
+    }
+d429 1
+a429 1
+void
+d458 2
+d471 1
+a471 1
+void
+d485 2
+d498 1
+a498 1
+void
+d512 2
+d525 1
+a525 1
+void
+d539 2
+d547 1
+a547 1
+void
+d561 2
+@
+
+
+39.4
+log
+@Added bindConstant() and cleanup.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.3 93/04/27 14:39:24 peter Exp Locker: peter $
+d15 1
+d18 1
+a31 1
+struct KeyMap TopMap = { 0, 0 };
+a33 2
+struct KeyMap *ThisMap;
+char ThisKey;
+d41 1
+a41 1
+    "primitive",
+a43 1
+    "keymap",
+a65 49
+static void
+ShowKeyMap( struct KeyMap *keyMap )
+{
+    struct KeyAction   *kp;
+    char    s1[6];
+    char    s2[6];
+
+    for (kp = keyMap->head; kp; kp = kp->next)
+    {
+	if (kp->lastKey == 0)
+	{
+	    PPrintf ("key '%s'", UnCtrl (kp->firstKey, s1));
+	}
+	else
+	{
+	    UnCtrl (kp->firstKey, s1);
+	    UnCtrl (kp->lastKey, s2);
+	    PPrintf ("keys '%s'-'%s'", s1, s2);
+	}
+	PPrintf (" bound to '%s'\n", kp->symbol->name);
+    }
+}
+
+static void
+ShowTopKeyMap( void )
+{
+    ShowKeyMap (&TopMap);
+}
+
+struct KeyAction *
+FindKey( char key, struct KeyMap *keyMap )
+{
+    struct KeyAction   *kp;
+
+    for (kp = keyMap->head; kp; kp = kp->next)
+    {
+	if (key == kp->firstKey)
+	{
+	    return kp;
+	}
+	if ((key >= kp->firstKey) && (key <= kp->lastKey))
+	{
+	    return kp;
+	}
+    }
+    return 0;
+}
+
+
+d78 2
+a79 2
+    char   *newName = (char *) malloc (strlen (name) + 1);
+    struct Symbol  *sp = (struct Symbol *) malloc (sizeof (struct Symbol));
+d81 27
+a107 14
+    strcpy (newName, name);
+    sp->name = newName;
+    if (symMap->tail[Hash (name)] == 0)
+    {
+	symMap->head[Hash (name)] = sp;
+    }
+    else
+    {
+	symMap->tail[Hash (name)]->next = sp;
+    }
+    symMap->tail[Hash (name)] = sp;
+    sp->next = (struct Symbol *) 0;
+    sp->stype = sp->value1 = sp->value2 = 0;
+    return sp;
+d115 1
+a115 1
+    struct Symbol   *sp;
+d117 1
+a117 2
+  /* PPrintf ("hash is %ld\n for %s", Hash(name),name); */
+    for (sp = symMap->head[Hash(name)]; sp; sp = sp->next)
+d119 1
+a119 34
+	if ( symbolEqual( name, sp->name ) )
+	{
+	    return sp;
+	}
+    }
+    return 0;
+}
+
+
+static long
+isDelimeter( char ch )
+{
+    return( ( ch == ' ' ) || ( ch == '\t' ) ||
+	( ch == '\n' ) || ( ch == '\0' ) );
+}
+
+/* Checks for equality between a command name and a symbol name.
+ * The command name is considered delimited by a space, tab, newline,
+ * or NUL.  The symbol name is delimited by a NUL.  This is a
+ * case-insensitive comparison, and returns zero if they're unequal,
+ * or non-zero if they are.
+ */
+static long
+symbolEqual( char *name, char *symname )
+{
+    long known = 0;
+    long equal = 1;
+    long nameend;
+
+    while ( !known )
+    {
+	nameend = isDelimeter( *name );
+
+	if ( !( *symname ) )
+d121 1
+a121 16
+	    /* That's the end of the symbol.  We're equal if the
+	     * current character of the name is a blank, else
+	     * we're not.
+	     */
+	    known = 1;
+	    equal = nameend;
+	}
+	else if ( ( nameend ) || ( UpperCase( *name ) != UpperCase( *symname ) ) )
+	{
+	    known = 1;
+	    equal = 0;
+	}
+	else
+	{
+	    name++;
+	    symname++;
+d124 1
+a124 1
+    return( equal );
+d127 1
+d129 1
+a129 1
+ShowSymbol( struct Symbol *sp )
+d131 2
+a132 2
+    PPrintf ("%10s  %08lx  %08lx  %s\n", TypeNames[sp->stype],
+	    sp->value1, sp->value2, sp->name);
+d139 1
+a139 1
+    struct Symbol  *sp;
+d142 1
+a142 1
+    for (h = 0; h < HASHSIZE; h++)
+d144 1
+a144 1
+	for (sp = symMap->head[h]; sp; sp = sp->next)
+d146 1
+a146 1
+	    ShowSymbol (sp);
+d158 3
+a160 3
+    struct Symbol  *sp;
+    int     h;
+    char    s[40];
+d163 1
+a163 1
+    for (h = 0; h < HASHSIZE; h++)
+d165 1
+a165 1
+	for (sp = symMap->head[h]; sp; sp = sp->next)
+d167 1
+a167 2
+/*	    PPrintf ("%s\n", sp->name); */
+	    if ((sp->stype) == ACT_OFFSET)
+d169 2
+a170 2
+		sprintf (s, "`hunk_%lx", sp->value2);
+		sp->value2 = GetValue(s);
+d176 1
+d180 1
+a180 1
+    Fixup (&TopSymMap);
+d186 1
+a186 1
+    ShowSymbolMap (&TopSymMap);
+a191 1
+    UnBindKeyMap( &TopMap );
+d198 1
+a198 1
+    struct Symbol *sp;
+d202 1
+a202 1
+    for (h = 0; h < HASHSIZE; h++)
+d204 2
+a205 2
+	sp = symMap->head[h];
+	while ( sp )
+d207 8
+a214 8
+	    succ = sp->next;
+	    if ( sp->stype == ACT_PRIM )
+	    {
+		free( (APTR)sp->value2 );
+	    }
+	    free( sp->name );
+	    free( sp );
+	    sp = succ;
+d222 5
+a226 5
+    struct Symbol  *sp,
+                   *cp;
+    long    v,
+            lv;
+    int	    h;
+d229 1
+a229 1
+    if (hexArgAddr(arg, (ULONG *)&addr))
+d234 1
+a234 1
+	for (h = 0; h < HASHSIZE; h++)
+d236 1
+a236 1
+	    for (sp = TopSymMap.head[h]; sp; sp = sp->next)
+d238 1
+a238 1
+		if (sp->stype == ACT_OFFSET)
+d240 2
+a241 2
+		    v = (sp->value2) + (sp->value1);
+		    if ((addr - v >= 0) && (addr - v < lv))
+d243 1
+a243 1
+			cp = sp;
+d249 5
+a253 3
+	if (cp != 0)
+	    PPrintf ("%s + %lx   (%lx + %lx = %lx)\n", cp->name, lv,
+		    cp->value2, cp->value1, v);
+d255 3
+a257 1
+	    PPrintf ("You're lost (%lx).\n", addr);
+a264 81
+struct KeyAction *
+BindKey ( char key, char *mapName, char *name )
+{
+    struct KeyAction   *kp;
+    struct KeyMap  *keyMap;
+    struct Symbol  *sp,
+                   *spkm;
+
+    sp = FindSymbol (name, &TopSymMap);
+    if (sp == 0)
+    {
+	PPrintf("Cannot bind key to unknown symbol\n");
+	return 0;
+    }
+
+    spkm = FindSymbol (mapName, &TopSymMap);
+    if (spkm == 0)
+    {
+	PPrintf("Cannot bind key to unknown keymap\n");
+	return 0;
+    }
+
+    if (spkm->stype != ACT_KEYMAP)
+    {
+	PPrintf("Cannot bind key to non-keymap type symbol\n");
+	return 0;
+    }    
+
+    keyMap = (struct KeyMap *) spkm->value1;
+
+    kp = FindKey (key, keyMap);
+    if (kp == 0)
+    {
+	kp = (struct KeyAction *) malloc (sizeof (struct KeyAction));
+    }
+
+    if ( keyMap->tail )
+    {
+	/* Ordinarily, we add it after the tail */
+	keyMap->tail->next = kp;
+    }
+    else
+    {
+	/* Special case: 1st node inserted at head */
+	keyMap->head = kp;
+    }
+    /* However we add it, it's always at the tail */
+    keyMap->tail = kp;
+    kp->next = 0;
+    kp->firstKey = key;
+    kp->lastKey = 0;
+    kp->symbol = sp;
+
+    return kp;
+}
+
+void
+UnBindKeyMap( struct KeyMap *keyMap )
+{
+    struct KeyAction   *kp;
+    struct KeyAction   *succ;
+
+    kp = keyMap->head;
+    while ( kp )
+    {
+	succ = kp->next;
+	free( kp );
+	kp = succ;
+    }
+}
+
+
+void
+BindSet( char firstKey, char lastKey, char *mapName, char *name )
+{
+    struct KeyAction   *kp;
+
+    kp = BindKey (firstKey, mapName, name);
+    if (kp != 0)
+	kp->lastKey = lastKey;
+}
+d266 4
+d271 1
+a271 1
+BindValue1( char *name, short vtype, long value )
+d273 1
+a273 1
+    struct Symbol  *symbol;
+d275 5
+a279 4
+    symbol = FindSymbol (name, &TopSymMap);
+    if (symbol == 0)
+    {
+	symbol = NewSymbol (name, &TopSymMap);
+a280 4
+
+    symbol->stype = vtype;
+    symbol->value1 = value;
+
+d284 5
+d290 1
+a290 1
+BindValue2( char *name, short vtype, long value )
+d292 1
+a292 1
+    struct Symbol  *symbol;
+d294 5
+a298 5
+    symbol = NewSymbol (name, &TopSymMap);
+
+    symbol->stype = vtype;
+    symbol->value1 = value;
+
+d304 1
+a304 1
+BindPrim( char *name, voidfunc function )
+d306 1
+a306 1
+    BindValue1 (name, ACT_PRIM, (long) function);
+d310 1
+a310 1
+BindPrim2( char *name, voidfunc function, char *arg1 )
+d312 1
+a312 1
+    struct Symbol *sp;
+d314 1
+a314 1
+    if ( sp = BindValue1(name, ACT_PRIM, (long) function ) )
+d316 1
+a316 1
+	char *value2;
+d319 1
+a319 1
+	    if ( value2 = malloc( strlen( arg1 ) + 1 ) )
+d321 2
+a322 2
+		strcpy( value2, arg1 );
+		sp->value2 = (long)value2;
+a333 2
+    ThisMap = &TopMap;
+
+a339 2
+
+    BindValue1 ("TopMap", ACT_KEYMAP, (long)&TopMap);
+d344 2
+a345 3
+/* Given a line, parse it and Evaluate() what we find. */
+void
+ParseLine( char *line )
+d347 2
+a348 8
+    char key;
+    struct KeyAction *kp;
+
+    /* Strip leading blanks */
+    while ( ( *line == ' ' ) || ( *line == '\t' ) )
+    {
+	line++;
+    }
+a349 32
+    /* Look at the first (non-blank) key in the line */
+    key = *line;
+    if ( !key )
+    {
+	ShowFrame();
+    }
+    else
+    {
+	while ( key )
+	{
+	    /* If this key is a single-stroke key, evaluate it.
+	     * After, we'll restart evaluation on the next character
+	     */
+	    if ( kp = FindKey( key, ThisMap ) )
+	    {
+		Evaluate( kp->symbol, "" );
+		key = *++line;
+	    }
+	    else
+	    {
+		/* Otherwise, we have a whole symbol, which goes to
+		 * the end of the line.
+		 */
+		if ( HandleSymbol( line ) )
+		{
+		    PPrintf("Unknown symbol\n");
+		}
+		key = 0;
+	    }
+	}
+    }
+}
+d352 1
+a352 1
+HandleSymbol( char *command )
+d354 5
+a358 19
+    struct Symbol  *sp;
+    char singlecommand[2];
+    long error = 0;
+
+    /* There are a few single-key commands that take arguments.
+     * Let's try to see if it's one of those:
+     */
+
+    singlecommand[ 0 ] = *command;
+    singlecommand[ 1 ] = '\0';
+
+    if ( sp = FindSymbol( singlecommand, &TopSymMap ) )
+    {
+	Evaluate( sp, &command[1] );
+    }
+    else
+    {
+	char *argstr = "";
+	char *ch = command;
+d360 6
+a365 2
+	/* If there's a space, then convert it to an EOL, and set
+	 * the argument string to the rest of the line.
+d367 4
+a370 1
+	while ( *ch )
+d372 8
+a379 9
+	    if ( *ch == ' ' )
+	    {
+		*ch = '\0';
+		argstr = ch+1;
+	    }
+	    else
+	    {
+		ch++;
+	    }
+d381 5
+a385 3
+
+	sp = FindSymbol ( command, &TopSymMap );
+	if (sp != 0)
+d387 2
+a388 1
+	    Evaluate (sp, argstr);
+d392 1
+a392 9
+	    if (!IsHexNum (command, &LastNum))
+	    {
+		error = 1;
+	    }
+	    else
+	    {
+		CurrAddr = LastNum;
+		ShowFrame();
+	    }
+d395 1
+a395 89
+    return( error );
+}
+
+
+/* Pass in a pointer to your line-pointer.  nextArg() will return
+ * a pointer to the next argument in line, skipping leading blanks.
+ * The trailing delimeter will be zeroed (i.e. in your line-buffer!).
+ * *line is left pointing at the next non-delimeter character (i.e.
+ * trailing blanks are skipped).
+ *
+ * Handles simple quoted arguments.
+ *
+ * Return NULL if no more args.
+ */
+char *
+nextArg( char **line )
+{
+    char *arg = NULL;
+    char *terminate;
+
+    if ( *line )
+    {
+	/* skip any leading blanks */
+	while ( ( ( **line ) != '\0' ) && ( isDelimeter( **line ) ) )
+	{
+	    (*line)++;
+	}
+
+	if ( **line )
+	{
+	    arg = *line;
+	    if ( ( **line == '\"' ) || ( **line == '\'' ) )
+	    {
+		char quote = **line;
+
+		arg++;
+		(*line)++;
+		while ( ( **line != '\0' ) && ( **line != quote ) )
+		{
+		    (*line)++;
+		}
+		terminate = *line;
+		if ( **line == quote )
+		{
+		    (*line)++;
+		}
+	    }
+	    else
+	    {
+		while ( !isDelimeter( **line ) )
+		{
+		    (*line)++;
+		}
+		terminate = *line;
+	    }
+	    /* skip any trailing blanks */
+	    while ( ( ( **line ) != '\0' ) && ( isDelimeter( **line ) ) )
+	    {
+		(*line)++;
+	    }
+	    /* Ensure that this argument is null-terminated */
+	    *terminate = '\0';
+	}
+    }
+    return( arg );
+}
+
+/* parses out single hex argument (doesn't advance argument pointer)
+ * Returns false if syntax error or no argument present.
+ */
+BOOL
+hexArg( UBYTE *argStr, ULONG *val )
+{
+    char *arg;
+
+    return( ( arg = nextArg( &argStr ) ) && ( IsHexNum( arg, val ) ) );
+}
+
+/* parses out single hex argument (doesn't advance argument pointer)
+ * uses CurrAddr if argument not present.  returns false if 
+ * syntax error.
+ */
+BOOL
+hexArgAddr( UBYTE *argStr, ULONG *val )
+{
+    BOOL retval = TRUE;
+    char *arg;
+
+    if ( arg = nextArg( &argStr ) )
+d397 4
+a400 11
+	if ( IsHexNum( arg, val ) )
+	{
+	}
+	else 
+	{
+	    retval = FALSE;
+	}
+    }
+    else 
+    {
+	*val = (ULONG) CurrAddr;
+d402 1
+a402 1
+    return (retval);
+d405 1
+d412 3
+a414 3
+    char *alias = nextArg( &arg );
+    char *equiv = nextArg( &arg );
+    struct Symbol *sp;
+d416 3
+a418 3
+    if ( ( alias ) && ( equiv ) )
+    {
+	if ( sp = FindSymbol( equiv, &TopSymMap ) )
+d420 1
+a420 1
+	    if ( sp->stype == ACT_PRIM )
+d422 1
+a422 1
+		BindPrim2( alias, (voidfunc)sp->value1, (char *)sp->value2 );
+d440 1
+d452 2
+a453 2
+    char *command = nextArg( &arg );
+    char *xcommand = arg;
+d455 1
+a455 1
+    if ( ( command ) && ( *xcommand ) )
+d457 1
+a457 1
+	BindPrim2( command, runWackCommand, xcommand );
+d465 1
+d477 2
+a478 2
+    char *command = nextArg( &arg );
+    char *xcommand = arg;
+d480 1
+a480 1
+    if ( ( command ) && ( *xcommand ) )
+d482 1
+a482 1
+	BindPrim2( command, runCommand, xcommand );
+d490 1
+d502 2
+a503 2
+    char *command = nextArg( &arg );
+    char *xcommand = arg;
+d505 1
+a505 1
+    if ( ( command ) && ( *xcommand ) )
+d507 1
+a507 1
+	BindPrim2( command, ARexx_Execute, xcommand );
+d515 1
+d522 1
+a522 1
+    char *label = nextArg( &arg );
+d525 1
+a525 1
+    if ( ( label ) && ( hexArgAddr( arg, &value ) ) )
+d527 1
+a527 1
+	BindValue1( label, ACT_CONSTANT, value );
+@
+
+
+39.3
+log
+@Minor cleanup.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.2 92/12/03 11:30:43 peter Exp Locker: peter $
+a47 7
+void
+PutError( char *s, int a )
+{
+    PPrintf(s, a);
+    NewLine();
+}
+
+d53 2
+a54 1
+    if (c < ' ') {
+d59 2
+a60 1
+	if (c != 0x7f) {
+d68 1
+a68 1
+void
+d75 5
+a79 3
+    for (kp = keyMap -> head; kp; kp = kp -> next) {
+	if (kp -> lastKey == 0) {
+	    PPrintf ("key '%s'", UnCtrl (kp -> firstKey, s1));
+d81 4
+a84 3
+	else {
+	    UnCtrl (kp -> firstKey, s1);
+	    UnCtrl (kp -> lastKey, s2);
+d87 1
+a87 1
+	PPrintf (" bound to '%s'\n", kp -> symbol -> name);
+d91 1
+a91 1
+void
+d102 4
+a105 2
+    for (kp = keyMap -> head; kp; kp = kp -> next) {
+	if (key == kp -> firstKey) {
+d108 2
+a109 1
+	if ((key >= kp -> firstKey) && (key <= kp -> lastKey)) {
+a117 15
+DoKey( char key )
+{
+    struct KeyAction   *kp;
+
+    kp = FindKey (key, ThisMap);
+    if (kp == 0) {
+     /* PutError ("No function bound to key %lc in this context", key); */
+        Putchar (7);
+	return;
+    }
+    Evaluate (kp -> symbol, "");	/* jimm: added second argument */
+}
+
+
+void
+d123 3
+d133 2
+a134 2
+    sp -> name = newName;
+    if (symMap -> tail[Hash (name)] == 0)
+d136 1
+a136 1
+	symMap -> head[Hash (name)] = sp;
+d138 3
+a140 3
+    else
+    {
+	symMap -> tail[Hash (name)] -> next = sp;
+d142 3
+a144 3
+    symMap -> tail[Hash (name)] = sp;
+    sp -> next = (struct Symbol *) 0;
+    sp -> stype = sp -> value1 = sp -> value2 = 0;
+d149 1
+d156 1
+a156 1
+    for (sp = symMap -> head[Hash(name)]; sp; sp = sp -> next)
+d166 2
+a167 1
+long
+d180 1
+a180 1
+long
+d214 1
+a214 1
+void
+d217 2
+a218 2
+    PPrintf ("%10s  %08lx  %08lx  %s\n", TypeNames[sp -> stype],
+	    sp -> value1, sp -> value2, sp -> name);
+d222 1
+a222 1
+void
+d228 4
+a231 2
+    for (h = 0; h < HASHSIZE; h++) {
+	for (sp = symMap -> head[h]; sp; sp = sp -> next) {
+d238 4
+a241 1
+void
+d249 4
+a252 2
+    for (h = 0; h < HASHSIZE; h++) {
+	for (sp = symMap -> head[h]; sp; sp = sp -> next) {
+d254 2
+a255 1
+	    if ((sp -> stype) == ACT_OFFSET) {
+d321 9
+a329 5
+	for (h = 0; h < HASHSIZE; h++) {
+	    for (sp = TopSymMap.head[h]; sp; sp = sp -> next) {
+		if (sp -> stype == ACT_OFFSET) {
+		    v = (sp->value2) + (sp -> value1);
+		    if ((addr - v >= 0) && (addr - v < lv)) {
+d337 2
+a338 2
+	    PPrintf ("%s + %lx   (%lx + %lx = %lx)\n", cp -> name, lv,
+		    cp -> value2, cp -> value1, v);
+d357 3
+a359 2
+    if (sp == 0) {
+	PutError ("Cannot bind key to unknown symbol",0);
+d364 3
+a366 2
+    if (spkm == 0) {
+	PutError ("Cannot bind key to unknown keymap",0);
+d370 3
+a372 2
+    if (spkm -> stype != ACT_KEYMAP) {
+	PutError ("Cannot bind key to non-keymap type symbol",0);
+d376 1
+a376 1
+    keyMap = (struct KeyMap *) spkm -> value1;
+d379 2
+a380 1
+    if (kp == 0) {
+d396 4
+a399 4
+    kp -> next = 0;
+    kp -> firstKey = key;
+    kp -> lastKey = 0;
+    kp -> symbol = sp;
+d427 1
+a427 1
+	kp -> lastKey = lastKey;
+d436 2
+a437 1
+    if (symbol == 0) {
+d441 2
+a442 2
+    symbol -> stype = vtype;
+    symbol -> value1 = value;
+d454 2
+a455 2
+    symbol -> stype = vtype;
+    symbol -> value1 = value;
+a485 11
+extern LONG proceed;
+
+void
+Interp( void )
+{
+    while ( proceed )
+    {
+	handle_IO();
+    }
+}
+
+d494 2
+a495 1
+    for (h = 0; h < HASHSIZE; h++) {
+d544 1
+a544 1
+		    PutError ("Unknown symbol",0);
+a622 1
+
+d714 3
+a716 1
+/* argument line is supposed to be "verb equivalentverb" */
+d748 8
+a755 1
+/* argument line is supposed to be "verb command" */
+d772 8
+a779 1
+/* argument line is supposed to be "verb command" */
+d796 8
+a803 1
+/* argument line is supposed to be "verb command" */
+d817 19
+@
+
+
+39.2
+log
+@AddrArg() renamed to hexArgAddr(), added hexArg() that doesn't default
+to the current address.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.1 92/10/30 16:12:39 peter Exp Locker: peter $
+d52 1
+a52 1
+    PPrintf("\n");
+d123 1
+a123 1
+     /* PutError ("no function bound to key %lc in this context", key); */
+d355 1
+a355 1
+	PutError ("cannot bind key to unknown symbol",0);
+d361 1
+a361 1
+	PutError ("cannot bind key to unknown keymap",0);
+d366 1
+a366 1
+	PutError ("cannot bind key to non-keymap type symbol",0);
+d546 1
+a546 1
+		    PutError ("unknown symbol",0);
+@
+
+
+39.1
+log
+@Fixed a bug caused by the fact that bindalias can legally call us
+with arg1 = NULL.
+@
+text
+@d6 1
+a6 1
+ * $Id: define.c,v 39.0 92/10/30 15:19:05 peter Exp Locker: peter $
+d317 1
+a317 1
+    if (AddrArg(arg, (ULONG *)&addr))
+d680 11
+d692 1
+a692 1
+ * syntax error (scanf fails).
+d695 1
+a695 1
+AddrArg( UBYTE *argStr, ULONG *val )
+@
+
+
+39.0
+log
+@Initial RCS check-in.
+@
+text
+@d6 1
+a6 1
+ * $Id: $
+a461 1
+    char *value2;
+d463 2
+a464 1
+    if ( value2 = malloc( strlen( arg1 ) + 1 ) )
+d466 2
+a467 2
+	strcpy( value2, arg1 );
+	if ( sp = BindValue1(name, ACT_PRIM, (long) function ) )
+d469 5
+a473 1
+	    sp->value2 = (long)value2;
+@

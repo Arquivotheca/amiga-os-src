@@ -1,0 +1,1181 @@
+head     39.2;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+39.2
+date     93.07.06.18.36.03;  author spence;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     93.06.23.11.22.19;  author spence;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     93.05.11.11.01.32;  author spence;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@All the ScrollLines code
+@
+
+
+39.2
+log
+@Added Alloc() code.
+@
+text
+@********************************************************************************
+*
+*	$Id: ScrollLines.asm,v 39.1 93/06/23 11:22:19 spence Exp Locker: spence $
+*
+********************************************************************************
+
+	opt	p=68020
+	section	code
+
+	include	'exec/types.i'
+	include	'exec/memory.i'
+	include	'exec/ables.i'
+	include	'graphics/view.i'
+	include	'graphics/copper.i'
+	include	'graphics/gfxbase.i'
+	include	'utility/tagitem.i'
+
+	include	"SpecialFXBase.i"
+	include	"SpecialFX.i"
+	include	"SpecialFX_internal.i"
+
+	xdef	AllocScrollLines
+	xdef	CountScrollLines
+	xdef	DisplayScrollLines
+	xref	DoUCopStuff
+
+	xref	_LVOMakeVPort
+	xref	_LVOScrollVPort
+	xref	_LVOCWait
+	xref	_LVOCMove
+	xref	_LVOCBump
+	xref	_LVOPermit
+	xref	_LVOAllocMem
+
+ON	equ	0
+OFF	equ	1
+DEBUGTABLES	equ	OFF
+DEBUGDISPLAY	equ	OFF
+
+********************************************************************************
+* {
+
+	; *********************************************************************
+	;
+	; Allocate the FXHandle
+	;
+	; *********************************************************************
+
+	; Enters with:
+	; d1 = Number of control structures to allocate
+	; a2 -> Error variable
+	; a5 = a6 -> SFXBase
+	; Returns
+	; d0 -> FXHandle
+
+AllocScrollLines:
+	; Allocate the RAM for the ScrollRange structures.
+	; How many of the slOffsetTables do we need?
+	; We need 16 for A/ECS, up to 64 for AA, and up to 128 for AA+.
+	; This can be calculated as 
+	; (16 << *(GfxBase->bwshifts[GfxBase->MemType]))
+	move.l	sfxb_GfxBase(a6),a0
+	move.l	gb_bwshifts(a0),a1
+	move.b	gb_MemType(a0),d0
+	move.b	0(a1,d0.w),d2
+	moveq	#16,d0
+	asl.l	d2,d0
+	move.w	d0,d4
+	mulu	#slOffsetTable_SIZEOF,d0
+	move.w	d0,d2
+	add.l	#slPrivate_SIZEOF,d0
+	move.w	d1,d5
+	mulu	#sclPrivate_SIZEOF,d1
+	add.l	d1,d0			; size of the allocation
+	move.l	d0,d3
+	move.l	#(MEMF_CLEAR|MEMF_PUBLIC),d1
+	move.l	sfxb_ExecBase(a5),a6
+	jsr	_LVOAllocMem(a6)
+	tst.l	d0
+	beq.s	FAIL_NOMEM
+	move.l	d0,a0
+	move.l	d0,a1
+	move.w	d4,slp_OffsetCount(a0)
+	move.l	#(SFX_ScrollLines&~$80000000),(a0)+	; fxh_Type
+	move.l	d5,(a0)+		; fxh_Num
+	move.l	d3,(a0)+		; fxh_AllocSize
+	lea	slPrivate_SIZEOF(a1,d2),a1
+	move.l	a1,(a0)			; fxh_First
+	bra.s	Alloc_SL_loop.
+Alloc_SL_loop:
+	move.l	a1,(a2)+ ; <<<<<<< WHAT THE FUCK IS THIS??
+	lea	sclPrivate_SIZEOF(a1),a1
+Alloc_SL_loop.:
+	dbra.s	d5,Alloc_SL_loop
+	rts
+
+FAIL_NOMEM:
+	move.l	#SFX_ERR_NoMem,(a2)
+	rts
+
+* }
+********************************************************************************
+* {
+	; **********************************************************************
+	
+	; Count the number of copper instructions needed for the ScrollLines
+	;
+	; **********************************************************************
+
+	;
+	; For each ScrollLine case, we need the following copperlist:
+	; WAIT (sl_YOffset-1, 0)		; LINE 1
+	; MOVE BPLMOD0,xxx	; set start of next line correctly
+	; MOVE BPLMOD1,xxx
+	; WAIT (sl_YOffset, 0)			; LINE 2
+	; MOVE BPLMOD0,xxx	; align next sl_YCount lines up
+	; MOVE BPLMOD1,xxx
+	; MOVE DDFSTRT,xxx
+	; MOVE BPLCON1,xxx
+	; MOVE FMODE,xxx	; (only on AA)
+	; WAIT (sl_YOffset+sl_YCount-1, 0)	; LINE 3
+	; MOVE BPLMOD0,xxx	; set start of next line correctly
+	; MOVE BPLMOD1,xxx
+	; WAIT (sl_YOffset+sl_YCount, 0)	; LINE 4
+	; MOVE BPLMOD0,xxx	; align next sl_YCount lines up
+	; MOVE BPLMOD1,xxx
+	; MOVE DDFSTRT,xxx
+	; MOVE BPLCON1,xxx
+	; MOVE FMODE,xxx	; (only on AA)
+	;
+	; There are times when some of these LINEs are not needed. These
+	; are defined in the following LUT:
+
+LINE_1_INS	equ	3
+LINE_2AA_INS	equ	6
+LINE_2ECS_INS	equ	5
+LINE_3_INS	equ	3
+LINE_4AA_INS	equ	6
+LINE_4ECS_INS	equ	5
+
+; The tables take on the form:
+; Previous Scroll 1 line away:  Next 1 line away, Next 2 lines away, Next 3> lines away
+; Previous Scroll 2 lines away: Next 1 line away, Next 2 lines away, Next 3> lines away
+
+; If only scrolling 1 line, the copper instructions are:
+AAScroll1Line:
+	dc.w	LINE_2AA_INS,(LINE_2AA_INS+LINE_4AA_INS),(LINE_2AA_INS+LINE_4AA_INS)
+	dc.w	(LINE_1_INS+LINE_2AA_INS),(LINE_1_INS+LINE_2AA_INS+LINE_4AA_INS),(LINE_1_INS+LINE_2AA_INS+LINE_4AA_INS)
+ScrollLineTableSize	equ	*-AAScroll1Line
+; If scrolling 2 or more lines:
+AAScroll2Lines:
+	dc.w	(LINE_2AA_INS+LINE_3_INS),(LINE_2AA_INS+LINE_3_INS+LINE_4AA_INS),(LINE_2AA_INS+LINE_3_INS+LINE_4AA_INS)
+	dc.w	(LINE_1_INS+LINE_2AA_INS+LINE_3_INS),(LINE_1_INS+LINE_2AA_INS+LINE_3_INS+LINE_4AA_INS),(LINE_1_INS+LINE_2AA_INS+LINE_3_INS+LINE_4AA_INS)
+
+ECSScroll1Line:
+	dc.w	LINE_2ECS_INS,(LINE_2ECS_INS+LINE_4ECS_INS),(LINE_2ECS_INS+LINE_4ECS_INS)
+	dc.w	(LINE_1_INS+LINE_2ECS_INS),(LINE_1_INS+LINE_2ECS_INS+LINE_4ECS_INS),(LINE_1_INS+LINE_2ECS_INS+LINE_4ECS_INS)
+ECSScroll2Lines:
+	dc.w	(LINE_2ECS_INS+LINE_3_INS),(LINE_2ECS_INS+LINE_3_INS+LINE_4ECS_INS),(LINE_2ECS_INS+LINE_3_INS+LINE_4ECS_INS)
+	dc.w	(LINE_1_INS+LINE_2ECS_INS+LINE_3_INS),(LINE_1_INS+LINE_2ECS_INS+LINE_3_INS+LINE_4ECS_INS),(LINE_1_INS+LINE_2ECS_INS+LINE_3_INS+LINE_4ECS_INS)
+
+CountScrollLines:
+	movem.l	d2-d7/a2-a6,-(sp)
+	move.l	ti_Data(a0),a0		; get the FXHandle
+	moveq	#0,d1			; d1 will count the instructions
+	move.w	fxh_Num(a0),d7
+	beq	CountScrolllines.
+	moveq	#0,d4			; use d4 to divide by 2 for lace
+	move.l	stk_ViewPort(a5),a1
+	btst.b	#2,vp_Modes+1(a1)	; laced?
+	beq.s	4$
+	moveq	#1,d4
+4$:
+	move.l	fxh_First(a0),a1	; First ScrollLines structure
+	subq.w	#1,d7
+	move.w	sl_YOffset(a1),d6
+	movem.l	d5/a3,-(sp)	
+	lea	AAScroll1Line(pc),a3
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a4)
+	bne.s	1$
+	lea	ECSScroll1Line(pc),a3
+1$:
+	; What type is the first ScrollLine?
+	; We know it is >1 line from the previous ScrollLine.
+	; If there is another in the list, how far is it from there?
+	moveq	#0,d5
+	move.l	d5,d3
+	tst.w	d7
+	beq.s	20$
+	move.w	sclPrivate_SIZEOF+sl_YOffset(a1),d0
+	sub.w	d6,d0
+	sub.w	sl_YCount(a1),d0
+	asr.w	d4,d0
+	beq.s	2$
+	moveq	#NEXT_SL_2,d5
+	subq.w	#1,d0
+	beq.s	2$
+20$:
+	moveq	#NEXT_SL_3G,d5
+2$:
+	addq.w	#PREV_SL_2,d5
+	move.w	d5,sclp_Type(a1)
+
+	move.w	sl_YCount(a1),d0
+	asr.w	d4,d0
+	cmp.w	#1,d0
+	beq.s	3$
+	add.w	#ScrollLineTableSize,d5
+3$:
+	add.w	0(a3,d5.w),d1		; This many copper instructions for the first ScrollLines.
+	tst.w	d7
+	beq.s	sl_counted		; no more to do.
+
+	bra.s	count_sl_loop.
+count_sl_loop:
+	move.w	d6,d3
+	add.w	sl_YCount(a1),d3	; d3 is where the last ScrollLines finished
+	lea	sclPrivate_SIZEOF(a1),a1
+	move.w	sl_YOffset(a1),d6
+	; What type is this one? How far is it from the last? How far is it to the next?
+	moveq	#0,d5
+	move.w	d6,d0
+	sub.w	d3,d0			; how far from the previous?
+	asr.w	d4,d0
+	cmp.w	#1,d0
+	ble.s	1$
+	moveq	#PREV_SL_2,d5
+1$:
+	tst.w	d7
+	bne.s	3$
+	addq.w	#NEXT_SL_3G,d5
+	bra.s	2$
+3$:
+	move.w	d6,d0
+	add.w	sl_YCount(a1),d0
+	move.w	sclPrivate_SIZEOF+sl_YOffset(a1),d2
+	sub.w	d0,d2
+	asr.w	d4,d2
+	subq.w	#1,d2
+	beq.s	2$			; next is only 1 away
+	addq.w	#2,d5
+	subq.w	#1,d2
+	beq.s	2$			; next is 2 away
+	addq.w	#2,d5			; next is 3> away
+2$:
+	move.w	d5,sclp_Type(a1)
+	cmp.w	#1,sl_YCount(a1)
+	beq.s	do_sl_count
+	add.w	#ScrollLineTableSize,d5
+do_sl_count:
+	add.w	0(a3,d5.w),d1
+count_sl_loop.
+	dbra.s	d7,count_sl_loop
+
+sl_counted:
+	movem.l	(sp)+,d5/a3
+	add.w	#16,d1			; for good luck
+	bsr	DoUCopStuff
+
+CountScrolllines.
+	movem.l	(sp)+,d2-d7/a2-a6
+	rts
+
+* }
+********************************************************************************
+* {
+	; **********************************************************************
+	;
+	; This code will build the UserCopperList to scroll blocks of line in
+	; this ViewPort.
+	;
+	; **********************************************************************
+
+	; enters with:
+	; a0 -> TagItem
+	; a4 -> GfxBase
+	; a5 -> Stack frame
+	; a6 -> UtilityBase
+
+DisplayScrollLines:
+	movem.l	d2-d7/a2-a6,-(sp)
+	move.l	a4,a6
+	move.l	ti_Data(a0),a4
+	move.l	stk_DispHandle(a5),a3
+	move.l	a4,(a3)+		; store the FxHandle in the AnimHandle
+	move.l	a3,stk_DispHandle(a5)
+	move.w	fxh_Num(a4),d7
+	beq	DisplayScrollLines.		; early sanity check
+
+	; **********************************************************************
+	;
+	; This code calculates the deltas for DDFSTRT, BPLCON1, BPLMODx and FMODE
+	; for 64 different positions, by faking out a ViewPort, and calling
+	; ScrollVPort(). Then for each position, look through the vp->DspIns, and
+	; store the results.
+	;
+	; **********************************************************************
+
+	sub.l	#(vp_SIZEOF+ri_SIZEOF),sp
+	move.l	sp,a2			; a2 -> dummy ViewPort
+	lea	vp_SIZEOF(a2),a1	; a1 -> RasInfo
+	move.l	stk_ViewPort(a5),a3
+	moveq	#0,d0
+	move.l	d0,vp_Next(a2)
+	move.l	vp_ColorMap(a3),vp_ColorMap(a2)
+	move.l	d0,vp_DspIns(a2)
+	move.l	d0,vp_SprIns(a2)
+	move.l	d0,vp_ClrIns(a2)
+	move.l	d0,vp_UCopIns(a2)
+	move.l	vp_DWidth(a3),vp_DWidth(a2)	; DWidth and DHeight
+	move.l	vp_DxOffset(a3),vp_DxOffset(a2)	; DxOffset and DyOffset
+	move.l	vp_Modes(a3),vp_Modes(a2)	; Modes, SpritePri and ExtendedModes
+	move.l	a1,vp_RasInfo(a2)
+	move.l	vp_RasInfo(a3),a3
+	move.l	d0,ri_Next(a1)			; No DPF for now.
+	move.l	ri_BitMap(a3),ri_BitMap(a1)
+	move.l	d0,ri_RxOffset(a1)		; RxOffset and RyOffset
+	move.l	a1,a3
+
+	; a2 -> dummy ViewPort
+	; a3 -> dummy RasInfo
+
+	; Make the ViewPort
+
+	FORBID	a1
+	move.l	stk_View(a5),a0
+	move.l	a2,a1
+	move.l	v_ViewPort(a0),-(sp)
+	move.l	a1,v_ViewPort(a0)
+	jsr	_LVOMakeVPort(a6)
+	move.l	stk_View(a5),a0
+	move.l	(sp)+,v_ViewPort(a0)
+	PERMIT	save
+
+	; look for the modulo values, and store them in d6.l,
+	; and FMode, Modulos, BplCon1, and DDFStrt to store in the Current holdings.
+	moveq	#0,d6
+	move.l	d6,d2			; store bplcon0 in d2
+	move.l	vp_DspIns(a2),d0
+*	beq	FAILURE_3
+	move.l	d0,a0
+	move.l	cl_CopIns(a0),d0
+*	beq	FAILURE_3
+	move.l	d0,a0
+sl_curr_loop:
+	lea	ci_SIZEOF(a0),a0	; skip the first WAIT
+	btst.b	#0,ci_OpCode+1(a0)	; last WAIT?
+	bne	searched_ci
+	move.w	ci_DestAddr(a0),d0
+	move.w	ci_DestData(a0),d1
+	and.w	#$fff,d0
+	cmp.w	#(BPLCON0&$fff),d0
+	beq.s	sl_curr_con0
+	cmp.w	#(BPLCON1&$fff),d0
+	beq.s	sl_curr_con1
+	cmp.w	#(DDFSTRT&$fff),d0
+	beq.s	sl_curr_ddfstrt
+	cmp.w	#(DDFSTOP&$fff),d0
+	beq.s	sl_curr_ddfstop
+	cmp.w	#(FMODE&$fff),d0
+	beq.s	sl_curr_fmode
+	cmp.w	#(BPL1PTH&$fff),d0
+	beq.s	sl_curr_bpl1
+	cmp.w	#(BPL2PTH&$fff),d0
+	beq.s	sl_curr_bpl2
+	cmp.w	#(BPLMOD0&$fff),d0
+	beq.s	sl_curr_mod0
+	cmp.w	#(BPLMOD1&$fff),d0
+	bne.s	sl_curr_loop
+sl_curr_mod1:
+	move.w	d1,d6
+	move.w	d1,slp_ZeroBPLMOD1(a4)
+	bra.s	sl_curr_loop
+sl_curr_mod0:
+	swap	d6
+	move.w	d1,d6
+	swap	d6
+	move.w	d1,slp_ZeroBPLMOD0(a4)
+	bra.s	sl_curr_loop
+sl_curr_con0:
+	move.w	d1,d2
+	bra.s	sl_curr_loop
+sl_curr_con1:
+	move.w	d1,slp_ZeroBPLCON1(a4)
+	bra.s	sl_curr_loop
+sl_curr_ddfstrt:
+	move.w	d1,slp_ZeroDDFSTRT(a4)
+	bra.s	sl_curr_loop
+sl_curr_ddfstop:
+	move.w	d1,slp_ZeroDDFSTOP(a4)
+	bra.s	sl_curr_loop
+sl_curr_fmode:
+	move.w	d1,slp_ZeroFMODE(a4)
+	move.l	a6,-(sp)
+	move.l	gb_bwshifts(a6),a6
+	and.w	#3,d1
+	move.b	0(a6,d1.w),d1
+	addq.w	#1,d1
+	move.w	d1,slp_ZeroDelta(a4)
+	move.l	(sp)+,a6
+	bra	sl_curr_loop
+sl_curr_bpl1:
+	move.w	d1,d4
+	swap	d4
+	lea	ci_SIZEOF(a0),a0	; assume LOW bits in the next instruction
+	move.w	ci_DestData(a0),d4
+	bra	sl_curr_loop
+sl_curr_bpl2:
+	move.w	d1,d5
+	swap	d5
+	lea	ci_SIZEOF(a0),a0	; assume LOW bits in the next instruction
+	move.w	ci_DestData(a0),d5
+	bra	sl_curr_loop
+
+searched_ci:
+	move.w	slp_ZeroFMODE(a4),d1
+	move.l	a6,-(sp)
+	move.l	gb_bwshifts(a6),a6
+	and.w	#3,d1
+	move.b	0(a6,d1.w),d1
+	addq	#1,d1
+	move.w	d1,slp_ZeroDelta(a4)
+	move.l	(sp)+,a6
+	clr.w	slp_ZeroCompensate(a4)
+
+		IFEQ	DEBUGTABLES
+		print	"Zero: DDFSTRT "
+		dbugw	slp_ZeroDDFSTRT(a4)
+		print	"	DDFSTOP "
+		dbugw	slp_ZeroDDFSTOP(a4)
+		print	"	CON1 "
+		dbugw	slp_ZeroBPLCON1(a4)
+		print	"	MOD0 "
+		dbugw	slp_ZeroBPLMOD0(a4)
+		print	"	MOD1 "
+		dbugw	slp_ZeroBPLMOD1(a4)
+		print	"	FMODE "
+		dbugw	slp_ZeroFMODE(a4)
+		print	"	Delta "
+		dbugw	slp_ZeroDelta(a4)
+		print	"	LineLen0 "
+		dbugw	slp_ZeroLineLen0(a4)
+		print	"	LineLen1 "
+		dbugw	slp_ZeroLineLen1(a4)
+		print	"	Compensate "
+		dbugw	slp_ZeroCompensate(a4)
+		print	"	Flags "
+		dbugw	slp_Flags(a4)
+		print	"	OffsetCount "
+		dbugw	slp_OffsetCount(a4)
+		print	"	DxOffset "
+		dbugw	slp_DxOffset(a4)
+		print	10
+		ENDC
+
+	; checkpoint
+	; d2 = BPLCON0
+	; d4 = BPL1PTR
+	; d5 = BPL2PTR
+	; d6 = Mod0:Mod1
+	; a2 -> tmp ViewPort on stack
+	; a3 -> tmp RasInfo on stack
+	; a4 -> struct FXHandle
+	; a5 -> Stack stuff
+	; a6 -> GfxBase
+
+	move.w	d2,stk_BPLCON0(a5)
+
+	; calculate all of the positions
+	move.w	vp_DxOffset(a2),slp_DxOffset(a4)
+	move.w	slp_OffsetCount(a4),d7	; this many positions to store
+	subq.w	#2,d7			; 1 for dbra, 1 because position 0 was done seperately above
+	move.l	a4,-(sp)
+	lea	slPrivate_SIZEOF(a4),a4	; a4 -> start of block
+	move.l	vp_ColorMap(a2),d0
+	beq.s	1$
+	move.l	d0,a0
+	tst.b	cm_Type(a0)
+	beq.s	1$
+	swap	d7
+	move.b	cm_AuxFlags(a0),d7
+	swap	d7
+	bclr.b	#CMAB_NO_INTERMED_UPDATE,cm_AuxFlags(a0)	; not exactly friendly, as the ColorMap is not a copy
+1$:
+	move.l	vp_DspIns(a2),a0
+	move.l	cl_CopIns(a0),a0
+	move.l	a0,-(sp)
+svp_loop
+	addq.w	#1,ri_RxOffset(a3)
+	move.l	a2,a0
+	jsr	_LVOScrollVPort(a6)
+	move.l	(sp),a0			; CopIns
+sl_init_loop:
+	lea	ci_SIZEOF(a0),a0	; skip the first WAIT
+	btst.b	#0,ci_OpCode+1(a0)	; last WAIT?
+	bne.s	svp_loop.
+	move.w	ci_DestAddr(a0),d0
+	move.w	ci_DestData(a0),d1
+	and.w	#$fff,d0
+	cmp.w	#(BPLCON1&$fff),d0
+	beq.s	sl_init_con1
+	cmp.w	#(DDFSTRT&$fff),d0
+	beq.s	sl_init_ddfstrt
+	cmp.w	#(DDFSTOP&$fff),d0
+	beq.s	sl_init_ddfstop
+	cmp.w	#(FMODE&$fff),d0
+	beq.s	sl_init_fmode
+	cmp.w	#(BPLMOD0&$fff),d0
+	beq.s	sl_init_mod0
+	cmp.w	#(BPLMOD1&$fff),d0
+	bne.s	sl_init_loop
+sl_init_mod1:
+	move.w	d1,OffBPLMOD1(a4)
+	bra.s	sl_init_loop
+sl_init_mod0:
+	move.w	d1,OffBPLMOD0(a4)
+	bra.s	sl_init_loop
+sl_init_con1:
+	move.w	d1,OffBPLCON1(a4)
+	bra.s	sl_init_loop
+sl_init_ddfstrt:
+	move.w	d1,OffDDFSTRT(a4)
+	bra.s	sl_init_loop
+sl_init_ddfstop:
+	move.w	d1,OffDDFSTOP(a4)
+	bra.s	sl_init_loop
+sl_init_fmode:
+	move.w	d1,OffFMODE(a4)
+	bra.s	sl_init_loop
+svp_loop.
+	move.w	OffFMODE(a4),d1
+	move.l	a6,d2
+	move.l	gb_bwshifts(a6),a6
+	and.w	#3,d1
+	move.b	0(a6,d1.w),d1
+	addq.w	#1,d1
+	move.w	d1,OffDelta(a4)		; multiply the Whole values by 2, 4, or 8 == shift by 1, 2 or 3
+	move.l	d2,a6
+	move.w	OffFMODE(a4),d1
+	move.w	stk_BPLCON0(a5),d0
+	jsr	CalcCycle(pc)		; d0 now has the cycle count
+	cmp.w	#8,d0
+	ble.s	10$
+	moveq	#8,d0			; max out at 8 cycles for the last fetch
+10$:
+	move.w	OffDDFSTOP(a4),d1
+	move.l	4(sp),a0		; get the FxHandle
+	sub.w	slp_ZeroDDFSTOP(a0),d1
+	beq.s	11$
+	divu	d0,d1
+	asl.w	#3,d1
+11$:
+	move.w	d1,OffLineLen0(a4)
+	move.w	d1,OffLineLen1(a4)
+
+	move.w	OffDDFSTOP(a4),d2
+	sub.w	slp_ZeroDDFSTOP(a0),d2
+	beq.s	1$
+	move.w	OffDelta(a4),d1
+	moveq	#1,d2
+	asl.w	d1,d2
+1$:
+	move.w	d2,OffCompensate(a4)
+
+		IFEQ	DEBUGTABLES
+		print	"Scroll "
+		dbugw	ri_RxOffset(a3)
+		print	"	DDFSTRT "
+		dbugw	OffDDFSTRT(a4)
+		print	"	DDFSTOP "
+		dbugw	OffDDFSTOP(a4)
+		print	"	CON1 "
+		dbugw	OffBPLCON1(a4)
+		print	"	MOD0 "
+		dbugw	OffBPLMOD0(a4)
+		print	"	MOD1 "
+		dbugw	OffBPLMOD1(a4)
+		print	"	FMODE "
+		dbugw	OffFMODE(a4)
+		print	"	Delta "
+		dbugw	OffDelta(a4)
+		print	"	LineLen0 "
+		dbugw	OffLineLen0(a4)
+		print	"	LineLen1 "
+		dbugw	OffLineLen1(a4)
+		print	"	Compensate "
+		dbugw	OffCompensate(a4)
+		print	10
+		ENDC
+
+	lea	slOffsetTable_SIZEOF(a4),a4
+	dbra.s	d7,svp_loop
+
+	move.l	vp_ColorMap(a2),a0
+	swap	d7
+	move.b	d7,cm_AuxFlags(a0)
+	addq.l	#4,sp
+	move.l	(sp)+,a4
+	add.l	#(vp_SIZEOF+ri_SIZEOF),sp
+
+	; checkpoint
+	; d6 = Mod0:Mod1
+	; a4 -> struct FxHandle
+	; a5 -> Stack stuff
+	; a6 -> GfxBase
+
+	; now build the copperlist
+	move.l	d6,stk_ZeroMod0(a5)
+	move.l	d6,stk_LastMod0(a5)
+	move.w	fxh_Num(a4),d7
+	subq.w	#1,d7
+	move.l	fxh_UCopList(a4),a2
+	move.l	a4,-(sp)
+	move.w	d7,-(sp)
+	move.l	a4,a3
+	move.l	fxh_First(a4),a4	; a4 -> first struct ScrollLines in the list
+
+	; calculate the Whole part of the XOffset, and the offset into the
+	; slOffsetTable
+calc_sloff:
+	move.w	sl_XOffset(a4),d3
+	ext.l	d3
+	move.w	slp_OffsetCount(a3),d2
+	move.l	d3,d0
+	bpl.s	3$
+	addq.l	#1,d0
+3$:
+	divs	d2,d0
+	move.w	d0,sclp_Whole(a4)	; number of whole 'jumps' to make (including the sign)
+	subq.w	#1,d2
+	tst.w	d3
+	bpl.s	2$
+	eor.w	d2,d3
+	addq.w	#1,d3
+	neg.w	d3
+	subq.w	#1,sclp_Whole(a4)
+2$:
+	and.w	d2,d3			; our 'true' XOffset
+	lea	FxHandle_SIZEOF(a3),a1
+	tst.w	d3
+	beq.s	1$
+	subq.w	#1,d3
+	mulu	#slOffsetTable_SIZEOF,d3
+	lea	slPrivate_SIZEOF(a3,d3),a1
+1$:
+	move.l	a1,sclp_slOff(a4)
+	lea	sclPrivate_SIZEOF(a4),a4
+	dbra.s	d7,calc_sloff
+	move.w	(sp)+,d7
+
+	; now the main build loop
+	; use the upper word of d7 to mask the y values. If the ViewPort is
+	; interlaced, we want all the y values to be even.
+	swap	d7
+	move.w	#$ffff,d7
+	move.l	stk_ViewPort(a5),a3
+	btst.b	#2,vp_Modes+1(a3)	; laced?
+	beq.s	10$
+	subq.w	#1,d7
+10$:
+	swap	d7
+
+	move.l	(sp),a4
+	move.l	fxh_First(a4),a4
+build_sl_loop:
+	move.l	(sp),a3
+	lea	FxHandle_SIZEOF(a3),a1
+	move.l	sclp_slOff(a4),a3
+	move.l	sl_YCount(a4),d5	; Count:YOffset
+	move.w	sclp_Type(a4),d4
+	move.w	sclp_Whole(a4),d6
+		IFEQ	DEBUGDISPLAY
+		print	10
+		print	"Using:"
+		print	"	Type "
+		dbugw	d4
+		print	"	Whole "
+		dbugw	d6
+		print	"	DDFSTRT "
+		dbugw	OffDDFSTRT(a3)
+		print	"	DDFSTOP "
+		dbugw	OffDDFSTOP(a3)
+		print	"	CON1 "
+		dbugw	OffBPLCON1(a3)
+		print	"	MOD0 "
+		dbugw	OffBPLMOD0(a3)
+		print	"	MOD1 "
+		dbugw	OffBPLMOD1(a3)
+		print	"	FMODE "
+		dbugw	OffFMODE(a3)
+		print	"	Delta "
+		dbugw	OffDelta(a3)
+		print	"	LineLen0 "
+		dbugw	OffLineLen0(a3)
+		print	"	LineLen1 "
+		dbugw	OffLineLen1(a3)
+		print	"	Compensate "
+		dbugw	OffCompensate(a3)
+		print	10
+		ENDC
+	cmp.w	#PREV_SL_2,d4
+	blt	build_line2_chk		; d3 is already set up, and we don't need LastMod
+	; here, the previous ScrollLines was 2 or more lines away, so we need
+	; at least LINE_1
+		IFEQ	DEBUGDISPLAY
+		print	"Prev 2> "
+		ENDC
+	subq.w	#PREV_SL_2,d4
+	moveq	#0,d0
+	move.l	d0,d1			; X value
+	move.w	d5,d0
+	subq.w	#1,d0			; Y value
+	swap	d7
+	and.w	d7,d0
+	swap	d7
+	move.l	a2,a1
+	jsr	_LVOCWait(a6)
+	move.l	a2,a1
+	jsr	_LVOCBump(a6)
+	; calculate the modulos we need.
+	move.w	OffDelta(a3),d2
+	move.w	d6,d1
+	exg	d6,d2
+	asl.w	d6,d2
+	move.w	d1,d6
+	move.w	stk_ZeroMod0(a5),d1
+	add.w	d1,d2
+	move.w	sclp_Whole(a4),d1
+	addq.w	#1,d1
+	muls	OffCompensate(a3),d1
+	add.w	d1,d2
+	move.w	d2,d0
+	swap	d0
+	CMOVE	#BPLMOD0,d2
+	move.w	OffDelta(a3),d2
+	move.w	d6,d1
+	exg	d6,d2
+	asl.w	d6,d2
+	move.w	d1,d6
+	move.w	stk_ZeroMod1(a5),d1
+	add.w	d1,d2
+	move.w	sclp_Whole(a4),d1
+	addq.w	#1,d1
+	muls	OffCompensate(a3),d1
+	add.w	d1,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD1,d2
+	move.l	d0,stk_LastMod0(a5)
+	move.l	stk_ZeroMod0(a5),d3
+	sub.w	d0,d3
+	swap	d0
+	swap	d3
+	sub.w	d0,d3
+	swap	d3
+
+build_line2_chk:	
+	; build LINE_2
+	; Easy bits first:
+	moveq	#0,d1
+	move.l	d1,d0
+	move.w	d5,d0
+	move.l	a2,a1
+	jsr	_LVOCWait(a6)
+	move.l	a2,a1
+	jsr	_LVOCBump(a6)
+	moveq	#0,d2
+	move.w	OffDDFSTRT(a3),d2
+	CMOVE	#DDFSTRT,d2
+	move.w	OffBPLCON1(a3),d2
+	CMOVE	#BPLCON1,d2
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a6)
+	beq.s	1$
+	move.w	OffFMODE(a3),d2
+	CMOVE	#FMODE,d2
+1$:
+	; now the modulos.
+	; From our table, we deduce:
+	; if (the height of this block == 1)
+	; {
+	;    if (the next block is 1 line away)
+	;        calculate modulos to point to bitplanes of the next block's offset
+	;    if (the next block is 2 or more lines away)
+	;        calculate modulos to point to restore the bplptrs
+	; }
+	; else  // height of this block is 2 or more lines
+	;    calculate the modulos to point to start of next line in this block
+	swap	d5
+	cmp.w	#1,d5
+	bne	build_line2_l2
+	tst.w	d4
+	beq.s	build_line2_l0
+	; height is 1, and the next block is 2 or more lines away, so
+	; calculate the modulos to put the bplptrs back to their orignal setting.
+		IFEQ	DEBUGDISPLAY
+		print	"l2h1n2 "
+		ENDC
+	move.l	OffBPLMOD0(a3),d0
+	move.l	d0,stk_LastMod0(a5)
+	sub.w	OffLineLen1(a3),d3
+	swap	d3
+	sub.w	OffLineLen0(a3),d3
+	swap	d3
+	bra	build_line3_n2
+build_line2_l0:
+	; height is 1, and the next block is 1 line away, so calculate the modulos
+	; to put the bplptrs at the start of the next line.
+		IFEQ	DEBUGDISPLAY
+		print	"l2h1n1 "
+		ENDC
+	move.l	sclPrivate_SIZEOF+sclp_slOff(a4),a0
+	move.w	OffDelta(a0),d1
+	move.w	sclPrivate_SIZEOF+sclp_Whole(a4),d6	; next Whole value
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod0(a5),d0
+	add.w	d0,d2		; this is what we want to be
+	swap	d3
+	add.w	d3,d2
+	sub.w	OffBPLMOD0(a3),d0
+	sub.w	d0,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD0,d2
+	swap	d0
+	swap	d3
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod1(a5),d0
+	add.w	d0,d2
+	add.w	d3,d2
+	sub.w	OffBPLMOD1(a3),d0
+	sub.w	d0,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD1,d2
+	move.l	d0,stk_LastMod0(a5)
+	move.l	stk_ZeroMod0(a5),d6
+	move.w	d6,d1
+	sub.w	d0,d6
+	sub.w	OffLineLen1(a3),d6
+	add.w	d6,d3
+	swap	d3
+	swap	d0
+	swap	d6
+	move.w	d6,d1
+	sub.w	d0,d6
+	sub.w	OffLineLen0(a3),d6
+	add.w	d6,d3
+	swap	d3
+	bra	build_sl_loop.
+build_line2_l2:
+		IFEQ	DEBUGDISPLAY
+		print	"l2h2 "
+		ENDC
+	move.l	OffBPLMOD0(a3),d2
+	swap	d2
+	add.w	OffCompensate(a3),d2
+	CMOVE	#BPLMOD0,d2
+	swap	d2
+	add.w	OffCompensate(a3),d2
+	CMOVE	#BPLMOD1,d2
+	sub.w	OffLineLen1(a3),d3
+	add.w	OffCompensate(a3),d3
+	swap	d3
+	sub.w	OffLineLen0(a3),d3
+	add.w	OffCompensate(a3),d3
+	swap	d3
+build_line3_chk:
+	; Check if we need to build LINE_3
+	; we always need LINE_3 if this block is 2 or more lines high.
+	move.w	d5,d0
+	swap	d5
+	cmp.w	#2,d0
+	blt	build_line4_chk
+	add.w	d5,d0
+	subq.w	#1,d0		; line number
+	swap	d7
+	and.w	d7,d0
+	swap	d7
+	moveq	#0,d1
+	move.l	a2,a1
+	jsr	_LVOCWait(a6)
+	move.l	a2,a1
+	jsr	_LVOCBump(a6)
+	; now the modulos.	
+	; From our table, we deduce:
+	; if (the next block is only 1 line away)
+	;    calculate the modulos to point to bitplanes of the next block's offset
+	; else
+	;    calculate the modulos to restore the bitplanes as they were.
+	tst.w	d4
+	bne	build_line3_n2
+	; next block is only 1 line away.
+	; calculate how far we want to be from the origin, and compensate with
+	; how far we are now.
+		IFEQ	DEBUGDISPLAY
+		print	"l3n1 "
+		ENDC
+	move.l	sclPrivate_SIZEOF+sclp_slOff(a4),a0
+	move.w	OffDelta(a0),d1
+	move.w	sclPrivate_SIZEOF+sclp_Whole(a4),d6	; next Whole value
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod0(a5),d0
+	add.w	d0,d2		; this is what we want to be.
+	swap	d3
+	add.w	d3,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD0,d2
+	swap	d0
+	swap	d3
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod1(a5),d0
+	add.w	d0,d2
+	add.w	d3,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD1,d2
+	move.l	d0,stk_LastMod0(a5)
+	move.l	stk_ZeroMod0(a5),d1
+	sub.w	d0,d1
+	add.w	d1,d3
+	swap	d0
+	swap	d3
+	swap	d1
+	sub.w	d0,d1
+	add.w	d1,d3
+	swap	d3
+	bra	build_sl_loop.
+build_line3_n2:
+		IFEQ	DEBUGDISPLAY
+		print	"l3n2 "
+		ENDC
+	move.l	stk_ZeroMod0(a5),d2
+	swap	d2
+	swap	d3
+	add.w	d3,d2
+	CMOVE	#BPLMOD0,d2
+	swap	d2
+	swap	d3
+	add.w	d3,d2
+	CMOVE	#BPLMOD1,d2
+	swap	d2
+	move.l	d2,stk_LastMod0(a5)
+build_line4_chk:
+	; check if we need to build LINE_4.
+	; We always need LINE_4 if the next block is 2 or more lines away.
+	tst.w	d4
+	beq	build_sl_loop.	; next is 1 line away
+	move.w	d5,d0
+	swap	d5
+	add.w	d5,d0		; line number
+	moveq	#0,d1
+	move.l	a2,a1
+	jsr	_LVOCWait(a6)
+	move.l	a2,a1
+	jsr	_LVOCBump(a6)
+	move.l	(sp),a3		; get back the FxHandle, so we can get the slp_Zero data
+	lea	slp_ZeroDDFSTRT(a3),a3
+	cmp.w	#NEXT_SL_3G,d4
+	bge	build_line4_n3
+	; next block is only 2 lines away.
+	; Restore DDFSTRT, BPLCON1 and FMODE for the 1 non-scrolled line, but
+	; calculate the modulos for the next scrolled line.
+		IFEQ	DEBUGDISPLAY
+		print	"l4n2 "
+		ENDC
+	move.w	OffDDFSTRT(a3),d2
+	CMOVE	#DDFSTRT,d2
+	move.w	OffBPLCON1(a3),d2
+	CMOVE	#BPLCON1,d2
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a6)
+	beq.s	1$
+	move.w	OffFMODE(a3),d2
+	CMOVE	#FMODE,d2
+1$:
+	move.l	sclPrivate_SIZEOF+sclp_slOff(a4),a0
+	move.w	OffDelta(a0),d1
+	move.w	sclPrivate_SIZEOF+sclp_Whole(a4),d6	; next Whole value
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod0(a5),d0
+	add.w	d0,d2
+	move.w	d2,d0
+	swap	d0
+	CMOVE	#BPLMOD0,d2
+	move.w	d6,d2
+	asl.w	d1,d2
+	move.w	stk_ZeroMod1(a5),d0
+	add.w	d0,d2
+	move.w	d2,d0
+	CMOVE	#BPLMOD1,d2
+	move.l	d0,stk_LastMod0(a5)
+	move.l	stk_ZeroMod0(a5),d3
+	sub.w	d0,d3
+	swap	d0
+	swap	d3
+	sub.w	d0,d3
+	swap	d3
+	bra	build_sl_loop.
+build_line4_n3:
+		IFEQ	DEBUGDISPLAY
+		print	"l4n3 "
+		ENDC
+	; next is 3 or more lines away, so just restore everything
+	move.w	(a3)+,d2
+	CMOVE	#DDFSTRT,d2
+	move.w	(a3)+,d2
+	CMOVE	#BPLCON1,d2
+	move.w	(a3)+,d2
+	CMOVE	#BPLMOD0,d2
+	swap	d2
+	move.w	(a3)+,d2
+	CMOVE	#BPLMOD1,d2
+	swap	d2
+	move.l	d2,stk_LastMod0(a5)
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a6)
+	beq.s	1$
+	move.w	(a3)+,d2
+	CMOVE	#FMODE,d2
+1$:
+build_sl_loop.:
+	; that's it
+	lea	sclPrivate_SIZEOF(a4),a4
+	dbra	d7,build_sl_loop
+	addq.l	#4,sp			; FxHandle
+
+	move.l	#10000,d0
+	move.l	#255,d1
+	move.l	a2,a1
+	jsr	_LVOCWait(a6)		; CEND
+	move.l	a2,a1
+	jsr	_LVOCBump(a6)
+
+DisplayScrollLines.:
+	movem.l	(sp)+,d2-d7/a2-a6
+	rts
+
+* }
+
+*******************************************************************************
+
+; UWORD CalcCycle(register __d0 UWORD bplcon0, UWORD __d1 FMode,
+;                 register __a6 struct GfxBase *GfxBase);
+;
+; Calculates the cycle type of a given mode
+; From MakeVP(), this is calculated as:
+; Index = (((Lores ? 0 : Hires ? 1 : 2) << GBASE->ArrayWidth) + fmode)
+; Cycle = -(GBASE->StrtFetchMasks[Index])
+;
+; NB - does not destroy a0
+
+CalcCycle:
+	move.w	d1,a1
+	moveq	#0,d1
+	and.w	#$8040,d0		; mask the Hires and SHires bits
+	bmi.s	calc_hi
+	beq.s	calc_lo
+calc_shi:
+	addq.w	#1,d1
+calc_hi:
+	addq.w	#1,d1			; for AA+, could be $8040, == ExtraHires
+calc_lo:
+	move.b	gb_arraywidth(a6),d0
+	asl.w	d0,d1
+	add.w	a1,d1			; index
+	add.w	d1,d1
+	move.l	gb_StrtFetchMasks(a6),a1
+	move.w	0(a1,d1.w),d0
+	neg.w	d0
+		IFEQ	DEBUGDISPLAY
+		print	"Cycles "
+		dbugw	d0
+		ENDC
+	rts
+
+@
+
+
+39.1
+log
+@First pass at trying to compensate for the FMode fudging we do in
+overscanned screens.
+@
+text
+@d3 1
+a3 1
+*	$Id: ScrollLines.asm,v 39.0 93/05/11 11:01:32 spence Exp Locker: spence $
+d22 1
+d33 1
+d40 62
+@
+
+
+39.0
+log
+@Copied from DisplayFX.asm and AnimateFX.asm
+@
+text
+@d3 1
+a3 1
+*	$Id: DisplayFX.asm,v 39.2 93/04/23 18:02:03 spence Exp Locker: spence $
+d33 5
+d41 1
+a41 1
+	;
+d274 1
+d288 2
+d294 2
+d316 3
+d325 3
+d337 1
+a337 1
+	bra.s	sl_curr_loop
+d360 1
+d362 30
+d393 1
+d403 2
+d408 1
+a408 1
+	subq.w	#1,d7			; for dbra
+d440 2
+d460 3
+d475 52
+a526 6
+	move.l	d6,d2
+	sub.w	OffBPLMOD1(a4),d2
+	move.w	d2,OffLineLen1(a4)
+	swap	d2
+	sub.w	OffBPLMOD0(a4),d2
+	move.w	d2,OffLineLen0(a4)
+d578 1
+d608 29
+d641 3
+d664 4
+d678 4
+d730 3
+d743 3
+d786 3
+d791 1
+d794 1
+d797 1
+d800 1
+d830 3
+d865 3
+d899 3
+d936 3
+d974 37
+@

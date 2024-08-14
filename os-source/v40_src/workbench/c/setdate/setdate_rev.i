@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'8.4.91'
+	ENDM
+VERS	MACRO
+		dc.b	'setdate 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'setdate 37.2 (8.4.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: setdate 37.2 (8.4.91)',0
+	ENDM

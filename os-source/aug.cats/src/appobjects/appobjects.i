@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	19
+DATE	MACRO
+		dc.b	'13.2.92'
+	ENDM
+VERS	MACRO
+		dc.b	'appobjects 37.19'
+	ENDM
+VSTRING	MACRO
+		dc.b	'appobjects 37.19 (13.2.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: appobjects 37.19 (13.2.92)',0
+	ENDM

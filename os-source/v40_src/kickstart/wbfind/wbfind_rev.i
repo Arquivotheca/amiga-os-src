@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'7.6.93'
+	ENDM
+VERS	MACRO
+		dc.b	'wbfind 40.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'wbfind 40.1 (7.6.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: wbfind 40.1 (7.6.93)',0
+	ENDM

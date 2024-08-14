@@ -1,0 +1,577 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.3
+date     91.08.06.16.08.09;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.05.22.13.31.04;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.12.15.47.14;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.3
+log
+@minor cleanup
+@
+text
+@/* -----------------------------------------------------------------------
+ * PtoFH.c  (NFSC) SAS
+ *
+ * $Locker: martin $
+ *
+ * $Id: ptofh.c,v 1.2 91/05/22 13:31:04 martin Exp Locker: martin $
+ *
+ * $Revision: 1.2 $
+ *
+ * $Header: inet2:src/c/nfsc/RCS/ptofh.c,v 1.2 91/05/22 13:31:04 martin Exp Locker: martin $
+ *
+ *------------------------------------------------------------------------
+ */
+
+
+
+/*
+ * Path to fhandle translator.  Parses Amiga path relative to a lock,
+ * returns filehandle for object pointed to by path.
+ */
+
+#include "fs.h"
+#include <sys/types.h>
+#include <sys/time.h>
+
+#include <string.h>
+
+/* local functions */
+static int searchdir(struct mount_pt *mt, register char *name, nfs_fh *dirp);
+
+#define MAX_BSTR_SIZE	255
+
+int
+ptofh(mt, dp, fd, path, nfd, name)
+	struct mount_pt *mt;
+	register struct DosPacket *dp;
+	struct fdata *fd;
+	u_char *path;
+	char *name;
+	register struct fdata *nfd;
+{
+	u_char pathbuf[MAX_BSTR_SIZE+1];
+	register u_char *c, *p, *last;
+	struct diropargs di;
+	struct diropres dor;
+	enum clnt_stat err;
+	int len;
+	short readlink = 0;
+
+
+
+	/* ACTION_READ_LINK passes in a CSTR instead of a BSTR */
+	/* set readlink so we know to interpret softlinks */
+	if(dp->dp_Type==ACTION_READ_LINK) {
+		readlink=1;
+		len = strlen(path);
+		if(len > MAX_BSTR_SIZE) {
+			dp->dp_Res2 = ERROR_LINE_TOO_LONG;
+			return NOTFOUND;
+		}
+
+	} else
+		len = *path++;
+
+
+	bcopy(path, pathbuf, len);
+	pathbuf[len] = 0;
+
+	/*
+	 * everything up to the first colon is considered a volume name
+	 */
+	for(c = pathbuf; *c; c++){
+		if(*c == ':'){
+			break;
+		}
+	}
+	c = (*c != 0) ? c + 1 : pathbuf;
+
+	*nfd = *fd;
+	nfd->fd_head = nfd->fd_next = (struct entry *)NULL;
+
+	if(*c == 0){
+		dp->dp_Res2 = ERROR_OBJECT_EXISTS;
+		return ALLFOUND;
+	}
+
+	/*
+	 * now iterate for each path component
+  	 */
+	do {
+		/*
+		 * get next component into name
+		 */
+		last = c;
+		p = (u_char *)name;
+		while(*c != '/'){
+			*p++ = *c++;
+			if(*c == 0){
+				break;
+			}
+		}
+		*p = 0;
+#ifdef MONITOR
+KPrintF("looking for %s\n",name);
+#endif
+		/*
+		 * check to see that current args describe directory
+		 */
+		if(nfd->fd_type != FD_DIR){
+			if(nfd->fd_type == FD_LINK)
+				dp->dp_Res2 = ERROR_IS_SOFT_LINK;
+			else
+				dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+			return NOTFOUND;
+		}
+		/*
+		 * set up diropargs to lookup relative to cwd
+  		 */
+		di.dir = nfd->fd_dir;
+		if(name[0] == 0 || !strcmp(name,"..")){
+			di.name = "..";
+			if(nfd->fd_dir_fid == mt->mt_lock.fd_dir_fid){
+				dp->dp_Res2 = ERROR_OBJECT_NOT_FOUND;
+				return NOTFOUND;
+			}
+		} else {
+			di.name = name;
+		}
+
+		/*
+		 * lookup pathname component on server.  Try verbatim
+		 * form first, if not found, then do case insensitive search
+		 * of directory.  If multiple matches are found then
+	 	 * file requester is put up.
+		 */
+		err = (int)nfs_call(mt, NFSPROC_LOOKUP,	xdr_diropargs, &di,
+							xdr_diropres, &dor);
+
+		if(!mt->mt_case) {
+			if(err==0 && dor.status != NFS_OK){
+				if(searchdir(mt, name, &di.dir)){
+					err = (int)nfs_call(mt, NFSPROC_LOOKUP,
+								xdr_diropargs, &di,
+								xdr_diropres, &dor);
+				}
+			}
+		}
+		if(err != RPC_SUCCESS || dor.status != 0){
+#ifdef MONITOR
+KPrintF("Lookup failed\n");
+#endif
+			dp->dp_Res2 = fh_status(err, dor.status);
+			return (*c == 0) ? LASTNOT:NOTFOUND;
+		}
+
+#define ATTR(ff) ((ff).diropres_u.diropres.attributes)
+		if((ATTR(dor).mode&NFSMODE_DIR) == NFSMODE_DIR){
+			nfd->fd_type = FD_DIR;
+			nfd->fd_dir = dor.diropres_u.diropres.file;
+			nfd->fd_dir_fid = ATTR(dor).fileid;
+		} else
+			if ((ATTR(dor).mode&NFSMODE_LNK) == NFSMODE_LNK) {
+			struct readlinkres rl;
+			char buffer[NFS_MAXPATHLEN];
+			int nlen;
+#ifdef MONITOR
+                        KPrintF("Looks like a link\n");
+#endif
+			if (readlink) {
+				rl.readlinkres_u.data = buffer;
+				err = (int)nfs_call(mt, NFSPROC_READLINK,xdr_nfs_fh,
+					&dor.diropres_u.diropres.file, xdr_readlinkres, &rl);
+#ifdef MONITOR
+				KPrintF("err=%ld\n",err);
+#endif
+				if (err != RPC_SUCCESS || rl.status != 0) {
+					dp->dp_Res2 = fh_status(err,rl.status);
+#ifdef MONITOR
+					KPrintF("link %s not found\n",name);
+#endif
+					return (NOTFOUND);
+				}
+#ifdef MONITOR
+				KPrintF("Found a link from %s to %s\n",name,rl.readlinkres_u.data);
+#endif
+				len = strlen(buffer);
+				if(strchr(buffer,':')) {
+					if(len+1>dp->dp_Arg4) {
+						dp->dp_Res1 = -2;
+						dp->dp_Res2 = ERROR_OBJECT_TOO_LARGE;
+						return (NOTFOUND);
+					}
+					strncpy(dp->dp_Arg3,buffer,len+1);
+					dp->dp_Res1 = len;
+				} else {
+					nlen = last-pathbuf;
+					if(len+nlen+1>dp->dp_Arg4) {
+						dp->dp_Res1 = -2;
+						dp->dp_Res2 = ERROR_OBJECT_TOO_LARGE;
+						return (NOTFOUND);
+					}
+					strncpy(dp->dp_Arg3,pathbuf,nlen);
+					strcpy((char *)dp->dp_Arg3+nlen,buffer);
+					dp->dp_Res1 = nlen+len;
+				}
+				dp->dp_Res2 = 0;
+				return (ALLFOUND);
+			} else {
+				nfd->fd_type = FD_LINK;
+				nfd->fd_file = dor.diropres_u.diropres.file;
+				nfd->fd_file_fid = ATTR(dor).fileid;
+			}
+
+		} else {
+			nfd->fd_type = FD_FILE;
+			nfd->fd_file = dor.diropres_u.diropres.file;
+			nfd->fd_file_fid = ATTR(dor).fileid;
+		}
+#undef ATTR
+		/*
+		 *  x/y/.. where y is file fail
+		 */
+		if(*c == '/'){
+			if(nfd->fd_type == FD_FILE){
+				dp->dp_Res1 = 0;
+				dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+				return (NOTFOUND);
+			} else if(nfd->fd_type == FD_LINK) {
+				dp->dp_Res1 = 0;
+				dp->dp_Res2 = ERROR_IS_SOFT_LINK;
+				return (NOTFOUND);
+			}
+			c++;
+		}
+	} while (*c != 0);
+
+	dp->dp_Res2 = ERROR_OBJECT_EXISTS;
+
+	return ALLFOUND;
+}
+
+/*
+ * Do case insensitive search of directory for name.  Return match in
+ * name.  If more than one match is found then (to prevent inadvertent
+ * modification of the wrong file) we fail.
+ */
+static int
+searchdir(mt, name, dirp)
+	struct mount_pt *mt;
+	register char *name;
+	nfs_fh *dirp;
+{
+	extern bool_t xdr_my_readdirres(), xdr_my_entry_list();
+	struct readdirargs ra;
+	struct readdirres rr;
+	register entry *e;
+	int err, found;
+
+	ra.count = mt->mt_rdsize;
+	ra.dir = *dirp;
+	bzero(&ra.cookie, sizeof(ra.cookie));
+	found = 0;
+
+	do {
+		bzero(&rr, sizeof(rr));
+		err = (int)nfs_call(mt, NFSPROC_READDIR,
+						xdr_readdirargs, &ra,
+						xdr_my_readdirres, &rr);
+		if(err != 0 || rr.status != NFS_OK){
+			break;
+		}
+
+		for(e = rr.readdirres_u.reply.entries; e; e = e->nextentry){
+			if(stricmp(e->name,name) == 0){
+				strcpy(name, e->name);
+				found++;
+			}
+			if(!e->nextentry){
+				ra.cookie = e->cookie;
+			}
+		}
+
+		if(rr.readdirres_u.reply.entries){
+			xdr_free(xdr_my_entry_list, &rr.readdirres_u.reply.entries);
+			rr.readdirres_u.reply.entries = 0;
+		}
+
+	} while(!rr.readdirres_u.reply.eof);
+
+	if(rr.readdirres_u.reply.entries){
+		xdr_free(xdr_my_entry_list, &rr.readdirres_u.reply.entries);
+		rr.readdirres_u.reply.entries = 0;
+	}
+
+	return (found == 1) ? 1:0;
+}
+
+/*
+ * Map rpc/nfs status code to Amiga status code.
+ */
+int
+fh_status(rpc_error, nfs_error)
+	enum clnt_stat rpc_error;
+	int nfs_error;
+{
+	char *errmsg, *clnt_sperrno();
+
+	if(rpc_error != RPC_SUCCESS){
+		errmsg = clnt_sperrno(rpc_error);
+		if(errmsg){
+			(void)requester(0L, " OK ", "NFS Client Problem\n%s\n", errmsg);
+		}
+		return 4000 + rpc_error;
+	}
+
+	switch(nfs_error){
+	case NFS_OK:
+		return 0;
+
+	case NFSERR_PERM:
+	case NFSERR_ACCES:
+		return ERROR_WRITE_PROTECTED;
+
+	case NFSERR_NOENT:
+		return ERROR_OBJECT_NOT_FOUND;
+
+	case NFSERR_NAMETOOLONG:
+		return ERROR_INVALID_COMPONENT_NAME;
+
+	case NFSERR_FBIG:
+	case NFSERR_DQUOT:
+	case NFSERR_NOSPC:
+		return ERROR_DISK_FULL;
+
+	case NFSERR_EXIST:
+		return ERROR_OBJECT_EXISTS;
+
+	case NFSERR_NOTDIR:
+	case NFSERR_ISDIR:
+		return ERROR_OBJECT_WRONG_TYPE;
+
+	case NFSERR_ROFS:
+		return ERROR_DISK_WRITE_PROTECTED;
+
+	case NFSERR_NOTEMPTY:
+		return ERROR_DIRECTORY_NOT_EMPTY;
+
+	case NFSERR_NXIO:
+	case NFSERR_NODEV:
+		return ERROR_DEVICE_NOT_MOUNTED;
+
+	case NFSERR_STALE:
+		return ERROR_INVALID_LOCK;
+
+	case NFSERR_WFLUSH:
+	case NFSERR_IO:
+	default:
+		return 5000+nfs_error;
+	}
+}
+@
+
+
+1.2
+log
+@major rewrite.
+added SYMLINK support
+recompiled with SAS 5.10
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: ptofh.c,v 1.1 90/11/12 15:47:14 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/ptofh.c,v 1.1 90/11/12 15:47:14 bj Exp $
+d22 1
+a22 2
+#include <libraries/dosextens.h>
+
+a24 2
+#include <rpc/rpc.h>
+#include <nfs/nfs.h>
+a27 8
+#include "fs.h"
+
+/* global functions */
+int ptofh(struct mount_pt *mt, register struct DosPacket *dp, struct fdata
+	*fd, u_char *path, register struct fdata *nfd, char *name);
+int fh_status(enum clnt_stat rpc_error, int nfs_error);
+
+
+a30 3
+/* external functions */
+BOOL requester(UBYTE *positive, UBYTE *negative, char *fmt, ...);
+
+d33 1
+a33 1
+int 
+d65 1
+a65 1
+	
+d69 2
+a70 2
+	/* 
+	 * everything up to the first colon is considered a volume name 
+d87 2
+a88 2
+	/* 
+	 * now iterate for each path component 
+d91 2
+a92 2
+		/* 
+		 * get next component into name 
+d106 2
+a107 2
+		/* 
+		 * check to see that current args describe directory 
+d116 2
+a117 2
+		/* 
+		 * set up diropargs to lookup relative to cwd 
+d130 1
+a130 1
+		/* 
+d136 1
+a136 1
+		err = (int)nfs_call(mt, NFSPROC_LOOKUP,	xdr_diropargs, &di, 
+d142 2
+a143 2
+					err = (int)nfs_call(mt, NFSPROC_LOOKUP,	
+								xdr_diropargs, &di, 
+d153 1
+a153 1
+			return (*c == 0) ? LASTNOT:NOTFOUND; 
+d161 1
+a161 1
+		} else  
+d213 1
+a213 1
+		
+d220 2
+a221 2
+		/* 
+		 *  x/y/.. where y is file fail 
+d264 1
+a264 1
+	do { 
+d266 3
+a268 3
+		err = (int)nfs_call(mt, NFSPROC_READDIR, 
+						xdr_readdirargs, &ra, 
+						xdr_my_readdirres, &rr); 
+d272 1
+a272 1
+		
+d282 1
+a282 1
+		
+d292 1
+a292 1
+//		rr.readdirres_u.reply.entries = 0;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+ * PtoFH.c
+d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d29 2
+d33 12
+d57 1
+a57 1
+	register u_char *c, *p;
+d62 3
+d66 12
+a77 5
+	len = *path++;
+	if(len > MAX_BSTR_SIZE){
+		dp->dp_Res2 = ERROR_LINE_TOO_LONG;
+		return NOTFOUND;
+	}
+d79 1
+d108 1
+d116 4
+a119 2
+		*p++ = 0;
+
+d124 4
+a127 1
+			dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+a129 1
+
+d134 1
+a134 1
+		if(name[0] == 0){
+a161 1
+
+d163 3
+d175 53
+d241 5
+a245 1
+				return NOTFOUND;
+d261 1
+a261 1
+static
+d288 1
+a288 1
+			if(strcasecmp(e->name, name) == 0){
+d306 1
+a306 1
+		rr.readdirres_u.reply.entries = 0;
+d315 1
+d325 1
+a325 1
+			requester(0L, " OK ", "NFS Client Problem\n%s\n", errmsg);
+a361 1
+	case NFSERR_IO:
+d364 2
+d367 2
+d370 1
+@

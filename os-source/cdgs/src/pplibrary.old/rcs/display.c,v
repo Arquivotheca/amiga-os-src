@@ -1,0 +1,552 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     93.02.26.19.08.00;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Display routines for player.
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@#include <exec/types.h>
+#include <exec/memory.h>
+#include <hardware/intbits.h>
+
+#include <graphics/gfxbase.h>
+#include <intuition/intuition.h>
+#include <intuition/pointerclass.h>
+
+#include <cdtv/debox.h>
+#include "cdtvkeys.h"
+
+#include "display.h"
+#include "display_protos.h"
+
+#include "playerprefs.h"
+
+
+#include "playerprefsbase.h"
+#include "playerprefs_pragmas.h"
+#include "playerprefs_protos.h"
+#include <clib/debox_protos.h>
+#include <pragmas/debox_pragmas.h>
+
+#include <clib/alib_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/battclock_protos.h>
+#include <clib/intuition_protos.h>
+
+#include "playerprefs_private_pragmas.h"
+#include <pragmas/exec_old_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/battclock_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+
+extern struct Library          *IntuitionBase;
+extern struct GfxBase          *GfxBase;
+extern struct DeBoxBase        *DeBoxBase;
+extern void                    *SysBase;
+extern struct PlayerPrefsBase  *PlayerPrefsBase;
+
+struct IBuffer *CurrentIB;
+struct IBuffer *WorkIB;
+struct IBuffer *MasterIB;
+struct MsgPort  *dbufport;
+struct Screen *PlayerScreen;
+struct Window *PlayerWindow;
+struct ColorChanger *PlayerColorChanger;
+
+struct BMInfo   *bmi;
+struct BMInfo   *buttonBMI;
+struct BitMap   *buttonBM;
+struct BitMap   *bm;
+UBYTE           *mask;
+struct RastPort WorkRP;
+UBYTE                   *bmask;
+struct BitMap blankpointerbm;
+APTR blankpointer;
+
+
+/*----------------------- DISPLAY FRAMES ------------------------*/
+
+
+#if 000
+VOID
+DisplayFramePos(struct DisplayFrame *df, struct CDTVPrefs *cp)
+{
+struct View *v;
+
+    v = df->view;
+    CenterCDTVView(cp, v, df->bmi->bmi_Width, df->bmi->bmi_Height);
+    FindViewRGB(v, df->cclist, 32);
+}
+#endif
+
+
+/* InitIBuffer()
+ *
+ * Clear all fields of the IBuffer structure.
+ * If you pass a non-zero BMInfo pointer, then it sets that, allocates a
+ *	ScreenBuffer,
+ * It always allocates MAX_PLGAD gadgets, and sets the MaxGad and BoxNo fields.
+ */
+struct IBuffer *
+AllocIBuffer(struct Screen *sc, struct BMInfo *bmi, int maxgad, int bufferid )
+{
+    struct IBuffer *ib;
+    int ok = 0;
+
+    if ( ib = AllocMem( sizeof( struct IBuffer ), MEMF_CLEAR ) )
+    {
+	ib->ib_Screen = sc;
+	if ( ib->ib_GState = AllocMem( maxgad*sizeof( WORD ), MEMF_CLEAR ) )
+	{
+	    ib->ib_MaxGad = maxgad;
+	    ib->ib_BoxNo = -1;
+
+	    if ( ib->ib_BMInfo = bmi )
+	    {
+		/* ZZZ: Need to allocate a screenbuffer for the original bm */
+		if ( ib->ib_ScreenBuffer = AllocScreenBuffer( sc, NULL, SB_COPY_BITMAP ) )
+		{
+		    ib->ib_ScreenBuffer->sb_DBufInfo->dbi_UserData1 = (APTR)bufferid;
+		    /* ZZZ:	DisplayFramePos(df, &CDTVPrefs); */
+		    ok = 1;
+		}
+	    }
+	    else
+	    {
+		ok = 1;
+	    }
+	}
+	if ( !ok )
+	{
+	    FreeIBuffer( ib );
+	    ib = NULL;
+	}
+    }
+    return( ib );
+}
+
+VOID
+FreeIBuffer( struct IBuffer *ib )
+{
+    if ( ib )
+    {
+	FreeScreenBuffer( ib->ib_Screen, ib->ib_ScreenBuffer );
+	if ( ib->ib_GState )
+	{
+	    FreeMem( ib->ib_GState, ib->ib_MaxGad * sizeof( WORD ) );
+	}
+	FreeMem( ib, sizeof( struct IBuffer ) );
+    }
+}
+
+VOID
+SwapIBuffer( VOID )
+{
+    struct IBuffer *temp;
+
+    temp = CurrentIB;
+    CurrentIB = WorkIB;
+    WorkIB = temp;
+    WorkRP.BitMap = WorkIB->ib_ScreenBuffer->sb_BitMap;
+    WaitBlit();
+    CurrentIB->ib_ScreenBuffer->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = dbufport;
+    *(ULONG *)&(CurrentIB->ib_ScreenBuffer->sb_DBufInfo->dbi_UserData1) |= 0x80000000;
+
+    ChangeScreenBuffer( CurrentIB->ib_Screen, CurrentIB->ib_ScreenBuffer );
+}
+
+/* Wait until WorkIB is safe to render into
+ * NB: We check CurrentIB (the other one), since the SafeMessage
+ * comes back when it's safe to render to the OTHER buffer.
+ */
+void
+MakeWorkIBSafe( void )
+{
+    int firsttime = 1;
+    struct Message *dbmsg;
+
+    while ( ((ULONG)CurrentIB->ib_ScreenBuffer->sb_DBufInfo->dbi_UserData1) & 0x80000000 )
+    {
+	if ( !firsttime )
+	{
+	    WaitTOF();
+	}
+	else
+	{
+	    firsttime = 0;
+	}
+	while ( dbmsg = GetMsg( dbufport ) )
+	{
+	    *((ULONG *)(dbmsg+1)) &= ~0x80000000;
+	}
+    }
+}
+
+/*-------------------------------------------------------------------------*/
+
+
+long
+StartPPScreen(struct GadDir *gl, struct BuildBG_Info *bg, UBYTE *buttondata,
+    UBYTE initfade)
+{
+/*ZZZ failure and freeing */
+    dbufport = CreateMsgPort();
+#if 000
+    if (!(StartIHandle(&input_data)))
+#endif
+    {
+	if (BuildBg(bg, &bmi, &bm))
+	{
+	    mask = NULL;
+
+	    bmi->bmi_Modes |= EXTRA_HALFBRITE;
+
+	    if (GrabBm(NULL, buttondata, &buttonBMI, &buttonBM, &bmask))
+	    {
+		struct ColorSpec screencolors[ 33 ];
+		int i;
+		for ( i = 0; i < 32; i++ )
+		{
+		    screencolors[i].ColorIndex = i;
+		    screencolors[i].Red =
+			screencolors[i].Green =
+			screencolors[i].Blue = 0;
+		}
+		screencolors[ i ].ColorIndex = ~0;
+		    
+		if ( PlayerScreen = OpenScreenOnlyTags(
+		    SA_DisplayID, EXTRAHALFBRITE_KEY,
+		    SA_Overscan, OSCAN_MAX,
+		    SA_Width, bmi->bmi_Width,
+		    SA_Height, bmi->bmi_Height,
+		    SA_Depth, 6,
+		    SA_DisplayID, EXTRAHALFBRITE_KEY,
+		    SA_Quiet, TRUE,
+		    SA_Exclusive, TRUE,
+		    SA_Draggable, FALSE,
+		    SA_Interleaved, TRUE,
+		    SA_Colors, screencolors,
+		    TAG_DONE ) )
+		{
+		    BltBitMap( bm, 0, 0, PlayerScreen->RastPort.BitMap,
+			0, 0, bmi->bmi_Width, bmi->bmi_Height, 0xC0, 0xFF, NULL );
+		    WaitBlit();
+		    InitBitMap( &blankpointerbm, 2, 16, 0 );
+		    if ( blankpointer = NewObject( NULL, "pointerclass",
+			POINTERA_BitMap, &blankpointerbm,
+			TAG_DONE ) )
+		    {
+			if ( PlayerWindow = OpenWindowOnlyTags(
+			    WA_Borderless, TRUE,
+			    WA_RMBTrap, TRUE,
+			    WA_SimpleRefresh, TRUE,
+			    WA_NoCareRefresh, TRUE,
+			    WA_Pointer, blankpointer,
+			    WA_CustomScreen, PlayerScreen,
+			    WA_BackFill, LAYERS_NOBACKFILL,
+			    WA_Activate, TRUE,
+			    WA_IDCMP, IDCMP_RAWKEY,
+			    TAG_DONE ) )
+			{
+			    InitRastPort( &WorkRP );
+
+			    if ( CurrentIB = AllocIBuffer( PlayerScreen, bmi, MAX_PLGAD, 0 ) )
+			    {
+				if ( WorkIB = AllocIBuffer( PlayerScreen, bmi, MAX_PLGAD, 1 ) )
+				{
+				    if ( MasterIB = AllocIBuffer( NULL, NULL, MAX_PLGAD, 0 ) )
+				    {
+					if ( PlayerColorChanger = AllocColorChanger( PlayerScreen, bmi ) )
+					{
+					    MasterIB->ib_GadList = gl;
+					    MasterIB->ib_ButtonBM = buttonBM;
+					    WorkRP.BitMap = WorkIB->ib_ScreenBuffer->sb_BitMap;
+
+					    return(0);
+					}
+				    }
+				}
+			    }
+			}
+		    }
+		}
+	    }
+	}
+    }
+
+    EndPPScreen();
+    return(1);
+}
+
+VOID
+EndPPScreen(VOID)
+{
+    FreeIBuffer( MasterIB );
+    FreeIBuffer( WorkIB );
+    FreeIBuffer( CurrentIB );
+
+    if ( PlayerWindow )
+    {
+	CloseWindow( PlayerWindow );
+    }
+
+    DisposeObject( blankpointer );
+
+    if ( PlayerScreen )
+    {
+	CloseScreen( PlayerScreen );
+    }
+
+    if (mask)
+    {
+	bm->Planes[bm->Depth++] = mask;
+    }
+    if (bm)
+    {
+	FreeBitMap(bm);
+    }
+    if (bmi)
+    {
+	FreeBMInfo(bmi);
+    }
+    if (bmask)
+    {
+	buttonBM->Planes[buttonBM->Depth++] = bmask;
+    }
+    if (buttonBM)
+    {
+	FreeBitMap(buttonBM);
+    }
+    if (buttonBMI)
+    {
+	FreeBMInfo(buttonBMI);
+    }
+
+    mask = bmask = NULL;
+    bm = buttonBM = NULL;
+    bmi = buttonBMI = NULL;
+    PlayerScreen = NULL;
+
+#if 000
+    CloseIHandle( &input_data );
+#endif
+}
+
+UWORD
+GetIDCMPEvent( void )
+{
+    struct IntuiMessage *imsg;
+    UWORD event = 0;
+
+    if ( imsg = (struct IntuiMessage *)GetMsg( PlayerWindow->UserPort ) )
+    {
+	if ( imsg->Class == IDCMP_RAWKEY )
+	{
+	    event = imsg->Code;
+	}
+	ReplyMsg( (struct Message *)imsg );
+    }
+    return( event );
+}
+
+void
+FadeTo(int lv)
+{
+    UWORD newcolors[32];
+    int i;
+    int start = 0;
+    int stop = lv;
+    int dir = 1;
+    int fade;
+
+    if ( !lv )
+    {
+	start = 15;
+	stop = lv;
+	dir = -1;
+    }
+
+    for ( fade = start; fade != stop; fade += dir )
+    {
+	for ( i = 0; i < 32; i++ )
+	{
+	    newcolors[ i ] = LevelColor( bmi->bmi_ColorMap[ i ], fade );
+	}
+	WaitTOF();
+	LoadRGB4( &PlayerScreen->ViewPort, newcolors, 32 );
+    }
+}
+
+ULONG *
+RGB4toRGB32( UWORD rgb4, ULONG *rgb32 )
+{
+    *rgb32++ = ( rgb4 >> 8 ) * 0x11111111;
+    *rgb32++ = (( rgb4 >> 4 ) & 0x00F ) * 0x11111111;
+    *rgb32++ = (( rgb4 ) & 0x00F ) * 0x11111111;
+    return( rgb32 );
+}
+
+void
+AbleColorChanger ( LONG on )
+{
+    struct ColorRange *cr = PlayerColorChanger->Ranges;
+    int range;
+
+    for ( range = 0; range < PlayerColorChanger->NumRanges; range++ )
+    {
+	cr->Enabled = on;
+	cr++;
+    }
+}
+
+struct ColorChanger *
+AllocColorChanger( struct Screen *sc, struct BMInfo *bmi )
+{
+    static STRPTR name = "PlayerCycler";
+    struct Task *cycletask;
+    struct ColorChanger *cc;
+
+    if ( cc = AllocVec( sizeof(struct ColorChanger) +
+	bmi->bmi_NumRanges * sizeof( struct ColorRange ), MEMF_CLEAR ) )
+    {
+	struct ColorRange *cr;
+	struct RangeInfo *rgi;
+	int range;
+
+	cc->ViewPort = &sc->ViewPort;
+	cc->NumRanges = bmi->bmi_NumRanges;
+
+	cr = cc->Ranges = ( struct ColorRange *)( cc + 1 );
+	rgi = bmi->bmi_RangeInfo;
+	for ( range = 0; range < cc->NumRanges; range++ )
+	{
+	    ULONG *ptr;
+
+	    cr->Enabled = 0;
+	    cr->Length = rgi->rgi_High - rgi->rgi_Low + 1;
+	    /* Use NTSC values for microseconds per frame, since it
+	     * still gives appealing results in PAL
+	     */
+	    cr->Countdown = cr->NumFrames = rgi->rgi_MicroSeconds / 16666;
+
+	    /* ZZZ failure */
+	    if ( ptr = AllocVec( cr->Length * 3 * sizeof( ULONG ) +
+		2 * sizeof( ULONG ), MEMF_CLEAR ) )
+	    {
+		int color;
+
+		cr->LoadTable = ptr;
+
+		*ptr++ = ( cr->Length << 16 ) + rgi->rgi_Low;
+		for ( color = rgi->rgi_Low; color <= rgi->rgi_High; color++ )
+		{
+		    ptr = RGB4toRGB32( bmi->bmi_ColorMap[ color ], ptr );
+		}
+		*ptr = 0;	/* terminates LoadRGB32() table */
+	    }
+
+	    cr++;
+	    rgi++;
+	}
+
+	if ( cycletask = CreateTask( name, 21, taskLoop, 4000 ) )
+	{
+	    cycletask->tc_UserData = cc;
+	    Signal( cycletask, SIGBREAKF_CTRL_C );
+	}
+	else
+	{
+	    FreeVec( cc );
+	}
+    }
+    return( cc );
+}
+
+void __saveds
+taskLoop( void )
+{
+    int dead = FALSE;
+    struct ColorChanger *cc;
+    struct ColorRange *cr;
+    int range;
+    struct Library *GfxBase = OpenLibrary("graphics.library",0);
+
+    Wait( SIGBREAKF_CTRL_C );
+    cc = FindTask( NULL )->tc_UserData;
+
+    while ( !dead )
+    {
+	/* Look ma!  We're just like a vblank server now */
+	WaitTOF();
+
+	if ( SetSignal( 0, SIGBREAKF_CTRL_C ) & SIGBREAKF_CTRL_C )
+	{
+	    dead = TRUE;
+	}
+	cr = cc->Ranges;    
+	for ( range = 0; range < cc->NumRanges; range++ )
+	{
+	    if ( ( cr->Enabled ) && ( !--cr->Countdown ) )
+	    {
+		ULONG *src = &cr->LoadTable[ 3 * cr->Length ];
+		ULONG *dest = src;
+		ULONG lastblue = *src--;
+		ULONG lastgreen = *src--;
+		ULONG lastred = *src--;
+		int color;
+
+		for ( color = 0; color < 3*(cr->Length - 1); color++ )
+		{
+		    *dest-- = *src--;
+		}
+		*dest-- = lastblue;
+		*dest-- = lastgreen;
+		*dest = lastred;
+		cr->Countdown = cr->NumFrames;
+		LoadRGB32( cc->ViewPort, cr->LoadTable );
+	    }
+	    cr++;
+	}
+    }
+    CloseLibrary( GfxBase );
+}
+
+struct Screen *
+OpenScreenOnlyTags( ULONG firsttag, ... )
+{
+     return( OpenScreenTagList( NULL, (struct TagItem *)&firsttag ) );
+}
+
+struct Window *
+OpenWindowOnlyTags( ULONG firsttag, ... )
+{
+     return( OpenWindowTagList( NULL, (struct TagItem *)&firsttag ) );
+}
+
+APTR
+NewObject( struct IClass *classPtr, UBYTE *classID, ULONG firsttag, ... )
+{
+     return( NewObjectA( classPtr, classID, (struct TagItem *)&firsttag ) );
+}
+@

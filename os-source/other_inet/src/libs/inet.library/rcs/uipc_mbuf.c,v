@@ -1,0 +1,1768 @@
+head     1.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ;
+comment  @ * @;
+
+
+1.4
+date     92.08.14.14.52.43;  author gregm;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.07.12.46.14;  author gregm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.10.09.16.28.26;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.12.01.19.39.23;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.4
+log
+@references to sleep() changed to handle CTRL-C.
+@
+text
+@/*
+ * Copyright (c) 1982, 1986, 1988 Regents of the University of California.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms are permitted
+ * provided that the above copyright notice and this paragraph are
+ * duplicated in all such forms and that any documentation,
+ * advertising materials, and other materials related to such
+ * distribution and use acknowledge that the software was developed
+ * by the University of California, Berkeley.  The name of the
+ * University may not be used to endorse or promote products derived
+ * from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
+ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ *	@@(#)uipc_mbuf.c	7.4.1.3 (Berkeley) 2/15/89
+ */
+
+#include <sys/param.h>
+#include <sys/user.h>
+#include <sys/mbuf.h>
+#include <sys/kernel.h>
+#include <syslog.h>
+#include <sys/domain.h>
+#include <sys/protosw.h>
+
+#ifdef AMIGA
+#include <exec/types.h>
+#include <exec/memory.h>
+#ifdef LATTICE
+#include <proto/exec.h>
+#endif
+#endif
+
+#ifdef AZTEC_C
+#include <functions.h>
+#endif
+
+#include "proto.h"
+
+/* these declarations from sys/mbuf.h */
+struct	mbstat mbstat;
+struct	mbuf *mfree, *mclfree;
+int	m_want;
+
+void mbinit()
+{
+	int s;
+
+	s = splimp();
+	if (m_clalloc(1, MPG_MBUFS, M_DONTWAIT) == 0){
+		panic("mbinit");
+	}
+	splx(s);
+
+	enter_nlist("_mbstat", &mbstat);
+
+	return;
+}
+
+#define MBUFS_AT_INIT	128	/* number of buffer available at init time */
+static char *mbuf_base;		/* memory allocated to mbufs	*/
+static int mbuf_size;		/* size of mbuf allocation	*/
+
+caddr_t
+m_clalloc(ncl, how, canwait)
+	register int ncl;
+	int how;
+{
+	register struct mbuf *m;
+	register int num_bufs;
+	void *AllocMem();
+
+/************************************************
+check if already allocated. commented out by MMH
+as a temporary fix to mbuf problem
+
+	if(mbuf_base){
+		return 0;
+	}
+************************************************/
+
+	num_bufs = MBUFS_AT_INIT;
+	mbuf_size = (num_bufs + 1)*MSIZE;
+	mbuf_base = (char *)AllocMem(mbuf_size, MEMF_PUBLIC|MEMF_CLEAR);
+	if(!mbuf_base){
+		return 0;
+	}
+	m = dtom(mbuf_base + MSIZE - 1);
+	switch (how) {
+	case MPG_MBUFS:
+		while(num_bufs-- > 0) {
+			m->m_off = 0;
+			m->m_type = MT_DATA;
+			m->m_next = 0;
+			mbstat.m_mtypes[MT_DATA]++;
+			mbstat.m_mbufs++;
+			(void) m_free(m);
+			m++;
+		}
+		break;
+
+	case MPG_SPACE:
+		mbstat.m_space++;
+		break;
+	}
+	return (caddr_t)mbuf_base;
+}
+
+/*
+ * Must be called at splimp.
+ */
+
+int m_expand(canwait)
+	int canwait;
+{
+	register struct domain *dp;
+	register struct protosw *pr;
+	int tries;
+
+	tries = 0;
+	for (;;){
+		if (m_clalloc(1, MPG_MBUFS, canwait)){
+			return (1);
+		}
+		if (canwait == 0 || tries++){
+			return (0);
+		}
+
+		/* ask protocols to free space */
+		for (dp = domains; dp; dp = dp->dom_next){
+			for (pr = dp->dom_protosw; pr < dp->dom_protoswNPROTOSW; pr++){
+				if (pr->pr_drain){
+					(*pr->pr_drain)();
+				}
+			}
+		}
+		mbstat.m_drain++;
+	}
+}
+
+/*
+ * Space allocation routines.
+ * These are also available as macros
+ * for critical paths.
+ */
+
+struct mbuf *
+m_get(canwait, type)
+	int canwait, type;
+{
+	register struct mbuf *m;
+
+	Forbid();	/* s = splimp(); */
+	if(m = mfree){
+		if (m->m_type != MT_FREE){
+#ifdef MBTRACER
+printf("m_get: panic, got mbuf type %d, wanted %d, m = %x\n", type, MT_FREE, m);
+			m_dump(m, 10000);
+#endif
+			panic("mget");
+		}
+		m->m_type = type;
+		mbstat.m_mtypes[MT_FREE]--;
+		mbstat.m_mtypes[type]++;
+		mfree = m->m_next;
+		m->m_next = 0;
+		m->m_off = MMINOFF;
+	} else {
+		m = m_more(canwait, type);
+	}
+
+#ifdef MBTRACER
+	m_record("m_get", ((u_long *)&canwait)[-1], m);
+#endif
+	Permit();	/* splx(s); */
+
+	return m;
+}
+
+struct mbuf *
+m_getclr(canwait, type)
+	int canwait, type;
+{
+	register struct mbuf *m;
+
+	MGET(m, canwait, type);
+	if (m == 0){
+		return (0);
+	}
+	bzero(mtod(m, caddr_t), MLEN);
+#ifdef MBTRACER
+	m_record("m_getclr", ((u_long *)&canwait)[-1], m);
+#endif
+	return (m);
+}
+
+struct mbuf *
+m_free(m)
+	struct mbuf *m;
+{
+	register struct mbuf *n;
+
+	Forbid();	/* s = splimp(); */
+#ifdef MBTRACER
+	m_record("m_free", ((u_long *)&m)[-1], m);
+#endif
+	if (m->m_type == MT_FREE){
+#ifdef MBTRACER
+printf("mfree panic: called from %06x (m=%06x), dump:\n", ((u_long *)&m)[-1],m);
+		m_dump(m, 100000);
+#endif
+		panic("mfree");
+		return (struct mbuf *)0;
+	}
+
+	mbstat.m_mtypes[m->m_type]--;
+	mbstat.m_mtypes[MT_FREE]++;
+
+	m->m_type = MT_FREE;
+	n = m->m_next;
+	m->m_next = mfree;
+	m->m_act = 0;
+	m->m_off = 0;
+	mfree = m;
+	if(m_want){
+		m_want = 0;
+		wakeup((ulong)&mfree);
+	}
+
+	Permit();	/* splx(s); */
+
+	return n;
+}
+
+/*
+ * Get more mbufs; called from MGET macro if mfree list is empty.
+ * Must be called at splimp.
+ */
+/*ARGSUSED*/
+struct mbuf *
+m_more(canwait, type)
+	int canwait, type;
+{
+	register struct mbuf *m;
+
+	while (m_expand(canwait) == 0) {
+		if (canwait == M_WAIT) {
+			mbstat.m_wait++;
+			m_want++;
+			(void)sleep((ulong)&mfree, PZERO - 1);
+			if (mfree){
+				break;
+			}
+		} else {
+			mbstat.m_drops++;
+			return (NULL);
+		}
+	}
+#define m_more(x,y) (panic("m_more"), (struct mbuf *)0)
+	MGET(m, canwait, type);
+#undef m_more
+	return m;
+}
+
+void m_freem(m)
+	struct mbuf *m;
+{
+	register struct mbuf *n;
+
+#ifdef MBTRACER
+	m_record("m_freem", ((u_long *)&m)[-1], m);
+#endif
+	if (m == NULL){
+		return;
+	}
+	Forbid();	/* s = splimp(); */
+	do {
+		MFREE(m, n);
+	} while (m = n);
+	Permit();	/* splx(s); */
+}
+
+/*
+ * Mbuffer utility routines.
+ */
+
+/*
+/*
+ * Make a copy of an mbuf chain starting "off" bytes from the beginning,
+ * continuing for "len" bytes.  If len is M_COPYALL, copy to end of mbuf.
+ * Should get M_WAIT/M_DONTWAIT from caller.
+ */
+struct mbuf *
+m_copy(m, off, len)
+	register struct mbuf *m;
+	int off;
+	register int len;
+{
+	register struct mbuf *n, **np;
+	struct mbuf *top, *p;
+
+	if (len == 0){
+		return (0);
+	}
+	if (off < 0 || len < 0){
+		panic("m_copy");
+	}
+	while (off > 0) {
+		if (m == 0){
+			panic("m_copy");
+		}
+		if (off < m->m_len){
+			break;
+		}
+		off -= m->m_len;
+		m = m->m_next;
+	}
+	np = &top;
+	top = 0;
+	while (len > 0) {
+		if (m == 0) {
+			if (len != M_COPYALL){
+				panic("m_copy");
+			}
+			break;
+		}
+		MGET(n, M_DONTWAIT, m->m_type);
+		*np = n;
+		if (n == 0){
+#ifdef MBTRACER
+printf("m_copy: nospace\n");
+#endif
+			goto nospace;
+		}
+		n->m_len = MIN(len, m->m_len - off);
+		if (m->m_off > MMAXOFF) {
+			p = mtod(m, struct mbuf *);
+			n->m_off = ((int)p - (int)n) + off;
+		} else {
+			bcopy(mtod(m, caddr_t)+off, mtod(n, caddr_t),
+			    (unsigned)n->m_len);
+		}
+		if (len != M_COPYALL){
+			len -= n->m_len;
+		}
+		off = 0;
+		m = m->m_next;
+		np = &n->m_next;
+	}
+	return (top);
+
+nospace:
+	m_freem(top);
+	return (0);
+}
+
+/*
+ * Copy data from an mbuf chain starting "off" bytes from the beginning,
+ * continuing for "len" bytes, into the indicated buffer.
+ */
+
+/*
+ *void m_copydata(m, off, len, cp)
+ *	register struct mbuf *m;
+ *	register int off;
+ *	register int len;
+ *	caddr_t cp;
+ *{
+ *	register unsigned count;
+ *
+ *	if (off < 0 || len < 0){
+ *		panic("m_copydata");
+ *	}
+ *	while (off > 0) {
+ *		if (m == 0){
+ *			panic("m_copydata");
+ *		}
+ *		if (off < m->m_len){
+ *			break;
+ *		}
+ *		off -= m->m_len;
+ *		m = m->m_next;
+ *	}
+ *	while (len > 0) {
+ *		if (m == 0){
+ *			panic("m_copydata");
+ *		}
+ *		count = MIN(m->m_len - off, len);
+ *		bcopy(mtod(m, caddr_t) + off, cp, count);
+ *		len -= count;
+ *		cp += count;
+ *		off = 0;
+ *		m = m->m_next;
+ *	}
+ *}
+ *
+ */
+
+void m_cat(m, n)
+	struct mbuf *m, *n;
+{
+	while (m->m_next){
+		m = m->m_next;
+	}
+	while(n){
+		if (m->m_off >= MMAXOFF ||
+		    m->m_off + m->m_len + n->m_len > MMAXOFF) {
+			/* just join the two chains */
+			m->m_next = n;
+			return;
+		}
+		/* splat the data from one into the other */
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
+		    (u_int)n->m_len);
+		m->m_len += n->m_len;
+		n = m_free(n);
+	}
+}
+
+void m_adj(mp, len)
+	struct mbuf *mp;
+	register int len;
+{
+	register struct mbuf *m;
+	register count;
+
+	if ((m = mp) == NULL){
+		return;
+	}
+	if (len >= 0) {
+		while (m != NULL && len > 0) {
+			if (m->m_len <= len) {
+				len -= m->m_len;
+				m->m_len = 0;
+				m = m->m_next;
+			} else {
+				m->m_len -= len;
+				m->m_off += len;
+				break;
+			}
+		}
+	} else {
+		/*
+		 * Trim from tail.  Scan the mbuf chain,
+		 * calculat    its length and finding the last mbuf.
+		 * If the adjustment only affects this mbuf, then just
+		 * adjust and return.  Otherwise, rescan and truncate
+		 * after the remaining size.
+		 */
+		len = -len;
+		count = 0;
+		for (;;) {
+			count += m->m_len;
+			if (m->m_next == (struct mbuf *)0){
+				break;
+			}
+			m = m->m_next;
+		}
+		if (m->m_len >= len) {
+			m->m_len -= len;
+			return;
+		}
+		count -= len;
+		/*
+		 * Correct length for chain is "count".
+		 * Find the mbuf with last data, adjust its length,
+		 * and toss data from remaining mbufs on chain.
+		 */
+		for (m = mp; m; m = m->m_next) {
+			if (m->m_len >= count) {
+				m->m_len = count;
+				break;
+			}
+			count -= m->m_len;
+		}
+		while (m = m->m_next){
+			m->m_len = 0;
+		}
+	}
+}
+
+/*
+ * Rearange an mbuf chain so that len bytes are contiguous
+ * and in the data area of an mbuf (so that mtod and dtom
+ * will work for a structure of size len).  Returns the resulting
+ * mbuf chain on success, frees it and returns null on failure.
+ * If there is room, it will add up to MPULL_EXTRA bytes to the
+ * contiguous region in an attempt to avoid being called next time.
+ */
+struct mbuf *
+m_pullup(n, len)
+	register struct mbuf *n;
+	int len;
+{
+	register struct mbuf *m;
+	register int count;
+	int space;
+
+	if (n->m_off + len <= MMAXOFF && n->m_next) {
+		m = n;
+		n = n->m_next;
+		len -= m->m_len;
+	} else {
+		if (len > MLEN){
+			goto bad;
+		}
+		MGET(m, M_DONTWAIT, n->m_type);
+		if (m == 0){
+			goto bad;
+		}
+		m->m_len = 0;
+	}
+	space = MMAXOFF - m->m_off;
+	do {
+		count = MIN(MIN(space - m->m_len, len + MPULL_EXTRA), n->m_len);
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t)+m->m_len,
+				  (unsigned)count);
+		len -= count;
+		m->m_len += count;
+		n->m_len -= count;
+		if (n->m_len){
+			n->m_off += count;
+		} else {
+			n = m_free(n);
+		}
+	} while (len > 0 && n);
+	if (len > 0) {
+		(void) m_free(m);
+		goto bad;
+	}
+	m->m_next = n;
+	return (m);
+bad:
+	m_freem(n);
+	return (0);
+}
+
+#ifdef MBTRACER
+
+#define TRACESIZE 2048
+struct mbtrace {
+	long	caller;		/* who called			*/
+	struct mbuf *m;		/* affected mbuf		*/
+	char	*name;		/* name of routine		*/
+} mbtrace[TRACESIZE];
+static mb_next = 0, mb_total;
+
+m_record(name, caller, m)
+	char 	*name;
+	long	caller;
+	struct mbuf *m;
+{
+	mb_total++;
+	mbtrace[mb_next].m = m;
+	mbtrace[mb_next].caller = caller;
+	mbtrace[mb_next].name = name;
+	if(++mb_next >= TRACESIZE){
+		mb_next = 0;
+	}
+}
+
+/*
+** dump last <num> allocates/frees of <m>
+*/
+int m_dump(m, num)
+	register struct mbuf *m;
+	int num;
+{
+	register int mb, i, initial;
+
+	initial = mb = mb_next;
+	if(num > TRACESIZE){
+		num = TRACESIZE;
+	}
+	printf("total logged: %d\n", mb_total);
+	while(num--){
+		for(i = 0; i < TRACESIZE; i++){
+			--mb;
+			if(mb < 0){
+				mb = TRACESIZE-1;
+			}
+			if(mb == initial){
+				goto done;
+			}
+			if(m == 0 || m == mbtrace[mb].m){
+				printf("%04d: %06x called %s on mbuf %x\n",
+					mb,
+					mbtrace[mb].caller,
+					mbtrace[mb].name,
+					mbtrace[mb].m);
+				break;
+			}
+		}
+		if(i == TRACESIZE){
+			break;
+		}
+	}
+done:	return 0;
+}
+#endif
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@d17 1
+a17 1
+ *      @@(#)uipc_mbuf.c 7.4.1.3 (Berkeley) 2/15/89
+a39 9
+#ifdef DYNAMIC_ALLOC
+#define forbid Disable();
+#define permit Enable();
+#else
+#define forbid Forbid();
+#define permit Permit();
+#endif
+
+
+d43 3
+a45 3
+struct  mbstat mbstat;
+struct  mbuf *mfree, *mclfree;
+int     m_want;
+d49 1
+d51 10
+a60 10
+        forbid
+        if (m_clalloc(1, MPG_MBUFS, M_DONTWAIT) == 0){
+                panic("mbinit");
+        }
+        permit
+
+        enter_nlist("_mbstat", &mbstat);
+
+        return;
+}
+d62 3
+a64 3
+#define MBUFS_AT_INIT   128     /* number of buffer available at init time */
+static char *mbuf_base;         /* memory allocated to mbufs    */
+static int mbuf_size;           /* size of mbuf allocation      */
+d68 2
+a69 2
+        register int ncl;
+        int how;
+d71 3
+a73 3
+        register struct mbuf *m;
+        register int num_bufs;
+        void *AllocMem();
+d79 3
+a81 3
+        if(mbuf_base){
+                return 0;
+        }
+d84 25
+a108 25
+        num_bufs = MBUFS_AT_INIT;
+        mbuf_size = (num_bufs + 1)*MSIZE;
+        mbuf_base = (char *)AllocMem(mbuf_size, MEMF_PUBLIC|MEMF_CLEAR);
+        if(!mbuf_base){
+                return 0;
+        }
+        m = dtom(mbuf_base + MSIZE - 1);
+        switch (how) {
+        case MPG_MBUFS:
+                while(num_bufs-- > 0) {
+                        m->m_off = 0;
+                        m->m_type = MT_DATA;
+                        m->m_next = 0;
+                        mbstat.m_mtypes[MT_DATA]++;
+                        mbstat.m_mbufs++;
+                        (void) m_free(m);
+                        m++;
+                }
+                break;
+
+        case MPG_SPACE:
+                mbstat.m_space++;
+                break;
+        }
+        return (caddr_t)mbuf_base;
+d116 1
+a116 1
+        int canwait;
+d118 23
+a140 23
+        register struct domain *dp;
+        register struct protosw *pr;
+        int tries;
+
+        tries = 0;
+        for (;;){
+                if (m_clalloc(1, MPG_MBUFS, canwait)){
+                        return (1);
+                }
+                if (canwait == 0 || tries++){
+                        return (0);
+                }
+
+                /* ask protocols to free space */
+                for (dp = domains; dp; dp = dp->dom_next){
+                        for (pr = dp->dom_protosw; pr < dp->dom_protoswNPROTOSW; pr++){
+                                if (pr->pr_drain){
+                                        (*pr->pr_drain)();
+                                }
+                        }
+                }
+                mbstat.m_drain++;
+        }
+d151 1
+a151 1
+        int canwait, type;
+d153 1
+a153 1
+        register struct mbuf *m;
+d155 3
+a157 3
+        forbid            /* s = splimp(); */
+        if(m = mfree){
+                if (m->m_type != MT_FREE){
+d160 1
+a160 1
+                        m_dump(m, 10000);
+d162 16
+a177 16
+                        panic("mget");
+                }
+                m->m_type = type;
+                mbstat.m_mtypes[MT_FREE]--;
+                mbstat.m_mtypes[type]++;
+                mfree = m->m_next;
+                m->m_next = 0;
+                m->m_off = MMINOFF;
+        } else {
+                m = m_more(canwait, type);
+        }
+
+#ifdef MBTRACER
+        m_record("m_get", ((u_long *)&canwait)[-1], m);
+#endif
+        permit          /* splx(s); */
+d179 1
+a179 1
+        return m;
+d184 1
+a184 1
+        int canwait, type;
+d186 1
+a186 1
+        register struct mbuf *m;
+d188 7
+a194 7
+        MGET(m, canwait, type);
+        if (m == 0){
+                return (0);
+        }
+        bzero(mtod(m, caddr_t), MLEN);
+#ifdef MBTRACER
+        m_record("m_getclr", ((u_long *)&canwait)[-1], m);
+d196 1
+a196 1
+        return (m);
+d201 1
+a201 1
+        struct mbuf *m;
+d203 1
+a203 1
+        register struct mbuf *n;
+d205 1
+a205 1
+        forbid          /* s = splimp(); */
+d207 1
+a207 1
+        m_record("m_free", ((u_long *)&m)[-1], m);
+d209 1
+a209 1
+        if (m->m_type == MT_FREE){
+d212 1
+a212 1
+                m_dump(m, 100000);
+d214 19
+a232 20
+                panic("mfree");
+                permit
+                return (struct mbuf *)0;
+        }
+
+        mbstat.m_mtypes[m->m_type]--;
+        mbstat.m_mtypes[MT_FREE]++;
+
+        m->m_type = MT_FREE;
+        n = m->m_next;
+        m->m_next = mfree;
+        m->m_act = 0;
+        m->m_off = 0;
+        mfree = m;
+        if(m_want){
+                m_want = 0;
+                wakeup((ulong)&mfree);
+        }
+
+        permit          /* splx(s); */
+d234 1
+a234 1
+        return n;
+d244 1
+a244 1
+        int canwait, type;
+d246 1
+a246 1
+        register struct mbuf *m;
+d248 13
+a260 13
+        while (m_expand(canwait) == 0) {
+                if (canwait == M_WAIT) {
+                        mbstat.m_wait++;
+                        m_want++;
+                        sleep((ulong)&mfree, PZERO - 1);
+                        if (mfree){
+                                break;
+                        }
+                } else {
+                        mbstat.m_drops++;
+                        return (NULL);
+                }
+        }
+d262 1
+a262 1
+        MGET(m, canwait, type);
+d264 1
+a264 1
+        return m;
+d268 1
+a268 1
+        struct mbuf *m;
+d270 2
+a271 1
+        register struct mbuf *n;
+d273 10
+a282 10
+        m_record("m_freem", ((u_long *)&m)[-1], m);
+#endif
+        if (m == NULL){
+                return;
+        }
+        forbid          /* s = splimp(); */
+        do {
+                MFREE(m, n);
+        } while (m = n);
+        permit          /* splx(s); */
+d297 3
+a299 3
+        register struct mbuf *m;
+        int off;
+        register int len;
+d301 31
+a331 31
+        register struct mbuf *n, **np;
+        struct mbuf *top, *p;
+
+        if (len == 0){
+                return (0);
+        }
+        if (off < 0 || len < 0){
+                panic("m_copy");
+        }
+        while (off > 0) {
+                if (m == 0){
+                        panic("m_copy");
+                }
+                if (off < m->m_len){
+                        break;
+                }
+                off -= m->m_len;
+                m = m->m_next;
+        }
+        np = &top;
+        top = 0;
+        while (len > 0) {
+                if (m == 0) {
+                        if (len != M_COPYALL){
+                                panic("m_copy");
+                        }
+                        break;
+                }
+                MGET(n, M_DONTWAIT, m->m_type);
+                *np = n;
+                if (n == 0){
+d335 18
+a352 18
+                        goto nospace;
+                }
+                n->m_len = MIN(len, m->m_len - off);
+                if (m->m_off > MMAXOFF) {
+                        p = mtod(m, struct mbuf *);
+                        n->m_off = ((int)p - (int)n) + off;
+                } else {
+                        bcopy(mtod(m, caddr_t)+off, mtod(n, caddr_t),
+                            (unsigned)n->m_len);
+                }
+                if (len != M_COPYALL){
+                        len -= n->m_len;
+                }
+                off = 0;
+                m = m->m_next;
+                np = &n->m_next;
+        }
+        return (top);
+d355 2
+a356 2
+        m_freem(top);
+        return (0);
+d366 4
+a369 4
+ *      register struct mbuf *m;
+ *      register int off;
+ *      register int len;
+ *      caddr_t cp;
+d371 1
+a371 1
+ *      register unsigned count;
+d373 24
+a396 24
+ *      if (off < 0 || len < 0){
+ *              panic("m_copydata");
+ *      }
+ *      while (off > 0) {
+ *              if (m == 0){
+ *                      panic("m_copydata");
+ *              }
+ *              if (off < m->m_len){
+ *                      break;
+ *              }
+ *              off -= m->m_len;
+ *              m = m->m_next;
+ *      }
+ *      while (len > 0) {
+ *              if (m == 0){
+ *                      panic("m_copydata");
+ *              }
+ *              count = MIN(m->m_len - off, len);
+ *              bcopy(mtod(m, caddr_t) + off, cp, count);
+ *              len -= count;
+ *              cp += count;
+ *              off = 0;
+ *              m = m->m_next;
+ *      }
+d402 1
+a402 1
+        struct mbuf *m, *n;
+d404 16
+a419 16
+        while (m->m_next){
+                m = m->m_next;
+        }
+        while(n){
+                if (m->m_off >= MMAXOFF ||
+                    m->m_off + m->m_len + n->m_len > MMAXOFF) {
+                        /* just join the two chains */
+                        m->m_next = n;
+                        return;
+                }
+                /* splat the data from one into the other */
+                bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
+                    (u_int)n->m_len);
+                m->m_len += n->m_len;
+                n = m_free(n);
+        }
+d423 2
+a424 2
+        struct mbuf *mp;
+        register int len;
+d426 56
+a481 56
+        register struct mbuf *m;
+        register count;
+
+        if ((m = mp) == NULL){
+                return;
+        }
+        if (len >= 0) {
+                while (m != NULL && len > 0) {
+                        if (m->m_len <= len) {
+                                len -= m->m_len;
+                                m->m_len = 0;
+                                m = m->m_next;
+                        } else {
+                                m->m_len -= len;
+                                m->m_off += len;
+                                break;
+                        }
+                }
+        } else {
+                /*
+                 * Trim from tail.  Scan the mbuf chain,
+                 * calculat
+                 * If the adjustment only affects this mbuf, then just
+                 * adjust and return.  Otherwise, rescan and truncate
+                 * after the remaining size.
+                 */
+                len = -len;
+                count = 0;
+                for (;;) {
+                        count += m->m_len;
+                        if (m->m_next == (struct mbuf *)0){
+                                break;
+                        }
+                        m = m->m_next;
+                }
+                if (m->m_len >= len) {
+                        m->m_len -= len;
+                        return;
+                }
+                count -= len;
+                /*
+                 * Correct length for chain is "count".
+                 * Find the mbuf with last data, adjust its length,
+                 * and toss data from remaining mbufs on chain.
+                 */
+                for (m = mp; m; m = m->m_next) {
+                        if (m->m_len >= count) {
+                                m->m_len = count;
+                                break;
+                        }
+                        count -= m->m_len;
+                }
+                while (m = m->m_next){
+                        m->m_len = 0;
+                }
+        }
+d494 2
+a495 2
+        register struct mbuf *n;
+        int len;
+d497 38
+a534 38
+        register struct mbuf *m;
+        register int count;
+        int space;
+
+        if (n->m_off + len <= MMAXOFF && n->m_next) {
+                m = n;
+                n = n->m_next;
+                len -= m->m_len;
+        } else {
+                if (len > MLEN){
+                        goto bad;
+                }
+                MGET(m, M_DONTWAIT, n->m_type);
+                if (m == 0){
+                        goto bad;
+                }
+                m->m_len = 0;
+        }
+        space = MMAXOFF - m->m_off;
+        do {
+                count = MIN(MIN(space - m->m_len, len + MPULL_EXTRA), n->m_len);
+                bcopy(mtod(n, caddr_t), mtod(m, caddr_t)+m->m_len,
+                                  (unsigned)count);
+                len -= count;
+                m->m_len += count;
+                n->m_len -= count;
+                if (n->m_len){
+                        n->m_off += count;
+                } else {
+                        n = m_free(n);
+                }
+        } while (len > 0 && n);
+        if (len > 0) {
+                (void) m_free(m);
+                goto bad;
+        }
+        m->m_next = n;
+        return (m);
+d536 2
+a537 2
+        m_freem(n);
+        return (0);
+d544 3
+a546 3
+        long    caller;         /* who called                   */
+        struct mbuf *m;         /* affected mbuf                */
+        char    *name;          /* name of routine              */
+d551 3
+a553 3
+        char    *name;
+        long    caller;
+        struct mbuf *m;
+d555 7
+a561 7
+        mb_total++;
+        mbtrace[mb_next].m = m;
+        mbtrace[mb_next].caller = caller;
+        mbtrace[mb_next].name = name;
+        if(++mb_next >= TRACESIZE){
+                mb_next = 0;
+        }
+d568 2
+a569 2
+        register struct mbuf *m;
+        int num;
+d571 1
+a571 1
+        register int mb, i, initial;
+d573 28
+a600 28
+        initial = mb = mb_next;
+        if(num > TRACESIZE){
+                num = TRACESIZE;
+        }
+        printf("total logged: %d\n", mb_total);
+        while(num--){
+                for(i = 0; i < TRACESIZE; i++){
+                        --mb;
+                        if(mb < 0){
+                                mb = TRACESIZE-1;
+                        }
+                        if(mb == initial){
+                                goto done;
+                        }
+                        if(m == 0 || m == mbtrace[mb].m){
+                                printf("%04d: %06x called %s on mbuf %x\n",
+                                        mb,
+                                        mbtrace[mb].caller,
+                                        mbtrace[mb].name,
+                                        mbtrace[mb].m);
+                                break;
+                        }
+                }
+                if(i == TRACESIZE){
+                        break;
+                }
+        }
+done:   return 0;
+@
+
+
+1.2
+log
+@changed splimp/splx to Forbid/Permit
+@
+text
+@d17 1
+a17 1
+ *	@@(#)uipc_mbuf.c	7.4.1.3 (Berkeley) 2/15/89
+d40 9
+d52 3
+a54 3
+struct	mbstat mbstat;
+struct	mbuf *mfree, *mclfree;
+int	m_want;
+a57 1
+	int s;
+d59 10
+a68 10
+	s = splimp();
+	if (m_clalloc(1, MPG_MBUFS, M_DONTWAIT) == 0){
+		panic("mbinit");
+	}
+	splx(s);
+
+	enter_nlist("_mbstat", &mbstat);
+
+	return;
+}
+d70 3
+a72 3
+#define MBUFS_AT_INIT	128	/* number of buffer available at init time */
+static char *mbuf_base;		/* memory allocated to mbufs	*/
+static int mbuf_size;		/* size of mbuf allocation	*/
+d76 2
+a77 2
+	register int ncl;
+	int how;
+d79 3
+a81 3
+	register struct mbuf *m;
+	register int num_bufs;
+	void *AllocMem();
+d87 3
+a89 3
+	if(mbuf_base){
+		return 0;
+	}
+d92 25
+a116 25
+	num_bufs = MBUFS_AT_INIT;
+	mbuf_size = (num_bufs + 1)*MSIZE;
+	mbuf_base = (char *)AllocMem(mbuf_size, MEMF_PUBLIC|MEMF_CLEAR);
+	if(!mbuf_base){
+		return 0;
+	}
+	m = dtom(mbuf_base + MSIZE - 1);
+	switch (how) {
+	case MPG_MBUFS:
+		while(num_bufs-- > 0) {
+			m->m_off = 0;
+			m->m_type = MT_DATA;
+			m->m_next = 0;
+			mbstat.m_mtypes[MT_DATA]++;
+			mbstat.m_mbufs++;
+			(void) m_free(m);
+			m++;
+		}
+		break;
+
+	case MPG_SPACE:
+		mbstat.m_space++;
+		break;
+	}
+	return (caddr_t)mbuf_base;
+d124 1
+a124 1
+	int canwait;
+d126 23
+a148 23
+	register struct domain *dp;
+	register struct protosw *pr;
+	int tries;
+
+	tries = 0;
+	for (;;){
+		if (m_clalloc(1, MPG_MBUFS, canwait)){
+			return (1);
+		}
+		if (canwait == 0 || tries++){
+			return (0);
+		}
+
+		/* ask protocols to free space */
+		for (dp = domains; dp; dp = dp->dom_next){
+			for (pr = dp->dom_protosw; pr < dp->dom_protoswNPROTOSW; pr++){
+				if (pr->pr_drain){
+					(*pr->pr_drain)();
+				}
+			}
+		}
+		mbstat.m_drain++;
+	}
+d159 1
+a159 1
+	int canwait, type;
+d161 1
+a161 1
+	register struct mbuf *m;
+d163 3
+a165 3
+	Forbid();	/* s = splimp(); */
+	if(m = mfree){
+		if (m->m_type != MT_FREE){
+d168 1
+a168 1
+			m_dump(m, 10000);
+d170 16
+a185 16
+			panic("mget");
+		}
+		m->m_type = type;
+		mbstat.m_mtypes[MT_FREE]--;
+		mbstat.m_mtypes[type]++;
+		mfree = m->m_next;
+		m->m_next = 0;
+		m->m_off = MMINOFF;
+	} else {
+		m = m_more(canwait, type);
+	}
+
+#ifdef MBTRACER
+	m_record("m_get", ((u_long *)&canwait)[-1], m);
+#endif
+	Permit();	/* splx(s); */
+d187 1
+a187 1
+	return m;
+d192 1
+a192 1
+	int canwait, type;
+d194 1
+a194 1
+	register struct mbuf *m;
+d196 7
+a202 7
+	MGET(m, canwait, type);
+	if (m == 0){
+		return (0);
+	}
+	bzero(mtod(m, caddr_t), MLEN);
+#ifdef MBTRACER
+	m_record("m_getclr", ((u_long *)&canwait)[-1], m);
+d204 1
+a204 1
+	return (m);
+d209 1
+a209 1
+	struct mbuf *m;
+d211 1
+a211 1
+	register struct mbuf *n;
+d213 1
+a213 1
+	Forbid();	/* s = splimp(); */
+d215 1
+a215 1
+	m_record("m_free", ((u_long *)&m)[-1], m);
+d217 1
+a217 1
+	if (m->m_type == MT_FREE){
+d220 1
+a220 1
+		m_dump(m, 100000);
+d222 20
+a241 19
+		panic("mfree");
+		return (struct mbuf *)0;
+	}
+
+	mbstat.m_mtypes[m->m_type]--;
+	mbstat.m_mtypes[MT_FREE]++;
+
+	m->m_type = MT_FREE;
+	n = m->m_next;
+	m->m_next = mfree;
+	m->m_act = 0;
+	m->m_off = 0;
+	mfree = m;
+	if(m_want){
+		m_want = 0;
+		wakeup((ulong)&mfree);
+	}
+
+	Permit();	/* splx(s); */
+d243 1
+a243 1
+	return n;
+d253 1
+a253 1
+	int canwait, type;
+d255 1
+a255 1
+	register struct mbuf *m;
+d257 13
+a269 13
+	while (m_expand(canwait) == 0) {
+		if (canwait == M_WAIT) {
+			mbstat.m_wait++;
+			m_want++;
+			sleep((ulong)&mfree, PZERO - 1);
+			if (mfree){
+				break;
+			}
+		} else {
+			mbstat.m_drops++;
+			return (NULL);
+		}
+	}
+d271 1
+a271 1
+	MGET(m, canwait, type);
+d273 1
+a273 1
+	return m;
+d277 1
+a277 1
+	struct mbuf *m;
+d279 1
+a279 2
+	register struct mbuf *n;
+
+d281 10
+a290 10
+	m_record("m_freem", ((u_long *)&m)[-1], m);
+#endif
+	if (m == NULL){
+		return;
+	}
+	Forbid();	/* s = splimp(); */
+	do {
+		MFREE(m, n);
+	} while (m = n);
+	Permit();	/* splx(s); */
+d305 3
+a307 3
+	register struct mbuf *m;
+	int off;
+	register int len;
+d309 31
+a339 31
+	register struct mbuf *n, **np;
+	struct mbuf *top, *p;
+
+	if (len == 0){
+		return (0);
+	}
+	if (off < 0 || len < 0){
+		panic("m_copy");
+	}
+	while (off > 0) {
+		if (m == 0){
+			panic("m_copy");
+		}
+		if (off < m->m_len){
+			break;
+		}
+		off -= m->m_len;
+		m = m->m_next;
+	}
+	np = &top;
+	top = 0;
+	while (len > 0) {
+		if (m == 0) {
+			if (len != M_COPYALL){
+				panic("m_copy");
+			}
+			break;
+		}
+		MGET(n, M_DONTWAIT, m->m_type);
+		*np = n;
+		if (n == 0){
+d343 18
+a360 18
+			goto nospace;
+		}
+		n->m_len = MIN(len, m->m_len - off);
+		if (m->m_off > MMAXOFF) {
+			p = mtod(m, struct mbuf *);
+			n->m_off = ((int)p - (int)n) + off;
+		} else {
+			bcopy(mtod(m, caddr_t)+off, mtod(n, caddr_t),
+			    (unsigned)n->m_len);
+		}
+		if (len != M_COPYALL){
+			len -= n->m_len;
+		}
+		off = 0;
+		m = m->m_next;
+		np = &n->m_next;
+	}
+	return (top);
+d363 2
+a364 2
+	m_freem(top);
+	return (0);
+d374 4
+a377 4
+ *	register struct mbuf *m;
+ *	register int off;
+ *	register int len;
+ *	caddr_t cp;
+d379 1
+a379 1
+ *	register unsigned count;
+d381 24
+a404 24
+ *	if (off < 0 || len < 0){
+ *		panic("m_copydata");
+ *	}
+ *	while (off > 0) {
+ *		if (m == 0){
+ *			panic("m_copydata");
+ *		}
+ *		if (off < m->m_len){
+ *			break;
+ *		}
+ *		off -= m->m_len;
+ *		m = m->m_next;
+ *	}
+ *	while (len > 0) {
+ *		if (m == 0){
+ *			panic("m_copydata");
+ *		}
+ *		count = MIN(m->m_len - off, len);
+ *		bcopy(mtod(m, caddr_t) + off, cp, count);
+ *		len -= count;
+ *		cp += count;
+ *		off = 0;
+ *		m = m->m_next;
+ *	}
+d410 1
+a410 1
+	struct mbuf *m, *n;
+d412 16
+a427 16
+	while (m->m_next){
+		m = m->m_next;
+	}
+	while(n){
+		if (m->m_off >= MMAXOFF ||
+		    m->m_off + m->m_len + n->m_len > MMAXOFF) {
+			/* just join the two chains */
+			m->m_next = n;
+			return;
+		}
+		/* splat the data from one into the other */
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
+		    (u_int)n->m_len);
+		m->m_len += n->m_len;
+		n = m_free(n);
+	}
+d431 2
+a432 2
+	struct mbuf *mp;
+	register int len;
+d434 56
+a489 56
+	register struct mbuf *m;
+	register count;
+
+	if ((m = mp) == NULL){
+		return;
+	}
+	if (len >= 0) {
+		while (m != NULL && len > 0) {
+			if (m->m_len <= len) {
+				len -= m->m_len;
+				m->m_len = 0;
+				m = m->m_next;
+			} else {
+				m->m_len -= len;
+				m->m_off += len;
+				break;
+			}
+		}
+	} else {
+		/*
+		 * Trim from tail.  Scan the mbuf chain,
+		 * calculat    its length and finding the last mbuf.
+		 * If the adjustment only affects this mbuf, then just
+		 * adjust and return.  Otherwise, rescan and truncate
+		 * after the remaining size.
+		 */
+		len = -len;
+		count = 0;
+		for (;;) {
+			count += m->m_len;
+			if (m->m_next == (struct mbuf *)0){
+				break;
+			}
+			m = m->m_next;
+		}
+		if (m->m_len >= len) {
+			m->m_len -= len;
+			return;
+		}
+		count -= len;
+		/*
+		 * Correct length for chain is "count".
+		 * Find the mbuf with last data, adjust its length,
+		 * and toss data from remaining mbufs on chain.
+		 */
+		for (m = mp; m; m = m->m_next) {
+			if (m->m_len >= count) {
+				m->m_len = count;
+				break;
+			}
+			count -= m->m_len;
+		}
+		while (m = m->m_next){
+			m->m_len = 0;
+		}
+	}
+d502 2
+a503 2
+	register struct mbuf *n;
+	int len;
+d505 38
+a542 38
+	register struct mbuf *m;
+	register int count;
+	int space;
+
+	if (n->m_off + len <= MMAXOFF && n->m_next) {
+		m = n;
+		n = n->m_next;
+		len -= m->m_len;
+	} else {
+		if (len > MLEN){
+			goto bad;
+		}
+		MGET(m, M_DONTWAIT, n->m_type);
+		if (m == 0){
+			goto bad;
+		}
+		m->m_len = 0;
+	}
+	space = MMAXOFF - m->m_off;
+	do {
+		count = MIN(MIN(space - m->m_len, len + MPULL_EXTRA), n->m_len);
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t)+m->m_len,
+				  (unsigned)count);
+		len -= count;
+		m->m_len += count;
+		n->m_len -= count;
+		if (n->m_len){
+			n->m_off += count;
+		} else {
+			n = m_free(n);
+		}
+	} while (len > 0 && n);
+	if (len > 0) {
+		(void) m_free(m);
+		goto bad;
+	}
+	m->m_next = n;
+	return (m);
+d544 2
+a545 2
+	m_freem(n);
+	return (0);
+d552 3
+a554 3
+	long	caller;		/* who called			*/
+	struct mbuf *m;		/* affected mbuf		*/
+	char	*name;		/* name of routine		*/
+d559 3
+a561 3
+	char 	*name;
+	long	caller;
+	struct mbuf *m;
+d563 7
+a569 7
+	mb_total++;
+	mbtrace[mb_next].m = m;
+	mbtrace[mb_next].caller = caller;
+	mbtrace[mb_next].name = name;
+	if(++mb_next >= TRACESIZE){
+		mb_next = 0;
+	}
+d576 2
+a577 2
+	register struct mbuf *m;
+	int num;
+d579 1
+a579 1
+	register int mb, i, initial;
+d581 28
+a608 28
+	initial = mb = mb_next;
+	if(num > TRACESIZE){
+		num = TRACESIZE;
+	}
+	printf("total logged: %d\n", mb_total);
+	while(num--){
+		for(i = 0; i < TRACESIZE; i++){
+			--mb;
+			if(mb < 0){
+				mb = TRACESIZE-1;
+			}
+			if(mb == initial){
+				goto done;
+			}
+			if(m == 0 || m == mbtrace[mb].m){
+				printf("%04d: %06x called %s on mbuf %x\n",
+					mb,
+					mbtrace[mb].caller,
+					mbtrace[mb].name,
+					mbtrace[mb].m);
+				break;
+			}
+		}
+		if(i == TRACESIZE){
+			break;
+		}
+	}
+done:	return 0;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a153 1
+	int s;
+d155 1
+a155 1
+	s = splimp();
+d162 1
+a162 1
+			panic("mget"); 
+d165 1
+a165 1
+		mbstat.m_mtypes[MT_FREE]--; 
+d167 1
+a167 1
+		mfree = m->m_next; 
+d169 1
+a169 1
+		m->m_off = MMINOFF; 
+d171 1
+a171 1
+		m = m_more(canwait, type); 
+d177 1
+a177 1
+	splx(s);
+a203 1
+	int s;
+d205 1
+a205 1
+	s = splimp();
+d218 1
+a218 1
+	mbstat.m_mtypes[m->m_type]--; 
+d222 1
+a222 1
+	n = m->m_next; 
+d225 1
+a225 1
+	m->m_off = 0; 
+d232 1
+a232 1
+	splx(s);
+a270 1
+	register int s;
+d278 1
+a278 1
+	s = splimp();
+d282 1
+a282 1
+	splx(s);
+d447 1
+a447 1
+		 * calculating its length and finding the last mbuf.
+@

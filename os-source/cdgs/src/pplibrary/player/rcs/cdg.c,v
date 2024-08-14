@@ -1,0 +1,493 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.5
+date     93.03.08.18.23.10;  author peter;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     93.02.26.19.03.07;  author peter;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.12.18.11.43.23;  author jerryh;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.07.29.10.11.53;  author jerryh;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.07.23.11.37.57;  author jerryh;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@CD+G supplimental module for Player program.
+@
+
+
+1.5
+log
+@Changed where includes come from.
+@
+text
+@
+#include "exec/types.h"
+#include "exec/io.h"
+#include "exec/memory.h"
+
+#include <graphics/sprite.h>
+
+#include <cdtv/cdtvprefs.h>
+#include <libraries/debox.h>
+#include <cdg/cdgprefs.h>
+
+#include "/playerprefs.h"
+#include "/playerprefsbase.h"
+#include "/playerprefs_pragmas.h"
+#include "/playerprefs_protos.h"
+
+#include <pragmas/exec_old_pragmas.h>
+#include <cdg/cdg_cr_pragmas.h>
+#include <pragmas/debox_pragmas.h>
+
+#include <clib/exec_protos.h>
+#include <clib/debox_protos.h>
+#include <cdg/cdg_cr_protos.h>
+
+#include <string.h>
+
+/********************* External Structures/Variables ***********************/
+
+extern struct Library         *CDGBase;
+extern struct CDTVPrefs        CDTVPrefs;
+extern struct Library         *GfxBase;
+extern struct DeBoxBase       *DeBoxBase;
+extern struct PlayerPrefsBase *PlayerPrefsBase;
+extern WORD                    ViewCenterX, ViewCenterY;
+
+/******************************* Functions *********************************/
+
+int  CDG_Open(struct CDGPrefs *cdp);
+void CDG_Close( void );
+
+/************************* Structures/Variables ****************************/
+
+struct MsgPort  *mp;
+struct IOStdReq *ior;
+UWORD           *SpriteMem;
+struct BitMap   *sbm;
+struct BMInfo   *sbmi;
+
+/************************* Setup CDG information ***************************/
+
+int CDG_Open(struct CDGPrefs *cdp) {
+
+BOOL fail;
+
+    fail = TRUE;
+    SpriteMem = NULL;
+
+    if(CDGBase = OpenLibrary("cdg.library",0)) {
+
+        memset(cdp, 0, sizeof(struct CDGPrefs));
+
+        cdp->cdgp_Control = CDGF_ALTSPRITES;
+
+        cdp->cdgp_DisplayX = CDTVPrefs.DisplayX - ViewCenterX;
+        cdp->cdgp_DisplayY = CDTVPrefs.DisplayY - ViewCenterY;
+
+        if (mp = CreateMsgPort())
+            if (ior = CreateIORequest(mp,sizeof(struct IOStdReq)))
+                if (!OpenDevice("cd.device", 0, ior, 0)) fail = FALSE;
+        }
+
+    if (fail) {
+
+        CDG_Close();
+        return(FALSE);
+        }
+
+    return(TRUE);
+    }
+
+
+
+/*********************** Close Down CDG information ************************/
+
+void CDG_Close( void ) {
+
+    if (SpriteMem) {
+
+        FreeVec(SpriteMem);
+        SpriteMem = NULL;
+        }
+
+    if (ior) {
+
+        if (ior->io_Device) CloseDevice(ior);
+        DeleteIORequest(ior);
+        }
+
+    if (mp) DeleteMsgPort(mp);
+
+    if (CDGBase) CloseLibrary(CDGBase);
+    }
+
+
+
+
+/*======================== Get Plane Information ==========================*/
+
+UWORD *dumpsprplane(struct BitMap *bm, long plane, long offset, UWORD *cptr) {
+
+UWORD *pp;
+        
+    pp = (UWORD *)bm->Planes[plane] + offset;
+    {
+	long    height, wpr;
+
+	wpr  = bm->BytesPerRow >> 1;
+
+	for (height=bm->Rows; height--;) {
+
+	    *cptr  = *pp;
+	    cptr  += 2;
+	    pp    += wpr;
+        }
+    }
+
+    return(cptr);
+    }
+
+
+
+/*======================== Get Sprite Information =========================*/
+
+UWORD *fillsprctl(int x, int y, int height, UWORD *cptr) {
+
+UBYTE *bptr;
+int    vstop;
+        
+    bptr = (UBYTE *)cptr;
+
+    *bptr++ = y;
+    *bptr++ = x>>1;
+    *bptr++ = (vstop = height + y);
+    *bptr++ = (y & 0x100 ? 4:0) + (vstop & 0x100 ? 2:0) + (x & 1);
+
+    return((UWORD *)bptr);
+    }
+
+
+
+
+/************************** Unpack CD+G Sprites ****************************/
+
+int UnpackSprites(struct CDGPrefs *cdgp) {
+
+extern UBYTE __far cdgnumb[];
+
+UWORD   *Gcptr;
+UWORD  **Gsptr;
+int      Gi;
+int      ssize, i;
+
+    sbmi = NULL;
+    sbm  = NULL;
+
+    if (!GrabBm(NULL, cdgnumb, &sbmi, &sbm, NULL)) return(0);                                       /* unpack the bitmaps */
+    
+    ssize = (sbm->Rows * 4 + 8) * (64 + 32);
+
+    if (!(Gcptr = AllocVec(ssize, MEMF_CHIP | MEMF_CLEAR))) return(0);                              /* free the bitmaps as well */
+
+    if (!(SpriteMem = Gcptr)) return(0);
+
+    CopyMem(sbmi->bmi_ColorMap, cdgp->cdgp_SpriteColors, 16);
+
+    cdgp->cdgp_SpriteHeight = 30;
+    Gsptr = cdgp->cdgp_ChannelSprites;
+
+    Gi = 0; do {
+
+        if (!sbm) return(0);                                                                        /* sprite unpacking failed */
+
+        *Gsptr++ = Gcptr;
+        Gcptr    = fillsprctl(250 + (Gi & 1 ? 16:0), 160, sbm->Rows, Gcptr);
+
+        dumpsprplane(sbm, 1, Gi, &Gcptr[1]);
+
+        Gcptr  = dumpsprplane(sbm, 0, Gi, Gcptr);
+        Gcptr += 2;
+    
+        *Gsptr++   = Gcptr;
+        Gcptr      = fillsprctl(250+(Gi & 1 ? 16:0), 160, sbm->Rows, Gcptr);
+        Gcptr[-1] |= SPRITE_ATTACHED;
+        Gcptr      = dumpsprplane(sbm, 2, Gi, Gcptr);
+        Gcptr     += 2;
+        } while (++Gi < 46);
+
+    for (i=0; i<4; i++) {                                                                           /* zap out the ntrack and ptrack sprites (it looks better to reuse the ff and rew sprites */
+
+        cdgp->cdgp_NTrackSprite[i] = cdgp->cdgp_FFSprite[i];
+        cdgp->cdgp_PTrackSprite[i] = cdgp->cdgp_RWSprite[i];
+        }
+
+    if (sbm) {
+
+        FreeGrabBm(&sbmi, &sbm, NULL);
+        sbm = NULL;
+        }
+
+    return(1);
+    }
+
+
+
+
+
+@
+
+
+1.4
+log
+@Minor cleanup.
+@
+text
+@a7 1
+#include "cdtv/cdtv.h"
+d9 2
+a10 2
+#include <cdtv/debox.h>
+#include <cdtv/cdgprefs.h>
+d18 2
+a19 2
+#include "cdtv/cdg_cr_pragmas.h"
+#include <cdtv/debox_pragmas.h>
+d22 2
+a23 1
+#include <cdtv/debox_protos.h>
+@
+
+
+1.3
+log
+@revised for cd.device.
+@
+text
+@d25 2
+d39 1
+a39 1
+void CDG_Close();
+d85 1
+a85 1
+void CDG_Close() {
+d109 1
+a109 1
+UWORD *dumpsprplane(struct BitMap *bm, int plane, int offset, UWORD *cptr) {
+a110 1
+int    height, wpr;
+d113 3
+a115 3
+    pp   = (UWORD *)bm->Planes[plane];
+    pp  += offset;
+    wpr  = bm->BytesPerRow >> 1;
+d117 3
+a119 1
+    for (height=bm->Rows; height--;) {
+d121 3
+a123 3
+        *cptr  = *pp;
+        cptr  += 2;
+        pp    += wpr;
+d125 1
+@
+
+
+1.2
+log
+@Cleaned up code.  Put headers on functions.
+@
+text
+@d67 1
+a67 1
+                if (!OpenDevice("cdtv.device", 0, ior, 0)) fail = FALSE;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d25 6
+a30 4
+extern struct Library *CDGBase;
+extern struct CDTVPrefs CDTVPrefs;
+extern struct Library *GfxBase;
+extern struct DeBoxBase *DeBoxBase;
+d32 1
+a32 1
+extern WORD ViewCenterX,ViewCenterY;
+d34 1
+a34 2
+BOOL MakeCDGPrefs(struct CDGPrefs *);
+VOID FreeCDGPrefs(struct CDGPrefs *);
+d37 3
+a39 1
+void CDG_Close(struct CDGPrefs *cdp);
+d47 1
+a47 4
+UWORD   *Gcptr;
+UWORD  **Gsptr;
+int      Gi;
+
+d58 1
+a58 1
+        memset(cdp,0,sizeof(struct CDGPrefs));
+d66 1
+a66 1
+            if(ior = CreateIORequest(mp,sizeof(struct IOStdReq)))
+d70 1
+a70 1
+    if(fail) {
+d72 1
+a72 1
+        CDG_Close(cdp);
+d81 1
+a81 1
+VOID FreeCDGPrefs(struct CDGPrefs *cdp) {
+d83 1
+a83 1
+    if(SpriteMem) {
+d85 2
+a89 1
+    }
+a90 4
+
+
+void CDG_Close(struct CDGPrefs *cdp)  {
+
+d97 1
+a97 4
+    if (mp)         DeleteMsgPort(mp);
+    if (cdp)        FreeCDGPrefs(cdp);
+    if (CDGBase)    CloseLibrary(CDGBase);
+}
+d99 2
+a100 7
+
+/* The sprite unpacking logic is now designed to be interspersed with */
+/* the animation logic for faster appearing player startup */
+
+int StartUnpack(struct CDGPrefs *cdgp) {
+
+extern UBYTE __far cdgnumb[];
+a101 1
+int ssize;
+a102 12
+    sbmi = NULL;
+    sbm  = NULL;
+
+    if(!GrabBm( NULL, cdgnumb, &sbmi,&sbm,NULL))return(0);                                          /* unpack the bitmaps */
+    
+    ssize = (sbm->Rows * 4 + 8) * (64+32);
+
+    if(!(Gcptr = AllocVec(ssize,MEMF_CHIP | MEMF_CLEAR))) return(0);                                /* free the bitmaps as well */
+
+    SpriteMem = Gcptr;
+
+    CopyMem(sbmi->bmi_ColorMap,cdgp->cdgp_SpriteColors,16);
+a103 5
+    cdgp->cdgp_SpriteHeight = 30;
+    Gsptr = cdgp->cdgp_ChannelSprites;
+    Gi = 0;
+    }
+
+d105 1
+d107 1
+d109 1
+a109 3
+UWORD *dumpsprplane(struct BitMap *bm,int plane,int offset, UWORD *cptr) {
+
+int height,wpr;
+d116 1
+a116 1
+    for(height=bm->Rows; height--;) {
+d128 3
+a130 1
+UWORD *fillsprctl(int x,int y,int height,UWORD *cptr) {
+d133 1
+a133 1
+int vstop;
+d139 2
+a140 2
+    *bptr++ = (vstop = height+y);
+    *bptr++ = (y & 0x100 ? 4:0)+(vstop & 0x100 ? 2:0)+(x & 1);
+d147 2
+a148 1
+void endgetsprites( struct CDGPrefs *cdgp) {
+d150 1
+a150 1
+int i;
+d152 9
+a160 1
+    for(i=0; i<4; i++) {                                                                            /* zap out the ntrack and ptrack sprites (it looks better to reuse the ff and rew sprites */
+d162 3
+a164 3
+        cdgp->cdgp_NTrackSprite[i] = cdgp->cdgp_FFSprite[i];
+        cdgp->cdgp_PTrackSprite[i] = cdgp->cdgp_RWSprite[i];
+        }
+d166 1
+a166 1
+    if(sbm) {
+d168 1
+a168 4
+        FreeGrabBm(&sbmi, &sbm, NULL);
+        sbm = NULL;
+        }
+    }
+d170 1
+d172 2
+d175 1
+a175 1
+GetSprites( struct CDGPrefs *cdgp,int x,int y) {
+d177 1
+a177 1
+    if(!sbm || !SpriteMem) return(0);                                                               /* sprite unpacking failed */
+d179 2
+a180 2
+    *Gsptr++ = Gcptr;
+    Gcptr    = fillsprctl(x+(Gi & 1 ? 16:0),y,sbm->Rows,Gcptr);
+d182 1
+a182 1
+    dumpsprplane(sbm, 1, Gi, &Gcptr[1]);
+d184 2
+a185 2
+    Gcptr  = dumpsprplane(sbm, 0, Gi, Gcptr);
+    Gcptr += 2;
+d187 14
+a200 5
+    *Gsptr++   = Gcptr;
+    Gcptr      = fillsprctl(x+(Gi & 1 ? 16:0), y, sbm->Rows, Gcptr);
+    Gcptr[-1] |= SPRITE_ATTACHED;
+    Gcptr      = dumpsprplane(sbm, 2, Gi, Gcptr);
+    Gcptr     += 2;
+d202 3
+a204 1
+    if (++Gi >= 46) endgetsprites(cdgp);
+d206 1
+d208 2
+@

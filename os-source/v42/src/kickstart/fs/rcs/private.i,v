@@ -1,0 +1,579 @@
+head     1.14;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.14
+date     92.08.25.00.57.07;  author jesup;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.08.03.01.03.09;  author jesup;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.07.07.22.20.06;  author jesup;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     92.04.09.01.49.13;  author jesup;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.05.09.21.34.38;  author steveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.09.20.16.50.59;  author steveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.06.05.13.11.13;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.06.05.13.10.02;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.04.16.17.07.49;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.04.09.17.48.33;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.04.06.15.05.17;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.12.08.01.11.44;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.12.06.10.51.50;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.13.16.47.49;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@1.3.1
+@
+
+
+1.14
+log
+@Added define for MINBUFFERS (3)
+@
+text
+@		INCLUDE	"exec/ports.i"
+		INCLUDE	"devices/timer.i"
+		INCLUDE	"libraries/dosextens.i"
+
+; Minimum number of buffers allowed for a device
+MINBUFFERS	EQU 3
+
+; buffer types for quick determination of what queue a buffer is on
+HASHFREE	EQU 0
+HASHVALID	EQU 1
+HASHPENDING	EQU 2
+HASHWAITING	EQU 3
+
+; stuff needed in bitmap routine
+ERROR_KEYRANGE  EQU 7364
+ERROR_NO_BITMAP EQU 8723
+ERROR_CHECKSUM	EQU 9955
+
+RAW    EQU -3		when writing, NEVER checksum this kind of block
+BITMAP EQU -2		when writing, checksum goes in first longword
+ROOT_BM_COUNT EQU 25	# bitmap pointers in the root block (dynamic in rest)
+
+	STRUCTURE CacheBuff,MLN_SIZE
+		APTR	cb_NextHash	next on a hash chain
+		UWORD	cb_QueueType	what queue we are on
+		UWORD	cb_State	state on the pending queue (read/write)
+		ULONG	cb_Header	file header this block belongs to
+		APTR	cb_CoPkt	owning co-routine or packet
+		ULONG	cb_Size		size of data area or 0,-1,-2 or >0
+		ULONG	cb_Key		what disk key this corresponds to
+		ULONG	cb_Error	error that occured when reading
+		ULONG	cb_Actual	amount that got read
+		ULONG	cb_Suppress	if TRUE don`t post write error requesters
+		APTR	cb_Buff		buf.buf, pointer to data area
+;data area will be directly after this struct if we are doing 1 block at a time
+	LABEL cb_SIZEOF
+
+; new structure for use with examine and ExNext to make it much F-A-S-T-E-R !!
+	STRUCTURE ExamineThing,0
+		UBYTE	ET_Type			type of examinething == 0
+		UBYTE	ET_Pad1
+		UWORD	ET_Pad2
+		APTR	ET_CurrentKey		pointer to next key to use
+		LABEL	ET_Entries		start of list of keys (HTSIZE+1)
+	LABEL ET_SIZEOF
+
+	STRUCTURE NewExamineThing,0
+		UBYTE	NET_Type		type of examinething == 1
+		UBYTE	NET_Pad1
+		UWORD	NET_NumEntries
+		ULONG	NET_NextKey		next key to return
+		ULONG	NET_NextBlockNum	DirList block it's in
+		ULONG	NET_BlockNum		Current dirlist block number
+		APTR	NET_BlockPtr		Current dirlist block ptr
+		APTR	NET_Entry		Current entry ptr
+	LABEL NET_SIZEOF
+
+fl_Examined EQU fl_SIZEOF+4		used for exnext kluge
+
+buf.valid       EQU -1     // buffer valid in freeblock
+buf.invalid     EQU 0    // buffer invalid....
+
+grab            EQU -1     // readblock grab before write....
+wait            EQU 0    // .... options
+
+altered.lock    EQU 0
+exclusive.lock  EQU -1
+shared.lock     EQU -2
+
+;   // file types
+
+t.deleted       EQU 1
+t.short         EQU 2
+t.long          EQU 4
+t.data          EQU 8
+t.list          EQU 16
+
+DCFS_REV	EQU 1
+DIRLIST_KEY	EQU 32
+DIRLIST_MASK	EQU $ffffffe0
+t.dirlist	EQU (DIRLIST_KEY!DCFS_REV)
+
+
+st.link		EQU -4		doesn't go on disk like this
+st.file         EQU -3
+st.root         EQU 1
+st.userdir      EQU 2
+
+;   // Protection bits
+
+prot.read       EQU 8
+prot.write      EQU 4
+prot.execute    EQU 2
+prot.delete     EQU 1
+
+discstate.writeprotected   EQU 80  // disc is write protected
+discstate.notvalidated     EQU 81  // disc is not validated
+discstate.validated        EQU 82  // disc is validated
+   
+type.dos	EQU ('D'<<24)!('O'<<16)!('S'<<8)
+type.kickstart	EQU ('K'<<24)!('I'<<16)!('C'<<8)!'K'
+type.ndos	EQU ('N'<<24)!('D'<<16)!('O'<<8)!'S'
+type.unreadable EQU ('B'<<24)!('A'<<16)!('D'<<8) 
+type.busy	EQU ('B'<<24)!('U'<<16)!('S'<<8)!'Y'
+type.rawcon	EQU ('R'<<24)!('A'<<16)!('W'<<8)
+type.con	EQU ('C'<<24)!('O'<<16)!('N'<<8)
+type.nodisk	EQU -1
+
+motor.timeout   EQU  3       // 3 second timeout
+comm.upb        EQU 20       // Upper bound of comment field in lwords
+
+	STRUCTURE co_routine,0
+		APTR	co_link		link in chain (must stay here)
+		APTR	co_sp		stack pointer for this co-routine
+		APTR	co_parent	parent co-routine (who called)
+		APTR	co_func		initial function when starting up
+		STRUCT	co_dsem,dsem_SIZEOF used for directory locks
+	LABEL co_SIZEOF
+
+Abort.Impossible      EQU 299
+Abort.ActionNotKnown  EQU 298
+Abort.KeyOutOfRange   EQU 297
+Abort.DiscError       EQU 296
+Abort.InvalidCheckSum EQU 293
+Abort.LoadSegFailure  EQU 292
+Abort.KeyAlreadyAllocated    EQU 290
+Abort.KeyAlreadyFree  EQU 289
+Abort.Busy            EQU 288
+Abort.BitMapCorrupt   EQU 287
+
+
+EndStreamch         EQU     -1
+NotInUse            EQU     -1
+BytesPerWord        EQU     4
+BitsPerWord         EQU     32
+BitsPerByte         EQU     8
+MaxInt              EQU     $7FFFFFFF
+MinInt              EQU     $80000000
+TicksPerSecond      EQU     50
+
+	STRUCTURE RecordLock,0
+		STRUCT	rl_Timer,IOTV_SIZE	timer request for timeouts
+		STRUCT	rl_FakePacket,dp_Arg2	dos packet for returning reqs
+		APTR	rl_StartPacket		the initial lockrecord request
+		ULONG	rl_ESecs		give up at or after this time
+		ULONG	rl_EMicros
+		ULONG	rl_Timeout		requested timeout period
+		ULONG	rl_LowBound		first byte locked
+		ULONG	rl_HighBound		last byte locked
+		ULONG	rl_LockType		exclusive or shared record lock
+		APTR	rl_Blocking		who we are blocking right now
+		APTR	rl_BlockingMe		who is blocking us right now
+		APTR	rl_rwddata		open we're associated with
+	LABEL rl_SIZEOF
+
+RL_EXCLUSIVE	EQU 0	an exclusive (write) record lock
+RL_SHARED	EQU 1	a shared (read) record lock
+
+RL_WRITE		EQU 0
+RL_WRITE_IMMEDIATE	EQU 1
+RL_READ			EQU 2
+RL_READ_IMMEDIATE	EQU 3
+
+
+; This is a notify entry that is added to the list for each NotifyRequest
+; the list itself is hung off the appropriate volume node.  If any notify
+; entries are still there when the disk is removed, the volume will not be
+; zapped.  When a volume is re-activated, it is nescessary to make sure that
+; the nr_Handler fields are pointing to the right handler (if a disk is
+; inserted into a different drive).
+	STRUCTURE NotifyEntry,0
+		APTR	ne_Next		next entry on the list
+		APTR	ne_NotifyReq	the actual notify request
+		ULONG	ne_Orphaned	TRUE means file/dir doesn`t exist yet
+		ULONG	ne_HeaderKey	which key we are watching for changes
+		APTR	ne_Msg		an oustanding NotifyMessage
+		STRUCT	ne_FullName,256	BSTR version of nr_FullName
+	LABEL ne_SIZEOF
+
+
+; softlinks actually take very little code in the FS.
+SOFTLINKS_SUPPORTED	EQU	1
+@
+
+
+1.13
+log
+@Added SOFTLINKS_SUPPORTED
+@
+text
+@d4 3
+@
+
+
+1.12
+log
+@Added NET entries to support the fact that we no longer pass things
+in N+1 registers.
+Added support for dircache subtypes
+@
+text
+@d176 4
+@
+
+
+1.11
+log
+@Added NewExamineThing for dos\4 & 5
+Added directory semaphore to each coroutine
+@
+text
+@d47 1
+a47 1
+		UWORD	NET_Pad2
+d49 4
+a52 1
+		ULONG	NET_Block		DirList block it's in
+d74 6
+a79 1
+t.dirlist	EQU 32
+@
+
+
+1.10
+log
+@added cb_suppress field
+@
+text
+@d37 3
+d44 8
+d71 1
+d106 1
+@
+
+
+1.9
+log
+@*** empty log message ***
+@
+text
+@d30 1
+@
+
+
+1.8
+log
+@*** empty log message ***
+@
+text
+@d152 1
+a153 47
+
+; This is an actual NotifyRequest (needs to be made into notify.i)
+	STRUCTURE NotifyRequest,0
+		APTR	nr_Name		pointer to file/dir name
+		APTR	nr_FullName	full path (including volume name)
+		ULONG	nr_UserData	for applications use
+		ULONG	nr_Flags
+		LABEL	nr_Port		message port for SEND_MESSAGE
+		APTR	nr_Task		*OR* task for SEND_SIGNAL
+		UBYTE	nr_SignalNum	sig for SEND_SIGNAL
+		STRUCT	nr_pad,3
+
+		APTR	nr_Data		for copy data
+		ULONG	nr_Length
+		ULONG	nr_Actual
+		ULONG	nr_FileSize
+
+		ULONG	nr_MsgCount	for handler use
+		ULONG	nr_Handler	handler sent to (for EndNotify)
+	LABEL nr_SIZEOF
+
+; This is the message that is sent to the calling application for notification
+	STRUCTURE NotifyMessage,MN_SIZE
+		ULONG	nm_Class
+		ULONG	nm_Code
+		APTR	nm_NReq		the associated NotifyRequest
+		ULONG	nm_DoNotTouch
+		ULONG	nm_DoNotTouch2
+	LABEL nm_SIZEOF
+
+NRF_SEND_MESSAGE	EQU 1
+NRF_SEND_SIGNAL		EQU 2
+NRF_COPY_DATA		EQU 4
+NRF_WAIT_REPLY		EQU 8
+NRF_NOTIFY_INITIAL	EQU 16
+NRF_MAGIC		EQU $80000000
+
+NRB_SEND_MESSAGE	EQU 0
+NRB_SEND_SIGNAL		EQU 1
+NRB_COPY_DATA		EQU 2
+NRB_WAIT_REPLY		EQU 3
+NRB_NOTIFY_INITIAL	EQU 4
+NRB_MAGIC		EQU 31
+
+NOTIFY_CODE		EQU 1234
+NOTIFY_CLASS		EQU 2345
+NOTIFY_REMOVE		EQU 3456
+@
+
+
+1.7
+log
+@*** empty log message ***
+@
+text
+@d12 3
+a14 3
+ERROR_KEYRANGE  EQU 736440
+ERROR_NO_BITMAP EQU 872364
+ERROR_CHECKSUM	EQU 995544
+d37 1
+a37 2
+		STRUCT	ET_Entries,72*4		all possible keys
+		ULONG	ET_End			dummy entry (always 0)
+d39 2
+@
+
+
+1.6
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.5
+log
+@synced with dosextens.i for ACTION codes
+@
+text
+@d14 2
+@
+
+
+1.4
+log
+@added completely new record locking structures
+@
+text
+@@
+
+
+1.3
+log
+@added new structures for notification
+@
+text
+@d1 3
+a3 1
+; stack sizes required for the various co routines (these are longword sizes)
+a4 14
+access.stsize     EQU 200
+locate.stsize     EQU 150
+rename.stsize     EQU 160
+create.stsize     EQU 150
+delete.stsize     EQU 200
+kill.stsize       EQU 25
+disc.stsize       EQU 100
+exobj.stsize      EQU 80
+exnext.stsize     EQU 80
+comm.stsize       EQU 100
+parent.stsize     EQU 80
+closedown.stsize  EQU 80 
+rd.stsize         EQU 100
+
+d11 8
+a18 3
+	STRUCTURE CacheBuff,0
+		APTR	cb_NextBuff	link to the next one in a queue
+		APTR	cb_PrevBuff	previous buffer in a queue
+d21 2
+d24 1
+a24 2
+		UWORD	cb_State	state on the pending queue
+		ULONG	cb_Size		size of data area or 0 or -1 or >0
+d26 2
+a44 32
+;   // fixed disc block offsets
+
+b.file.type     EQU 0
+b.file.ownkey   EQU 1
+b.file.highseq  EQU 2
+b.file.datasize EQU 3
+b.file.firstkey EQU 4
+b.file.checksum EQU 5
+b.file.database EQU 6
+
+
+b.data.type     EQU 0
+b.data.hdrkey   EQU 1
+b.data.seq      EQU 2
+b.data.datasize EQU 3
+b.data.nextkey  EQU 4
+b.data.checksum EQU 5
+b.data.database EQU 6
+
+
+b.dir.hashtab   EQU 6
+
+
+;   // lock offsets
+
+lock.link       EQU 0
+lock.key        EQU 1
+lock.access     EQU 2
+lock.task       EQU 3
+lock.volnode    EQU 4
+lock.upb        EQU 4
+
+a48 5
+;   // queueing element offsets
+
+quel.link       EQU 0
+quel.co         EQU 1
+
+d57 1
+a68 27
+;   // offsets into info vector for examine functions
+
+info.key        EQU  0       // disc key on drive
+info.dtype      EQU  1       // directory entry type
+info.name       EQU  2
+info.protect    EQU 29       // protection bits
+info.type       EQU 30       // actual entry type
+info.bytesize   EQU 31       // size in bytes
+info.blocksize  EQU 32       // number of blocks used
+info.date       EQU 33
+info.comment    EQU 36
+info.upb        EQU 56       // upper bound of vector
+
+;   // offsets into the info vector for the discinfo
+;   // action and the associated reply manifests
+
+discinfo.errors EQU  0       // soft errors
+discinfo.unit   EQU  1       // unit number
+discinfo.state  EQU  2       // disc state
+discinfo.space  EQU  3       // space available in blocks
+discinfo.used   EQU  4       // space used in blocks
+discinfo.alloc  EQU  5       // block size in bytes
+discinfo.type   EQU  6       // disk type
+discinfo.vol    EQU  7       // disc volume node
+discinfo.inuse  EQU  8       // zero if not in use
+discinfo.size   EQU  8       // upb
+
+a112 14
+;     // Error report types
+report.stream EQU 0       // A stream
+report.task   EQU 1       // A file system taskid
+report.lock   EQU 2       // A lock
+report.volume EQU 3       // A volume node
+
+
+	STRUCTURE RLHeader,0
+		APTR	rlh_Next		next header in list
+		ULONG	rlh_HeaderKey		the file that this pertains to
+		ULONG	rlh_NumLocks		total number of record locks
+		APTR	rlh_LockList		list of record locks
+	LABEL rlh_SIZEOF
+
+d114 6
+a119 1
+		APTR	rl_Next
+d122 1
+a122 2
+		APTR	rl_FileHandle		filehandle this lock belongs to
+		ULONG	rl_LockType		exclusive or shared rcord lock
+d125 1
+a125 1
+		APTR	rl_Timer		a timer request if waiting
+@
+
+
+1.2
+log
+@new packets
+@
+text
+@d212 62
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d187 25
+@

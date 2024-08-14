@@ -1,0 +1,507 @@
+head     40.2;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:40.2; strict;
+comment  @ * @;
+
+
+40.2
+date     94.03.08.09.41.54;  author davidj;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     94.03.07.14.34.06;  author davidj;  state Exp;
+branches ;
+next     40.0;
+
+40.0
+date     94.03.03.10.52.14;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+40.2
+log
+@state variable
+@
+text
+@/* player.c
+ * Player routines for CDPlayer
+ * Copyright (c) 1994 Commodore International Services, Co.
+ *
+ */
+
+#include <dos/dos.h>
+#include <exec/types.h>
+#include <internal/playerlibrary.h>
+
+#include <clib/dos_protos.h>
+#include <clib/player_protos.h>
+#include <string.h>
+#include <stdio.h>
+
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/player_pragmas.h>
+
+#include "cdaudio.h"
+
+/*****************************************************************************/
+
+#define	NUM_TRACKS	31
+
+/*****************************************************************************/
+
+UWORD RandomNumber (ULONG range)
+{
+    ULONG iterations = range - 1;
+    ULONG overflow = 0;
+
+    while (iterations)
+    {
+	if (randomseed & 0x80000000)
+	    overflow = 1;
+
+	randomseed *= 2;
+
+	if (overflow)
+	    randomseed ^= 0x1D872B41;
+
+	iterations >>= 1;
+    }
+
+    return ((UWORD) (((randomseed & 0xFFFF) * range) >> 16));
+}
+
+/*****************************************************************************/
+
+void InitializeCD (void)
+{
+    register UBYTE i;
+
+    if (PlayerBase)
+    {
+	/* Get everything we need to properly initialize things */
+	PlayList = ObtainPlayList ();
+	GetOptions (&PlayerOptions);
+	GetPlayerState (&PlayerState);
+	SetCDPlaylistState (FALSE);
+    }
+    else
+    {
+	/* Clear the structures */
+	memset (&DummyList, 0, sizeof (struct PlayList));
+	memset (&PlayerOptions, 0, sizeof (struct PlayerOptions));
+	memset (&PlayerState, 0, sizeof (struct PlayerState));
+
+	/* Initialize the dummy play list */
+	PlayList = &DummyList;
+	PlayList->EntryCount = PlayerState.Tracks = NUM_TRACKS;
+	for (i = 0; i < NUM_TRACKS; i++)
+	    PlayList->Entry[i] = i + 1;
+    }
+
+    /* Initialize the state */
+    pState = -1;
+
+    /* Initialize the random number seed */
+    randomseed = (-vhposr & 0x7FFF) ^ 0x1D6539A3;
+}
+
+/*****************************************************************************/
+
+LONG FreshenCDInfo (void)
+{
+    if (PlayerBase)
+    {
+	GetOptions (&PlayerOptions);
+	GetPlayerState (&PlayerState);
+
+	if (pState != PlayerState.AudioDisk)
+	{
+	    pState = PlayerState.AudioDisk;
+	    return 2;
+	}
+	return 1;
+    }
+    if (fake)
+	return 1;
+    return 0;
+}
+
+/*****************************************************************************/
+
+LONG GetCDState (void)
+{
+    if (PlayerState.AudioDisk == 1)
+    {
+	switch (PlayerState.PlayState)
+	{
+	    case PLS_STOPPED:
+		return SID_STOP;
+
+	    case PLS_PLAYING:
+		return SID_PLAY;
+
+	    case PLS_PAUSED:
+		return SID_PAUSE;
+	}
+    }
+    if (fake)
+	return SID_STOP;
+    return SID_NOCD;
+}
+
+/*****************************************************************************/
+
+LONG GetCDButtonState (LONG which)
+{
+    switch (which)
+    {
+	    /* Time Mode */
+	case GID_TIME:
+	    return (LONG)PlayerOptions.TimeMode;
+
+	    /* Intro */
+	case GID_INTRO:
+	    return (LONG)PlayerOptions.Intro;
+
+	    /* Random */
+	case GID_RANDOM:
+	    return rndState;
+
+	    /* Loop */
+	case GID_LOOP:
+	    return (LONG)PlayerOptions.Loop;
+    }
+    return 0;
+}
+
+/*****************************************************************************/
+
+LONG GetCDNumTracks (void)
+{
+    if (PlayerState.AudioDisk == 1)
+	return (LONG) PlayerState.Tracks;
+    if (fake)
+	return NUM_TRACKS;
+    return 0;
+}
+
+/*****************************************************************************/
+
+LONG GetCDNumEnabled (void)
+{
+    LONG i, num = 0;
+
+    if (PlayerBase)
+    {
+	/* Lock the play list */
+	ModifyPlayList (TRUE);
+    }
+
+    if (PlayList)
+    {
+	/* Set the appropriate state */
+	for (i = 0; i < PlayList->EntryCount; i++)
+	{
+	    if (PlayList->Entry[i] & PLEF_ENABLE)
+		num++;
+	}
+    }
+
+    if (PlayerBase)
+    {
+	/* Unlock the play list */
+	ModifyPlayList (FALSE);
+    }
+
+    return num;
+}
+
+/*****************************************************************************/
+
+LONG GetCDTrackNum (LONG i)
+{
+    if (PlayList)
+	return (LONG)(PlayList->Entry[i] & PLEF_TRACK);
+    return i + 1;
+}
+
+/*****************************************************************************/
+
+void SetCDButtonState (LONG which, LONG dir, LONG value)
+{
+    LONG key;
+
+    /* Make sure it is a release so that we have a value */
+    if ((which > GID_STOP) && (dir == 0))
+    {
+	switch (which)
+	{
+	    case GID_TIME:
+		PlayerOptions.TimeMode = (BYTE) value;
+#if 0
+		PlayerOptions.Loop = -1;
+		PlayerOptions.Intro = -1;
+		PlayerOptions.Subcode = -1;
+#endif
+		break;
+
+	    case GID_INTRO:
+		PlayerOptions.Intro = (BYTE) value;
+#if 0
+		PlayerOptions.Loop = -1;
+		PlayerOptions.TimeMode = -1;
+		PlayerOptions.Subcode = -1;
+#endif
+		return;
+
+	    case GID_RANDOM:
+		rndState = value;
+		return;
+
+	    case GID_LOOP:
+		PlayerOptions.Loop = (BYTE) value;
+#if 0
+		PlayerOptions.Intro = -1;
+		PlayerOptions.TimeMode = -1;
+		PlayerOptions.Subcode = -1;
+#endif
+		break;
+
+	    default:
+		return;
+	}
+
+	/* Set the options */
+	if (PlayerBase)
+	{
+	    SetOptions (&PlayerOptions);
+#if 0
+	    GetOptions (&PlayerOptions);
+#endif
+	}
+    }
+
+    if (PlayerState.AudioDisk == 1)
+    {
+	if (which < GID_TIME)
+	{
+	    if (dir)
+		key = PKSF_PRESS;
+	    else
+		key = PKSF_RELEASE;
+
+	    switch (which)
+	    {
+		case GID_REWIND:
+		    key |= PKS_REVERSE;
+		    break;
+
+		case GID_PP:
+		    key |= PKS_PLAYPAUSE;
+		    break;
+
+		case GID_FFORWARD:
+		    key |= PKS_FORWARD;
+		    break;
+
+		case GID_STOP:
+		    key |= PKS_STOP;
+		    break;
+	    }
+	    SubmitKeyStroke (key);
+	}
+    }
+}
+
+/*****************************************************************************/
+
+LONG GetCDPlayEntryState (LONG which)
+{
+    LONG state = 0;
+
+    if (PlayerBase)
+    {
+	/* Lock the play list */
+	ModifyPlayList (TRUE);
+    }
+
+    if (PlayList)
+    {
+	/* Set the appropriate state */
+	if (which < PlayList->EntryCount)
+	    state = (LONG)(PlayList->Entry[which] & PLEF_ENABLE);
+    }
+
+    if (PlayerBase)
+    {
+	/* Unlock the play list */
+	ModifyPlayList (FALSE);
+    }
+    return state;
+}
+
+/*****************************************************************************/
+
+void SetCDPlayEntryState (LONG which, LONG state)
+{
+    if (PlayerBase)
+    {
+	/* Lock the play list */
+	ModifyPlayList (TRUE);
+    }
+
+    if (PlayList)
+    {
+	/* Set the appropriate state */
+	if (state)
+	    PlayList->Entry[which] |= PLEF_ENABLE;
+	else
+	    PlayList->Entry[which] &= ~PLEF_ENABLE;
+    }
+
+    if (PlayerBase)
+    {
+	/* Unlock the play list */
+	ModifyPlayList (FALSE);
+    }
+}
+
+/*****************************************************************************/
+
+void SetCDPlaylistState (LONG state)
+{
+    register UBYTE i;
+
+    if (PlayerBase)
+    {
+	/* Lock the play list */
+	ModifyPlayList (TRUE);
+    }
+
+    if (PlayList)
+    {
+	/* Clear the enable bit */
+	for (i = 0; i < 100; i++)
+	{
+	    if (state)
+		PlayList->Entry[i] |= PLEF_ENABLE;
+	    else
+		PlayList->Entry[i] &= ~PLEF_ENABLE;
+	}
+    }
+
+    if (PlayerBase)
+    {
+	/* Unlock the play list */
+	ModifyPlayList (FALSE);
+    }
+}
+
+/*****************************************************************************/
+
+void SetCDPlaylist (LONG which)
+{
+    register UBYTE i, j, k, max;
+
+    if (PlayerBase)
+    {
+	/* Lock the play list */
+	ModifyPlayList (TRUE);
+    }
+
+    if (PlayList)
+    {
+	/* Remember the state */
+	UndoPlayList = *PlayList;
+
+	/* Clear the play list */
+	memset (PlayList->Entry, 0, sizeof (PlayList->Entry));
+
+	/* Set the play list */
+	max = PlayList->EntryCount = PlayerState.Tracks;
+	for (i = 0; i < max; i++)
+	{
+	    if (which)
+	    {
+		k = RandomNumber ((ULONG)(max - i)) + 1;
+		for (j = 0; j < max; j++)
+		{
+		    if (!(PlayList->Entry[j] & PLEF_ENABLE))
+			k--;
+		    if (!k)
+		    {
+			PlayList->Entry[j] = (i + 1) | PLEF_ENABLE;
+			break;
+		    }
+		}
+	    }
+	    else
+		PlayList->Entry[i] = (i + 1) | PLEF_ENABLE;
+	}
+
+	/* Correct the state of things */
+	for (i = 0; i < max; i++)
+	    if (!(UndoPlayList.Entry[i] & PLEF_ENABLE))
+		PlayList->Entry[i] &= ~PLEF_ENABLE;
+    }
+
+    if (PlayerBase)
+    {
+	/* Unlock the play list */
+	ModifyPlayList (FALSE);
+    }
+}
+@
+
+
+40.1
+log
+@moved all globals to init in one place
+@
+text
+@d77 1
+a77 1
+    state = -1;
+d92 1
+a92 1
+	if (state != PlayerState.AudioDisk)
+d94 1
+a94 1
+	    state = PlayerState.AudioDisk;
+a138 1
+printf ("get intro %d\n", PlayerOptions.Intro);
+d253 1
+d255 1
+@
+
+
+40.0
+log
+@initial RCS
+@
+text
+@a26 7
+static LONG state;
+static LONG randomseed;
+static LONG rndState;
+static struct PlayList DummyList;
+
+/*****************************************************************************/
+
+d217 5
+d226 5
+a230 1
+printf ("set intro %d\n", PlayerOptions.Intro);
+d239 5
+d252 1
+d254 2
+@

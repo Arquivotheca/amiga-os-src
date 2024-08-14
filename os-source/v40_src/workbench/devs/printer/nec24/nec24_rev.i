@@ -1,0 +1,16 @@
+VERSION		EQU	35
+REVISION	EQU	17
+DATE	MACRO
+		dc.b	'10.7.91'
+	ENDM
+VERS	MACRO
+		dc.b	'nec24 35.17'
+	ENDM
+VSTRING	MACRO
+		dc.b	'nec24 35.17 (10.7.91)',13,10,0
+		ds.w	0
+	ENDM
+VERTAG	MACRO
+		dc.b	0,'$VER: nec24 35.17 (10.7.91)',0
+		ds.w	0
+	ENDM

@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'15.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'asl 42.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'asl 42.2 (15.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: asl 42.2 (15.7.93)',0
+	ENDM

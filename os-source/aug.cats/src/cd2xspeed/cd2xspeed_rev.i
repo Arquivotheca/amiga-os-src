@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'16.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'cd2xspeed 1.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cd2xspeed 1.5 (16.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cd2xspeed 1.5 (16.9.93)',0
+	ENDM

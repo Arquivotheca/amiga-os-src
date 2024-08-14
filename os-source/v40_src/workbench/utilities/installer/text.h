@@ -1,0 +1,363 @@
+#ifndef INSTALLERSTR_H
+#define INSTALLERSTR_H
+
+
+/****************************************************************************/
+
+
+/* This file was created automatically by CatComp.
+ * Do NOT edit by hand!
+ */
+
+
+#ifndef EXEC_TYPES_H
+#include <exec/types.h>
+#endif
+
+
+/****************************************************************************/
+
+
+#define TX_YES 3
+
+#define TX_NO 4
+
+#define TX_ABORT 5
+
+#define TX_HELP 6
+
+#define TX_PROCEED 7
+
+#define TX_CANCEL 8
+
+#define TX_PARENT 9
+
+#define TX_DRIVES 10
+
+#define TX_MAKEDIR 11
+
+#define TX_SKIP 12
+
+#define TX_EXITHELP 13
+
+#define TX_MORE 14
+
+#define TX_BACK 15
+
+#define TX_EXITABOUT 16
+
+#define TX_ABOUT 17
+
+#define TX_COMPLETE 18
+
+#define TX_OK 19
+
+#define TX_COPYING_FILE 46
+
+#define TX_TO_DRAWER 47
+
+#define TX_MAKEDIR_INFO 48
+
+#define TX_ENTER_PATH 49
+
+#define TX_CHANGE_DEST 50
+
+#define TX_COPY_DEST 51
+
+#define TX_HELP_COPY 54
+
+#define TX_HELP_ASKCHOICE 55
+
+#define TX_HELP_ASKOPTIONS 56
+
+#define TX_HELP_ASKSTRING 57
+
+#define TX_HELP_ASKNUMBER 58
+
+#define TX_HELP_ASKDISK 59
+
+#define TX_PLEASE_INSERT 60
+
+#define TX_HELP_ASKBOOL 61
+
+#define TX_SELECTED_DRAWER 62
+
+#define TX_HELP_SELECTDIR 63
+
+#define TX_SELECTED_FILE 64
+
+#define TX_CURRENT_DRAWER 65
+
+#define TX_HELP_SELECTFILE 66
+
+#define TX_INST_COMPLETE 67
+
+#define TX_INST_COMP_WHERE 68
+
+#define TX_INST_LOGFILE 69
+
+#define TX_WORKING 70
+
+#define TX_HELP_CONFIRM 71
+
+#define TX_VERSION_SOURCE 72
+
+#define TX_VERSION_DEST 73
+
+#define TX_VERSION_NONE 74
+
+#define TX_PROCEED_INST 75
+
+#define TX_INST_MODE 76
+
+#define TX_WELCOME 77
+
+#define TX_HELP_INSTMODE 78
+
+#define TX_LOG_TO 79
+
+#define TX_INST_OPTIONS 80
+
+#define TX_WELCOME_OPT 81
+
+#define TX_HELP_SETTINGS 82
+
+#define TX_MODIFY_SS 83
+
+#define TX_ANOTHER_FILE 84
+
+#define TX_PROCEED_CHANGES 85
+
+#define TX_FILE_MODIFIED 86
+
+#define TX_HELP_CHANGE_SS 87
+
+#define TX_ERROR 88
+
+#define TX_DOSERROR 89
+
+#define TX_SORRY 90
+
+#define TX_CONFIRM 91
+
+#define TX_ESCAPE 92
+
+#define TX_RANGE 93
+
+#define TX_PROCEED_COPY 96
+
+#define MSG_BOOTDISK 131
+
+#define MSG_ASKDELETE 168
+
+#define TX_SKIP_FILE 169
+
+#define TX_DELETE 170
+
+#define HELP_USER_LEVEL 138
+
+#define HELP_INST_SETTINGS 139
+
+#define HELP_CHANGE_STARTUP 140
+
+#define STR_FILE_TO_MODIFY 141
+
+#define HELP_SELECT_FILE 142
+
+#define STR_NEW_DEST 143
+
+#define HELP_SELECT_DRAWER 144
+
+#define HELP_VERSION 145
+
+#define HELP_COPYFILES 146
+
+#define HELP_ASKDISK 147
+
+#define HELP_ASKSTRING 148
+
+#define HELP_ASKNUMBER 149
+
+#define HELP_ASKCHOICE 150
+
+#define HELP_ASKOPTIONS 151
+
+#define HELP_MAKEDIR 152
+
+#define STR_CREATE_ICON 153
+
+#define STR_NOVICE_USER 154
+
+#define STR_AVERAGE_USER 155
+
+#define STR_EXPERT_USER 156
+
+#define STR_FOR_REAL 157
+
+#define STR_PRETEND 158
+
+#define STR_PRINTER 159
+
+#define STR_LOGFILE 160
+
+#define STR_NOLOG 161
+
+#define STR_SURE_ABORT 162
+
+#define HELP_STARTUP 163
+
+#define MSG_NO_PRINTER 26
+
+#define MSG_ACCESS_TRANSCRIPT 27
+
+#define MSG_ACCESS_PRINTER 28
+
+#define MSG_PROB_SOURCE 52
+
+#define MSG_PROB_FILE 53
+
+#define MSG_NOEXAMINE_OBJECT 97
+
+#define MSG_NOEXIST_OBJECT 98
+
+#define MSG_CANNOT_ASSIGN 99
+
+#define MSG_ERR_MEMORY 102
+
+#define MSG_NO_DRAWER 117
+
+#define MSG_NO_FILE 118
+
+#define MSG_PROB_SS 119
+
+#define MSG_ERR_WRITING 120
+
+#define MSG_ERR_UNKNOWN 121
+
+#define MSG_ERR_READING 122
+
+#define MSG_CANNOT_CREATE 123
+
+#define MSG_CANNOT_COPY 124
+
+#define MSG_OVERWRITE 125
+
+#define MSG_EXECUTE_PATH 126
+
+#define MSG_NO_COMMAND 128
+
+#define MSG_NO_REXX 129
+
+#define MSG_NO_DUPLOCK 130
+
+#define ERR_READING_US 136
+
+#define ERR_WRITING_US 137
+
+#define MSG_BAD_PARAMS_COPY 164
+
+#define MSG_INVALID_DRAWER_NAME 167
+
+#define MSG_NO_WINDOW 22
+
+#define MSG_NO_SCRIPT_ICON 23
+
+#define MSG_NO_PARTITION 24
+
+#define MSG_NO_TRANSCRIPT 25
+
+#define MSG_NO_SCRIPT 30
+
+#define MSG_NO_INIT 31
+
+#define MSG_NO_LIBRARIES 32
+
+#define MSG_NO_WORKBENCH 33
+
+#define MSG_TOO_LONG 95
+
+#define MSG_DIVIDE_ZERO 100
+
+#define MSG_BAD_CAT 101
+
+#define TRANS_HEADER 0
+
+#define TRANS_USER_DRAWER 34
+
+#define TRANS_COPY_FILE 35
+
+#define TRANS_COPY_DRAWER 36
+
+#define TRANS_ASK_CHOICE 37
+
+#define TRANS_NO_OPTIONS 38
+
+#define TRANS_ASK_OPTIONS 39
+
+#define TRANS_ASK_STRING 40
+
+#define TRANS_ASK_NUMBER 41
+
+#define TRANS_ASK_BOOL 42
+
+#define TRANS_DEST_DRAWER 43
+
+#define TRANS_ASK_DRAWER 44
+
+#define TRANS_ASK_FILE 45
+
+#define MSG_ONERROR 94
+
+#define MSG_USER_ABORT 103
+
+#define MSG_ABORT_LINE 104
+
+#define MSG_PROBLEM_LINE 105
+
+#define TRANS_CREATE_DRAWER 106
+
+#define TRANS_INSERT_COMMANDS 107
+
+#define TRANS_CREATE_TEXTFILE 108
+
+#define TRANS_END_TEXTFILE 109
+
+#define TRANS_EXECUTE 110
+
+#define TRANS_RUN 111
+
+#define TRANS_AREXX 112
+
+#define TRANS_RENAME 113
+
+#define TRANS_DELETE 114
+
+#define TRANS_ABORTING 115
+
+#define TRANS_EXITING 116
+
+#define TRANS_START_US 134
+
+#define TRANS_END_US 135
+
+#define TX_ASSIGN_LABEL 132
+
+#define TX_DRAWER_LABEL 133
+
+#define TRANS_DEF_NAME 1
+
+#define MSG_ABOUT_INSTALLER1 165
+
+#define MSG_ABOUT_INSTALLER2 166
+
+#define TX_USAGE 2
+
+#define MSG_BAD_ARGS 20
+
+#define MSG_NO_FONT 21
+
+#define MSG_NO_COMPILE 29
+
+#define MSG_NO_NIL 127
+
+#endif /* INSTALLERSTR_H */

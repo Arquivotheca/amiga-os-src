@@ -1,0 +1,1879 @@
+head     39.13;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+39.13
+date     93.11.05.14.58.37;  author jesup;  state Exp;
+branches ;
+next     39.12;
+
+39.12
+date     93.10.12.23.15.40;  author jesup;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     93.08.23.19.31.41;  author peter;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     93.05.21.17.34.09;  author peter;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     93.05.07.17.04.18;  author peter;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     93.05.03.14.39.17;  author peter;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     93.04.27.14.36.30;  author peter;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.03.18.16.26.18;  author peter;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.12.03.11.30.59;  author peter;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.11.06.15.40.06;  author peter;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.11.03.17.53.33;  author peter;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.11.02.17.08.45;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.11.02.12.41.58;  author peter;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.10.30.15.21.11;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@ARexx handling code for Wack.
+@
+
+
+39.13
+log
+@added Call function
+@
+text
+@/*
+ * Amiga Grand Wack
+ *
+ * rexxhandler.c -- ARexx handling code for Wack.
+ *
+ * $Id: rexxhandler.c,v 39.12 93/10/12 23:15:40 jesup Exp Locker: jesup $
+ *
+ * Wack is an ARexx command host.  It implements a small number
+ * of specific-to-ARexx commands.  Anything not recognized as one
+ * of those is attempted as a regular Wack command.  From the
+ * Wack command line, it is also possible to invoke ARexx scripts
+ * and "string files".
+ *
+ * This module contains code to initialize the ARexx stuff, handle
+ * incoming ARexx messages, bind the ARexx-specific Wack commands, and
+ * launch ARexx scripts from within Wack.  The code for the
+ * ARexx-specific Wack commands is also here.
+ *
+ */
+
+#include <dos/dos.h>
+#include <dos/rdargs.h>
+
+extern struct Library *DOSBase;
+
+#include "linklib_protos.h"
+#include "linklib_pragmas.h"
+extern APTR LinkLibBase;
+
+#include <clib/dos_protos.h>
+#include <pragmas/dos_pragmas.h>
+
+#include "symbols.h"
+#include "simplerexx.h"
+#include "wackbase.h"
+#include "parse.h"
+
+#include "sys_proto.h"
+#include "io_proto.h"
+#include "asm_proto.h"
+#include "ops_proto.h"
+#include "define_proto.h"
+#include "parse_proto.h"
+#include "show_proto.h"
+#include "find_proto.h"
+#include "special_proto.h"
+#include "link_proto.h"
+#include "wackbase_proto.h"
+#include "rexxhandler_proto.h"
+
+extern UWORD far VERSION;
+extern UWORD far REVISION;
+extern APTR CurrAddr;
+extern APTR SpareAddr;
+extern ULONG rexx_error;
+extern struct WackLibBase *WackBase;
+
+struct ARexxContext *RexxContext;
+struct SymbolMap RexxSymMap = {0};
+ULONG rexx_error = 0;
+
+#define MAX(a,b) ((a)>(b)?(a):(b))
+
+extern long remote_error;
+
+/* Holds a copy of the command string to execute */
+#define REXXBUFFERSIZE	512
+char rexxcmdbuffer[ REXXBUFFERSIZE ];
+
+/* Used for result strings */
+#define REXXOUTBUFFERSIZE 512
+char rexxoutbuffer[ REXXOUTBUFFERSIZE ];
+
+/* Initialize an ARexx port named "WACK.n".  The default extension
+ * for our ARexx scripts will be ".wack".  Returns the signal mask
+ * of the port signal, or zero for failure.
+ */
+ULONG
+ARexx_Init( void )
+{
+    ULONG sigmask = 0;
+    if ( RexxContext = InitARexx( &WackBase->wl_MsgPort, "wack", "wack") )
+    {
+	sigmask = ARexxSignal(RexxContext);
+	ARexx_Bind();
+    }
+    return( sigmask );
+}
+
+void
+ARexx_Exit( void )
+{
+    /* Shut down ARexx */
+    FreeARexx( RexxContext );
+    UnBindSymbolMap( &RexxSymMap );
+    RexxContext = NULL;
+}
+
+ULONG
+ARexx_NumPending( void )
+{
+    ULONG outstanding = 0;
+    if ( RexxContext )
+    {
+	outstanding = RexxContext->Outstanding;
+    }
+    return( outstanding );
+}
+
+
+void
+ARexx_Handler( void )
+{
+    struct RexxMsg *rmsg;
+    char *result = NULL;
+    ULONG error = 0;
+    if ( RexxContext )
+    {
+	while ( rmsg = GetARexxMsg( RexxContext ) )
+	{
+	    if (rmsg == REXX_RETURN_ERROR)
+	    {
+		/* We got an error back...  What do we do now?
+		 * The error result was discarded inside
+		 * GetARexxMsg()
+		 */
+		PPrintf("ARexx script failed\n");
+	    }
+	    else
+	    {
+		char *arg;
+		char command[ MAXTOKENLEN ];
+
+		if ( arg = parseToken( rmsg->rm_Args[0], command ) )
+		{
+		    struct Symbol *sym;
+		
+		    /* Is it a special Rexx-only command?  If so, we
+		     * execute it here...
+		     */
+		    if ( sym = FindSymbol( command, &RexxSymMap ) )
+		    {
+			if ( !( arg = parseRemainder( arg ) ) )
+			{
+			    arg = "";
+			}
+
+			rexx_error = 0;
+			resetError();
+
+			result = evaluateSymbol( sym, arg );
+			error = rexx_error;
+			if ( ( !error ) && ( remote_error ) )
+			{
+			    error = 10;
+			}
+			resetError();
+		    }
+		    else
+		    {
+			/* It's not a Rexx-specific command, so pass it
+			 * off to anyone else.
+			 */
+			if ( !processLine( rmsg->rm_Args[0] ) )
+			{
+			    error = 20;
+			}
+		    }
+		}
+	    }
+	    ReplyARexxMsg( RexxContext, rmsg, result, error );
+	}
+    }
+}
+
+
+void
+BindRexxPrim( char *name, rexxfunc function )
+{
+    struct Symbol *symbol;
+
+    if ( ( symbol = FindSymbol( name, &RexxSymMap ) ) ||
+	( symbol = NewSymbol( name, &RexxSymMap ) ) )
+    {
+	symbol->sym_Type = ACT_COMMAND;
+	symbol->sym_Function = function;
+    }
+}
+
+
+/* This routine creates a result string in a printf()-way */
+char *
+RexxPrintfResult( char *fmt, ... )
+{
+    char *result = NULL;
+    /* We suppress printing after an error has occurred */
+    if ( !remote_error )
+    {
+	sprintfA( rexxoutbuffer, fmt, ((ULONG *)&fmt)+1 );
+	result = rexxoutbuffer;
+    }
+    return( result );
+}
+
+
+/* We are called to execute the named ARexx script.
+ * If we got here through the use of the "rx" keyword,
+ * then arg1 contains both the script name and the arguments.
+ * If we got here as the result of the "bindrx" command,
+ * arg1 contains the script name and any arguments specified
+ * at bindrx time, while arg2 contains arguments added
+ * at invocation time.
+ */
+STRPTR
+ARexx_Execute( char *arg1, char *arg2 )
+{
+    if ( RexxContext )
+    {
+	strcpy( rexxcmdbuffer, arg1 );
+	if ( ( arg2 ) && ( *arg2 ) )
+	{
+	    strcat( rexxcmdbuffer, " " );
+	    strcat( rexxcmdbuffer, arg2 );
+	}
+ 
+	if ( !SendARexxMsg( RexxContext, rexxcmdbuffer, FALSE ) )
+	{
+	    PPrintf("Couldn't send ARexx message\n");
+	}
+    }
+    else
+    {
+	PPrintf("ARexx not available\n");
+    }
+
+    return( NULL );
+}
+
+/* We are called to interpret the specified ARexx command. */
+STRPTR
+ARexx_ExecuteString( char *arg )
+{
+    if ( RexxContext )
+    {
+	if ( !SendARexxMsg( RexxContext, arg, TRUE ) )
+	{
+	    PPrintf("Couldn't send rexx message\n");
+	}
+    }
+    else
+    {
+	PPrintf("ARexx not available\n");
+    }
+
+    return( NULL );
+}
+
+
+void
+ARexx_Bind( void )
+{
+    BindRexxPrim("currentaddr", rxcmd_CurrentAddr );
+    BindRexxPrim("spareaddr", rxcmd_SpareAddr );
+    BindRexxPrim("version", rxcmd_Version );
+    BindRexxPrim("print", rxcmd_Print );
+
+    BindRexxPrim("readbyte", rxcmd_ReadByte );
+    BindRexxPrim("readword", rxcmd_ReadWord );
+    BindRexxPrim("readlong", rxcmd_ReadLong );
+    BindRexxPrim("readblock", rxcmd_ReadBlock );
+    BindRexxPrim("readstring", rxcmd_ReadString );
+    BindRexxPrim("readbstr", rxcmd_ReadBSTR );
+
+    BindRexxPrim("writebyte", rxcmd_WriteByte );
+    BindRexxPrim("writeword", rxcmd_WriteWord );
+    BindRexxPrim("writelong", rxcmd_WriteLong );
+    BindRexxPrim("writeblock", rxcmd_WriteBlock );
+
+    BindRexxPrim("findlibrary", rxcmd_FindLibrary );
+
+    BindRexxPrim("connection", rxcmd_Connection );
+    BindRexxPrim("contextaddr", rxcmd_Context );
+
+    BindRexxPrim("call", rxcmd_Call );
+}
+
+
+char *
+rxcmd_CurrentAddr( char *arg )
+{
+    long *address;
+    char *result;
+
+    result = RexxPrintfResult( "%lx", CurrAddr );
+
+    if ( arg = parseRemainder( arg ) )
+    {
+	if ( parseHexNum( arg, (long *)&address, NULL ) )
+	{
+	    CurrAddr = address;
+	}
+	else
+	{
+	    rexx_error = 10;
+	}
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_SpareAddr( char *arg )
+{
+    long *address;
+    char *result;
+
+    result = RexxPrintfResult( "%lx", SpareAddr );
+
+    if ( arg = parseRemainder( arg ) )
+    {
+	if ( parseHexNum( arg, (long *)&address, NULL ) )
+	{
+	    SpareAddr = address;
+	}
+	else
+	{
+	    rexx_error = 10;
+	}
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_Version( char *arg )
+{
+    return( RexxPrintfResult( "Wack %ld.%ld", VERSION,REVISION ) );
+}
+
+
+char *
+rxcmd_Print( char *arg )
+{
+    PPrintf("%s\n", arg ? arg : "" );
+    return( NULL );
+}
+
+
+/* Returns zero if there is a parsing problem, >0 if a hexadecimal
+ * conversion is requested, <0 if a decimal conversion is requested.
+ * Legal formats:
+ *	address
+ *	address decimal
+ *	decimal
+ *	(nothing)
+ */
+long
+parseReadTemplate( char *arg, long **addressp )
+{
+    long ok = 1;
+    char arg1[ MAXTOKENLEN ];
+
+    *addressp = CurrAddr;
+    if ( arg = parseToken( arg, arg1 ) )
+    {
+	if ( IsHexNum( arg1, (long *)addressp ) )
+	{
+	    arg = parseToken( arg, arg1 );
+	}
+	if ( arg )
+	{
+	    if ( !stricmp( arg1, "decimal" ) )
+	    {
+		ok = -1;
+	    }
+	    else
+	    {
+		ok = 0;
+	    }
+	}
+    }
+    return( ok );
+}
+
+
+char *
+rxcmd_ReadByte( char *arg )
+{
+    long *address;
+    unsigned char data;
+    char *result = NULL;
+    long parse;
+
+    if ( parse = parseReadTemplate( arg, &address ) )
+    {
+	data = ReadByte( address );
+	if ( parse > 0 )
+	{
+	    result = RexxPrintfResult("%02lx", data );
+	}
+	else
+	{
+	    result = RexxPrintfResult("%ld", data );
+	}
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_ReadWord( char *arg )
+{
+    long *address;
+    unsigned short data;
+    char *result = NULL;
+    long parse;
+
+    if ( parse = parseReadTemplate( arg, &address ) )
+    {
+	data = ReadWord( address );
+	if ( parse > 0 )
+	{
+	    result = RexxPrintfResult("%04lx", data );
+	}
+	else
+	{
+	    result = RexxPrintfResult("%ld", data );
+	}
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_ReadLong( char *arg )
+{
+    long *address;
+    long data;
+    char *result = NULL;
+    long parse;
+
+    if ( parse = parseReadTemplate( arg, &address ) )
+    {
+	data = ReadLong( address );
+	if ( parse > 0 )
+	{
+	    result = RexxPrintfResult("%08lx", data );
+	}
+	else
+	{
+	    result = RexxPrintfResult("%ld", data );
+	}
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+/* Legal formats:
+ *	address hexvalue
+ *	address decvalue decimal
+ *	hexvalue
+ *	decvalue decimal
+ */
+long
+parseWriteTemplate( char *arg, long **addressp, long *data )
+{
+    char arg1[ MAXTOKENLEN ];
+    char arg2[ MAXTOKENLEN ];
+    char arg3[ MAXTOKENLEN ];
+    char *addrarg = arg1;
+    char *valuearg = arg2;
+    BOOL decimal = FALSE;
+    long ok = TRUE;
+
+    if ( arg = parseToken( arg, arg1 ) )
+    {
+	if ( arg = parseToken( arg, arg2 ) )
+	{
+	    if ( parseToken( arg, arg3 ) )
+	    {
+		if ( !stricmp( arg3, "decimal" ) )
+		{
+		    decimal = TRUE;
+		}
+		else
+		{
+		    ok = FALSE;
+		}
+	    }
+	    else if ( !stricmp( arg2, "decimal" ) )
+	    {
+		decimal = TRUE;
+		addrarg = NULL;
+		valuearg = arg1;
+	    }
+	}
+	else
+	{
+	    addrarg = NULL;
+	    valuearg = arg1;
+	}
+    }
+    else
+    {
+	ok = FALSE;
+    }
+
+    if ( ok )
+    {
+	*addressp = CurrAddr;
+	if ( addrarg )
+	{
+	    if ( !IsHexNum( addrarg, (long *)addressp ) )
+	    {
+		ok = FALSE;
+	    }
+	}
+	if ( valuearg )
+	{
+	    if ( decimal )
+	    {
+		if ( !IsDecNum( valuearg, data ) )
+		{
+		    ok = FALSE;
+		}
+	    }
+	    else
+	    {
+		if ( !IsHexNum( valuearg, data ) )
+		{
+		    ok = FALSE;
+		}
+	    }
+	}
+    }
+    return( ok );
+}
+
+
+char *
+rxcmd_WriteByte( char *arg )
+{
+    long *address;
+    long data;
+
+    if ( parseWriteTemplate( arg, &address, &data ) )
+    {
+	WriteByte( address, data );
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( NULL );
+}
+
+
+char *
+rxcmd_WriteWord( char *arg )
+{
+    long *address;
+    long data;
+
+    if ( parseWriteTemplate( arg, &address, &data ) )
+    {
+	WriteWord( address, data );
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( NULL );
+}
+
+
+char *
+rxcmd_WriteLong( char *arg )
+{
+    long *address;
+    long data;
+
+    if ( parseWriteTemplate( arg, &address, &data ) )
+    {
+	WriteLong( address, data );
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( NULL );
+}
+
+
+/* Legal formats:
+ *	[nothing]
+ *	address
+ */
+char *
+rxcmd_ReadString( char *arg )
+{
+    void *address;
+    char *result = "";
+
+    if ( parseAddress( arg, (long *)&address ) )
+    {
+	GetString( address, rexxoutbuffer, REXXOUTBUFFERSIZE );
+	result = rexxoutbuffer;
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+/* Legal formats:
+ *	[nothing]
+ *	address
+ */
+char *
+rxcmd_ReadBSTR( char *arg )
+{
+    void *address;
+    char *result = "";
+
+    if ( parseAddress( arg, (long *)&address ) )
+    {
+	GetBSTR( address, rexxoutbuffer, REXXOUTBUFFERSIZE );
+	result = rexxoutbuffer;
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_FindLibrary( char *arg )
+{
+    struct Library *library;
+    char *result;
+    char *libname;
+    result = "0";
+
+    if ( libname = parseRemainder( arg ) )
+    {
+	if ( library = FindBase( arg ) )
+	{
+	    result = RexxPrintfResult( "%lx", library );
+	}
+	else
+	{
+	    rexx_error = 5;
+	}
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+char *
+rxcmd_Connection( char *arg )
+{
+    return( (char *)LinkConnection() );
+}
+
+char *
+rxcmd_Context( char *arg )
+{
+    return( RexxPrintfResult("%lx", LinkContext() ) );
+}
+
+char *
+rxcmd_ReadBlock( char *arg )
+{
+    UBYTE *address;
+    UBYTE *buffer;
+    ULONG size;
+    char *result = NULL;
+
+    if (parseArrayTemplate( arg, &address, &buffer, &size ) )
+    {
+	ReadBlock( address, buffer, size );
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+char *
+rxcmd_WriteBlock( char *arg )
+{
+    UBYTE *address;
+    UBYTE *buffer;
+    ULONG size;
+    char *result = NULL;
+
+    if (parseArrayTemplate( arg, &address, &buffer, &size ) )
+    {
+	WriteBlock( address, buffer, size );
+    }
+    else
+    {
+	rexx_error = 10;
+    }
+    return( result );
+}
+
+
+/* Legal formats:
+ *	address buffer_address length
+ *	buffer_address length
+ */
+long
+parseArrayTemplate( char *arg, UBYTE **addressp, UBYTE **data, ULONG *size )
+{
+    char arg1[ MAXTOKENLEN ];
+    char arg2[ MAXTOKENLEN ];
+    char arg3[ MAXTOKENLEN ];
+    char *addrarg = arg1;
+    char *bufferarg = arg2;
+    char *sizearg = arg3;
+    long ok = TRUE;
+
+    if ( arg = parseToken( arg, arg1 ) )
+    {
+	if ( arg = parseToken( arg, arg2 ) )
+	{
+	    if ( parseToken( arg, arg3 ) )
+	    {
+		addrarg = arg1;
+		bufferarg = arg2;
+		sizearg = arg3;
+	    } else {
+		addrarg = NULL;
+		bufferarg = arg1;
+		sizearg = arg2;
+	    }
+	    *addressp = CurrAddr;
+	    if ( addrarg )
+	    {
+		if ( !IsHexNum( addrarg, (long *)addressp ) )
+		{
+			ok = FALSE;
+		}
+	    }
+	    if ( !IsHexNum( bufferarg, (long *)data ) )
+	    {
+		ok = FALSE;
+	    }
+	    if ( !IsHexNum( sizearg, (long *)size ) )
+	    {
+		ok = FALSE;
+	    }
+	} else
+	    ok = FALSE;
+    } else
+	ok = FALSE;
+
+    return( ok );
+}
+
+
+char *
+rxcmd_Call( char *arg )
+{
+    long *address = CurrAddr;
+    char *result = NULL;
+
+    if ( arg = parseRemainder( arg ) )
+    {
+	if ( parseHexNum( arg, (long *)&address, NULL ) )
+	{
+		;
+	}
+	else
+	{
+	    rexx_error = 10;
+	}
+    }
+    if (rexx_error == 0)
+	if (!CallFunction(address))
+	    rexx_error = 10;
+
+    return( result );
+}
+
+@
+
+
+39.12
+log
+@Added support for read/write block from rexx
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.11 93/08/23 19:31:41 peter Exp $
+d283 2
+d783 24
+@
+
+
+39.11
+log
+@Pass new NULL argument to parseHexNum().
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.10 93/05/21 17:34:09 peter Exp Locker: peter $
+d270 1
+d277 1
+d687 95
+@
+
+
+39.10
+log
+@Command functions now return NULL string.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.9 93/05/07 17:04:18 peter Exp Locker: peter $
+d294 1
+a294 1
+	if ( parseHexNum( arg, (long *)&address ) )
+d317 1
+a317 1
+	if ( parseHexNum( arg, (long *)&address ) )
+@
+
+
+39.9
+log
+@Switched to new parsing routines.  Now reports (minimally) when a
+launched script returns an error.  Cleaned up command-line handling.
+Removed ARexx_ExecuteQuote.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.8 93/05/03 14:39:17 peter Exp Locker: peter $
+d214 1
+a214 1
+void
+d235 2
+d240 1
+a240 1
+void
+d254 2
+@
+
+
+39.8
+log
+@Changes to handle operation without ARexx.  Redid parsing to not
+use ReadArgs().
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.7 93/04/27 14:36:30 peter Exp Locker: peter $
+d36 1
+d43 1
+a69 4
+/* Holds a copy of the line to parse */
+#define REXXBUFFERSIZE	512
+char rexxparsebuffer[ REXXBUFFERSIZE ];
+
+d123 5
+a127 1
+		/* We got an error back...  What do we do now? */
+d131 2
+a132 1
+		char *arg = rmsg->rm_Args[0];
+d134 1
+a134 1
+		if ( arg ) /* Check to make sure we have a command */
+d136 1
+a136 1
+		    struct Symbol *sp;
+d141 1
+a141 1
+		    if ( sp = FindSymbol( arg, &RexxSymMap ) )
+d143 1
+a143 8
+			char *argstr = "";
+			char *ch = arg;
+			long go;
+			/* If there's a space, set the argument string to the rest
+			 * of the line.
+			 */
+			go = (long) *ch;
+			while ( go )
+d145 1
+a145 10
+			    if ( ( *ch == ' ' ) || ( *ch == '\t' ) )
+			    {
+				argstr = ch+1;
+				go = 0;
+			    }
+			    else
+			    {
+				ch++;
+				go = (long) *ch;
+			    }
+d147 1
+d151 1
+a151 1
+			result = Evaluate( sp, argstr );
+d155 1
+a155 1
+			    error = 5;
+d164 1
+a164 1
+			if ( HandleSymbol( arg ) )
+d182 2
+a183 2
+    symbol = FindSymbol( name, &RexxSymMap );
+    if (symbol == 0)
+d185 2
+a186 1
+	symbol = NewSymbol( name, &RexxSymMap );
+d188 1
+a189 3
+    symbol->stype = ACT_PRIM;
+    symbol->value1 = (long) function;
+}
+a191 1
+
+d205 8
+a212 2
+/* We get called here as a result of someone typing in a quoted
+ * string.  We back up one character to reclaim the quote.
+a214 17
+ARexx_ExecuteQuote( char *arg )
+{
+    if ( RexxContext )
+    {
+	if ( !SendARexxMsg( RexxContext, (arg-1), FALSE ) )
+	{
+	    PPrintf("Couldn't send rexx message\n");
+	}
+    }
+    else
+    {
+	PPrintf("ARexx not available\n");
+    }
+}
+
+
+void
+d228 1
+a228 1
+	    PPrintf("Couldn't send rexx message\n");
+d237 1
+d254 1
+d279 1
+d288 1
+a288 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg = nextArg( &arg ) )
+d290 1
+a290 1
+	if ( IsHexNum( arg, (long *)&address ) )
+d302 1
+d311 1
+a311 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg = nextArg( &arg ) )
+d313 1
+a313 1
+	if ( IsHexNum( arg, (long *)&address ) )
+d325 1
+d332 1
+d340 3
+a342 1
+/* Returns zero for problem, 1 for hex conversion, 2 for decimal.
+a348 1
+
+d353 1
+a353 1
+    char *argptr;
+a354 3
+    strcpy( rexxparsebuffer, arg );
+    argptr = rexxparsebuffer;
+
+d356 1
+a356 1
+    if ( arg = nextArg( &argptr ) )
+d358 1
+a358 1
+	if ( IsHexNum( arg, (long *)addressp ) )
+d360 1
+a360 1
+	    arg = nextArg( &argptr );
+d364 1
+a364 1
+	    if ( !stricmp( arg, "decimal" ) )
+d366 1
+a366 1
+		ok = 2;
+d389 1
+a389 1
+	if ( parse == 2 )
+d391 1
+a391 1
+	    result = RexxPrintfResult("%ld", data );
+d395 1
+a395 1
+	    result = RexxPrintfResult("%02lx", data );
+d405 1
+d417 1
+a417 1
+	if ( parse == 2 )
+d419 1
+a419 1
+	    result = RexxPrintfResult("%ld", data );
+d423 1
+a423 1
+	    result = RexxPrintfResult("%04lx", data );
+d433 1
+d445 1
+a445 1
+	if ( parse == 2 )
+d447 1
+a447 1
+	    result = RexxPrintfResult("%ld", data );
+d451 1
+a451 1
+	    result = RexxPrintfResult("%08lx", data );
+d461 1
+a467 1
+
+d471 5
+a475 4
+    char *arg1;
+    char *arg2;
+    char *arg3;
+    char *valuearg;
+d477 1
+d479 1
+a479 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg1 = nextArg( &arg ) )
+d481 1
+a481 6
+	arg3 = NULL;
+	if ( arg2 = nextArg( &arg ) )
+	{
+	    arg3 = nextArg( &arg );
+	}
+	if ( arg3 )
+d483 1
+a483 1
+	    if ( !stricmp( arg3, "decimal" ) )
+d485 8
+a492 1
+		decimal = TRUE;
+d494 1
+a494 1
+	    else
+d496 3
+a498 1
+		rexx_error = 10;
+d501 1
+a501 1
+	else if ( arg2 )
+d503 2
+a504 5
+	    if ( !stricmp( arg2, "decimal" ) )
+	    {
+		decimal = TRUE;
+		arg2 = NULL;
+	    }
+d506 5
+d512 8
+a519 11
+	if ( !rexx_error )
+	{
+	    valuearg = arg1;
+	    *addressp = CurrAddr;
+	    if ( arg2 )
+	    {
+		valuearg = arg2;
+		if ( !IsHexNum( arg1, (long *)addressp ) )
+		{
+		    rexx_error = 10;
+		}
+d522 1
+a522 2
+
+	if ( !rexx_error )
+d528 1
+a528 1
+		    rexx_error = 10;
+d535 1
+a535 1
+		    rexx_error = 10;
+d540 1
+a540 5
+    else
+    {
+	rexx_error = 10;
+    }
+    return( rexx_error == 0 );
+d543 1
+d561 1
+d579 1
+d597 5
+d605 1
+a605 1
+    void *address = CurrAddr;
+d608 1
+a608 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg = nextArg( &arg ) )
+d610 2
+a611 7
+	if ( IsHexNum( arg, (long *)&address ) )
+	{
+	}
+	else
+	{
+	    rexx_error = 10;
+	}
+d613 1
+a613 2
+
+    if ( !rexx_error )
+d615 1
+a615 2
+	GetString( address, rexxoutbuffer, REXXOUTBUFFERSIZE );
+	result = rexxoutbuffer;
+d621 4
+d628 1
+a628 1
+    void *address = CurrAddr;
+d631 1
+a631 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg = nextArg( &arg ) )
+d633 2
+a634 7
+	if ( IsHexNum( arg, (long *)&address ) )
+	{
+	}
+	else
+	{
+	    rexx_error = 10;
+	}
+d636 1
+a636 2
+
+    if ( !rexx_error )
+d638 1
+a638 2
+	GetBSTR( address, rexxoutbuffer, REXXOUTBUFFERSIZE );
+	result = rexxoutbuffer;
+d643 1
+d649 1
+a649 1
+
+d652 1
+a652 3
+    strcpy( rexxparsebuffer, arg );
+    arg = rexxparsebuffer;
+    if ( arg = nextArg( &arg ) )
+@
+
+
+39.7
+log
+@Rework of link architecture/naming.  Added ARexx_NumPending() function.
+rxcmd_Connection() and rxcmd_Context() now go through link-API.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.6 93/03/18 16:26:18 peter Exp Locker: peter $
+d35 2
+d54 1
+a54 1
+extern struct MsgPort *WackBase;
+d62 1
+a62 26
+#define COUNT0	0
+
+/* Template for readbyte, readword, and readlong */
+#define READ_TEMPLATE "address,dec/s"
+#define READOPT_ADDRESS		0
+#define READOPT_DECIMAL		1
+#define COUNT1	MAX( COUNT0,	2 )
+
+/* Template for writebyte, writeword, and writelong */
+#define WRITE_TEMPLATE "value/a,address,dec/s"
+#define WRITEOPT_VALUE		0
+#define WRITEOPT_ADDRESS	1
+#define WRITEOPT_DECIMAL	2
+#define COUNT2	MAX( COUNT1,	3 )
+
+/* Template for any (optional) single-address command */
+#define ADDRESS_TEMPLATE "address"
+#define ADDRESSOPT_ADDRESS	0
+#define COUNT3	MAX( COUNT2,	1 )
+
+/* Template for any (required) single name command */
+#define NAME_TEMPLATE "name/a"
+#define NAMEOPT_NAME		0
+#define COUNT4	MAX( COUNT3,	1 )
+
+#define REXXOPT_COUNT	COUNT4
+d64 1
+a64 3
+LONG rexxopts[ REXXOPT_COUNT ];
+struct RDArgs *rexx_rdargs;
+
+d68 1
+d72 1
+a72 1
+extern long remote_error;
+d84 4
+a87 16
+    int h;
+    /* Let's initialize our ARexx port named wack.  ".wack" will be
+     * the default extension for our ARexx scripts.
+     */
+    if ( WackBase = InitWackBase() )
+    {
+	for (h = 0; h < HASHSIZE; h++)
+	{
+	    RexxSymMap.head[h] = 0;
+	    RexxSymMap.tail[h] = 0;
+	}
+	if ( RexxContext = InitARexx( WackBase, "wack", "wack") )
+	{
+	    sigmask = ARexxSignal(RexxContext);
+	    ARexx_Bind();
+	}
+d97 1
+a97 5
+    if ( WackBase )
+    {
+	UnBindSymbolMap( &RexxSymMap );
+	FreeWackBase( WackBase );
+    }
+d104 6
+a109 1
+    return( (ULONG)RexxContext->Outstanding );
+d119 1
+a119 1
+    while ( rmsg = GetARexxMsg( RexxContext ) )
+d121 1
+a121 1
+	if (rmsg == REXX_RETURN_ERROR)
+d123 7
+a129 5
+	    /* We got an error back...  What do we do now? */
+	}
+	else
+	{
+	    char *arg = rmsg->rm_Args[0];
+d131 3
+a133 3
+	    if ( arg ) /* Check to make sure we have a command */
+	    {
+		struct Symbol *sp;
+d135 2
+a136 10
+		/* Is it a special Rexx-only command?  If so, we
+		 * execute it here...
+		 */
+		if ( sp = FindSymbol( arg, &RexxSymMap ) )
+		{
+		    char *argstr = "";
+		    char *ch = arg;
+		    long go;
+		    /* If there's a space, set the argument string to the rest
+		     * of the line.
+d138 1
+a138 2
+		    go = (long) *ch;
+		    while ( go )
+d140 8
+a147 1
+			if ( ( *ch == ' ' ) || ( *ch == '\t' ) )
+d149 10
+a158 2
+			    argstr = ch+1;
+			    go = 0;
+d160 6
+a165 1
+			else
+d167 1
+a167 2
+			    ch++;
+			    go = (long) *ch;
+d169 1
+d171 1
+a171 6
+		    rexx_error = 0;
+		    resetError();
+
+		    result = Evaluate( sp, argstr );
+		    error = rexx_error;
+		    if ( ( !error ) && ( remote_error ) )
+d173 7
+a179 12
+			error = 5;
+		    }
+		    resetError();
+		}
+		else
+		{
+		    /* It's not a Rexx-specific command, so pass it
+		     * off to anyone else.
+		     */
+		    if ( HandleSymbol( arg ) )
+		    {
+			error = 20;
+d183 1
+a184 1
+	ReplyARexxMsg( RexxContext, rmsg, result, error );
+d188 1
+d225 8
+a232 1
+    if ( !SendARexxMsg( RexxContext, (arg-1), FALSE ) )
+d234 1
+a234 1
+	PPrintf("Couldn't send rexx message\n");
+d237 2
+d242 1
+a242 2
+   strcpy( rexxcmdbuffer, arg1 );
+    if ( ( arg2 ) && ( *arg2 ) )
+d244 11
+a254 2
+	strcat( rexxcmdbuffer, " " );
+	strcat( rexxcmdbuffer, arg2 );
+d256 1
+a256 2
+ 
+    if ( !SendARexxMsg( RexxContext, rexxcmdbuffer, FALSE ) )
+d258 1
+a258 1
+	PPrintf("Couldn't send rexx message\n");
+d265 1
+a265 1
+    if ( !SendARexxMsg( RexxContext, arg, TRUE ) )
+d267 4
+a270 1
+	PPrintf("Couldn't send rexx message\n");
+d272 3
+a274 37
+}
+
+LONG *
+parseRexxArgs( char *arg, char *template )
+{
+    LONG *result = NULL;
+    LONG i;
+    for ( i = 0; i < REXXOPT_COUNT; i++ )
+    {
+	rexxopts[ i ] = 0;
+    }
+    if ( rexx_rdargs = AllocDosObjectTagList( DOS_RDARGS, NULL ) )
+    {
+	/* ReadArgs() requires newline termination. */
+	strcpy( rexxparsebuffer, arg );
+	strcat( rexxparsebuffer, "\n" );
+	rexx_rdargs->RDA_Source.CS_Buffer = rexxparsebuffer;
+	rexx_rdargs->RDA_Source.CS_Length = strlen( rexxparsebuffer );
+	rexx_rdargs->RDA_Source.CS_CurChr = 0;	
+
+	rexx_rdargs->RDA_Flags = RDAF_NOPROMPT;
+
+	if ( ReadArgs( template, rexxopts, rexx_rdargs ) )
+	{
+	    result = rexxopts;
+	}
+    }
+    return( result );
+}
+
+void
+freeRexxArgs( void )
+{
+    if ( rexx_rdargs )
+    {
+	FreeArgs( rexx_rdargs );
+	FreeDosObject( DOS_RDARGS, rexx_rdargs );
+a306 1
+    long *opts;
+d310 3
+a312 1
+    if ( opts = parseRexxArgs( arg, ADDRESS_TEMPLATE ) )
+d314 1
+a314 1
+	if ( opts[ ADDRESSOPT_ADDRESS ] )
+d316 5
+a320 8
+	    if ( IsHexNum( (char *)opts[ ADDRESSOPT_ADDRESS ], (long *)&address ) )
+	    {
+		CurrAddr = address;
+	    }
+	    else
+	    {
+		rexx_error = 5;
+	    }
+a322 4
+    else
+    {
+	rexx_error = 10;
+    }
+a330 1
+    long *opts;
+d334 3
+a336 1
+    if ( opts = parseRexxArgs( arg, ADDRESS_TEMPLATE ) )
+d338 5
+a342 1
+	if ( opts[ ADDRESSOPT_ADDRESS ] )
+d344 1
+a344 8
+	    if ( IsHexNum( (char *)opts[ ADDRESSOPT_ADDRESS ], (long *)&address ) )
+	    {
+		SpareAddr = address;
+	    }
+	    else
+	    {
+		rexx_error = 5;
+	    }
+a346 4
+    else
+    {
+	rexx_error = 10;
+    }
+d363 8
+a370 1
+/* Returns zero for problem, 1 for hex conversion, 2 for decimal */
+d374 2
+a375 2
+    long *opts;
+    long ok = 0;
+d377 11
+a387 9
+    if ( opts = parseRexxArgs( arg, READ_TEMPLATE ) )
+    {
+	ok = 1;
+	*addressp = CurrAddr;
+	if ( opts[ READOPT_ADDRESS ] )
+	{
+	    ok &= IsHexNum( (char *)opts[ READOPT_ADDRESS ], (long *)addressp );
+	}
+	if ( ok )
+d389 1
+a389 2
+	    ok = 1;
+	    if ( opts[ READOPT_DECIMAL ] )
+d393 4
+a397 1
+	freeRexxArgs();
+d402 1
+d483 8
+d494 48
+a541 2
+    long *opts;
+    long ok = 0;
+d543 1
+a543 14
+    if ( opts = parseRexxArgs( arg, WRITE_TEMPLATE ) )
+    {
+	ok = 1;
+	*addressp = CurrAddr;
+	if ( opts[ WRITEOPT_ADDRESS ] )
+	{
+	    ok &= IsHexNum( (char *)opts[ WRITEOPT_ADDRESS ], (long *)addressp );
+	}
+
+	if ( opts[ WRITEOPT_DECIMAL ] )
+	{
+	    ok &= IsDecNum( (char *)opts[ WRITEOPT_VALUE ], data );
+	}
+	else
+d545 14
+a558 1
+	    ok &= IsHexNum( (char *)opts[ WRITEOPT_VALUE ], data );
+d560 4
+a563 1
+	freeRexxArgs();
+d565 1
+a565 1
+    return( ok );
+d622 1
+a622 2
+    void *address;
+    long *opts;
+d625 3
+a627 1
+    if ( opts = parseRexxArgs( arg, ADDRESS_TEMPLATE ) )
+d629 1
+a629 1
+	if ( opts[ ADDRESSOPT_ADDRESS ] )
+a630 7
+	    if ( IsHexNum( (char *)opts[ ADDRESSOPT_ADDRESS ], (long *)&address ) )
+	    {
+	    }
+	    else
+	    {
+		rexx_error = 5;
+	    }
+d634 1
+a634 1
+	    address = CurrAddr;
+d636 4
+a642 4
+    else
+    {
+	rexx_error = 10;
+    }
+d646 1
+d650 1
+a650 2
+    void *address;
+    long *opts;
+d653 3
+a655 1
+    if ( opts = parseRexxArgs( arg, ADDRESS_TEMPLATE ) )
+d657 1
+a657 1
+	if ( opts[ ADDRESSOPT_ADDRESS ] )
+a658 7
+	    if ( IsHexNum( (char *)opts[ ADDRESSOPT_ADDRESS ], (long *)&address ) )
+	    {
+	    }
+	    else
+	    {
+		rexx_error = 5;
+	    }
+d662 1
+a662 1
+	    address = CurrAddr;
+d664 4
+a670 4
+    else
+    {
+	rexx_error = 10;
+    }
+a678 1
+    long *opts;
+d682 3
+a684 1
+    if ( opts = parseRexxArgs( arg, NAME_TEMPLATE ) )
+d686 5
+a690 1
+	if ( opts[ NAMEOPT_NAME ] )
+d692 1
+a692 8
+	    if ( library = FindBase( (char *)opts[NAMEOPT_NAME] ) )
+	    {
+		result = RexxPrintfResult( "%lx", library );
+	    }
+	    else
+	    {
+		rexx_error = 5;
+	    }
+@
+
+
+39.6
+log
+@Added connection and contextaddr keywords.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.5 92/12/03 11:30:59 peter Exp Locker: peter $
+a24 4
+extern short remote;
+extern long sadremote;
+extern long sadunit;
+extern STRPTR remote_machine;
+d26 4
+d43 1
+a43 1
+#include "access_proto.h"
+d141 7
+d194 1
+a194 1
+		    reset_Error();
+d202 1
+a202 1
+		    reset_Error();
+d459 1
+a459 1
+	data = GetMemB( address );
+d486 1
+a486 1
+	data = GetMem( address );
+d513 1
+a513 1
+	data = GetMemL( address );
+d565 1
+a565 1
+	PutMemB( address, data );
+d582 1
+a582 1
+	PutMem( address, data );
+d599 1
+a599 1
+	PutMemL( address, data );
+d707 1
+a707 14
+    char *result;
+    if ( remote )
+    {
+	result = RexxPrintfResult( "Envoy %s", remote_machine );
+    }
+    else if ( sadremote )
+    {
+	result = RexxPrintfResult( "SAD %ld", sadunit );
+    }
+    else
+    {
+	result = RexxPrintfResult( "Local" );
+    }
+    return( result );
+d713 1
+a713 1
+    return( RexxPrintfResult("%lx", getContextAddr() ) );
+@
+
+
+39.5
+log
+@Rexx print command no longer treats its data as an argument in need of
+parsing.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.4 92/11/06 15:40:06 peter Exp Locker: peter $
+d25 4
+d336 3
+d695 25
+@
+
+
+39.4
+log
+@Failure to init could cause the rexx symbol map to be freed before it
+was properly initialized.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.3 92/11/03 17:53:33 peter Exp Locker: peter $
+d403 1
+a403 2
+    char *line = nextArg( &arg );
+    PPrintf("%s\n", line ? line : "" );
+@
+
+
+39.3
+log
+@ARexx "writeword" and "writelong" were actually bound to WriteByte.
+Added "findlibrary".  Improved Rexx error codes.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.2 92/11/02 17:08:45 peter Exp Locker: peter $
+d110 5
+a117 5
+	    for (h = 0; h < HASHSIZE; h++)
+	    {
+		RexxSymMap.head[h] = 0;
+		RexxSymMap.tail[h] = 0;
+	    }
+a127 1
+    UnBindSymbolMap( &RexxSymMap );
+d129 5
+a133 1
+    FreeWackBase( WackBase );
+@
+
+
+39.2
+log
+@Added "readstring" and "readbstr" keywords.  Decimal ARexx read
+commands no longer pad result with zeroes.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.1 92/11/02 12:41:58 peter Exp Locker: peter $
+d38 1
+d76 4
+a79 1
+#define REXXOPT_COUNT	COUNT3
+d81 2
+d325 4
+a328 2
+    BindRexxPrim("writeword", rxcmd_WriteByte );
+    BindRexxPrim("writelong", rxcmd_WriteByte );
+d354 4
+d384 4
+d453 4
+d480 4
+d507 4
+d618 4
+d651 4
+d658 29
+@
+
+
+39.1
+log
+@If ARexx_Execute() has no second argument, then no space is added to
+the command line.  Added "spareaddr" function.  Renamed "current"
+function to "currentaddr".  Added rxcmd_SpareAddr, and renamed
+rxcmd_Current.
+@
+text
+@d6 1
+a6 1
+ * $Id: rexxhandler.c,v 39.0 92/10/30 15:21:11 peter Exp Locker: peter $
+d36 1
+d315 2
+d430 1
+a430 1
+	    result = RexxPrintfResult("%02ld", data );
+d453 1
+a453 1
+	    result = RexxPrintfResult("%04ld", data );
+d476 1
+a476 1
+	    result = RexxPrintfResult("%08ld", data );
+d562 58
+@
+
+
+39.0
+log
+@Initial RCS check-in.
+@
+text
+@d6 1
+a6 1
+ * $Id: $
+d44 1
+d244 1
+a244 1
+    if ( arg2 )
+d306 2
+a307 1
+    BindRexxPrim("current", rxcmd_Current );
+d321 1
+a321 1
+rxcmd_Current( char *arg )
+d336 26
+@

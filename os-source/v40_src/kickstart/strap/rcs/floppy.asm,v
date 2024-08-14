@@ -1,0 +1,1029 @@
+head     36.13;
+branch   ;
+access   ;
+symbols  V36_86:36.10 V36_85:36.10 V36_83:36.10 V36_82:36.10 V36_80:36.10 V36_75:36.10 V36_73:36.9 V36_56:36.9 V36_55:36.9 V36_54:36.9 V36_51:36.8 V36_50:36.8 V36_49:36.8 V36_33:36.1 V36_26:36.1 V36_22:36.0 L36_19:36.0;
+locks    ; strict;
+comment  @*   @;
+
+
+36.13
+date     90.04.06.10.31.29;  author kodiak;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     90.04.02.11.14.12;  author kodiak;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     89.12.30.22.21.51;  author kodiak;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     89.09.29.13.31.23;  author kodiak;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     89.06.19.11.15.43;  author kodiak;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     89.04.30.18.30.22;  author kodiak;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     89.04.11.09.02.26;  author kodiak;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     89.04.10.09.07.17;  author kodiak;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     89.04.03.12.14.31;  author kodiak;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     89.03.31.17.57.26;  author kodiak;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.03.31.17.55.05;  author kodiak;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.03.18.18.29.49;  author kodiak;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.03.15.14.19.38;  author kodiak;  state Exp;
+branches ;
+next     36.0;
+
+36.0
+date     88.12.20.13.51.13;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@floppy boot interface code
+@
+
+
+36.13
+log
+@trackdisk no longer requires chip memory
+@
+text
+@**
+**	$Filename$
+**	$Release: 1.4 $
+**	$Revision: 36.12 $
+**	$Date: 90/04/02 11:14:12 $
+**
+**	floppy boot interface
+**
+**	(C) Copyright 1985,1986,1987,1988 Commodore-Amiga, Inc.
+**	    All Rights Reserved
+**
+	SECTION	strap
+
+**	Included Files
+
+	INCLUDE	"strap.i"
+
+	INCLUDE	"exec/nodes.i"
+	INCLUDE	"exec/lists.i"
+	INCLUDE "exec/ports.i"
+	INCLUDE	"exec/tasks.i"
+	INCLUDE	"exec/memory.i"
+	INCLUDE	"exec/libraries.i"
+	INCLUDE	"exec/io.i"
+	INCLUDE	"exec/execbase.i"
+	INCLUDE	"exec/alerts.i"
+
+	INCLUDE	"devices/trackdisk.i"
+
+	INCLUDE	"libraries/expansionbase.i"
+
+	INCLUDE	"bootblock.i"
+
+**	Imported Names
+
+	XLVO	AllocMem
+	XLVO	CloseDevice
+	XLVO	DoIO
+	XLVO	FreeMem
+	XLVO    OpenDevice
+
+	XREF	SMAlert
+	XREF	SMDisplayTick
+
+**	Exported Names
+
+	XDEF	SMFloppiesOpen
+	XDEF	SMFloppiesClose
+	XDEF	SMFloppyBoot
+	XDEF	SMFloppiesWait
+
+
+
+FBOOTSIZE	EQU	1024
+
+ STRUCTURE	StrapFloppyLocals,0
+	STRUCT	sfl_IO,(IOSTD_SIZE+4)*4	; one request for each floppy unit,
+					;   each followed by long disk chg cnt
+	STRUCT	sfl_FloppyBuffer,FBOOTSIZE ; 1K floppy sector buffer
+	STRUCT	sfl_Port,MP_SIZE	; request reply port
+	LABEL	StrapFloppyLocals_SIZEOF
+
+	IFNE	sfl_IO
+	FAIL	"sfl_IO not zero, recode here"
+	ENDC
+
+
+**********************************************************************
+*
+* the rom resident bootstrap code.
+*
+* it calls the disk bootstrap with:
+*
+*	A1 -- ptr to IOB to the disk
+*	A6 -- sysbase
+*
+*
+* it expects back:
+*	D0 -- failure flag: non-zero causes AN_BootError alert
+*	A0 -- if failure flag is zero, then A0 is address to jump to
+*		(after bootstrap cleans up)
+*
+**********************************************************************
+
+;------ SMFloppiesOpen -----------------------------------------------
+;
+;	open all four trackdisk units and get a trackdisk buffer
+;
+;	a4	set to StrapFloppyLocals
+;
+SMFloppiesOpen:
+		movem.l	d2/a2,-(a7)
+
+		;-- get floppy locals
+		move.l	#StrapFloppyLocals_SIZEOF,d0
+		move.l	#MEMF_CLEAR!MEMF_PUBLIC,d1
+		CALLLVO	AllocMem
+		move.l	d0,a4
+		tst.l	d0
+		bne.s	foInitLocals
+
+		move.l	#AN_BootStrap!AG_NoMemory!AO_TrackDiskDev,d0
+		bsr	SMAlert
+		bra.s	foDone
+
+		;--	initialize trackdisk reply port
+foInitLocals:
+		move.b	#SIGB_SINGLE,sfl_Port+MP_SIGBIT(a4)
+		move.l	ThisTask(a6),sfl_Port+MP_SIGTASK(a4)
+		lea	sfl_Port+MP_MSGLIST(a4),a0
+		NEWLIST	a0
+
+		;--	initialize trackdisk requests
+
+		;-- open all the trackdisk units
+		moveq	#0,d2		; trackdisk unit
+		move.l	a4,a2		; lea sfl_IO(a4),a2: unit IO request
+
+		;--	get trackdisk device
+foOpenLoop:
+		lea	sfl_Port(a4),a0
+		move.l	a0,MN_REPLYPORT(a2)
+
+		move.l	d2,d0
+		moveq	#0,d1
+		lea	TDName(pc),a0
+		move.l	a2,a1
+		CALLLVO	OpenDevice
+		tst.l	d0
+		beq.s	foOpenNext
+
+		clr.l	IO_DEVICE(a2)
+
+foOpenNext:
+		addq.w	#1,d2
+		add.w	#IOSTD_SIZE+4,a2
+		cmp.w	#4,d2
+		blt.s	foOpenLoop
+
+foDone:
+		movem.l	(a7)+,d2/a2
+		rts
+
+
+TDName		dc.b	'trackdisk.device',0
+		ds.w	0
+
+
+;------ SMFloppiesClose ----------------------------------------------
+;
+;	a4	StrapFloppyLocals
+;	a6	SysBase
+;
+;	a4	set to zero
+;
+SMFloppiesClose:
+		movem.l	d2/a2,-(a7)
+		move.l	a4,d0		; check if floppy locals exist
+		beq.s	fcDone
+
+		moveq	#4-1,d2		; trackdisk unit
+		move.l	a4,a2		; lea sfl_IO(a4),a2: unit IO request
+
+fcCloseLoop:
+		tst.l	IO_DEVICE(a2)
+		beq.s	fcCloseNext
+
+		;--	release trackdisk device
+		move.l	a2,a1
+		CALLLVO	CloseDevice
+
+fcCloseNext:
+		add.w	#IOSTD_SIZE+4,a2
+		dbf	d2,fcCloseLoop
+
+		;--	release floppy locals
+		move.l	a4,a1
+		move.l	#StrapFloppyLocals_SIZEOF,d0
+		CALLLVO	FreeMem
+		suba.l	a4,a4
+
+fcDone:
+		movem.l	(a7)+,d2/a2
+		rts
+
+
+;------ SMFloppyBoot -------------------------------------------------
+;
+;	d0	unit
+;	a4	StrapFloppyLocals
+;	a5	ExpansionBase
+;	a6	SysBase
+;
+SMFloppyBoot:
+		movem.l	d2/a2-a3,-(a7)
+		move.l	a4,d1		; check for floppy locals
+		beq	fbNoDevice
+		move.w	d0,d2		; save unit number
+		mulu	#IOSTD_SIZE+4,d0
+		lea	sfl_IO(a4,d0.w),a2
+		tst.l	IO_DEVICE(a2)
+		beq	fbNoDevice
+
+fbRestart:
+		;-- clear out any stale buffers
+		move.l	a2,a1
+		move.w	#CMD_CLEAR,IO_COMMAND(a1)	
+		CALLLVO	DoIO
+		tst.l	d0
+		bne	fbIOError
+
+		;-- we now have a disk.  note the change number
+		move.l	a2,a1
+		move.w	#TD_CHANGENUM,IO_COMMAND(a1)	
+		CALLLVO	DoIO
+		tst.l	d0
+		bne	fbIOError
+
+		;--	save the change number
+		move.l	IO_ACTUAL(a2),IOSTD_SIZE(a2)
+
+		;-- read the boot blocks into memory
+		move.l	a2,a1
+		move.w	#CMD_READ,IO_COMMAND(a1)	
+		move.l	#FBOOTSIZE,IO_LENGTH(a1)
+		lea	sfl_FloppyBuffer(a4),a0
+		move.l	a0,IO_DATA(a1)
+		clr.l	IO_OFFSET(a1)
+		CALLLVO	DoIO
+		tst.l	d0
+		bne	fbFail
+
+		;------ see if there is a legal header
+		lea	sfl_FloppyBuffer(a4),a0
+		move.l	(a0),d0		; check for 'DOS?'
+		clr.b	d0		;   (anything allowed in low byte)
+		cmp.l	#BBNAME_DOS,d0
+		bne	fbFail
+
+		;------ validate the checksum (longword w/ carry wraparound)
+		move.w	#(FBOOTSIZE>>2)-1,d1
+		moveq	#0,d0
+
+fbSumLoop:
+		add.l	(a0)+,d0
+		bcc.s	fbSumDBF
+		addq.l	#1,d0
+fbSumDBF:
+		dbf	d1,fbSumLoop
+
+		not.l	d0
+		bne	fbFail
+
+		;------ jump to the code with a1/a6 set up
+		lea	sfl_FloppyBuffer(a4),a0
+		move.l	a2,a1
+		jsr	BB_ENTRY(a0)
+
+		;------ check the return code: zero means a0 contains boot addr
+		tst.l	d0
+		beq.s	fbSucceed
+
+		move.l	#AN_BootError,d0
+		bsr	SMAlert
+
+fbFail:
+		;------ turn the motor off
+		move.l	a2,a1
+		move.w	#TD_MOTOR,IO_COMMAND(a1)	
+		clr.l	IO_LENGTH(a1)
+		CALLLVO	DoIO
+
+fbNoDevice:
+		moveq	#-1,d0
+
+fbSucceed:
+		movem.l	(a7)+,d2/a2-a3
+		rts
+
+fbIOError:
+		cmp.b	#TDERR_DiskChanged,d0
+		beq	fbRestart
+
+		move.l	#AN_BootStrap!AG_IOError!AO_TrackDiskDev,d0
+
+fbError:
+		bsr	SMAlert
+		bra.s	fbFail
+
+
+;------ SMFloppiesWait -----------------------------------------------
+;
+;	d5	StrapDisplayLocals
+;	d6	eb_MountList first entry
+;
+;	a4	StrapFloppyLocals
+;	a5	ExpansionBase
+;	a6	SysBase
+;
+;---------------------------------------------------------------------
+;
+;	d2	floppy unit
+;	d3	bits set for open floppy units
+;	d4	bits set for units whose change count has bumped
+;
+;	a2	floppy IO request
+;	a3	ExpansionBase
+;
+SMFloppiesWait:
+		movem.l	d2-d4/a2-a3/a5,-(a7)
+		move.l	a5,a3		; local register for ExpansionBase
+		move.l	d5,a5		; activate StrapDisplayLocals
+		move.l	a4,d1		; check for floppy locals
+		beq	fwExpansionOnly
+
+		moveq	#0,d4
+		moveq	#0,d3
+fwLoop:
+		moveq	#0,d2
+		move.l	a4,a2		; lea sfl_IO(a4),a2: unit IO request
+
+fwLoopUnit:
+		tst.l	IO_DEVICE(a2)
+		beq	fwNextUnit
+
+		bset	d2,d3
+
+		btst	d2,d4
+		bne.s	fwCheckInserted
+
+		;-- look for the change count to increase
+		move.l	a2,a1
+		move.w	#TD_CHANGENUM,IO_COMMAND(a1)
+		CALLLVO	DoIO
+		tst.l	d0
+		bne.s	fwIOError
+
+		;--	get previous change count
+		move.l	IO_ACTUAL(a2),d0
+		cmp.l	IOSTD_SIZE(a2),d0
+		beq.s	fwNextUnit
+
+		move.l	d0,IOSTD_SIZE(a2) ; save new change count
+		bset	d2,d4
+
+		;-- look for inserted disk
+fwCheckInserted:
+		move.l	a2,a1
+		move.w	#TD_CHANGESTATE,IO_COMMAND(a1)
+		CALLLVO	DoIO
+		tst.l	d0
+		bne.s	fwIOError
+
+		tst.l	IO_ACTUAL(a2)
+		beq.s	fwNewUnit
+
+fwNextUnit:
+		bsr	SMDisplayTick
+
+		add.w	#IOSTD_SIZE+4,a2
+		addq.w	#1,d2
+		cmp.w	#4,d2
+		blt.s	fwLoopUnit
+
+		;-- look for change in eb_MountList head
+		moveq	#-1,d2
+		cmp.l	eb_MountList(a3),d6
+		beq.s	fwCheckOpens
+
+fwNewUnit:
+		move.l	d2,d0
+
+fwDone:
+		movem.l	(a7)+,d2-d4/a2-a3/a5
+		rts
+
+fwIOError:
+		cmp.b	#TDERR_DiskChanged,d0
+		beq.s	fwNextUnit
+
+		move.l	#AN_BootStrap!AG_IOError!AO_TrackDiskDev,d0
+
+		bsr	SMAlert
+		bra.s	fwNextUnit
+
+
+		;-- ensure a trackdisk unit is open
+fwCheckOpens:
+		tst.b	d3
+		bne	fwLoop
+
+		move.l	#AN_BootStrap!AG_OpenDev!AO_TrackDiskDev,d0
+		bsr	SMAlert
+
+fwExpansionOnly:
+		bsr	SMDisplayTick
+		cmp.l	eb_MountList(a3),d6
+		beq.s	fwExpansionOnly
+		moveq	#-1,d2
+		bra.s	fwDone
+
+	END
+@
+
+
+36.12
+log
+@for rcs 4.x header change
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.11 $
+**	$Date: 89/12/30 22:21:51 $
+d96 1
+a96 1
+		move.l	#MEMF_CLEAR!MEMF_PUBLIC!MEMF_CHIP,d1
+@
+
+
+36.11
+log
+@*** UNTESTED ***
+revision to go with config.asm that knows how to add floppy nodes to
+eb_Mountlist.  This module was scrapped altogether when the rest of
+its function moved to boot.asm
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.10 $
+**	$Date: 89/09/29 13:31:23 $
+@
+
+
+36.10
+log
+@dn_GlobalVec for floppies back to 0
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.9 $
+**	$Date: 89/06/19 11:15:43 $
+a35 1
+	XLVO	AddHead
+a40 1
+	XLVO	Remove
+a67 12
+ STRUCTURE	StrapFloppyNode,0
+	STRUCT	sfn_DevNode,DeviceNode_SIZEOF
+	STRUCT	sfn_FSSM,FileSysStartupMsg_SIZEOF
+	STRUCT	sfn_Envec,(DE_MASK+1)*4
+	STRUCT	sfn_DriveName,5		; 3,'DF0',0
+	ALIGNLONG
+	STRUCT	sfn_DevName,18		; 17,'trackdisk.device',0
+	ALIGNWORD
+	STRUCT	sfn_BootNode,BootNode_SIZEOF
+	LABEL	StrapFloppyNode_SIZEOF
+
+
+a253 47
+		;------ create an entry at the head of the eb_MountList
+		move.l	#StrapFloppyNode_SIZEOF,d0
+		moveq	#0,d1
+		CALLLVO	AllocMem
+		tst.l	d0
+		beq	fbMemError
+
+		move.l	d0,a3
+
+		;------ initialize the mount node
+		lea	fbSFNTemplate(pc),a0
+		move.l	a3,a1
+		moveq	#StrapFloppyNode_SIZEOF/2-1,d0
+fbCopyTemplate:
+		move.w	(a0)+,(a1)+
+		dbf	d0,fbCopyTemplate
+
+		;------ patch BPTRs
+		move.l	a3,d0		; get base BPTR
+		lsr.l	#2,d0		;
+		move.l	d0,a0		;
+
+		lea	sfn_FSSM/4(a0),a1
+		move.l	a1,sfn_DevNode+dn_Startup(a3)
+		lea	sfn_DriveName/4(a0),a1
+		move.l	a1,sfn_DevNode+dn_Name(a3)
+		lea	sfn_DevName/4(a0),a1
+		move.l	a1,sfn_FSSM+fssm_Device(a3)
+		lea	sfn_Envec/4(a0),a1
+		move.l	a1,sfn_FSSM+fssm_Environ(a3)
+
+		;------ patch APTR
+	IFNE	sfn_DevNode
+	FAIL	'sfn_DevNode not zero, recode here'
+	ENDC
+		move.l	a3,sfn_BootNode+bn_DeviceNode(a3)
+
+		;------ patch unit number
+		move.w	d2,sfn_FSSM+fssm_Unit+2(a3)
+		add.b	#'0',d2
+		move.b	d2,sfn_DriveName+3(a3)
+
+		;------	put this boot node at the head of eb_MountList
+		lea	eb_MountList(a5),a0
+		lea	sfn_BootNode(a3),a1
+		CALLLVO	AddHead
+
+a265 7
+		;------ remove the boot node from eb_MountList
+		move.l	a3,a1
+		CALLLVO	Remove
+		move.l	#StrapFloppyNode_SIZEOF,d0
+		move.l	a3,a1
+		CALLLVO	FreeMem
+
+a284 1
+		bra.s	fbError
+a285 3
+fbMemError:
+		move.l	#AN_BootStrap!AG_NoMemory!AO_ExpansionLib,d0
+
+a288 31
+
+fbSFNTemplate:
+		dc.l	0,0,0,0		; dn_Next, dn_Type, dn_Task, dn_Lock
+		dc.l	0,600,10	; dn_Handler, dn_StackSize, dn_Priority 
+		dc.l	0,0,0		; dn_Startup, dn_SegList, dn_GlobalVec
+		dc.l	0		; dn_Name
+		dc.l	0,0,0		; fssm_Unit, fssm_Device, fssm_Environ
+		dc.l	0		; fssm_Flags
+		dc.l	14,128,0	; de_TableSize, de_SizeBlock, de_SecOrg
+		dc.l	2,1		; de_Surfaces, de_SectorPerBlock
+		dc.l	11,2		; de_BlocksPerTrack, de_Reserved
+		dc.l	0,0,0		; de_PreAlloc, de_Interleave, de_LowCyl
+		dc.l	79,5		; de_HighCyl, de_NumBuffers
+		dc.l	MEMF_PUBLIC!MEMF_CHIP
+					; de_BufMemType
+		dc.l	$200000		; de_MaxTransfer
+		dc.l	$1ffffe		; de_AddressMask
+		dc.b	3,'DF0',0,0,0,0	; (dn_Name)
+		dc.b	17,'trackdisk.device',0
+					; (fssm_Device)
+		dc.l	0,0		; ln_Succ, ln_Pred
+		dc.b	NT_BOOTNODE,127	; ln_Type, ln_Pri
+		dc.l	0		; ln_Name
+		dc.w	0		; bn_Flags
+		dc.l	0		; bn_DeviceNode
+fbsfntEnd:
+
+	IFNE	(fbsfntEnd-fbSFNTemplate)-StrapFloppyNode_SIZEOF
+	FAIL	'fbSFNTemplate size not StrapFloppyNode_SIZEOF'
+	ENDC
+
+@
+
+
+36.9
+log
+@ensure null exists after drive name BSTR
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.8 $
+**	$Date: 89/04/30 18:30:22 $
+d365 1
+a365 1
+		dc.l	0,0,-1		; dn_Startup, dn_SegList, dn_GlobalVec
+@
+
+
+36.8
+log
+@poll all floppies & eb_MounList for inserted floppies after prompt
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.7 $
+**	$Date: 89/04/11 09:02:26 $
+d74 1
+a74 1
+	STRUCT	sfn_DriveName,4		; 3,'DF0'
+d378 1
+a378 1
+		dc.b	3,'DF0'		; (dn_Name)
+@
+
+
+36.7
+log
+@
+change envec a little
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.6 $
+**	$Date: 89/04/10 09:07:17 $
+d21 1
+d25 1
+d49 2
+a50 2
+	XDEF	SMFloppyOpen
+	XDEF	SMFloppyClose
+d52 1
+a52 1
+	XDEF	SMFloppyWait0
+d54 28
+d93 2
+a94 2
+*	D0 -- failure code -- to be given to alert
+*	A0 -- if failure code is null, then A0 is address to jump to
+d99 8
+d108 7
+a114 7
+SMFloppyOpen:
+		;------	set up the change counter pointer
+		move.w	d0,d1
+		lsl.w	#2,d1
+		lea	sml_DiskChangeCnt(a4),a0
+		add.w	d1,a0
+		move.l	a0,sml_ChangeCntPtr(a4)
+d116 3
+a118 2
+		;------	save unit number
+		move.w	d0,sml_UnitNum(a4)
+d120 19
+a138 1
+		;------ get trackdisk device
+d141 1
+a141 1
+		lea	sml_IOR(a4),a1
+d144 1
+a144 1
+		bne.s	foFail
+d146 1
+a146 6
+		;------ get trackdisk buffer
+		move.l	#FBOOTSIZE,d0
+		moveq	#MEMF_PUBLIC!MEMF_CHIP,d1
+		CALLLVO	AllocMem
+		move.l	d0,sml_FloppyBuffer(a4)
+		bne.s	foRts
+d148 5
+a152 2
+		move.l	#AN_BootStrap!AG_NoMemory!AO_TrackDiskDev,d0
+		bsr	SMAlert
+d154 2
+a155 7
+		lea	sml_IOR(a4),a1
+		CALLLVO	CloseDevice
+
+foFail:
+		clr.l	sml_IOR+IO_DEVICE(a4)
+
+foRts:
+d163 11
+d175 2
+a176 3
+SMFloppyClose:
+		tst.l	sml_IOR+IO_DEVICE(a4)
+		beq.s	fcRts
+d178 3
+a180 4
+		;------ release trackdisk buffer
+		move.l	#FBOOTSIZE,d0
+		move.l	sml_FloppyBuffer(a4),a1
+		CALLLVO	FreeMem
+d182 2
+a183 2
+		;------ release trackdisk device
+		lea	sml_IOR(a4),a1
+d186 12
+a197 3
+		clr.l	sml_IOR+IO_DEVICE(a4)
+		clr.l	sml_FloppyBuffer(a4)
+fcRts:
+d201 7
+a207 1
+
+d209 2
+a210 3
+		move.l	a2,-(a7)
+
+		tst.l	sml_IOR+IO_DEVICE(a4)
+d212 5
+d219 2
+a220 2
+		;------ clear out any stale buffers
+		lea	sml_IOR(a4),a1
+d226 2
+a227 2
+		;------ we now have a disk.  note the change number
+		lea	sml_IOR(a4),a1
+d233 2
+a234 2
+		move.l	sml_ChangeCntPtr(a4),a0
+		move.l	sml_IOR+IO_ACTUAL(a4),(a0)
+d236 2
+a237 2
+		;------ read the boot blocks into memory
+		lea	sml_IOR(a4),a1
+d240 2
+a241 1
+		move.l	sml_FloppyBuffer(a4),IO_DATA(a1)
+d248 1
+a248 1
+		move.l	sml_FloppyBuffer(a4),a0
+d275 1
+a275 1
+		move.l	d0,a2
+d279 1
+a279 1
+		move.l	a2,a1
+d286 1
+a286 1
+		move.l	a2,d0		; get base BPTR
+d291 1
+a291 1
+		move.l	a1,sfn_DevNode+dn_Startup(a2)
+d293 1
+a293 1
+		move.l	a1,sfn_DevNode+dn_Name(a2)
+d295 1
+a295 1
+		move.l	a1,sfn_FSSM+fssm_Device(a2)
+d297 1
+a297 1
+		move.l	a1,sfn_FSSM+fssm_Environ(a2)
+d303 1
+a303 1
+		move.l	a2,sfn_BootNode+bn_DeviceNode(a2)
+d306 3
+a308 4
+		move.w	sml_UnitNum(a4),d0
+		move.w	d0,sfn_FSSM+fssm_Unit+2(a2)
+		add.b	#'0',d0
+		move.b	d0,sfn_DriveName+3(a2)
+d312 1
+a312 1
+		lea	sfn_BootNode(a2),a1
+d316 2
+a317 2
+		move.l	sml_FloppyBuffer(a4),a0
+		lea	sml_IOR(a4),a1
+d328 1
+a328 1
+		move.l	a2,a1
+d331 1
+a331 1
+		move.l	a2,a1
+d336 1
+a336 1
+		lea	sml_IOR(a4),a1
+d345 1
+a345 1
+		move.l	(a7)+,a2
+d394 24
+a417 6
+SMFloppyWait0:
+		move.l	d2,-(a7)
+
+		;------	check for successful open
+		tst.l	sml_IOR+IO_DEVICE(a4)
+		beq.s	fwOpenError
+d419 5
+a423 3
+		;------	get previous change count
+		move.l	sml_ChangeCntPtr(a4),a0
+		move.l	(a0),d2
+d425 12
+a436 4
+		move.w	#TD_CHANGENUM,sml_IOR+IO_COMMAND(a4)
+fwChangeLoop:
+		;------ wait for the change count to increase
+		lea	sml_IOR(a4),a1
+d441 4
+a444 2
+		cmp.l	sml_IOR+IO_ACTUAL(a4),d2
+		bne.s	fwRestart
+d446 2
+a447 2
+		bsr	SMDisplayTick
+		bra.s	fwChangeLoop
+d449 4
+a452 7
+
+		;------ ok, it has been changed
+fwRestart:
+		move.w	#TD_CHANGESTATE,sml_IOR+IO_COMMAND(a4)
+fwStateLoop:
+		;------ loop here until a disk is inserted
+		lea	sml_IOR(a4),a1
+d457 2
+a458 2
+		tst.l	sml_IOR+IO_ACTUAL(a4)
+		beq.s	fwDone
+d460 1
+a461 1
+		bra.s	fwStateLoop
+d463 13
+d477 1
+a477 1
+		move.l	(a7)+,d2
+d482 1
+a482 1
+		beq.s	fwRestart
+a484 1
+		bra.s	fwError
+d486 9
+a494 1
+fwOpenError:
+d496 1
+d498 5
+a502 2
+fwError:
+		bsr	SMAlert
+@
+
+
+36.6
+log
+@make BSTR of trackdisk.device include null in length
+accept any variant of 'DOS?' as bootable
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.5 $
+**	$Date: 89/04/03 12:14:31 $
+d91 1
+a91 1
+		moveq	#MEMF_CHIP,d1
+d296 3
+a298 2
+		dc.l	MEMF_CHIP	; de_BufMemType
+		dc.l	11*512		; de_MaxTransfer
+@
+
+
+36.5
+log
+@make dn_GlobalVec == -1
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.4 $
+**	$Date: 89/03/31 17:57:26 $
+d170 3
+a172 1
+		cmp.l	#BBNAME_DOS,(a0)
+d300 1
+a300 1
+		dc.b	16,'trackdisk.device',0
+@
+
+
+36.4
+log
+@express MaxTransfer as number of bytes
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.3 $
+**	$Date: 89/03/31 17:55:05 $
+d285 1
+a285 1
+		dc.l	0,0,0		; dn_Startup, dn_SegList, dn_GlobalVec
+@
+
+
+36.3
+log
+@increase environment table to include MaxTransfer & Mask
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.2 $
+**	$Date: 89/03/18 18:29:49 $
+d295 1
+a295 1
+		dc.l	11		; de_MaxTransfer
+@
+
+
+36.2
+log
+@SMDisplayTick added
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.1 $
+**	$Date: 89/03/15 14:19:38 $
+d289 1
+a289 1
+		dc.l	12,128,0	; de_TableSize, de_SizeBlock, de_SecOrg
+d295 2
+@
+
+
+36.1
+log
+@fix notice of new disk change number
+@
+text
+@d4 2
+a5 2
+**	$Revision: 36.0 $
+**	$Date: 88/12/20 13:51:13 $
+d43 1
+d331 1
+a331 1
+		beq.s	fwChangeLoop
+d333 4
+d348 4
+a351 1
+		bne.s	fwStateLoop
+@
+
+
+36.0
+log
+@reorganized for V36
+@
+text
+@d4 2
+a5 2
+**	$Revision$
+**	$Date$
+d319 1
+a319 1
+		move.l	a0,d2
+@

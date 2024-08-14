@@ -1,0 +1,1468 @@
+head     1.3;
+branch   ;
+access   martin bj;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.3
+date     90.11.02.10.53.23;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.05.31.10.17.04;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.04.26.19.53.09;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@lssup.a
+@
+
+
+1.3
+log
+@fixed -R option and GetWinBounds function
+@
+text
+@* --------------------------------------------------------------------- *
+* LSSUP.A - Assembly support routines for ls.c
+* Written by Justin V. McCormick 89-07-24
+* --------------------------------------------------------------------- *
+	IFD	CAPE
+	CSYMFMT
+	BASEREG	B
+	SMALLOBJ
+	ADDSYM
+	OPTIMON
+	IDNT	"lssup.a"
+	ENDC
+
+
+SYS	MACRO	*
+	IFGT	NARG-2
+	FAIL	!!!
+	ENDC
+	IFEQ	NARG-2
+	MOVE.L	\2,a6
+	ENDC
+	JSR	LVO\1(a6)
+	ENDM
+
+XLVO	MACRO	*
+	XREF	LVO\1
+	ENDM
+
+; Equates
+fib_DirEntryType EQU	$4
+fib_FileName	EQU	$8
+*  fib_FileName	EQU	$9
+fib_Size	EQU	$7C
+fib_NumBlocks	EQU	$80
+fib_DateStamp	EQU	$84
+fib_SIZEOF	EQU	$104
+
+ds_Days		EQU	$0
+ds_Minute	EQU	$4
+ds_Tick		EQU	$8
+
+LH_HEAD		EQU	$0
+LN_PRED		EQU	$4
+LN_SUCC		EQU	$0
+
+fe_Node	equ	0
+fe_Fib	equ	8
+pr_ConsoleTask		EQU	$A4
+
+MEMF_CLEAR		EQU	$10000
+sp_Msg			EQU	$0
+sp_Pkt			EQU	$14
+sp_SIZEOF		EQU	$44
+dp_Link			EQU	$0
+dp_Port			EQU	$4
+dp_Arg1			EQU	$14
+dp_Type			EQU	$8
+ACTION_SCREEN_MODE	EQU	$3E2
+LN_NAME			EQU	$A
+LN_PRI			EQU	$9
+LN_TYPE			EQU	$8
+MP_FLAGS		EQU	$E
+MP_MSGLIST		EQU	$14
+MP_SIGBIT		EQU	$F
+MP_SIGTASK		EQU	$10
+MP_SIZE			EQU	$22
+NT_MSGPORT		EQU	$4
+PA_SIGNAL		EQU	$0
+
+* Library offsets
+	XLVO	AddPort
+	XLVO	AddTail
+	XLVO	AllocMem
+	XLVO	AllocSignal
+	XLVO	CopyMem
+	XLVO	Debug
+	XLVO	Examine
+	XLVO	FindTask
+	XLVO	FreeMem
+	XLVO	FreeSignal
+	XLVO	GetMsg
+	XLVO	Input
+	XLVO	Insert
+	XLVO	IoErr
+	XLVO	IsInteractive
+	XLVO	Output
+	XLVO	ParentDir
+	XLVO	PutMsg
+	XLVO	RawDoFmt
+	XLVO	Read
+	XLVO	RemPort
+	XLVO	WaitForChar
+	XLVO	WaitPort
+	XLVO	Write
+	XLVO	UnLock
+
+* External constants
+	XREF	@@AllocFib
+	XREF	@@CleanUp
+	XREF	@@stpcpy
+	XREF	@@strcat
+	XREF	@@strlen
+	XREF	baddatestr
+	XREF	badtimestr
+	XREF	ColonStr
+	XREF	datepat
+	XREF	dayspermonth
+	XREF	DOSBase
+	XREF	gwbrstr
+	XREF	LSFlags
+	XREF	NoFindFmtStr
+	XREF	NoRAMMsg
+	XREF	RamNameStr
+	XREF	SlashStr
+	XREF	sortkey
+	XREF	timepat
+
+	SECTION	CODE
+* --------------------------------------------------------------------- *
+* VOID *myalloc (LONG)
+*   d0            d0
+* --------------------------------------------------------------------- *
+	XDEF	@@myalloc
+@@myalloc:
+	movem.l	d2/a6,-(sp)
+	addq.l	#4,d0			;Include sizeof(LONG)
+	move.l	d0,d2			;Copy to survive AllocMem
+	moveq	#0,d1			;MEMF_ANYTHING
+	SYS	AllocMem,4		;AllocMem(size + 4, 0L)
+	tst.l	d0			;Got it?
+	 beq.s	1$
+	movea.l	d0,a6			;Copy pointer
+	move.l	d2,(a6)+		;Stash size in first 4 bytes
+	move.l	a6,d0			;return final pointer in d0
+1$
+	movem.l	(sp)+,d2/a6
+	rts
+
+* --------------------------------------------------------------------- *
+* VOID myfree (VOID *)
+*               a0
+* --------------------------------------------------------------------- *
+	XDEF	@@myfree
+@@myfree:
+	move.l	a6,-(sp)
+
+	lea	-4(a0),a1		;Put in sys reg
+	move.l	(a1),d0			;d0 = size to free
+	SYS	FreeMem,4
+
+	movea.l	(sp)+,a6
+	rts
+
+* --------------------------------------------------------------------- *
+* void asprintf(wstr, formatstring, args)
+*   char *wstr;
+*   char *formatstring;
+*   char **args;
+*
+* Synopsis: Given formatstring and args to format, formats output to wstr.
+* Similar to sprintf(), except doesn't handle floats.
+* --------------------------------------------------------------------- *
+	XDEF	asprintf
+asprintf:
+	link	a5,#0
+	movem.l	d0-d2/a0-a3/a6,-(sp)	;Save everything we might clobber
+
+* Call format function to convert fmtstring and args to buffer on the stack
+	movea.l	12(a5),a0		;Grab format string
+	lea	16(a5),a1		;Grab EA of arguments
+	lea	kput1,a2		;Grab EA of output subroutine
+	movea.l	8(a5),a3		;Grab EA of dest workspace
+	SYS	RawDoFmt,4		;Format it into workspace
+
+	movem.l	(sp)+,d0-d2/a0-a3/a6	;Restore registers
+	unlk	a5			;And stack frame
+	rts
+
+* --------------------------------------------------------------------- *
+* RawDoFmt() output routine for xprintf, called for each formatted char.
+* Takes byte in d0 and puts in buffer pointed to by a3, then increments a3.
+* --------------------------------------------------------------------- *
+	XDEF	kput1
+kput1:
+	move.b	d0,(a3)+
+	rts
+
+* --------------------------------------------------------------------- *
+* void GetWinBounds(width, height)
+*   long *width, *height;
+*          a0       a1
+* Find current console window, determine width and height
+* in terms of current font, update width and height VPARMS passed.
+* --------------------------------------------------------------------- *
+height	EQU	-4
+width	EQU	-8
+conid	EQU	-12
+packet	EQU	-16
+rpport	EQU	-20
+rpstr	EQU	-40
+
+	XDEF	@@GetWinBounds
+@@GetWinBounds:
+	link	a5,#-44
+	movem.l	d2-d4/a2/a6,-(sp)
+
+	move.l	a0,width(a5)		;Save width/height pointers on stack
+	move.l	a1,height(a5)
+
+	SYS	Input,DOSBase(a4)	;Grab Input filehandle
+	move.l	d0,d1
+	SYS	IsInteractive		;IsInteractive(Input())?
+	tst.l	d0
+	 beq.s	gwbnowbrep		;Nope, can't get a bounds report
+	SYS	Output
+	move.l	d0,d1
+	SYS	IsInteractive		;IsInteractive(Output())?
+	tst.l	d0
+	 beq.s	gwbnowbrep		;Nope, don't clutter output stream
+
+	suba.l	a1,a1
+	SYS	FindTask,4		;d0 = FindTask(0L), our process
+	movea.l	d0,a0			;Transfer to address reg
+	move.l	pr_ConsoleTask(a0),conid(a5) ;Save proc->pr_ConsoleTask
+	tst.l	conid(a5)		;Is there really a console there?
+	 bne.s	gwbgotcon		;Yep
+
+gwbnowbrep:
+* Else we cannot get a window bounds report from this source
+	moveq	#23,d1			;return H=23
+	moveq	#77,d2			;       W=77
+	bra	gwbupdate
+
+gwbgotcon:
+	moveq	#0,d4			;Clear our success status register
+
+	moveq	#0,d0
+	movea.l	d0,a0
+	jsr	CreatePort
+	move.l	d0,rpport(a5)		;rpport = CreatePort(0L, 0L)
+	 beq	gwbdone			;Oops, no signals or ram available!
+	moveq	#sp_SIZEOF,d0
+	jsr	@@myalloc
+	move.l	d0,packet(a5)		;packet = AllocBlock(sizeof(*packet))
+	 beq	gwbfreeport		;Oops, no ram, free up port
+
+* Okay, we got our process id, reply port, and packet
+* Now toggle the console into raw mode
+	movea.l	rpport(a5),a2
+	movea.l	d0,a1
+	movea.l	conid(a5),a0
+	moveq	#1,d0
+	jsr	SetConsoleType		;SetConsoleType(1L, conid, packet, rpport)
+
+* Request a window bounds report
+	SYS	Output,DOSBase(a4)
+	move.l	d0,d1
+	moveq	#4,d3
+	lea	gwbrstr(a4),a0
+	move.l	a0,d2
+	SYS	Write,DOSBase(a4)	;Write(Output(), "\2330 q", 4L);
+	cmpi.l	#$0004,d0		;Did the console choke on it?
+	 bne	gwbsetcook		;hmmm, see if we can back out gracefully
+
+* Read the report string into stack buffer, if there is one
+	move.l	#10000,d2
+	SYS	Input
+	move.l	d0,d1
+	SYS	WaitForChar		;WaitForChar(Input(), 10000L) (.01 secs)
+	tst.l	d0			;Did we get the report?
+	 beq	gwbsetcook		;Nope, must not be a report coming
+
+
+
+	moveq	#16,d4			;Don't let it get longer than 16...
+	lea	rpstr(a5),a2		;Point to input string area...
+loop_for_r:
+	SYS	Input
+	move.l	d0,d1
+	moveq	#1,d3			;Get one character...
+	move.l	a2,d2			;Get room for that character...
+	SYS	Read			;Read character...
+	tst.l	d0			;Check if we got one...
+	beq.s	loop_for_r
+;
+	sub.l	#1,d4
+	beq.s	done_loop_r
+;
+	cmp.b	#'r',(a2)+		; Check for the final 'r'
+	bne.s	loop_for_r
+;
+done_loop_r:
+	neg.l	d4
+	addq.l	#8,d4
+	addq.l	#8,d4
+
+* Turn the console back to cooked mode pronto to avoid cursor blink
+gwbsetcook:
+	movea.l	rpport(a5),a2
+	movea.l	packet(a5),a1
+	movea.l	conid(a5),a0
+	moveq	#0,d0
+	jsr	SetConsoleType		;SetConsoleType(0L, conid, packet, rpport)
+
+* Release resources we borrowed
+gwbfreepack:
+	move.l	packet(a5),d0		;Did we allocate a packet?
+	 beq.s	gwbfreeport		;nay, check for port to free
+	movea.l	d0,a0
+	jsr	@@myfree			;Else FreeBlock(packet)
+
+gwbfreeport:
+	move.l	rpport(a5),d0		;if (rpport)...
+	 beq	gwbdone			;nope
+	jsr	DeletePort		;Else DeletePort(rpport)
+
+* Finally, sanity check window bounds report string
+* d4 = length of report string according to Read()
+	cmpi.l	#9,d4			;Less than 8 characters returned?
+	 ble	gwbdone			;hmmm, phonky bounds report from DOS?
+	lea	rpstr(a5),a2		;a2 = rpstr
+	cmpi.b	#';',4(a2)		;Matches a typical report template?
+	 bne	gwbdone			;nope, got some weird junk back?
+	cmpi.b	#'r',-1(a2,d4.w)	;Last byte is 'r' for report?
+	 bne	gwbdone			;Nope, message fubar!
+
+* Parse the height and width variables from the field now
+* Our report format looks like this in hex:
+* 	9b 31 3b 31 3b y2 y1 3b x2 x1 20 72
+* Or in ascii:
+*	<0x9b>1;1;20;77 r
+* Which would indicate a width of 77 cols and a height of 20 rows for
+* the current console device
+*
+* REGS:	a2 points to beginning of 'r' terminated string
+
+	addq.w	#5,a2			;Point to first char of Y size
+	moveq	#0,d1			;Clear out work reg
+
+* Convert ascii rows value to LONG, update host data
+	move.b	(a2)+,d1		;Grab a Y
+	subi.w	#'0',d1			;Less ascii offset
+	cmpi.b	#';',(a2)		;Any more Y digits?
+	 beq.s	1$			;Nope
+	mulu	#10,d1			;Else shift by 10
+	add.b	(a2)+,d1		;Add least significant Y digit
+	subi.b	#'0',d1			;Less ascii offset
+	cmpi.b	#';',(a2)		;Any more Y digits?
+	 beq.s	1$			;Nope
+	mulu	#$000a,d1		;Else shift by 10
+	add.b	(a2)+,d1		;Add least significant Y digit
+	subi.b	#'0',d1			;Less ascii offset
+					;We'll assume screen height < 999 rows
+1$
+* Convert ascii columns value to LONG, update host data
+	addq.w	#1,a2			;Move past the ';' separator
+	moveq	#0,d2			;Zap work reg
+	move.b	(a2)+,d2		;Grab msd of X
+	cmpi.b	#' ',d2			;Premature end?
+	 beq	gwbdone			;Huh, must be garbage - don't update VPARMS
+	cmpi.b	#';',d2			;Also a possible error
+	 beq	gwbdone
+	cmpi.b	#'r',d2			;And what about this?
+	 beq	gwbdone
+
+	subi.b	#'0',d2			;Okay, adjust ascii offset
+	cmpi.b	#' ',(a2)		;Hit end of report?
+	 beq.s	2$			;Yep
+	mulu	#$000a,d2		;Else shift by 10
+	add.b	(a2)+,d2		;Add next digit
+	subi.b	#'0',d2			;Ascii adjust
+	cmpi.b	#' ',(a2)		;Hit end of report?
+	 beq.s	2$			;Yep
+	mulu	#$000a,d2		;Else shift by 10
+	add.b	(a2),d2			;Add next digit
+	subi.b	#'0',d2			;Ascii adjust
+
+2$
+gwbupdate:
+* Finally, update parameters by reference
+	movea.l	height(a5),a0		;Grab height VPARM
+	move.l	d1,(a0)			;*height = d1
+	movea.l	width(a5),a0		;Grab width VPARM
+	move.l	d2,(a0)			;*width = d2
+
+gwbdone:
+	movem.l	(sp)+,d2-d4/a2/a6
+	unlk	a5
+	rts
+
+* --------------------------------------------------------------------- *
+* void __asm SetConsoleType(flag, id, packet, port)
+*   register __d0 long flag;
+*   register __a0 struct Process *id;
+*   register __a1 struct StandardPacket *packet;
+*   register __a2 struct MsgPort *port;
+*
+* Flag = 1L -- Raw mode
+*      = 0L -- Cooked mode
+* --------------------------------------------------------------------- *
+	XDEF	SetConsoleType
+SetConsoleType:
+	movem.l	a2/a3/a5/a6,-(sp)
+
+	movea.l	a0,a3			;Copy process pointer
+	movea.l	a1,a5			;Copy packet pointer
+	lea	sp_Pkt(a5),a0		;a0 = &packet->sp_Pkt
+	move.l	a0,sp_Msg+LN_NAME(a5)	;p->sp_Msg.mn_Node.ln_Name = &p->sp_Pkt
+	lea	sp_Msg(a5),a0		;a0 = &packet->sp_Msg
+	move.l	a0,sp_Pkt+dp_Link(a5)	;p->sp_Pkt.dp_Link = &p->sp_Msg
+	move.l	a2,sp_Pkt+dp_Port(a5)	;p->sp_Pkt.dp_Port = replyport
+	move.l	#ACTION_SCREEN_MODE,sp_Pkt+dp_Type(a5)	;Set function
+
+	tst.w	d0			;On or Off?
+	 beq	1$
+	move.l	#-1,sp_Pkt+dp_Arg1(a5)	;RAW ON
+	bra.s	2$
+1$
+	clr.l	sp_Pkt+dp_Arg1(a5)	;RAW OFF
+2$
+	movea.l	a3,a0
+	movea.l	a5,a1
+	SYS	PutMsg,4		;PutMsg(proc, packet)
+
+	movea.l	a2,a0
+	SYS	WaitPort		;WaitPort(port)
+	movea.l	a2,a0
+	SYS	GetMsg			;(void)GetMsg(port)
+
+	movem.l	(sp)+,a2/a3/a5/a6
+	rts
+
+* ------------------------------------------------------------------------- *
+* struct MsgPort *CreatePort(name, pri) (a0/d0)
+* ------------------------------------------------------------------------- *
+	XDEF	CreatePort
+CreatePort:
+	movem.l	d5/d7/a2/a5/a6,-(sp)
+
+	move.l	a0,a5			;Save Name
+	move.l	d0,d5			;Save Pri
+
+* Allocate a free signal, crap out if we can't
+	moveq	#-1,d0
+	SYS	AllocSignal,4
+	cmp.l	#-1,d0			;Did we get a signal?
+	 bne.s	cpgotsig		;Yep
+	moveq	#0,d0			;Otherwise return NULL
+	bra	cpdone
+
+cpgotsig:
+	move.l	d0,d7			;Save our signal
+
+* Allocate memory for MsgPort
+	moveq	#MP_SIZE,d0		;Size of MsgPort
+	jsr	@@myalloc		;Allocate it
+	tst.l	d0			;Did we get it?
+	 bne.s	cpgotport		;Yep
+
+	move.l	d7,d0			;Otherwise crap out, free signal
+	SYS	FreeSignal
+	moveq	#0,d0			;Return NULL
+	bra	cpdone
+
+cpgotport:
+	move.l	d0,a2			;This is our new port!
+	move.l	a5,LN_NAME(a2)		;port->mp_Node.ln_Name = name
+	move.b	d5,LN_PRI(a2)		;port->mp_Node.ln_Pri = priority
+	move.b	#NT_MSGPORT,LN_TYPE(a2) ;port->mp_Node.ln_Type = NT_MSGPORT
+	move.b	#PA_SIGNAL,MP_FLAGS(a2) ;port->mp_Flags = PA_SIGNAL
+	move.b	d7,MP_SIGBIT(a2)	;port->mp_SIGBIT = sigBit
+	suba.l	a1,a1
+	SYS	FindTask
+	move.l	d0,MP_SIGTASK(a2)	;port->mp_SIGTASK = FindTask(0L)
+
+	cmpa.l	#0,a5			;Is this a new name?
+	beq.s	cpnoname		;Nope, add it to the msg list
+
+	movea.l	a2,a1
+	SYS	AddPort			;Otherwise add this port
+	move.l	a2,d0			;Return port pointer
+	bra.s	cpdone
+
+cpnoname:
+* Initialized New List head
+	lea	MP_MSGLIST(a2),a0 	;a0 = &port->mp_MsgList
+	move.l	a0,(a0)			;list->lh_Head = list
+	addq.l	#4,(a0)			;list->lh_Head += 4L
+	clr.l	4(a0)			;list->lh_Tail = 0L
+	move.l	a0,8(a0)		;list->lh_TailPred = list
+	move.l	a2,d0			;Return port pointer
+
+cpdone:
+	movem.l	(sp)+,d5/d7/a2/a5/a6
+	rts
+
+* ------------------------------------------------------------------------- *
+* DeletePort(port)(d0)
+* ------------------------------------------------------------------------- *
+	XDEF	DeletePort
+DeletePort:
+	movem.l	a5/a6,-(sp)
+
+	move.l	d0,a5
+	movea.l	$4,a6
+	tst.l	LN_NAME(a5)		;Is there a name?
+	beq.s	dpnoname
+
+	move.l	d0,a1
+	SYS	RemPort			;RemPort(port)
+
+dpnoname:
+	move.b	#$ff,LN_TYPE(a5) 	;port->mp_Node.ln_Type = 0xff
+	move.l	#-1,MP_MSGLIST(a5) 	;port->mp_MsgList.lh_Head = -1L
+
+	moveq	#0,d0
+	move.b	MP_SIGBIT(a5),d0	;d0 = port->mp_SigBit
+	SYS	FreeSignal		;FreeSignal(d0)
+
+	movea.l	a5,a0
+	jsr	@@myfree			;FreeBlock(port)
+
+	movem.l	(sp)+,a5/a6
+	rts
+
+* ------------------------------------------------------------------------
+* FibFileDate(fib_date, datestr, timestr)
+*               a0	  a1	   8(a5)
+*   struct DateStamp *fib_date;
+*   char *datestr, *timestr;
+*   Calculate date based on DateStamp structure and return a pointer
+* to the formatted date string.
+* ------------------------------------------------------------------------
+	XDEF	@@FibFileDate
+@@FibFileDate:
+	link	a5,#0
+	movem.l	d3-d7/a2-a3/a6,-(sp)
+
+	movea.l	a1,a3			;a3 = datestr, 8(a5) = timestr
+	movea.l	a0,a1			;Grab datestamp pointer
+	moveq	#78,d7			;Initial year = 1978
+
+	move.l	(a1),d5			;days = fib_date->ds_Days
+	 blt	ffdbaddate		;Hey! you can't be negative! Invalid date...
+
+* Determine what year it is
+	divu	#1461,d5
+	move.l	d5,d0			;Stash it
+	ext.l	d5
+	lsl.l	#2,d5
+	add.l	d5,d7			;year += (days / 1461) * 4
+
+* Count how many months into that year
+ffdgetmo:
+	swap	d0			;days %= 1461
+	move.w	d0,d5
+
+1$	tst.w	d5			;Out of days yet?
+	 beq.s	3$			;Yep, done here
+
+	move.w	#365,d6			;Else month_days = 365
+	move.w	d7,d0			;Grab year
+	andi.w	#3,d0			;if (year & 3) == 0 Leap year?
+	 bne.s	2$			;Nope
+	addq.w	#1,d6			;Otherwise bump month_days
+
+2$	cmp.w	d6,d5			;is day < month_days?
+	 blt.s	3$			;yep, done here
+	sub.w	d6,d5			;otherwise day -= month_days
+
+	addq.l	#1,d7			; year++
+	bra	1$
+3$
+
+* Count how many days into that month of that year
+ffdgetday:
+;for (i = 0, day++; i < 12; i++)
+	moveq	#0,d4			;current month = 0
+	moveq	#0,d6			;Zap hinybs
+	addq.w	#1,d5
+	lea	dayspermonth(a4),a0
+
+1$
+	move.b	0(a0,d4.w),d6		;month_days = dayspermonth[i]
+
+	cmpi.w	#1,d4			;if (i == 1 && (year & 3) == 0)
+	 bne.s	2$
+	move.w	d7,d0
+	andi.w	#3,d0
+	 bne.s	2$
+	addq.w	#1,d6			;month_days++
+
+2$	cmp.w	d6,d5			;if (day <= month_days)
+	 ble.s	4$			;Break out, found the right month
+
+	sub.w	d6,d5			;Else, day -= month_days
+
+	addq.w	#1,d4			;i++
+3$	cmpi.w	#12,d4			;Done all months yet?
+	 blt	1$			;Nope
+
+4$
+ffdprint:
+1$	cmpi.l	#99,d7			;while (year >= 100)
+	 ble.s	2$
+	subi.l	#100,d7			;year -= 100
+	bra	1$
+2$
+;asprintf(datestr, "%02d-%02d-%02d %02d:%02d:%02d", i + 1, day, year, hour, min, sec)
+	move.l	8(a1),d0		;sec = fib_date->ds_Tick / 50;
+	divu	#50,d0
+	ext.l	d0
+	move.l	d0,-(sp)		;Push secs
+	move.l	4(a1),d0		;min = fib_date->ds_Minute
+	move.l	d0,d1			;Clone it
+	divu	#60,d0
+	moveq	#0,d3
+	move.w	d0,d3			;hour = min / 60
+	mulu	#60,d0
+	sub.w	d0,d1			;min -= hour * 60
+	move.l	d1,-(sp)		;Push mins
+	move.l	d3,-(sp)		;Push hours
+	pea	timepat(a4)		;Push the format pattern
+	move.l	8(a5),-(sp)		;Push destination buffer, datestr
+	jsr	asprintf
+	lea	20(sp),sp
+
+	move.l	d5,-(sp)		;Push day
+	addq.w	#1,d4			;Push month (offset by 1!)
+	move.l	d4,-(sp)
+	move.l	d7,-(sp)		;Push year
+	pea	datepat(a4)		;Push the format pattern
+	move.l	a3,-(sp)		;Push destination buffer
+	jsr	asprintf
+	lea	20(sp),sp
+
+ffddone:
+	movem.l	(sp)+,d3-d7/a2-a3/a6
+	unlk	a5
+	rts
+
+ffdbaddate:
+	lea	badtimestr(a4),a1	;stpcpy (timestr, "00:00:00");
+	movea.l	8(a5),a0
+	jsr	@@stpcpy
+	lea	baddatestr(a4),a1	;stpcpy (datestr, "00-00-00");
+	movea.l	a3,a0
+	jsr	@@stpcpy
+	bra	ffddone
+
+*----------------------------------------------------------------------
+* LONG iswild(name)
+*   char *name;
+*          a0
+* Search a string for wild characters, return 1 if found
+*----------------------------------------------------------------------
+	XDEF	@@iswild
+@@iswild:
+	moveq	#0,d0			;Clear out our character register
+ischk1:
+	move.b	(a0)+,d0		;Grab a char
+	 beq.s	iwdone			;Might be end of string?
+	cmpi.b	#'*',d0			;Is it *?
+	 beq.s	iswdone			;yep, is wild
+	cmpi.b	#'?',d0			;Is it a qmark
+	 bne.s	ischk1			;Nope, check next character
+
+iswdone:
+	moveq	#1,d0
+iwdone:
+	rts
+
+* ------------------------------------------------------------------------
+; Compare a wild card name with a normal name
+; LONG wildmatch (name, wild)
+;   char *name, *wild;
+;          a0     a1
+* ------------------------------------------------------------------------
+	XDEF	@@wildmatch
+@@wildmatch:
+	link	a5,#-64
+	movem.l	d3/a2-a3,-(sp)
+
+	movea.l	a0,a2			;Grab name
+	movea.l	a1,a3			;Grab pattern
+	lea	-64(a5),a0		;back[0][0]
+	lea	-60(a5),a1		;back[0][1]
+
+	moveq	#0,d3			;bi = 0
+
+wmloop1:
+	tst.b	(a2)			;End of name?
+	 bne.s	wmnoteon
+	tst.b	(a3)			;End of pattern?
+	 beq	wmmatched		;Yep, we matched
+
+wmnoteon:
+	cmpi.b	#'*',(a3)		;Is it a splat?
+	 bne.s	wmnotstar		;Nope, maybe '?'
+
+	cmpi.w	#64,d3			;Have we hit max expression depth?
+	 beq	wmnomatch		;Yep, ran out of room in recursion table
+
+;back[bi][0] = w
+	move.l	a3,0(a0,d3.w)		;Stash pointer to this '*' in table
+
+;back[bi][1] = n
+	move.l	a2,0(a1,d3.w)
+
+	addq.w	#8,d3			;++bi
+	addq.w	#1,a3			;++w
+	bra.s	wmloop1			;Check next
+
+wmgoback:
+	subq.w	#8,d3			;--bi
+	move.l	a0,d0
+wmback1:
+	tst.w	d3			;while (bi >= 0 && *back[bi][1] == '\x0')
+	 blt.s	wmbacked
+	movea.l	0(a1,d3.l),a0
+	tst.b	(a0)
+	 bne.s	wmbacked
+
+	subq.w	#8,d3			;--bi
+	bra.s	wmback1
+
+wmbacked:
+	tst.w	d3			;if (bi < 0)
+	 blt.s	wmnomatch		;return (0)
+
+	movea.l	d0,a0
+	movea.l	0(a0,d3.w),a3		;w = back[bi][0] + 1
+	addq.w	#1,a3
+
+	addq.l	#1,0(a1,d3.w)
+	movea.l	0(a1,d3.l),a2		;n = ++back[bi][1]
+
+	addq.w	#8,d3			;++bi
+	bra.s	wmloop1
+
+wmnotstar:
+	cmpi.b	#'?',(a3)		;Is it '?'
+	 bne.s	wmnotqmark
+
+	tst.b	(a2)			;Reached end of string?
+	 bne.s	wmincpoint		;Nope, move on to next char
+
+	tst.w	d3			;Are we at top level of expression?
+	 beq.s	wmnomatch		;Yep, expression didn't match
+	bra.s	wmgoback		;Otherwise pop a level and try to match
+
+wmnotqmark:
+	move.b	(a2),d0			;Grab a char from bstr
+	cmpi.b	#$40,d0			;less than @@ character?
+	 bls.s	1$			;Yep
+	cmpi.b	#$5a,d0			;Greater than Z?
+	 bhi.s	1$			;Yep
+	addi.b	#$20,d0
+1$
+	move.b	(a3),d1			;Grab a char from bstr
+	cmpi.b	#$40,d1			;less than @@ character?
+	 bls.s	2$			;Yep
+	cmpi.b	#$5a,d1			;Greater than Z?
+	 bhi.s	2$			;Yep
+	addi.b	#$20,d1
+2$
+	cmp.b	d0,d1			;*n = *w?
+	 beq.s	wmincpoint		;Yep, move on past
+
+	tst.w	d3			;Are we at top expression level?
+	 beq.s	wmnomatch		;Yep, they didn't match
+	bra.s	wmgoback		;Nope, process next part
+
+wmincpoint:
+	tst.b	(a2)			;Done with name?
+	 beq.s	wmnamend		;Yep
+	addq.w	#1,a2			;Otherwise increment name pointer
+
+wmnamend:
+	tst.b	(a3)			;End of pattern?
+	 beq.s	wmmatched		;Yep, we matched
+	addq.w	#1,a3			;Otherwise inc wild pointer, match next char
+	bra	wmloop1
+
+wmmatched:
+	moveq	#1,d0
+	bra.s	wmdone
+
+wmnomatch:
+	moveq	#0,d0
+
+wmdone:
+	movem.l	(sp)+,d3/a2-a3
+	unlk	a5
+	rts
+
+* --------------------------------------------------------------------- *
+* BOOL CompFibs (keytype, a,   b)
+*		    d0   a0   a1
+*   LONG keytype;
+*   struct FileInfoBlock *a, *b;
+*
+* Used by SortFibs to determine precedence of Fibs.
+* keytype is one of 0, 1, or 2:
+*   0=alpha, 1=size, 2=date
+* --------------------------------------------------------------------- *
+	XDEF	@@CompFibs
+@@CompFibs:
+	movem.l	d2-d3/a2,-(sp)
+
+	move.l	d0,d2			;Stash keytype
+
+* Prioritize Dirs/Files?
+	move.l	LSFlags(a4),d3		;Grab flags
+
+	btst.l	#17,d3			;LSFlags & MIXFILEDIRS?
+	 bne.s	cftstsort		;Yep, don't bother comparing EntryTypes
+
+	move.l	fib_DirEntryType(a0),d0
+	cmp.l	fib_DirEntryType(a1),d0
+	 blt.s	1$			;a0 is < a1, (dir < file)
+	 beq.s	cftstsort		;a0 is == a1, try next test
+
+	moveq	#0,d0			;a0 is > a1, (file > dir)
+	bra.s	2$
+1$
+	moveq	#1,d0			;greater than, (dir < file)
+
+2$	btst.l	#16,d3			;LSFlags & FILESFIRST?
+	 beq	cfexit0			;Nope, default Dirs first
+	bchg.l	#0,d0			;Else d0 ^= 1, reverse sense
+	bra	cfexit0
+
+* Both entries are the same type, now see about sorting them
+cftstsort:
+	btst.l	#6,d3			;LSFlags & NOSORTFLAG set?
+	 bne	cffalse			;Yep, always AddTail to list
+
+* Switch keytype
+	tst.w	d2			;Alphabetize?
+	 bne.s	cfnalpha		;Nope
+
+* Compare lexigraphically, ignoring case differences
+cfalpha:
+	lea	fib_FileName+1(a0),a0	;a = &Fipb->fib_FileName
+	lea	fib_FileName+1(a1),a1	;b = &Fipb->fib_FileName
+
+;  for(; *a && tolower(*a) == tolower(*b); a++, b++);
+lccstart:
+	tst.b	(a0)			;Is there a char here at source?
+	 beq.s	lcceostr		;Nope, fell off the end
+
+	move.b	(a1)+,d1		;Grab a char from bstr
+	cmpi.b	#$40,d1			;less than @@ character?
+	 bls.s	1$			;Yep
+	cmpi.b	#$5a,d1			;Greater than Z?
+	 bhi.s	1$			;Yep
+	addi.b	#$20,d1
+1$
+	move.b	(a0)+,d0		;Grab a char from astr
+	cmpi.b	#$40,d0			;less than @@ character?
+	 bls.s	2$			;Yep
+	cmpi.b	#$5a,d0			;Greater than Z?
+	 bhi.s	2$			;Yep
+	addi.b	#$20,d0
+2$
+	cmp.b	d0,d1			;are they the same?
+	 beq	lccstart		;Yep, compare next pair of chars
+
+lcceostr:
+	sub.b	d1,d0			;return(tolower(*astr) - tolower(*bstr))
+	 bgt.s	cftrue			; > 0?, return TRUE
+	bra.s	cffalse			;Else return FALSE
+
+cfnalpha:
+	subq.w	#1,d2			;Size?
+	 bne.s	cfnsize			;Nope
+
+* Compare fib_Sizes
+	move.l	fib_Size(a0),d0		;d0 = afib->fib_Size
+	cmp.l	fib_Size(a1),d0		;b->fib_Size > a->fib_Size?
+	 bgt.s	cftrue			;Yep, return TRUE
+	 blt.s	cffalse			;<, return FALSE
+	 bra	cfalpha			;Else it's a tie, alphabetize
+
+cfnsize:
+* Compare fib_DateStamps
+	lea	fib_DateStamp(a0),a0	;a = &afib->fib_DateStamp
+	lea	fib_DateStamp(a1),a1	;b = &bfib->fib_DateStamp
+	jsr	@@CompareDateStamps
+	tst.l	d0
+	 beq	cfalpha			;its the same date?, alphabetize
+	 blt.s	cffalse
+cftrue:
+	moveq	#1,d0
+	bra.s	cfexit
+cffalse:
+	moveq	#0,d0
+cfexit:
+	btst.l	#9,d3			;LSFlags & REVFLAG?
+	 beq.s	1$			;Nope
+	bchg.l	#0,d0			;Else invert boolean result
+1$
+cfexit0:
+	movem.l	(sp)+,d2-d3/a2
+	rts
+
+* --------------------------------------------------------------------- *
+* LONG CompareDateStamps(adate, bdate)
+*  d0                     a0      a1
+*   struct DateStamp *adate, *bdate;
+* --------------------------------------------------------------------- *
+	XDEF	@@CompareDateStamps
+@@CompareDateStamps:
+	move.l	ds_Days(a0),d0		;d0 = adate->ds_Days
+	sub.l	ds_Days(a1),d0		;b->ds_Days > a->ds_Days?
+	 bne.s	1$			;Return b->day - a->day
+
+;They are the same day, check min/tick
+	move.l	ds_Minute(a0),d0
+	sub.l	ds_Minute(a1),d0	;d0 = amin - bmin
+	muls	#3000,d0		;     * 3000
+	add.l	ds_Tick(a0),d0
+	sub.l	ds_Tick(a1),d0		;     + atick - btick
+1$
+	rts
+
+* --------------------------------------------------------------------- *
+* VOID InsertFibNode(hfib, newfib)
+*                     a0     a1
+*   struct List *hfib;
+*   struct FibEntry *newfib;
+*
+* Compare data in newfib->Fib with nodes in the list until we
+* find the insertion point.
+* --------------------------------------------------------------------- *
+	XDEF	@@InsertFibNode
+@@InsertFibNode:
+	movem.l	d2/a2-a3/a5/a6,-(sp)
+
+	move.l	sortkey(a4),d2
+	movea.l	a0,a3			;a3 = hfib
+	movea.l	a1,a2			;a2 = newfib
+
+	movea.l	LH_HEAD(a3),a5		;afib = hfib->lh_Head
+
+1$	tst.l	fe_Node+LN_SUCC(a5)	;afib->fe_Node.mln_Succ != 0?
+	 beq.s	4$
+
+	movea.l	fe_Fib(a2),a1
+	movea.l	fe_Fib(a5),a0
+	move.l	d2,d0
+	jsr	@@CompFibs		;CompFibs(sortkey, afib->Fib, newfib->Fib)
+	tst.w	d0
+	 bne.s	4$
+	movea.l	fe_Node+LN_SUCC(a5),a5	;afib = afib->fe_Node.mln_Succ
+	bra	1$
+
+4$	movea.l	a3,a0			;a0 = List *
+	movea.l	a2,a1			;a1 = Node *
+	movea.l	fe_Node+LN_PRED(a5),a2	;a2 = Pred *
+	SYS	Insert,4		;Insert(hfib, newfib, afib->fe_Node.mln_Succ)
+
+	movem.l	(sp)+,d2/a2-a3/a5/a6
+	rts
+
+* --------------------------------------------------------------------- *
+* LONG FillFibEntry (headfib, fibp)
+*		       a0      a1
+*   struct List *headfib;
+*   struct FileInfoBlock *fibp;
+* --------------------------------------------------------------------- *
+	XDEF	@@FillFibEntry
+@@FillFibEntry:
+	movem.l	a2-a3/a5/a6,-(sp)
+	movea.l	a0,a2			;a2 = head of list
+	movea.l	a1,a3			;a3 = fileinfoblock
+
+	jsr	@@AllocFib		;Allocate a new fib
+	tst.l	d0			;Got it?
+	 beq.s	3$			;Nope, return 0
+	movea.l	d0,a5			;a5 = tfibp = AllocFib()
+
+	move.l	#fib_SIZEOF,d0
+	movea.l	fe_Fib(a5),a1
+	movea.l	a3,a0
+	SYS	CopyMem,4		;CopyMem(fibp, tfibp->Fib, sizeof(struct fib))
+
+	movea.l	a5,a1
+	movea.l	a2,a0
+
+	jsr	@@InsertFibNode		;InsertFibNode(headfib, tfibp)
+
+	moveq	#1,d0			;return(1)
+3$
+	movem.l	(sp)+,a2-a3/a5/a6
+	rts
+
+* --------------------------------------------------------------------- *
+	XDEF	@@nullstub
+@@nullstub:
+	moveq	#0,d0
+	rts
+
+* --------------------------------------------------------------------- *
+* LONG GetPathString (dest, src)
+*  d0                  a0    a1
+*   BYTE *dest, *src;
+* --------------------------------------------------------------------- *
+	XDEF	@@GetPathString
+@@GetPathString:
+	move.l	a2,-(sp)
+
+	moveq	#0,d0			;Zero return dest length
+
+* Find end of src string
+	movea.l	a1,a2			;Save src start address
+1$	tst.b	(a1)+			;while (*src++ != 0)
+	 bne	1$
+
+* Work backwards till we find a ':' or a '/'
+2$	move.b	-(a1),d1		;c = *(--src)
+	cmpi.b	#':',d1			;Hit a colon?
+	 beq.s	4$			;Yep, found our path end
+	cmpi.b	#'/',d1			;Hit a slash?
+	 bne.s	3$			;Nope, try next char
+	cmpa.l	a2,a1			;At first char?
+	 beq.s	4$			;Yep, leave the single slash
+	cmpi.b	#'/',-1(a1)		;Next char back is also a '/'?
+	 beq.s	4$			;Yep, allow multiple slashes
+	subq.w	#1,a1			;Else backup to previous char, eliminate '/'
+	bra.s	4$
+3$
+	cmpa.l	a2,a1			;Back at start of src?
+	 bhi	2$			;Nope, try previous src char
+	bra.s	gpsdone			;Else no dest, return
+4$
+* Copy path portion to dest
+gpscpy:
+	cmpa.l	a2,a1			;Past end address?
+	 bcs.s	gpsdone			;Yep, terminate
+	move.b	(a2)+,(a0)+		;Copy a char from src to dest
+	addq.w	#1,d0			;Bump dest length count
+	bra	gpscpy			;Check end address
+gpsdone:
+	clr.b	(a0)			;Null terminate dest
+
+	movea.l	(sp)+,a2
+	rts
+
+* --------------------------------------------------------------------- *
+* LONG GetFileString (dest, src)
+*  d0                  a0    a1
+*   BYTE *dest, *src;
+* --------------------------------------------------------------------- *
+	XDEF	@@GetFileString
+@@GetFileString:
+	move.l	a2,-(sp)
+
+	moveq	#0,d0			;Zero return dest length
+
+* Find end of src string
+	movea.l	a1,a2			;Save src start address
+1$	tst.b	(a1)+			;while (*src++ != 0)
+	 bne	1$
+
+* Work backwards till we find a ':' or a '/'
+2$	move.b	-(a1),d1		;c = *(--src)
+	cmpi.b	#':',d1			;Hit a colon?
+	 beq.s	4$			;Yep, found our path end
+	cmpi.b	#'/',d1			;Hit a slash?
+	 beq.s	4$			;Nope, try next char
+3$
+	cmpa.l	a2,a1			;Back at start of src?
+	 bhi	2$			;Nope, try previous src char
+	bra.s	gfscpy			;Else no path, entire src is filename
+4$
+	addq.w	#1,a1			;Move past ':' or '/'
+
+* Copy name portion to dest
+gfscpy:
+	move.b	(a1)+,(a0)+		;Copy a char from src to dest
+	 beq.s	2$
+	addq.w	#1,d0			;Bump dest length count
+	bra	gfscpy			;Check end address
+2$
+	movea.l	(sp)+,a2
+	rts
+
+* ------------------------------------------------------------------------- *
+* BYTE *astrncpy(dst, src, len)
+* d0/a0          a0   a1    d0
+* Takes text in a1, copies d0 bytes to text in a0.
+* a0 returns pointing to null at end of final text.
+* Dest text is always null terminated.
+* ------------------------------------------------------------------------- *
+	XDEF	@@astrncpy
+@@astrncpy:
+1$	subq.l	#1,d0			;Dec count
+	 blt.s	2$			;Done!
+
+	move.b	(a1)+,(a0)+		;Copy a byte
+	 bne	1$			;Do until end of src or cnt < 0
+2$
+	clr.b	(a0)			;Null terminate dest
+	move.l	a0,d0			;Return in d0 also
+	rts
+
+* ------------------------------------------------------------------------- *
+* VOID amovmem(src, dst, len)
+*              a0    a1   d0
+* Takes text in a0, copies d0 bytes to text in a1. Correctly handles
+* overlapping memory.
+* ------------------------------------------------------------------------- *
+	XDEF	amovmem
+amovmem:
+	cmpa.l	a0,a1			;Low to high or high to low?
+	 bcs.s	2$			;High to low, copy forward
+	adda.w	d0,a0			;Else start at end, copy backward
+	adda.w	d0,a1
+
+1$	move.b	-(a0),-(a1)
+	subq.w	#1,d0
+	 bgt	1$
+	bra.s	amdone
+
+2$	move.b	(a0)+,(a1)+
+	subq.w	#1,d0
+	 bgt	2$
+amdone:
+	rts
+
+* --------------------------------------------------------------------- *
+* BYTE *aindex(BYTE *, BYTE);
+*  d0           a0      d0
+* --------------------------------------------------------------------- *
+	XDEF	@@aindex
+@@aindex:
+1$	cmp.b	(a0),d0
+	 beq.s	aifound
+	tst.b	(a0)+
+	 beq.s	ainomatch
+	bra	1$
+
+ainomatch:
+	moveq	#0,d0
+	rts
+
+aifound:
+	move.l	a0,d0
+	rts
+
+* --------------------------------------------------------------------- *
+* LONG MakePathString(lock, dest)
+*                      a0     a1
+*   struct FileLock *lock;
+*   BYTE *dest;
+*
+* DESCRIPTION:
+*   Given text and a filelock, construct entire pathname and
+* return in dest.
+* --------------------------------------------------------------------- *
+	XDEF	@@MakePathString
+@@MakePathString:
+	movem.l	d2-d5/d7/a2-a3/a6,-(sp)
+
+* Grab pointer to lock and dest text to fill
+	move.l	a0,d3			;d3 = lock
+	movea.l	a1,a2			;a2 = dest
+	clr.b	(a2)			;NULL terminate dest
+	moveq	#0,d5			;LockFlag = 0
+
+* Allocate a FileInfoBlock for local use
+	move.l	#fib_SIZEOF,d0
+	jsr	@@myalloc
+	move.l	d0,d7			;d7 = *fib
+	 beq	mpsfailed		;Whoops no mem? return!
+
+	movea.l	DOSBase(a4),a6		;DOSBase calls from here on
+
+* while (lock != 0)
+1$
+	tst.l	d3			;Got a lock?
+	 beq.s	mpsokay			;Nope, must be at root
+
+* Examine the current lock
+	move.l	d3,d1
+	move.l	d7,d2
+	SYS	Examine			;Examine(lock, fib)
+	tst.l	d0			;Okay?
+	 beq.s	mpsfailed		;Nope, some sort of dos failure?
+
+	movea.l	d7,a1
+	cmpi.b	#' ',fib_FileName(a1)	;if (fib->fib_FileName[0] >= ' ')
+	 bcs.s	3$			;Nope, don't bother inserting?
+
+	tst.b	(a2)			;if (dest[0] != 0)
+	 beq.s	2$
+	lea	SlashStr(a4),a1
+	movea.l	a2,a0
+	jsr	@@InsertPathString	;InsertPathString(dest, "/");
+2$
+	movea.l	d7,a1
+	lea	fib_FileName(a1),a1
+	movea.l	a2,a0
+	jsr	@@InsertPathString	;InsertPathString(dest, fib->fib_FileName)
+3$
+* Okay, move up one directory
+	move.l	d3,d4			;oldlock = lock
+
+	move.l	d3,d1
+	SYS	ParentDir
+	move.l	d0,d3			;lock = ParentDir(lock)
+
+	tst.w	d5			;LockFlag set?
+	 bne.s	4$			;Yep, unlock
+	moveq	#1,d5			;Else LockFlag = 1, unlock next time
+	 bra	1$			;Next directory up
+4$
+	move.l	d4,d1
+	SYS	UnLock			;UnLock(oldlock)
+	bra	1$			;Examine
+
+mpsokay:
+* See if root was RAM:, special case
+	movea.l	d7,a1			;a1 = fib
+	cmpi.b	#' ',fib_FileName(a1)	;if (fib->fib_FileName[0] >= ' ')
+	 bcc.s	1$			;Yep, not 1.1/1.2 RAM:
+	lea	RamNameStr(a4),a1	;Else...
+	movea.l	a2,a0
+	jsr	@@InsertPathString	;InsertPathString(dest, "RAM:")
+	bra.s	mpsdone
+1$
+* Find last slash we tacked on, change to a colon, or, add a colon
+	moveq	#'/',d0
+	movea.l	a2,a0
+	jsr	@@aindex			;d0 = strchr(dest, '/')
+	tst.l	d0			;Do we have a slash?
+	 beq.s	2$			;Nope, at root....
+	movea.l	d0,a0
+	move.b	#':',(a0)		;Else change first '/' to a ':'
+	bra.s	mpsdone
+
+* No slash, must be locked at the root.  Append a colon to the dest.
+2$
+	lea	ColonStr(a4),a1
+	movea.l	a2,a0
+	jsr	@@strcat			;strcat (dest, ":")
+	bra.s	mpsdone
+
+* Come here if an error occured, return empty text to caller
+mpsfailed:
+	clr.b	(a2)			;dest[0] = (BYTE)0
+	moveq	#0,d3			;return (0L)
+	bra.s	mpsdeall
+
+* Come here if everything is okay, deallocate FileInfoBlock
+mpsdone:
+	moveq	#1,d3			;return (1L)
+
+mpsdeall:
+	tst.l	d7			;Did we allocate a fib?
+	 beq.s	mpsfinis		;nope
+	movea.l	d7,a0			;Else free the memory
+	jsr	@@myfree
+
+mpsfinis:
+	move.l	d3,d0			;Put return value in d0
+	movem.l	(sp)+,d2-d5/d7/a2-a3/a6
+	rts
+
+* --------------------------------------------------------------------- *
+* VOID InsertPathString(dest, source)
+*                        a0     a1
+*   BYTE *dest, *source;
+*
+* DESCRIPTION:
+*   Insert source text into dest text.
+* Special case for source length == 0, source must be RAM.
+* --------------------------------------------------------------------- *
+	XDEF	@@InsertPathString
+@@InsertPathString:
+	movem.l	d7/a2-a3,-(sp)
+
+	movea.l	a1,a3			;a3 = source
+	move.l	a0,a2			;a2 = dest
+
+	movea.l	a3,a0
+	jsr	@@strlen
+	move.l	d0,d7			;d7 = strlen(source)
+
+1$	movea.l	a2,a0
+	jsr	@@strlen			;d0 = strlen(dest)
+
+	addq.w	#1,d0			;Bump the length to include zero byte at end
+	movea.l	a2,a1
+	adda.w	d7,a1			;Push dest + slen
+	movea.l	a2,a0			;Push dest
+	jsr	amovmem			;amovmem(dest, dest + slen, strlen(dest) + 1)
+
+	move.w	d7,d0
+	movea.l	a2,a1
+	movea.l	a3,a0
+	jsr	amovmem			;amovmem(source, dest, slen)
+
+	movem.l	(sp)+,d7/a2-a3
+	rts
+
+* --------------------------------------------------------------------- *
+* VOID NoMemExit(VOID)
+* --------------------------------------------------------------------- *
+	XDEF	@@NoMemExit
+@@NoMemExit:
+	moveq	#103,d1
+	moveq	#20,d0
+	lea	NoRAMMsg(a4),a0
+	jsr	@@CleanUp
+	rts
+
+* --------------------------------------------------------------------- *
+* VOID NoFileExit(name)
+*                  a0
+* BYTE *name;
+* --------------------------------------------------------------------- *
+	XDEF	@@NoFileExit
+@@NoFileExit:
+	movem.l	d2-d4/a6,-(sp)
+
+	move.l	a0,d2			;Save name
+	SYS	IoErr,DOSBase(a4)	;Get IoError status
+	move.l	d0,d3			;Save it
+
+	move.l	#300,d0
+	jsr	@@myalloc
+	move.l	d0,d4			;d3 = myalloc( 300 )
+	 bne.s	1$			;Got it!
+	jsr	@@NoMemExit		;else exit with No Ram message
+	bra.s	2$
+1$
+	move.l	d2,-(sp)
+	pea	NoFindFmtStr(a4)
+	move.l	d4,-(sp)
+	jsr	asprintf		;asprintf(tstr, NoFindFmtStr, name)
+	lea	12(sp),sp
+
+	move.l	d3,d1
+	moveq	#20,d0
+	movea.l	d4,a0
+	jsr	@@CleanUp		;CleanUp(tstr, 20L, IoErr())
+					;         a0   d0     d1
+	move.l	d4,a0
+	jsr	@@myfree			;free (tstr)
+2$
+	movem.l	(sp)+,d2-d4/a6
+	rts
+
+* --------------------------------------------------------------------- *
+	END
+* --------------------------------------------------------------------- *
+@
+
+
+1.2
+log
+@Fixed alpha sorting
+@
+text
+@d30 3
+a32 3
+fib_DirEntryType EQU	$4 
+*                   fib_FileName	EQU	$8
+fib_FileName	EQU	$9
+d36 1
+a36 1
+fib_SIZEOF	EQU	$104 
+d159 1
+a159 1
+* 
+d272 6
+a277 1
+	
+d280 16
+a295 5
+	moveq	#16,d3			;Don't let it get longer than 16 characters
+	lea	rpstr(a5),a0		;Point to input string area
+	move.l	a0,d2
+	SYS	Read			;Read(Input(), rpstr, 16L)
+	move.l	d0,d4			;Save read length while we close shop
+d353 1
+a353 1
+					;We'll assume screen height < 999 rows	
+d475 1
+a475 1
+	
+d508 1
+a508 1
+	
+d511 1
+a511 1
+	
+d634 1
+a634 1
+	jsr	asprintf	
+d733 1
+a733 1
+	addq.w	#1,a3	
+d833 1
+a833 1
+	
+d838 1
+a838 1
+	
+d845 2
+a846 2
+	lea	fib_FileName(a0),a0	;a = &Fipb->fib_FileName
+	lea	fib_FileName(a1),a1	;b = &Fipb->fib_FileName
+d969 1
+a969 1
+*		       a0      a1          
+d1246 1
+a1246 1
+	lea	ColonStr(a4),a1	
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d31 2
+a32 1
+fib_FileName	EQU	$8
+@

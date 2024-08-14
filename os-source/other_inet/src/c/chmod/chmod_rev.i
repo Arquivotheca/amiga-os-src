@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'24.11.92'
+	ENDM
+VERS	MACRO
+		dc.b	'chmod 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'chmod 37.2 (24.11.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: chmod 37.2 (24.11.92)',0
+	ENDM

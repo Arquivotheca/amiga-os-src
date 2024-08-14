@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'11.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'XlEdit 1.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'XlEdit 1.3 (11.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: XlEdit 1.3 (11.7.93)',0
+	ENDM

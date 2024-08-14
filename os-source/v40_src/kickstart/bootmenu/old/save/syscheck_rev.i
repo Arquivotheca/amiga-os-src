@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	182
+DATE	MACRO
+		dc.b	'13.9.90'
+	ENDM
+VERS	MACRO
+		dc.b	'syscheck 36.182'
+	ENDM
+VSTRING	MACRO
+		dc.b	'syscheck 36.182 (13.9.90)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: syscheck 36.182 (13.9.90)',0
+	ENDM

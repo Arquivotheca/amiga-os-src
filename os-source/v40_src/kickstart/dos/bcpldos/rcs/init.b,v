@@ -1,0 +1,200 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.39.09;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@filesystem initialisation
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+******************************************************************************/
+
+
+SECTION "INIT"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+
+manifest $(
+    bsize = (Disc.sector.size >> 2) - 1
+    b.file.secondarytype = bsize
+    b.file.filename = bsize-19 $)
+
+//global $( putch: -41 $)
+
+// Passed a parameter packet containing:
+// Arg1: Name (ignored)
+// Arg2: Startup info: 
+//   Vector containing unit, disc driver name, environment & flags
+// Arg3: Pointer to device node
+
+// Envec is some space which is used for the disc IOB
+// and also for a copy of the envec passed in parm pkt
+
+LET fh3init ( parm.pkt, discspace ) BE
+$(
+   LET num.buffers = ?
+   LET arg = parm.pkt!pkt.arg2
+   LET node = parm.pkt!pkt.arg3
+   LET rc = FALSE
+
+   soft.errors    := 0
+
+   unit.no  := arg!fs.unit
+   devicename := arg!fs.device
+   envec := arg!fs.envec
+   OpenFlags := arg!fs.flags
+   disc.dev := discspace
+   disc.extra.dev := discspace+IO.size+1
+
+   UNLESS node = 0 DO node!dev.task := taskid()
+
+   bitmap := 0
+
+   size.block     := envec ! envec.szblk
+   n.surfaces     := envec ! envec.nsur
+//   sector.origin  := envec ! envec.secorg
+//   n.secsperblock := envec ! envec.nsecblk
+   n.blockspertrk := envec ! envec.nblktrk
+   n.resblocks    := envec ! envec.nresblk
+   prealloc       := envec ! envec.prefac
+   intleave       := envec ! envec.intfac
+   lowercyl       := envec ! envec.lowcyl
+   uppercyl       := envec ! envec.upcyl
+
+   n.bufmemtype := envec!0 >= envec.bufmemtype ->
+      envec!envec.bufmemtype, memf.pubclear
+
+   b.file.upb     := size.block-1
+   num.buffers    := envec ! envec.nbuffers
+
+   n.blockspercyl := n.blockspertrk * n.surfaces
+   keylwb         := n.resblocks
+   keyupb         := ( uppercyl - lowercyl + 1 ) * n.blockspercyl - 1
+   n.blocks       := keyupb - keylwb + 1
+   rootkey        := ( keyupb + keylwb ) / 2
+   lowercyl       := n.blockspercyl * lowercyl  // Now the offset
+
+   b.file.stype   := b.file.upb
+   b.file.parent  := b.file.upb - 2
+
+   b.file.hashchain := b.file.upb - 3
+
+   b.file.name    := b.file.upb - 19
+   b.file.date    := b.file.upb - 22
+   b.dir.hashmax  := b.file.upb - 50
+   b.file.keymax  := b.dir.hashmax
+   b.size.hashtab := b.dir.hashmax - b.dir.hashtab + 1
+   b.root.bitmap  := b.file.upb - 48   // NHG
+   b.root.bmvalid := b.file.upb - 49 // NHG
+   b.root.mapsize := b.file.date - b.root.bitmap - 1   // NHG
+   b.file.protect := b.file.upb - 47
+   b.file.bytesize:= b.file.upb - 46
+   b.file.infobase:= b.file.upb - 45 
+   BM.blocksize   := b.file.upb // NHG
+   byte.datasize  := (size.block-b.data.database)<<2  // data area size in bytes
+
+   disc.running      := FALSE // tjk
+   lock.queue        := 0     // tjk
+   current.volume    := 0     // tjk
+   motor.ticks       := 0     // tjk
+   free.buffer.queue := 0
+   filesopen         := FALSE // NHG
+   mapblocks         := 0     // NHG
+   writingmap        := FALSE // NHG
+   disktype          := type.nodisk
+   closepkt          := 0
+   datakey           := rootkey
+
+
+   b.file.extension := b.file.upb - 1
+
+   UNLESS getbuffers( num.buffers ) GOTO initfail
+
+   // Attempt to open device
+   IF OpenDevice( disc.dev, devicename, unit.no, OpenFlags ) = 0 then
+      GOTO initfail
+
+   copyvec(disc.dev,disc.extra.dev,IO.size)
+   bitmap := 0
+   wrprot := TRUE   // At least until we know
+
+   bitmap.upb := ( n.blocks - 1 ) / bitsperword
+
+   valid.buffer.queue   := 0
+   pending.queue        := 0
+   waiting.queue        := 0
+
+
+   $(
+      disc.co := createco (   disc, disc.stsize )
+      kill.co := createco ( cokill, kill.stsize )
+
+      IF ( kill.co \= 0 ) & ( disc.co \= 0 ) THEN BREAK
+
+      deleteco ( kill.co )
+      deleteco ( disc.co )
+
+      GOTO initfail 
+
+   $) REPEAT
+
+   callco ( kill.co, 0 )
+   callco ( disc.co, 0 )
+   rc := TRUE
+
+   // Exit here
+
+initfail:
+   parm.pkt!pkt.res1 := rc
+   parm.pkt!pkt.res2 := result2(TRUE,rc)
+   UNLESS rc DO 
+   $( unloadseg( free.buffer.queue )
+   $)
+$)
+
+AND getbuffers(num) = VALOF
+$( FOR i = 1 TO num DO
+   $(
+      LET buf = getmem ( b.file.upb + buf.prefix, n.bufmemtype )
+      IF buf = 0 RESULTIS FALSE
+      buf ! buf.buf      := buf + buf.prefix
+      ! buf              := free.buffer.queue
+      free.buffer.queue  := buf
+   $)
+   RESULTIS TRUE
+$)
+@

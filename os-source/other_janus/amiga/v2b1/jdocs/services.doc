@@ -1,0 +1,316 @@
+
+Amiga/PC Services  --  Bridge Board
+Robert J. Mical
+Copyright (C) 1987, 1988, Commodore-Amiga Inc.
+
+
+
+
+This section of the Janus reference documentation describes programming 
+Janus services on the Amiga 2000 with a Bridge board installed.  The section 
+is divided into the following subsections:
+
+This document represents a beta release of the final doc.  It's pretty solid, 
+but there's a chance that there might exist discrepancies between this 
+doc and the autodocs and the include files.  If there is a difference, 
+believe the autodocs and the include files.
+
+	- Overview
+	- Service Creator Techniques
+	- Service User Techniques
+	- AddService()
+	- AllocServiceMem()
+	- CallService()
+	- DeleteService()
+	- FreeServiceMem()
+	- GetService()
+	- ReleaseService()
+	- Examples
+
+
+
+=== Overview ==================================================================
+The Janus service system provides a general-purpose mechanism with which 
+one or more Amiga and PC application programs can communicate and share 
+data.  This is the highest level of Amiga/PC communications.  
+
+The service system lays on top of the Bridge board Janus interrupt-driven 
+Amiga/PC interface.  By using services, you get to take advantage of all 
+the power of the Amiga/PC interface, with none of the hassle.  
+
+The service provides a method of communication in the following way:
+	- One application creates the service by calling AddService()
+	- One or more other applications establish communications by 
+	  asking the system to link them to that service by calling 
+	  GetService().  On the Amiga, several applications can 
+	  link to a service simultaneously
+	- Once the link is established, any application can 
+	  communicate with the other(s) by setting data in the 
+	  service's parameter block and then calling CallService().  
+	  When CallService() is called, any application connected to the 
+	  service (other than the one initiating the service) will be 
+	  signalled that a service communication is available.  
+	  Also, on the Amiga side there are ways to specify that 
+	  you want to learn about messages from the PC only, 
+	  and that you want your CallService() calls to signal 
+	  the PC only, not any other Amiga tasks that may be 
+	  sharing the service
+
+The application programs that intend on sharing a service have to be 
+cooperative in the sense that each has some preknowledge about the other:  
+	- They must have a common knowledge about the ApplicationID 
+	  and the LocalID numbers, which are used to find one another
+	- They must agree on the contents and meanings of the data 
+	  in the parameter memory
+
+Throughout the discussion below, unless otherwise noted the program 
+being discussed could be either an Amiga or a PC program.  
+
+An Amiga program that connects with the service system provides a 
+signal number as an argument to the routine ( AddService() or GetService() ) 
+that is called to link the program to a service.  This signal 
+number is a normal Amiga task signal number, which is usually gotten 
+from a call to Exec's AllocSignal().  After the program is connected 
+to the service system it can call Wait() with the service signal bit 
+used to create a signal mask.  When the task is awakened by this bit, 
+voila, the task knows that some service communication has been initiated 
+by some other user of that service.  
+
+A PC program that uses the service system performs the same steps, 
+except that instead of providing a signal bit the PC program provides 
+a pointer to an assembly language routine which will be called 
+when a service communication takes place.  In the simplest case, 
+the assembly language routine sets a bit to specify to the main 
+program that a service communication has taken place, and the 
+main program sits in a busy-wait loop looking for that bit to be set.  
+(Ah, I remember the days when a busy-wait solution was OK.)  
+
+A program that wants to make a service available calls AddService().  
+If the calls succeeds it establishes a new service and allocates 
+a block of Janus parameter memory.  After the service has been added 
+it is available to any program that wants to use the service and share 
+the parameter memory, provided that the program knows the service's 
+ApplicationID and LocalID.  
+
+The ApplicationID and LocalID numbers of a service are used by programs 
+to find and link with the service.  The ApplicationID number is a 
+32-bit number assigned by Commodore-Amiga.  The LocalID number is 
+a number defined by the creator of the service.  
+
+Programs which want to use the service must call GetService(), which 
+establishes the connection between the program and the service.  
+If the call to GetService() succeeds, the program receives a pointer 
+to a ServiceData structure which will be filled out with data 
+describing the service, most importantly the size and location of 
+the service's parameter block.  
+
+If the call to GetService() fails, this means that the service is not 
+currently available.  Normally this is because the service hasn't been 
+added to the system yet.  If you really want the service, you could try to 
+find it by calling GetService() periodically until the call succeeds.  
+But this is an inelegant and wasteful solution.  Instead, the Amiga 
+service system provides a way for your program to be informed automatically 
+when the service comes available.  You achieve this by setting the 
+GETS_WAIT argument flag when you call GetService().  If you have set 
+the GETS_WAIT flag and the service isn't available yet when you call 
+GetService() then you will be linked into the system as if you had 
+gotten the service, and when the service finally does come available your 
+task will be signalled.  Pretty nifty, eh?  
+
+On the PC side the result is the same though the technique is slightly 
+different.  On the PC you can specify that if a service isn't currently 
+available you want to wait until it comes available, but what this 
+means is that your program simply stops cold, waiting for the service.  
+On the Amiga that would wreak all sorts of havoc, but on the PC it's 
+acceptable.  
+
+A special facility provided by the Bridge interface is the autoload 
+capability, where an application when calling GetService() can specify 
+that if a service isn't currently available the service system should 
+attempt to load and execute a program that has an ApplicationID and 
+LocalID that matches the request.  The service application, if it exists, 
+would, presumably, call AddService() soon after it began to run, at which 
+point the PC's GetService() request would succeed.  By using this 
+facility, for example, a PC program that wants to avail itself of a 
+currently-unavailable Amiga service can cause the service to come into 
+being without requiring the user to invoke a program.  This feature is 
+defined for both the Amiga and the PC, but we haven't figured out yet 
+exactly what it means (and how it would work) for the Amiga to cause a 
+PC program to begin executing.  
+
+Once you have added or gotten a service, you have become a "service user."  
+Most of the following discussion refers to the service user without 
+distinction between the program that added the service and those that 
+got the service.  In fact, the only real distinctions are:
+	- If you AddService() you must DeleteService(), whereas if you 
+	  GetService() you must ReleaseService()
+	- If you AddService() you should check the EXPUNGE_SERVICE flag 
+	  every time you are awakened, whereas if you GetService() you 
+	  should check the SERVICE_DELETED flag every time you are awakened.  
+	  These flags rae described below
+
+After you sucessfully call AddService() or GetService(), you will have 
+gotten a pointer to a ServiceData structure, which is the base data 
+structure of a service.  This data structure is located in parameter 
+memory of the Bridge board and therefore is accessible by both the Amiga 
+and the PC.  In this structure, which is defined in services.[hi], most 
+of the fields are used by the system to manage the service.  However, 
+there are a few structure elements that are particularly useful:  
+	- Flags has the service status flags.  You must pay attention 
+	  to some of these, such as SERVICE_DELETED and EXPUNGE_SERVICE
+	- ServiceDataLock is a Janus lock byte, which is initialized 
+	  for you by the system and which may then be used to prevent 
+	  multiple access to the ServiceData structure.  You aren't 
+	  required to use this lock byte, but it's provided for 
+	  you in case you need it.  We anticipate that many applications 
+	  will need it
+	- AmigaMemPtr and PCMemPtr point to the Bridge memory that 
+	  was allocated for the service at the time that AddService() 
+	  was called.  Typically, this will be used as a shared-memory 
+	  buffer for service users
+
+With all these pieces in place, your programs are ready to start 
+communicating.  The only other things you need are your own protocol 
+describing who can do what in the shared memory (and whether you should 
+lock the ServiceDataLock before using the memory), and you need a way 
+to signal the other service users that new service communications are 
+available.  
+
+A service user signals the other users with the CallService() routine.  
+Normally, when you CallService() all other service users will be 
+signalled, on both the Amiga and the PC sides.  Additionally, you have 
+the ability to designate when you first add or get the service that you 
+only want to receive service signals that originate on the other side 
+of the Bridge.  For example, if you're an Amiga service user you can 
+choose to receive service signals only when generating by a call to 
+CallService() on the PC; you will not be signalled when another Amiga 
+user of the service calls CallService().  
+
+Every time you receive a service signal, you must examine one of two 
+flags in the Flags field of the service's ServiceData structure.  
+If you added the service, you must check the EXPUNGE_SERVICE flag, 
+which is an advisory flag that can be set by any service user to 
+ask you to delete the service.  You can ignore this flag if you must, 
+but it's highly recommended that you respond to it by deleting 
+you service as requested.  If, on the other hand, you linked to the 
+service using GetService() then every time you are signalled you should 
+check the SERVICE_DELETED flag.  This flag gets set when the service 
+creator calls DeleteService().  It means that the service is on its way 
+out of the system so you should release your usage of the service as 
+soon as possible.  
+
+Note that even though a service has ben deleted it's not removed form the 
+system until all users of the service release it.  This is especially 
+significant regarding the memory buffers of the service, which will 
+remain valid until the last user releases the service.  A service that's 
+deleted is no longer available to new users, so that a call to GetService() 
+that follows the call to DeleteService() will result in the old service 
+not being found.  Likewise, a call to AddService() after a call to 
+DeleteService() will be successful, even though the old service may not 
+yet have been completely removed from the system.  Subsequent calls to 
+GetService() will find the new service, not the old.  
+
+When you're done with a service or when you've been asked to let go of 
+the service, you must clean up after yourself.  Any program that has 
+successfully called AddService() must call DeleteService() when it's 
+through with the service.  Any program that has successfully called 
+GetService() must call ReleaseService() when it's through with the service.  
+
+When the program who called AddService() wants to remove the service 
+from the system, the program calls DeleteService().  With the call to 
+DeleteService() the service becomes unavailable to any new users.  
+As noted above, the service doesn't become unavailable to those who are 
+already linked into the service.  
+
+When the creator of the service calls DeleteService(), the SERVICE_DELETED 
+flag will be set in the service's ServiceData structure, and then all 
+users of the service will be signalled.  Thus, it's the service user's 
+responsibility to check the SERVICE_DELETED flag every time they are 
+awakened by the service signal.  When this flag is found set, the service 
+users should call the ReleaseService() routine as soon as possible.  
+
+
+There is much to be said about memory allocation and management under 
+services.  Please refer to the "Bridge Memory" section of this document for 
+details.  
+
+
+
+=== Service User Techniques ===================================================
+GetService()
+WillWait flag, and the sequence
+AutoLoad flag and the facts, including setting EXPUNGE_SERVICE if you want 
+that, although you don't have to.  
+AllocServiceMem() and FreeServiceMem()
+You should examine the SERVICE_DELETED bit every time you are signalled, 
+before you examine and data that may have been passed to you by the service 
+users.  Once the service is marked as having been deleted, you can no longer 
+be sure that the data in in any buffer reflects valid information.  
+For instance, if you asked for another service user to fill a shared buffer 
+with data and the next time your awakened you notice that the SERVICE_DELETED 
+flag has been set, you don't know which of two things has happened:
+    - the other user called DeleteService() before supplying the requested data 
+    - the other user supplied the requested data, signalled you, but before 
+      you responded to the signal the other user also called DeleteService() 
+On finding it set, call ReleaseService as soon as possible.  
+
+
+
+=== AddService() ==============================================================
+This routine allocates the requested block of memory and clears this memory
+to zero.  
+If any users are waiting for this service, 
+they will be sent a signal after the service is added to the system.  
+
+Returns JSERV_OK if al went well.  
+Refer to the subsection "Add/GetService() Return Codes" below for a 
+description of the error codes that can be returned by this code.  
+
+
+
+=== GetService() ==============================================================
+The programmer can set the GETS_WAIT argument to TRUE, which means 
+that even if the service is not currently available the task will be 
+waiting on the signal bit that it has provided in case the service does 
+come available.  If the task is later signalled with that bit, this means 
+that the service has come available and the task can then examine its 
+ServiceData structure to obtain the data for the service.  Meanwhile, 
+if the service never comes available and the task no longer wants the 
+service, the task can safely call ReleaseService() to designate that 
+it's no longer waiting for the service.  Note that if you set GETS_WAIT 
+when you call GetService() and you are returned a pointer to a ServiceData 
+structure then you must call ReleaseService() at some point even if you 
+never connect with the service.
+
+As noted, if you set the GETS_WAIT argument to TRUE you will get 
+a pointer to a ServiceData structure back whether or not the service is 
+available yet (unless some other error has occurred such as 
+out-of-Janus-memory or guru-caprice).  The correct way to check whether 
+or not the ServiceData structure points to a real or pending service 
+is by examining the UserCount field of the ServiceData structure.  
+The UserCount field will be zero until the service is added to the system.
+
+
+
+=== CallService() =============================================================
+This routine causes all other users of the service to be notified.  
+
+
+
+=== ReleaseService() ==========================================================
+This routine undoes everything that GetService() does.
+
+Those who call GetService() must call ReleaseService() when they're done with 
+the service.  
+
+
+
+=== DeleteService() ===========================================================
+This routine undoes everything that AddService() does.
+
+The program that calls AddService() calls DeleteService() to begin the process 
+of removing the service from the system.  
+
+
+
+=== Examples ==================================================================

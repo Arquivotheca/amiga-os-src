@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'3.10.91'
+	ENDM
+VERS	MACRO
+		dc.b	'toolmenu 37.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'toolmenu 37.3 (3.10.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: toolmenu 37.3 (3.10.91)',0
+	ENDM

@@ -1,0 +1,1246 @@
+head     39.12;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+39.12
+date     93.11.05.14.58.16;  author jesup;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     93.08.24.16.44.24;  author peter;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     93.08.23.19.32.07;  author peter;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     93.08.19.16.35.39;  author peter;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     93.07.16.18.25.07;  author peter;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     93.06.02.15.50.51;  author peter;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.05.21.17.33.53;  author peter;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     93.05.07.17.07.06;  author peter;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.05.03.14.39.10;  author peter;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     93.04.27.14.41.23;  author peter;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.12.03.14.15.15;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.12.03.11.29.41;  author peter;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.10.30.15.21.02;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Code for minor Wack command operations.
+@
+
+
+39.12
+log
+@added Call function
+@
+text
+@/*
+ * Amiga Grand Wack
+ *
+ * ops.c -- Code for minor Wack command operations.
+ *
+ * $Id: ops.c,v 39.11 93/08/24 16:44:24 peter Exp Locker: jesup $
+ *
+ * Contains code for many of the smaller Wack operations, including
+ * base and BPTR conversion, indirection, token evaluation, etc.
+ *
+ */
+
+#include "symbols.h"
+#include "special.h"
+#include "std.h"
+#include "parse.h"
+
+#include "sys_proto.h"
+#include "asm_proto.h"
+#include "sat_proto.h"
+#include "find_proto.h"
+#include "parse_proto.h"
+#include "define_proto.h"
+#include "link_proto.h"
+#include "decode_proto.h"
+#include "ops_proto.h"
+#include "io_proto.h"
+
+extern long FrameSize;
+extern unsigned long CurrAddr;
+extern unsigned long SpareAddr;
+extern unsigned long DisasmAddr;
+
+/* In the dump, insert a space every this number of bytes */
+long DumpSpacing = 4;
+long DumpASCII = 1;
+long ReadSize = 4;
+
+#define MAXINDIR 200	/* maximum number of indirections */
+
+long indirStack[MAXINDIR];
+short indirCount = 0;
+
+
+/**********************************************************************/
+
+/* Frame Position Movement */
+
+STRPTR
+NextWord( char *arg )
+{
+    CurrAddr += 2;
+    while ( *arg++ == '>' )
+    {
+	CurrAddr += 2;
+    }
+    ShowFrame();
+
+    return( NULL );
+}
+
+STRPTR
+BackWord( char *arg )
+{
+    CurrAddr -= 2;
+    while ( *arg++ == '<' )
+    {
+	CurrAddr -= 2;
+    }
+    ShowFrame();
+
+    return( NULL );
+}
+
+STRPTR
+NextFrame( char *arg )
+{
+    CurrAddr += FrameSize;
+    ShowFrame();
+    while ( *arg++ == '.' )
+    {
+	CurrAddr += FrameSize;
+	ShowFrame();
+    }
+
+    return( NULL );
+}
+
+STRPTR
+BackFrame( char *arg )
+{
+    CurrAddr -= FrameSize;
+    ShowFrame();
+    while ( *arg++ == ',' )
+    {
+	CurrAddr -= FrameSize;
+	ShowFrame();
+    }
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+Disassemble( char *arg )
+{
+    unsigned long endaddr;
+    NewLine();
+    do
+    {
+	endaddr = FrameSize + DisasmAddr;
+	while ( DisasmAddr < endaddr )
+	{
+	    DisasmAddr += (ULONG)do_decode( (caddr_t) DisasmAddr );
+	    NewLine();
+	}
+    }
+    while ( *arg++ == ';' );
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+ShiftBPtr( char *arg )
+{
+    long bptr;
+
+    if ( parseHexNum( arg, &bptr, NULL ) )
+    {
+	PPrintf (" => %lx\n", bptr<<2);
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+STRPTR
+ToDec( char *arg )
+{
+    long num;
+
+    if ( parseHexNum( arg, &num, NULL ) )
+    {
+	PPrintf (" => %ld\n", num);
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+STRPTR
+ToHex( char *arg )
+{
+    long num;
+
+    if ( parseDecNum( arg, &num ) )
+    {
+	PPrintf (" => %lx\n", num);
+    }
+    else
+    {
+	PPrintf("Bad syntax: expected decimal argument\n");
+    }
+
+    return( NULL );
+}
+
+STRPTR
+ClearScreen( void )
+{
+    Putchar ('L'-'A'+1);
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+/* Puts current address on stack, bumps stack down if full
+ * (so we lose old stacked values, instead of being unable
+ * to do new indirections
+ */
+
+void
+stackCurrent( void )
+{
+    if (indirCount < MAXINDIR)
+    {
+	indirStack[indirCount++] = CurrAddr;
+    }
+    else
+    {
+	int i;
+	for ( i = 0; i < MAXINDIR-1; i++ )
+	{
+	    indirStack[ i ] = indirStack[ i+1 ];
+	}
+	indirStack[MAXINDIR-1] = CurrAddr;
+    }
+}
+
+STRPTR
+Indirect( STRPTR arg )
+{
+    stackCurrent();
+
+    CurrAddr = ReadLong( (APTR) CurrAddr ) & 0xfffffffe;
+    ShowFrame();
+
+    return( arg );
+}
+
+/**********************************************************************/
+
+STRPTR
+IndirectBptr( STRPTR arg )
+{
+    stackCurrent();
+
+    CurrAddr = ReadLong( (APTR) CurrAddr ) << 2;
+    ShowFrame();
+
+    return( arg );
+}
+
+/**********************************************************************/
+
+STRPTR
+Exdirect( STRPTR arg )
+{
+    STRPTR result = arg;
+    if (indirCount > 0)
+    {
+	CurrAddr = indirStack[--indirCount];
+	ShowFrame();
+    }
+    else
+    {
+	PPrintf("No indirections to undo\n");
+	result = NULL;
+    }
+
+    return( result );
+}
+
+/**********************************************************************/
+
+/* We now keep a spare address pointer you can swap with the
+ * current one.  Also, certain functions that display a particular
+ * address (eg.  xxxbase, awindow, etc.) set up the SpareAddr
+ * variable.  This routine will swap the current address with
+ * the spare one.
+ */
+STRPTR
+swapSpareAddr( STRPTR arg )
+{
+    unsigned long temp;
+
+    temp = CurrAddr;
+    CurrAddr = SpareAddr;
+    SpareAddr = temp;
+    ShowFrame();
+
+    return( arg );
+}
+
+/**********************************************************************/
+
+/* These typedefs are used to invoke the single and double argument
+ * bound commands.
+ */
+typedef STRPTR (*CMDFUNC_1ARG)( char *arg );
+typedef STRPTR (*CMDFUNC_2ARGS)( char *arg1, char *arg2 );
+
+STRPTR
+evaluateSymbol( struct Symbol *sym, char *argStr )
+{
+    STRPTR result = NULL;
+
+    switch (sym->sym_Type)
+    {
+	case ACT_CONSTANT: 
+	case ACT_PGMSYMBOL:
+	    CurrAddr = sym->sym_Value1;
+	    ShowFrame();
+	    break;
+
+	case ACT_COMMAND:
+	    if ( sym->sym_Args )
+	    {
+		result = (*((CMDFUNC_2ARGS)sym->sym_Function))( sym->sym_Args, argStr );
+	    }
+	    else
+	    {
+		result = (*((CMDFUNC_1ARG)sym->sym_Function))( argStr );
+	    }
+	    break;
+
+	default: 
+	    PPrintf("Unknown symbol type\n");
+    }
+    return( result );
+}
+
+
+/**********************************************************************/
+
+STRPTR
+SizeFrame( char *arg )
+{
+    long newframesize;
+
+    if ( parseHexNum( arg, &newframesize, NULL ) )
+    {
+	FrameSize = newframesize;
+	ShowFrame();
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+NextCount( char *arg )
+{
+    long i;
+
+    if ( parseHexNum( arg, &i, NULL ) )
+    {
+	CurrAddr += i;
+	ShowFrame();
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+BackCount( char *arg )
+{
+    long i;
+
+    if ( parseHexNum( arg, &i, NULL ) )
+    {
+	CurrAddr -= i;
+	ShowFrame();
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+Resume( void )
+{
+    Putchar ('\n');
+    freeCPU();
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+Call( char *arg )
+{
+    long addr;
+
+    if ( arg = parseHexNum( arg, &addr, NULL ) )
+    {
+	CallFunction((APTR) addr);
+    }
+    else
+    {
+	if (*arg)
+		BadSyntax();
+        else
+		CallFunction((APTR) CurrAddr);
+    }
+
+    Putchar ('\n');
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+SetBreakPoint( void )
+{
+#if 000
+    long i;
+
+    PPrintf ("%08lx %ld ^", CurrAddr, getBrkCnt (CurrAddr));
+    if ( parseAddress(arg, &i) )
+    {
+	setBrkPt (i);
+    }
+    else
+        Putchar ('\n');
+#endif
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+AssignMem( char *arg )
+{
+    LONG num;
+    ULONG writesize;
+
+    if ( parseHexNum( arg, &num, &writesize ) )
+    {
+	if ( writesize == 1 )
+	{
+	    WriteByte( (APTR)CurrAddr, num );
+	}
+	else if ( writesize == 2 )
+	{
+	    WriteWord( (APTR)CurrAddr, num );
+	}
+	else
+	{
+	    WriteLong( (APTR)CurrAddr, num );
+	}
+        ShowFrame();
+    }
+    else
+    {
+	BadSyntax();
+    }
+
+    return( NULL );
+}
+
+/**********************************************************************/
+
+STRPTR
+Nothing1( void )
+{
+    return( NULL );
+}
+
+STRPTR
+Nothing2( void )
+{
+    PPrintf("Nothing happens.\n");
+
+    return( NULL );
+}
+
+STRPTR
+Nothing3( void )
+{
+    PPrintf("You are in a maze of twisty subroutines, all alike.\n");
+
+    return( NULL );
+}
+
+void
+BadSyntax( void )
+{
+    PPrintf("Bad syntax: expected hex argument\n");
+}
+
+/**********************************************************************/
+
+STRPTR
+setDump( char *arg )
+{
+    char token[ MAXTOKENLEN ];
+    int showstatus = 1;
+
+    while ( arg = parseToken( arg, token ) )
+    {
+	if ( !stricmp( token, "narrow" ) )
+	{
+	    DumpSpacing = 4;
+	    showstatus = 0;
+	}
+	else if ( !stricmp( token, "wide" ) )
+	{
+	    DumpSpacing = 2;
+	    showstatus = 0;
+	}
+	else if ( !stricmp( token, "ascii" ) )
+	{
+	    DumpASCII = 1;
+	    showstatus = 0;
+	}
+	else if ( !stricmp( token, "noascii" ) )
+	{
+	    DumpASCII = 0;
+	    showstatus = 0;
+	}
+	else if ( !stricmp( token, "word" ) )
+	{
+	    ReadSize = 2;
+	    showstatus = 0;
+	}
+	else if ( !stricmp( token, "longword" ) )
+	{
+	    ReadSize = 4;
+	    showstatus = 0;
+	}
+	else
+	{
+	    PPrintf("Bad syntax: setdump (WORD|LONGWORD) (WIDE|NARROW) (ASCII|NOASCII)\n");
+	}
+    }
+    if ( showstatus )
+    {
+	PPrintf( "Dump mode: read by %sword, %s output, %s ASCII\n",
+	    ReadSize == 4 ? "long" : "",
+	    DumpSpacing == 4 ? "narrow" : "wide",
+	    DumpASCII ? "show" : "hide" );
+    }
+
+    return( NULL );
+}
+
+void
+asciiByte( UBYTE data, char **strptr )
+{
+    char first = '.';
+    char second = '.';
+    if ( ( data ) && ( data < 0x80 ) )
+    {
+	if ( data > 31 )
+	{
+	    first = ' ';
+	    second = (char) data;
+	}
+	else
+	{
+	    first = '^';
+	    second = (char) (data + 'A' - 1 );
+	}
+    }
+    *(*strptr)++ = first;
+    *(*strptr)++ = second;
+}
+
+void
+ShowWord( unsigned long data, char **asciibufptr, long bytecount )
+{
+    PPrintf( "%04lx", data );
+    asciiByte( data >> 8, asciibufptr );
+    asciiByte( data & 0xFF, asciibufptr );
+    if ( ( bytecount % DumpSpacing ) == 0 )
+    {
+	PPrintf(" ");
+    }
+}
+
+void
+ShowFrame(void)
+{
+    long count = FrameSize;
+    long addr = CurrAddr;
+    unsigned long data;
+    long bytecount;
+    char ascii[33];
+    char *asciiptr;
+
+    DisasmAddr = CurrAddr;
+    while ( count > 0 )
+    {
+	bytecount = 0;
+	asciiptr = ascii;
+	PPrintf("%08lx ", addr );
+	while ( ( count > 0 ) && ( bytecount < 16 ) )
+	{
+	    if ( count > 0 )
+	    {
+		if ( ( ReadSize == 2 ) || ( count < 4 ) )
+		{
+		    data = (unsigned short)ReadWord( (void *)addr );
+		    bytecount += 2;
+		    ShowWord( data, &asciiptr, bytecount );
+		    addr += 2;
+		    count -= 2;
+		}
+		else
+		{
+		    data = ReadLong( (void *)addr );
+		    bytecount += 2;
+		    ShowWord( data >> 16, &asciiptr, bytecount );
+		    bytecount += 2;
+		    ShowWord( data & 0xFFFF, &asciiptr, bytecount );
+		    addr += 4;
+		    count -= 4;
+		}
+	    }
+	}
+	*asciiptr = '\0';
+	if ( DumpASCII )
+	{
+	    PPrintf("%s", ascii);
+	}
+	NewLine();
+    }
+}
+
+/**********************************************************************/
+@
+
+
+39.11
+log
+@Fixed setdump narrow to work again.  Fixed setdump help.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.10 93/08/23 19:32:07 peter Exp Locker: peter $
+d381 24
+@
+
+
+39.10
+log
+@The "=" operator can now write by byte, word, or long, depending on the
+number of hex digits typed.  The "setdump" command now allows control
+over whether word or long-word reads are used to display frames.  The
+default is now read by long-word.  If the frame size is not a whole
+number of long words, the last read is a short-word.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.9 93/08/19 16:35:39 peter Exp Locker: peter $
+d509 1
+a509 1
+	    PPrintf("Bad syntax: setdump [wide|narrow] [ascii|noascii] [word|longword]\n");
+d514 1
+a514 1
+	PPrintf( "Dump mode: %sword reads, %s, %s ASCII\n",
+d551 1
+a551 1
+    if ( ( ( bytecount * 2 ) % DumpSpacing ) == 0 )
+@
+
+
+39.9
+log
+@setdump command now only prints state if no args given.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.8 93/07/16 18:25:07 peter Exp Locker: peter $
+d34 2
+a35 1
+long DumpSpacing = 2;
+d37 1
+d131 1
+a131 1
+    if ( parseHexNum( arg, &bptr ) )
+d148 1
+a148 1
+    if ( parseHexNum( arg, &num ) )
+d321 1
+a321 1
+    if ( parseHexNum( arg, &newframesize ) )
+d341 1
+a341 1
+    if ( parseHexNum( arg, &i ) )
+d361 1
+a361 1
+    if ( parseHexNum( arg, &i ) )
+d411 1
+d413 1
+a413 1
+    if ( ( parseHexNum( arg, &num ) ) && ( ( num & 0xFFFF0000 ) == 0 ) )
+d415 12
+a426 1
+	WriteWord((APTR)CurrAddr, num );
+d479 1
+a479 1
+	    DumpSpacing = 2;
+d484 1
+a484 1
+	    DumpSpacing = 1;
+d497 10
+d509 1
+a509 1
+	    PPrintf("Bad syntax: setdump [wide|narrow] [ascii|noascii]\n");
+d514 3
+a516 1
+	PPrintf("Dump mode: %s, %s ASCII\n", DumpSpacing == 2 ? "narrow" : "wide",
+d546 12
+d563 1
+a563 1
+    long wordcount;
+d570 1
+a570 1
+	wordcount = 0;
+d573 1
+a573 1
+	while ( ( count > 0 ) && ( wordcount < 8 ) )
+d577 9
+a585 6
+		data = (unsigned short)ReadWord( (void *)addr );
+		PPrintf("%04lx",data);
+		asciiByte( data >> 8, &asciiptr );
+		asciiByte( data & 0xFF, &asciiptr );
+		wordcount++;
+		if ( ( wordcount % DumpSpacing ) == 0 )
+d587 7
+a593 1
+		    PPrintf(" ");
+a594 2
+		addr += 2;
+		count -= 2;
+@
+
+
+39.8
+log
+@Removed ACT_OFFSET stuff.  ACT_PGMSYMBOL now recognized.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.7 93/06/02 15:50:51 peter Exp Locker: peter $
+d459 1
+a459 1
+    int quiet = 0;
+d463 1
+a463 1
+	if ( !stricmp( token, "quiet" ) )
+a464 4
+	    quiet = 1;
+	}
+	else if ( !stricmp( token, "narrow" ) )
+	{
+d466 1
+d471 1
+d476 1
+d481 1
+d485 1
+a485 1
+	    PPrintf("Bad syntax: setdump [wide|narrow] [ascii|noascii] [quiet]\n");
+d488 1
+a488 1
+    if ( !quiet )
+@
+
+
+39.7
+log
+@Whereis() function (ApproxSymIndirect()) moved to define.c.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.6 93/05/21 17:33:53 peter Exp Locker: peter $
+d289 1
+a289 1
+	case ACT_BASE: 
+a302 5
+	    break;
+
+	case ACT_OFFSET:
+	    CurrAddr = sym->sym_Value2 + sym->sym_Value1;
+	    ShowFrame();
+@
+
+
+39.6
+log
+@Command functions now return NULL string.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.5 93/05/07 17:07:06 peter Exp Locker: peter $
+a178 13
+
+    return( NULL );
+}
+
+/**********************************************************************/
+/* jimm: 4/15/89: whereis: indirect/where/exdirect		      */
+STRPTR
+Whereis( void )
+{
+    CPTR tempaddr = CurrAddr;
+    CurrAddr = ReadLong( (APTR) CurrAddr ) & 0xfffffffe;
+    ApproxSym( "" );
+    CurrAddr = tempaddr;
+@
+
+
+39.5
+log
+@Upcoded simple stuff from actions.asm and placed it here.  Switched to
+new parsing routines.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.4 93/05/03 14:39:10 peter Exp Locker: peter $
+d47 1
+a47 1
+void
+d56 2
+d60 1
+a60 1
+void
+d69 2
+d73 1
+a73 1
+void
+d83 2
+d87 1
+a87 1
+void
+d97 2
+d103 1
+a103 1
+void
+d118 2
+d124 1
+a124 1
+void
+d137 2
+d141 1
+a141 1
+void
+d154 2
+d158 1
+a158 1
+void
+d171 2
+d175 1
+a175 1
+void
+d179 2
+d185 1
+a185 1
+void
+d192 2
+d221 2
+a222 2
+void
+Indirect( void )
+d228 2
+d234 2
+a235 2
+void
+IndirectBptr( void )
+d241 2
+d247 2
+a248 2
+void
+Exdirect( void )
+d250 1
+d259 1
+d261 2
+d273 2
+a274 2
+void
+swapSpareAddr( void )
+d282 2
+d291 2
+a292 2
+typedef void * (*CMDFUNC_1ARG)( char *arg );
+typedef void * (*CMDFUNC_2ARGS)( char *arg1, char *arg2 );
+d294 1
+a294 1
+void *
+d297 1
+a297 1
+    void *result = NULL;
+d332 1
+a332 1
+void
+d346 2
+d352 1
+a352 1
+void
+d366 2
+d372 1
+a372 1
+void
+d386 2
+d392 1
+a392 1
+void
+d397 2
+d403 1
+a403 1
+void
+d417 2
+d423 1
+a423 1
+void
+d437 2
+d443 1
+a443 1
+void
+d446 1
+d449 1
+a449 1
+void
+d453 2
+d457 1
+a457 1
+void
+d461 2
+d473 1
+a473 1
+void
+d511 2
+@
+
+
+39.4
+log
+@Minor cleanup.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.3 93/04/27 14:41:23 peter Exp Locker: peter $
+d16 1
+d22 1
+d25 1
+d45 69
+d119 1
+a119 1
+    if ( hexArg( arg, &bptr ) )
+d134 1
+a134 1
+    if ( hexArg( arg, &num ) )
+d145 1
+a145 1
+ToHex( char *argStr )
+a147 1
+    char *arg;
+d149 1
+a149 1
+    if ( ( arg = nextArg( &argStr ) ) && ( IsDecNum( arg, &num ) ) )
+d258 6
+d265 1
+a265 1
+Evaluate( struct Symbol *sp, char *argStr )
+d269 1
+a269 1
+    switch (sp -> stype)
+d273 1
+a273 1
+	    CurrAddr = sp -> value1;
+d276 3
+a278 2
+	case ACT_PRIM:
+	    if ( sp->value2 )
+d280 1
+a280 1
+		result = ExecuteSym2(sp->value1, (char *)sp->value2, argStr);
+d284 1
+a284 1
+		result = ExecuteSym(sp->value1, argStr);
+d289 1
+a289 1
+	    CurrAddr = (sp->value2) + (sp -> value1);
+d292 1
+d299 1
+d307 1
+a307 1
+    if ( hexArg( arg, &newframesize ) && ( newframesize ) )
+d325 1
+a325 1
+    if ( hexArg(arg, &i) )
+d343 1
+a343 1
+    if ( hexArg(arg, &i) )
+d372 1
+a372 1
+    if ( hexArgAddr(arg, &i) )
+d388 1
+a388 1
+    if ( hexArg( arg, &num ) )
+d390 1
+a390 1
+	WriteWord((APTR)CurrAddr, num & 0xffff);
+d427 1
+a427 1
+setDump( char *argStr )
+d429 1
+a429 1
+    char *arg;
+d432 1
+a432 1
+    while ( arg = nextArg( &argStr ) )
+d434 1
+a434 1
+	if ( !stricmp( arg, "quiet" ) )
+d438 1
+a438 1
+	else if ( !stricmp( arg, "narrow" ) )
+d442 1
+a442 1
+	else if ( !stricmp( arg, "wide" ) )
+d446 1
+a446 1
+	else if ( !stricmp( arg, "ascii" ) )
+d450 1
+a450 1
+	else if ( !stricmp( arg, "noascii" ) )
+@
+
+
+39.3
+log
+@Rework of link architecture/naming and cleanup.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.2 92/12/03 14:15:15 peter Exp Locker: peter $
+d155 2
+a156 1
+    if (indirCount > 0) {
+d160 3
+a162 2
+    else {
+	PutError ("No indirections to undo",0);
+d215 1
+a215 1
+	    PutError ("Unknown symbol type",0);
+@
+
+
+39.2
+log
+@ShowFrame() now in C, supports wide/narrow, ASCII/NOASCII.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.1 92/12/03 11:29:41 peter Exp Locker: peter $
+d22 1
+a22 1
+#include "access_proto.h"
+d100 1
+a100 1
+    CurrAddr = GetMemL( (APTR) CurrAddr ) & 0xfffffffe;
+d135 1
+a135 1
+    CurrAddr = GetMemL( (APTR) CurrAddr ) & 0xfffffffe;
+d146 1
+a146 1
+    CurrAddr = GetMemL( (APTR) CurrAddr ) << 2;
+d160 1
+a160 1
+	PutError ("no indirections to undo",0);
+d213 1
+a213 1
+	    PutError ("unknown symbol type",0);
+d308 1
+a308 1
+	PutMem ((APTR)CurrAddr, num & 0xffff);
+d374 1
+a374 1
+	    PPrintf("Bad syntax: setdump [wide|narrow] [ascii|noascii] [quiet]\n\n");
+d379 1
+a379 1
+	PPrintf("Dump mode: %s, %s ASCII\n\n", DumpSpacing == 2 ? "narrow" : "wide",
+d426 1
+a426 1
+		data = (unsigned short)GetMem( (void *)addr );
+@
+
+
+39.1
+log
+@Typing colon-return no longer sets the frame size to zero.
+@
+text
+@d6 1
+a6 1
+ * $Id: ops.c,v 39.0 92/10/30 15:21:02 peter Exp Locker: peter $
+d29 1
+d31 3
+d340 106
+@
+
+
+39.0
+log
+@Initial RCS check-in.
+@
+text
+@d6 1
+a6 1
+ * $Id: $
+d39 1
+a39 1
+ShiftBPtr( char *argStr )
+a41 1
+    char *arg;
+d43 1
+a43 1
+    if ( ( arg = nextArg( &argStr ) ) && ( IsHexNum( arg, &bptr ) ) )
+d54 1
+a54 1
+ToDec( char *argStr )
+a56 1
+    char *arg;
+d58 1
+a58 1
+    if ( ( arg = nextArg( &argStr ) ) && ( IsHexNum( arg, &num ) ) )
+d219 3
+a221 1
+    if ( AddrArg(arg, &FrameSize) )
+d223 1
+d239 1
+a239 1
+    if ( AddrArg(arg, &i) )
+d257 1
+a257 1
+    if ( AddrArg(arg, &i) )
+d286 1
+a286 1
+    if ( AddrArg(arg, &i) )
+d298 1
+a298 1
+AssignMem( char *argStr )
+a300 1
+    char *arg;
+d302 1
+a302 1
+    if ( ( arg = nextArg( &argStr ) ) && ( IsHexNum( arg, &num ) ) )
+@

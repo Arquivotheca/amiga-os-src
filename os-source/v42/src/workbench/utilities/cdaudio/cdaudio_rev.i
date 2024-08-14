@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'8.3.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cdaudio 42.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdaudio 42.4 (8.3.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdaudio 42.4 (8.3.94)',0
+	ENDM

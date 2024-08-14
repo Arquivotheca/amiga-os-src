@@ -1,0 +1,425 @@
+The copper is going to be very important in the AAA project, and working on the
+two main copper functions is going to take a large percentage of the time.
+
+The two main functions are MakeVPort() and MrgCop().
+
+MakeVPort() actually doesn't need that much work. It was totally rewritten for
+3.0, and is now very modular (although there is still some data coupling across
+modules unfortunately), which should make building AAA 32bit intermediate
+copperlist much easier. The VecInfo in the database is private, and you can
+change this any way you want; right now, it is set up with the info needed to
+build A, ECS and AA intermediate copperlists. You could extend this with the
+32bit copper info, or redesign it.
+
+The source code for MakeVPort() is very heavily annotated; bugs and workarounds
+are documented in line.
+
+
+MrgCop() is the bitch. Right now, don't even think about adding 32 bit support
+to it; just think about redesigning it from the ground up, with the following in
+mind:
+
+1) Needs to write 16 bit copper lists on pre AAA machines.
+2) Needs to write 32 bit copper lists for AAA modes.
+3) Needs to either fall back to 16 bit mode for user copperlists, or parse the
+user copperlists and convert them to the 32 bits equivalents. I bet this will
+cause compatibility problems though. I think you are going to have to ignore 16
+bit UCopLists on 32 bit modes, and set a new flag in the database
+(DIPF_IS_UCOPLIST) which s/w will have to look for.
+I don't think you should support a new 32 bit UCopList option. Let SpecialFX do
+all that stuff, and provide a way for sfx to talk to graphics.
+
+It's unfortunate that MrgCop() needs to know about pre AAA copperlists, because
+there are so many problems with it. In fact, you may just say 'what the fuck',
+and call the old code for pre AAA machines, and the nice new shiny code for AAA
+copperlists. The main problem is with line 256, where MrgCop() has to insert an
+extra WAIT(0xFF, 0x??). In c/coppermover.asm, there is a function called
+get_hwait_hack() which tries to calculate the horizontal wait value on line 255.
+
+At this point, we should take a look at how the datafetch engine works:
+
+There are five fetch patterns depending on the display mode and bandwidth (called
+2-cycle, 4-cycle, 8-cycle, 16-cycle and 32-cycle), and are shown below, where the
+numbers 1-8 are the bitplane numbers.  The copper is an even-cycle engine, and
+can only get every other dma slot, if available.  These are the ones with an
+asterisk.  So you can see that in a Lores 1x mode, all the possible copper
+cycles are available to the copper if the depth is less than 5, but the 5th
+bitplane would cause the copper to lose one cycle in three to the bitplane
+engine.  8 bitplanes, and it is fully saturated.
+
+        *   *   *   *     *   *   *   *     *   *   *   *     *   *   *   *
+SHires  2 1 2 1 2 1 2 1 | 2 1 2 1 2 1 2 1 | 2 1 2 1 2 1 2 1 | 2 1 2 1 2 1 2 1 |
+1x                      |                 |                 |                 |
+                        |                 |                 |                 |
+Hires                   |                 |                 |                 |
+1x                      |                 |                 |                 |
+SHires                  |                 |                 |                 |
+2x      4 2 3 1 4 2 3 1 | 4 2 3 1 4 2 3 1 | 4 2 3 1 4 2 3 1 | 4 2 3 1 4 2 3 1 |
+                        |                 |                 |                 |
+Lores                   |                 |                 |                 |
+1x                      |                 |                 |                 |
+Hires                   |                 |                 |                 |
+2x                      |                 |                 |                 |
+SHires                  |                 |                 |                 |
+4x      8 6 4 2 7 3 5 1 | 8 6 4 2 7 3 5 1 | 8 6 4 2 7 3 5 1 | 8 6 4 2 7 3 5 1 |
+                        |                 |                 |                 |
+Lores                   |                 |                 |                 |
+2x                      |                 |                 |                 |
+Hires                   |                 |                 |                 |
+4x      8 6 4 2 7 3 5 1 |   B L A N K     | 8 6 4 2 7 3 5 1 |   B L A N K     |
+                        |                 |                 |                 |
+Lores                   |                 |                 |                 |
+4x      8 6 4 2 7 3 5 1 |   B L A N K     |   B L A N K     |   B L A N K     |
+
+
+The bitplane fetches are controlled by two registers in A/ECS/AAA called DDFSTRT
+and DDFSTOP. 
+
+DDFSTRT tells the bitplane engine when to start fetching the first data for that
+line. That data is ready to be displayed when bitplane 1 has been fetched, ie
+after 2 cycles in a 2 cycle mode, 4 cycles in a 4 cycle mode, and 8 cycles in an
+8, 16 or 32 cycle mode.
+
+DDFSTOP tells the bitplane engine when to start fetching the last block of data
+(when to start stopping), and does not actually finish fetching until bitplane
+one has been fetched (again, either 2, 4 or 8 cycles after it started).
+
+The units for both DDFSTRT and DDFSTOP are in color clocks.
+
+For  example, in a typical lores NTSC display where DDFSTRT = 0x28 and DDFSTRT =
+0xd8, the first cycle starts at colour clock 0x28, and goes through to colour
+clock 0x30. At colour clock 0x30, the data fetched is now ready to be displayed.
+In a 1x lores, the next data starts to be fetched at colour clock 0x30, but in a
+2x lores, there are 8 colour clocks where the bitplane engine goes to sleep, and
+doesn't start fetching again until clock 0x38 (and in a hires 4x, it sleeps for
+another 24 colour clocks and starts fetching at clock 0x48). This continues
+until colour clock 0xd8 (set in DDFSTOP), where the data starts fetching at
+0xd8, and stops for the line at 0xe0.
+
+The value of DDFSTOP - DDFSTRT must be a multiple of the cycle value. In this
+case, 0xd8 - 0x28 = 0xb0, which is 22 8 cycles, 11 16 cycles, or 5.5 32 cycles.
+Therefore, to display the Lores in 4x (32 cycle) mode would mean having to
+either set DDFSTRT 16 colour clocks earlier at 0x18 (0xd8 - 0x18 = 0xc0 which is
+6 x 32 cycles), or setting DDFSTOP 16 colour clocks later at 0xe8. Seeing as on
+an NTSC display the max colour clock is 0xe2, we need to move DDFSTRT to 0x18
+(unfortunately eating into sprite DMA).
+
+(On ECS and greater, DDFSTRT can be set to any even colour clock value (and
+DDFSTOP set accordingly), but on 'A', there is a granularity where DDFSTRT must
+be a multiple of 8 for lores, and 4 for hires.)
+
+Now, you may not want the data to start displaying as soon as it is ready, but
+you may want it delayed by a couple of pixels (as is the case in smooth
+horizontal scrolling); this is controlled by the delay (aka scroll) bits in
+BPLCON1.
+
+When you scroll, you need to prefetch, which means setting ddfstrt early. For
+Lores-4x (a 32-cycle), subtract 32 from ddfstrt. For Lores-2x (a 16-cycle),
+subtract 16, and for Lores-1x, subtract 8. You of course have to subtract 8, 4,
+and 2 respectively from the bitplane pointers. Now, at the nominal 320x256 Lores
+screen position, non-scrolled, DDFSTRT = 0x38, which is fine. But scrolling
+changes DDFSTRT to 0x18 (for 4x), which gives you only sprite 0. Even for 1x,
+you need to set DDFSTRT to 0x30, which loses you sprite 7. Also, in the higher
+fetch cycles, BPLCON1 has the extra bits needed for the extra scroll range.
+
+Phew!
+
+Now that is explained, let's look at what get_hwait_hack() needs to do. We will
+probably have a copper list that looks something like
+
+MOVE(blah,blah)
+MOVE(blah,blah)
+WAIT(0xff, ???)
+WAIT(0x5, 0)	; wait for line 0x105
+
+If the WAIT(0xff, ???) happens early in line 255, then it is satisfied, and
+looks at the next instruction, WAIT(0x5, 0). Well, the vbeam is on line 255,
+which is greater than line 5, so that WAIT is immediately satsified too; the
+WAIT(0xff) did nothing for us. Let us look at the opposite problem of waiting at
+the end of line 255. If we wait for the last colour clock on the line, the
+copper behaves as follows:
+1) The copper triggers on the last colour clock.
+2) The vbeam counter wraps around to line 256.
+3) The copper says 'what line was that wait for?  Oh, line 255, but I'm on line
+0, so I need to wait'.  Therefore, it waits forever.
+
+We need to wait for the penultimate colour clock on the line for the copper to
+respond to the WAIT properly, and calculating that depends on the DDFSTOP, the
+depth, the mode, and the bandwidth of the ViewPort that is on line 255.
+
+I have documented this with get_hwait_hack() in the source code as:
+
+*******************************************************************************
+*
+* We need to find the penultimate colour clock that is available to the copper
+* on the line.
+*
+* definitions:
+*    UNSATURATED:    hwait = ((total_colorclocks - 1) & 0xfffe)
+*    FULLYSATURATED: hwait = ddfstrt
+*
+* if ((cs_tovp is on a 256 line boundary and cs_tovp > YWait) ||
+*     (cs_bovp <= YWait))
+* {
+*    if (previous CopList had WHOLE_LINES set (if all instructions fitted on a
+*        whole number of lines)
+*        return 0
+*    else
+*        UNSATURATED;
+* }
+* else
+* {
+*    // find the penultimate colour clock available to the copper
+*    lastcc = UNSATURATED;
+*    if (((lastcc & 0x7) >= 2) || //not an even multiple of 8 colour clocks
+*        ((ddfstop + granularity) < lastcc)) // display does not go to the rhs
+*    {
+*        hwait = (lastcc - 2);
+*    }
+*    else
+*    {
+*        cycles = (2, 4, 8, 16 or 32 depending on mode);
+*        if (bpu == cycles)
+*        {
+*            FULLYSATURATED
+*        }
+*        else
+*        {
+*            // the last fetch cycle is at most 8 cycles long.
+*            cycles = (2, 4 or 8 depending on the mode of the last fetch)
+* 
+*            // (* = available for copper)
+*            // 2  1                      2cycle
+*            // *  
+*            //
+*            // 4  2  3  1                4 cycle
+*            // *     *
+*            //
+*            // 8  4  6  2  7  3  5  1    8 cycle
+*            // *     *     *     *
+*
+*            if (bpu <= ((cycles / 2) + 1))
+*            {
+*                hwait = (lastcc - 2);
+*            }
+*            else
+*            {
+*                if (cycles == 4)
+*                {
+*                    hwait = (lastcc - 4); // bpu == 3 in a 4 cycle mode.
+*                }
+*                else
+*                {
+*                    // cycles == 8
+*                    if (bpu == 6)
+*                    {
+*                        hwait = (lastcc - 4)
+*                    }
+*                    else
+*                    {
+*                        // must be 7 cycles
+*                        hwait = (lastcc - 8);
+*                    }
+*                }
+*            }
+*        }
+*    }
+* }
+*
+*******************************************************************************
+
+Fortunately, the AAA copper WAIT instruction has enough bits in the vertical
+beam position comparator to not need the WAIT(255) trick, but only in the 32bit
+copper mode. Who knows what hairy problems are going to arise, what timing
+differences were made, in the 16 bit WAIT engine. Also, because the DMA system
+is no longer fixed at intervals, it is *IMPOSSIBLE* to know when a copper
+instruction is going to be executed (well, not impossible with an intelligent
+DMA resource allocation system, but still pretty hard) - see page F29 of the AAA
+spec for more gotchas. (NB - you could run in CopperNasty mode which gives the
+copper every cycle it needs - you may want to enable this when running in 16 bit
+copper mode *if you can* - check with the chippies for this).
+
+Who said this was going to be easy??
+
+
+MrgCop()
+========
+
+MrgCop() is just a sort-and-merge function; I'm sure you could find text-book
+examples of this in books like Knuth.
+
+Define a flag COPPER32 for the CopList->Flags field to show a 32 bit
+intermediate copper list. When this is set, CopList->CopIns and CopList->CopPtr
+point to a struct CopIns32 instead of a struct CopIns, which is defined as
+
+struct CopIns32
+{
+    LONG   OpCode; /* 0 = move, 1 = wait, 0x80000000 = MoveMultiple */
+    union
+    {
+	struct CopList *nxtlist;
+	struct 
+	{
+		union
+		{
+			LONG VWaitPos;	/* vertical beam wait */
+			LONG DestAddr;	/* destination address of copper move */
+		} u1;
+		union
+		{
+			LONG HWaitPos;	/* horizontal beam wait position */
+			LONG DestData;	/* destination immediate data to
+					 * send. This is the first data in the
+					 * list of a multiple-move.
+					 */
+
+		} u2;
+	} u4;
+    } u3;
+};
+
+/* shorthand for above */
+#define NXTLIST     u3.nxtlist
+#define VWAITPOS    u3.u4.u1.VWaitPos
+#define DESTADDR    u3.u4.u1.DestAddr
+#define HWAITPOS    u3.u4.u2.HWaitPos
+#define DESTDATA    u3.u4.u2.DestData
+#define DESTDATAM(n)	u3.u4.u2.DestData[(n)]
+
+This leaves the basic structure of a ViewPort with DspIns, SprIns, ClrIns and
+UCopList intact, with the new 32 bit instructions only affecting the structure
+at the lowest level. For compatibilty, you may want to generate 16 bit
+intermediate coppper lists (where possible) at ViewPort->DspIns->CopIns, and
+another 32 bit intermediate copper list at ViewPort->DspIns->Next->CopIns which
+MrgCop() would use in preference (yeah, I know, one more level of indirection) -
+this lets you fall back to 16 bit mode if you need to.
+
+You would then need to update the macros that build the intermediate
+copperlists. These are SUPERCMOVE(), SUPERBUMP() and SUPERWAIT() defined in
+gfxsrc:macros.h (used in MakeVPort()), to know about 32 bit stuff.
+
+
+
+*******************************************************************************
+
+Here's a potential problem with DDFSTRT in AAA that Tim McDonald told me about.
+If this is accurate, I believe many scrolly games such as Shadow of the Beast
+will break under AAA.
+
+Return-Path: <mcdonald@crunch.commodore.com>
+Received: from cbmmail.commodore.com by sleeponit with
+   Amiga SMTPd#03533; Thu, 26 Aug 1993 15:14:14 PDT
+Received: from cbmvax.cbm.commodore.com by cbmmail.commodore.com (4.1/SMI-4.1)
+	id AA19204; Thu, 26 Aug 93 15:13:49 EDT
+Received: from crunch.commodore.com 
+	by cbmvax.cbm.commodore.com
+	(5.65/UUCP-Project/Commodore - Ultrix 4.3 Ver 07/12/93)
+	id AA15995; Thu, 26 Aug 93 15:13:47 -0400
+Received: from sol by crunch (4.1/SMI-4.1)
+	id AA01076; Thu, 26 Aug 93 15:13:32 EDT
+Date: Thu, 26 Aug 93 15:13:31 EDT
+From: mcdonald@crunch.commodore.com (Tim McDonald -- LSI design)
+Message-Id: <9308261913.AA01076@crunch>
+Received: by sol (4.1/SMI-4.1)
+	id AA08662; Thu, 26 Aug 93 15:13:30 EDT
+To: spence@cbmvax.cbm.commodore.com
+Cc: mcdonald@crunch.commodore.com, rosier@crunch.commodore.com,
+        dean@crunch.commodore.com, lenthe@crunch.commodore.com,
+        hepler@crunch.commodore.com
+Subject:  AAA DDFSTART/DDFSTOP behavior
+
+Spence,
+    Here's a brief description of the problem, I will add this to the
+next version of the AAA spec in section 6.7.2 "Programming DDFSTRT and
+DDFSTOP"
+
+    As a result of the pipelining of graphics data introduced by LINDA 
+in the AAA architecture, the behavior of DDFSTART/DDFSTOP no longer
+matches that of the ECS architecture. In AAA, DDFSTART and DDFSTOP 
+effect each line in two ways, first it is used to calculate the number
+of pixels to be fetched by ANDREA and when to start fetching them.
+Second, it is used by LINDA to indicate when to start shifting bitplane
+data into MONICA.  There is only one DDFSTART signal to start both of
+these events.
+    A possible problem arises from the fact that when DDFSTART and
+DDFSTOP are reprogrammed they will simultaneously take effect for both
+the fetch of the next line of graphics data and the display of the
+previously fetched line of data (which was fetched with the old
+ddfstart data.)
+				
+Line    Copper			Fetch			Display
+0	MOVE DDFSTART,0x30	
+1				line 1(ddf=30)
+2	MOVE DDFSTART,0x38	line 2(ddf=30)		line1(ddf=30)	   
+3				line 3(ddf=38)	      >	line2(ddf=38) <
+4				line 4(ddf=38)		line3(ddf=38)
+
+    As a result of this the line displayed after DDFSTART is updated
+will be displayed wrong. (line2 in the example was fetched with ddf=30,
+but displayed with ddf=38) It may be necessary to blank this line to
+avoid this.
+    Changing this behavior is non-trivial, since LINDA uses the same DDF
+signal for both events.
+
+Tim McDonald
+
+
+From: spence@cbmvax.commodore.com
+Subject: Re: AAA DDFSTART/DDFSTOP behavior
+To: mcdonald@crunch.commodore.com (Tim McDonald -- LSI design)
+In-Reply-To: <9308261913.AA01076@crunch>; from "mcdonald@crunch.commodore.com (Tim McDonald -- LSI design)"
+X-Mailer: AmigaMail [version 38.7 (24.2.92)]
+
+> Line    Copper			Fetch			Display
+> 0	MOVE DDFSTART,0x30	
+> 1				line 1(ddf=30)
+> 2	MOVE DDFSTART,0x38	line 2(ddf=30)		line1(ddf=30)	   
+> 3				line 3(ddf=38)	      >	line2(ddf=38) <
+> 4				line 4(ddf=38)		line3(ddf=38)
+
+
+So, if we change DDFSTRT on line 1 instead of 2, we get:
+
+0	MOVE DDFSTRT,0x30
+1	MOVE DDFSTRT,0x38	line 1(ddf = 38)
+2				line 2(ddf = 38)	> line1(ddf=38) <
+
+Is that right?
+
+
+Return-Path: <mcdonald@crunch.commodore.com>
+Received: from cbmmail.commodore.com by sleeponit with
+   Amiga SMTPd#03542; Fri, 27 Aug 1993 14:55:14 PDT
+Received: from cbmvax.cbm.commodore.com by cbmmail.commodore.com (4.1/SMI-4.1)
+	id AA22069; Fri, 27 Aug 93 14:54:47 EDT
+Received: from crunch.commodore.com 
+	by cbmvax.cbm.commodore.com
+	(5.65/UUCP-Project/Commodore - Ultrix 4.3 Ver 07/12/93)
+	id AA20777; Fri, 27 Aug 93 14:54:56 -0400
+Received: from sol by crunch (4.1/SMI-4.1)
+	id AA13335; Fri, 27 Aug 93 14:54:42 EDT
+Date: Fri, 27 Aug 93 14:54:42 EDT
+From: mcdonald@crunch.commodore.com (Tim McDonald -- LSI design)
+Message-Id: <9308271854.AA13335@crunch>
+Received: by sol (4.1/SMI-4.1)
+	id AA10102; Fri, 27 Aug 93 14:54:40 EDT
+To: spence@cbmvax.cbm.commodore.com
+Subject: AAA DDFSTART/DDFSTOP behavior
+
+
+>So, if we change DDFSTRT on line 1 instead of 2, we get:
+> 
+> 0	MOVE DDFSTRT,0x30
+> 1	MOVE DDFSTRT,0x38	line 1(ddf = 38)
+> 2				line 2(ddf = 38)	> line1(ddf=38) <
+>
+> Is that right?
+>
+
+Not really.  The value of DDFSTART is held off until the next HRESET which
+will come at the beginning of line 2.  So line1 in the above example would
+have been fetched with the old (0x30) value of DDFSTRT. Line1 will however
+be displayed with the new DDFSTRT (0x38). Sorry.
+
+Tim
+

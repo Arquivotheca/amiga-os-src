@@ -1,0 +1,409 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.38.21;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@the CLI
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@SECTION "CLI"
+
+// This is a totally rewritten CLI for AmigaDOS
+// Modifications to make it use the Resident list added
+// in conditional compilation flags - NHG 6Sep86
+
+GET "LIBHDR"
+GET "SYSHDR"
+GET "IOHDR"
+GET "MANHDR"
+
+MANIFEST
+$(
+namemax    = 25
+promptmax  = 15
+setmax     = 20
+filemax    = 10
+$)
+
+// We use five basic IO streams throughout this CLI
+// 1) stderr         Always the console (standardout)
+// 2) stdin          Set by <, defaults to console (CIS)
+// 3) stdout         Set by >, defaults to console (COS)
+// 4) cmdin          Set by EXECUTE or eof to file or console (currentin)
+// 5) conin          Default console input stream (standardin)
+
+// The initial packet contains a function to call for
+// initialisation purposes; or zero if the global one
+// is to be used.
+
+LET START(parm.pkt) BE
+  $( LET prompt  = VEC promptmax
+     LET commandname = VEC namemax
+     LET commandfile = VEC filemax
+     LET setname = VEC setmax
+     LET error = FALSE
+     LET tnum = ?
+     LET tid = taskid()
+     LET fn = parm.pkt=0 -> cli.init, parm.pkt!pkt.type
+     LET rootnode = rootstruct()
+     LET clip = VEC cli.upb           // Space for the CLI info
+     LET standardout = ?
+
+     clearvec(clip, cli.upb)
+     putlong( tinfo.cli, tid, clip )
+     clip!cli.prompt := prompt
+     clip!cli.commandname := commandname
+     clip!cli.commandfile := commandfile
+     clip!cli.setname := setname
+
+     // Call the initialisation routine.
+     // Return a function, or 0 (nothing to do), 
+     // or <0 (return parm.pkt at end)
+     fn := fn(parm.pkt)
+     if fn > 0 do fn(result2(FALSE))
+     tnum := getlong( tinfo.tasknum, tid )
+
+     standardout := clip!cli.standardoutput
+
+     $( LET ch = ?
+
+     $( LET item = ?
+
+        clip!cli.interactive :=  NOT clip!cli.background &
+               clip!cli.currentinput=clip!cli.standardinput
+
+        selectinput(clip!cli.currentinput)
+        selectoutput(standardout)
+//+     ch := unrdch() -> rdch(), 0
+
+        TEST clip!cli.interactive THEN
+//+           UNLESS ch=';' THEN
+           $( wrch('O'-'@@')  // Change to default char set	
+              writef(prompt,tnum)
+              wrch(0)     // A null to force output
+           $)
+        ELSE
+        $( IF testflags(2) THEN
+           $( error := TRUE
+              writes("****BREAK - CLI*N")
+           $)
+           IF error BREAK
+        $)
+
+        error := FALSE
+        item := rditem(commandname, namemax)
+        ch := 0
+        UNLESS item=0 THEN
+        $( error := TRUE
+           TEST item>0 THEN 
+           $( LET rc = -1
+              LET res2 = 0        // Error code if not 'object not found'
+              LET module = 0
+	      LET firsttime = TRUE
+	      LET dir, p = ?, ?
+$<RESIDENT
+	      LET segment = 0
+$>RESIDENT
+	retry:
+              dir := currentdir(FALSE)
+              p := clip!cli.commanddir
+$<RESIDENT
+              // Try the resident segment list
+              segment := searchsegs(commandname)
+              UNLESS segment = 0 | segment!segment.uc < 0 DO
+              $(
+                   module := segment ! segment.seg
+                   segment ! segment.uc := segment!segment.uc + 1
+              $)
+$>RESIDENT
+
+              // Try current directory
+	      IF module = 0
+              DO module := load(commandname,dir,@@res2)
+
+              // Try directories in path list
+              UNTIL module NE 0 | p=0 DO
+              $( module := load(commandname,p!1,@@res2)
+                 p := !p
+              $)
+
+              // Try C:
+              IF module=0 THEN UNLESS devicetask("C:")=0 DO
+              $( currentdir(TRUE, result2(FALSE))
+                 module := loadseg(commandname)
+                 getr2(@@res2)
+              $)
+
+              // Now restore the current directory
+              currentdir(TRUE,dir)
+
+	      // if all that failed, try again because
+	      // the user may have replace a disc and made a
+	      // directory in the path list valid. Only do
+    	      // this once more, but not if the error was
+	      // device.not.mounted (218) which implies that
+	      // the requestor was cancelled.
+	      IF module=0 & firsttime & result2(FALSE) \= 218 DO
+	      $( firsttime := FALSE
+		 GOTO retry
+	      $)
+
+              testflags(1)
+              clip!cli.module := module
+              UNLESS module=0 do        // Attempt to run the command
+                 rc := load.and.run( module, clip )
+
+              TEST rc < 0 THEN IF rc = -1 THEN
+              $( getr2(@@res2)
+                 // Now give Unknown command or more detailed message
+                 TEST res2=0 THEN
+                       writef("Unknown command %S*N",commandname)
+                 ELSE
+                 $( writef("Unable to load %S: ",commandname)
+                    fault(res2)
+                 $)
+              $)
+              ELSE
+              $(
+                 res2 := rc=0 -> 0, result2(FALSE)
+
+                 clip!cli.returncode := rc
+                 IF rc<clip!cli.faillevel THEN
+                    error := FALSE
+                 selectoutput(standardout)
+                 IF error & NOT clip!cli.interactive THEN
+                    writef("%S failed returncode %N*N",
+                        commandname, rc)
+              $)
+
+              selectinput(clip!cli.currentinput)
+              ch := unrdch() -> 0, '*N'
+$<RESIDENT'
+              unloadseg(clip!cli.module) 
+$>RESIDENT'
+$<RESIDENT
+              TEST segment = 0
+              THEN unloadseg(module)
+              ELSE segment!segment.uc := segment!segment.uc - 1
+$>RESIDENT
+              clip!cli.module := 0
+              clip!cli.result2 := res2
+           $)
+
+           ELSE
+              writes("Error in command name*N")
+        $)
+
+        UNTIL ch='*N' | ch=endstreamch DO
+           ch := rdch()
+
+     $) REPEATUNTIL ch=endstreamch
+
+        TEST clip!cli.currentinput=clip!cli.standardinput THEN
+        $( IF clip!cli.background BREAK
+           clip!cli.standardinput!scb.end := -1
+           clip!cli.standardinput!scb.arg1 := 1
+        $)
+        ELSE
+        $( endread()
+           UNLESS commandfile%0=0 DO deleteobj(commandfile)
+	   commandfile%0 := 0
+           clip!cli.currentinput := clip!cli.standardinput
+           clip!cli.faillevel := cli.initialfaillevel
+        $)
+
+     $) REPEAT
+
+     // If EXECUTE called then pass back startup packet to caller
+     // now we are finished. Note that we do not close the IO streams
+     // in this case unless we opened them for the user. When fn is <0
+     // it is a flag word as follows:
+     // Bit 31     Set to indicate flags
+     // Bit  1     Set if user provided input stream
+     // Bit  0     Set if RUN provided output stream
+
+     TEST fn < 0 then 
+     $( LET scb = output()     // Flush buffer output
+        LET pos = scb!scb.pos
+        IF pos>0 writebytes( (scb!scb.buf) <<2, pos )
+	scb!scb.pos := 0
+        // Decode flag word. Close any io streams which the user has
+        // not provided. Do not close IO streams provided by user.
+        if (fn & 2) = 0 then endread()
+        if (fn & 1) = 1 then endwrite()
+        returnpkt( parm.pkt, ?, clip!cli.result2 )
+     $)
+     ELSE                  // Otherwise close IO streams, normal case
+     $( endread()
+        endwrite()
+     $)
+
+     freeobj(currentdir(FALSE))
+     fn := clip!cli.commanddir
+     UNTIL fn=0 DO
+     $( LET next = !fn
+        freeobj(fn!1)
+        freevec(fn)
+        fn := next
+     $)
+     rootnode!rtn.tasktab!tnum := 0
+     deletetask()
+  $)
+
+AND load(file,dir,codep) = VALOF
+$( LET seg, r2 = ?, ?
+   currentdir(TRUE,dir)
+   seg := noreqloadseg(file)
+   UNLESS seg=0 RESULTIS seg
+   getr2(codep)
+   RESULTIS 0
+$)
+
+AND getr2(codep) BE IF !codep=0 DO
+$( LET r2 = result2(FALSE)
+   UNLESS r2 = error.objectnotfound | r2 = error.device.not.mounted THEN
+      !codep := r2
+$)
+
+ 
+
+// Attempt to load and run the required module
+// Return -2 if syntax error (having printed message)
+// Else return result of runcommand
+and load.and.run( module, clip ) = VALOF
+$( LET termin, termout = clip!cli.standardinput, output()
+   LET stdin, stdout = -1, -1
+   LET rc = ?
+   LET ch = ?
+   LET stdvec = VEC namemax
+   $( IF stdin=0 | stdout=0 THEN           // Error
+	 RESULTIS err(result2(FALSE),stdin,stdout)
+      ch := rdch()
+      SWITCHON ch INTO
+      $( CASE '*S': CASE '*T': LOOP
+         CASE '>' : IF stdout>0 ENDCASE    // Already set
+		    stdout := openf(findoutput)
+		    LOOP
+         CASE '<' : IF stdin>0 ENDCASE     // Already set
+		    stdin  := openf(findinput)
+		    LOOP
+         DEFAULT  : BREAK
+      $)
+      RESULTIS err("too many > or <",stdin,stdout)
+   $) REPEAT
+   // We now read the rest of the line and place it into a buffer.
+   // This is passed to runcommand to be made available to the calling
+   // program. We also patch up the scb so that programs calling the
+   // character interface read the command tail as part of their input.
+   // Note that the stdin stream is either a new input file; or it
+   // is from the terminal. In either case there are no characters
+   // buffered within the stream buffer at this time. Programs running
+   // under the CLI must not close stdin so we can safely replace the
+   // SCB buffer with a private one, filled with the command line.
+   // If stdin is new then the buffer pointer will be overwritten when
+   // the command line is exhausted. If stdin is the terminal then
+   // reads will use the replacement buffer instead.
+   $( LET pos = 0
+      LET original.buffer = ?
+      LET original.pos, original.end = ?, ?
+      // State indicates parsing state. <0 -> in quotes, >0  out of quotes,
+      //                                =0 -> in comment
+      LET state = 1
+      LET private.buffer = VEC 63
+      $( LET c = ch
+	 SWITCHON ch INTO
+	 $( CASE ';':     // A comment character
+	       UNLESS state<0 DO state := 0
+	       GOTO nextl
+	    CASE '*"':    // Quoted values
+	       state := -state
+	       GOTO nextl
+	    CASE '+':     // Possibly a trailing plus
+               TEST rdch()='*N' THEN c := '*N'
+               ELSE unrdch()
+	    DEFAULT:
+	    nextl:
+	       UNLESS state ENDCASE
+	    CASE '*N': CASE endstreamch:
+               private.buffer%pos := c
+               pos := pos+1
+               IF pos > 256 THEN
+                  RESULTIS err("command too long",stdin,stdout)
+               IF ch='*N' | ch=endstreamch BREAK
+	 $)
+         ch := rdch()
+      $) REPEAT
+      // Set up defaults for stdin & stdout
+      IF stdin<0  THEN stdin  := termin
+      IF stdout<0 THEN stdout := termout
+      original.buffer := stdin!scb.buf
+      original.pos    := stdin!scb.pos
+      original.end    := stdin!scb.end
+      stdin!scb.buf := private.buffer
+      stdin!scb.pos := 0
+      stdin!scb.end := pos
+      // Attempt to run the command
+      selectinput(stdin)
+      selectoutput(stdout)
+      result2(TRUE,0)
+      rc := runcommand( module, clip!cli.defaultstack, private.buffer, pos )
+      IF stdin!scb.buf=private.buffer THEN 
+         stdin!scb.buf := original.buffer
+      stdin!scb.pos := original.pos
+      UNLESS stdin!scb.end=0 DO
+         stdin!scb.end := original.end
+   $)
+   UNLESS stdin=termin endstream(stdin)
+   UNLESS stdout=termout endstream(stdout)
+   RESULTIS rc
+$)
+
+AND openf(fn) = VALOF
+$( LET stdvec = VEC namemax
+   LET s = 0
+   TEST rditem( stdvec, namemax ) > 0 THEN
+   $( s := fn( stdvec )
+      IF s=0 THEN 
+	 result2(TRUE,"Unable to open redirection file")
+   $)
+   ELSE
+      result2(TRUE,"syntax error")
+   RESULTIS s
+$)
+
+AND err(m,si,so) = VALOF
+$( writef("CLI error: %S*N",m)
+   if si > 0 endstream(si)
+   if so > 0 endstream(so)
+   RESULTIS -2
+$)
+
+$<RESIDENT
+AND searchsegs( name ) = VALOF
+$(
+        LET list = rootstruct()!rtn.info!info.segments
+        UNTIL list = 0 DO
+                TEST compstring(name,list+segment.name) = 0
+                THEN RESULTIS list
+                ELSE list := !list
+        RESULTIS 0
+$)
+$>RESIDENT
+@

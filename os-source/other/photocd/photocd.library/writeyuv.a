@@ -1,0 +1,180 @@
+*   $Id: writeyuv.a,v 1.3 93/12/21 10:46:19 jjszucs Exp $
+
+        XDEF    _writeYUV
+
+        OPT     P=68020             ; Motorola MC68020 CPU or above
+
+        SECTION CODE
+
+*       "If you can't do it in C, do it in assembly. If you can't do it
+*       in assembly, it's not worth doing." - Programmer's saying
+
+******************************************************************************
+*
+*   NAME
+*       writeYUV()   -   write one line of YUV data from Y, C1, and C2 source
+*                        to client image buffer
+*
+*   SYNOPSIS
+*       void writeYUV(UBYTE *pYSrc,UBYTE *pC1Src,UBYTE *pC2Src,UBYTE *pDest,
+*                             a0           a1            a2            a3
+*                   UWORD nPixels);
+*                          d0
+*
+*   FUNCTION
+*       Write one line of YUV data from raw Y, C1, and C2 source data to
+*       client image buffer, interpolating C1 and C2 for pixels without
+*       chrominance data.
+*
+*   INPUTS
+*       pYSrc (A0)      -   Y source data
+*       pC1Src (A1)     -   C1 source data
+*       pC2Src (A2)     -   C2 source data
+*       pDest (A3)      -   Destination image buffer
+*       nPixels (D0)    -   Number of pixels to copy
+*
+*   RESULT
+*       All registers preserved.
+*
+*   EXAMPLE
+*
+*   NOTES
+*       nPixels must be an even number greater than 3.
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+******************************************************************************
+
+*
+*   N.B.:
+*       This code is carefully optimized and is the result of much
+*       discussion between Darren Greenwald (darren@cbmvax) and John J.
+*       Szucs (jjszucs@cbmvax). A very strong emphasis has been placed
+*       on avoiding memory accesses, which can be locked out by the
+*       AGA chipset if a high-bandwidth display mode (such as
+*       high-resolution, interlaced, maximum-overscan HAM8) is being
+*       used on a chip RAM-only system, such as the CD32.
+*
+*       Change this code only with extreme care. Remember:
+*           "If builders built buildings the way programmers
+*           write programs, the first woodpecker would have
+*           destroyed civilization."
+*
+
+_writeYUV:
+
+        *
+        *   Entry
+        *
+
+        MOVEM.L     A0-A3/D0-D5,-(SP)       ;   Push A0-A3, D0-D5 to stack
+
+        *
+        *   Initialization
+        *
+
+        SUBQ.W      #2,D0                   ;   nPixels=nPixels-2
+                                            ;   -1 for DBRA (loops until counter
+                                            ;       is -1, not 0 as would be expected)
+                                            ;   -1 to handle last pixel as
+                                            ;       special case
+
+        ;   Pre-load D2 with xx|Y(0)|C1(0)|C2(0)
+        MOVEQ       #0,D2                   ;   Clear D2
+        MOVE.B      (A0)+,D2                ;   D2(16-23)=Y(0)
+        LSL.L       #8,D2                   ;   D2( 8-15)=C1(0)
+        MOVE.B      (A1)+,D2
+        LSL.L       #8,D2                   ;   D2( 0- 7)=C2(0)
+        MOVE.B      (A2)+,D2
+
+        *
+        *   Start of pixel processing loop
+        *
+
+1$:
+        *
+        *   Copy and interpolate
+        *
+
+        MOVE.L      D2,D1                   ;   Read x|Y(n)|C1(n)|C2(n) from
+                                            ;   n+1 look-ahead
+
+        MOVE.L      D3,D2                   ;   Move n+2 look-ahead to n+1 look-ahead
+
+        BTST        #0,D0                   ;   For even pixels ...
+        BNE         2$
+
+        MOVEQ       #0,D2                   ;   Clear D2 and D3
+        MOVEQ       #0,D3
+
+        MOVE.B      (A0)+,D2                ;   D2(16-23)=Y(n+2)
+
+        MOVE.B      (A0)+,D3                ;   D3(16-23)=Y(n+2)
+
+        MOVEQ       #0,D4                   ;   D4=C1(n+2)
+        MOVE.B      (A1)+,D4
+        LSL.L       #8,D3                   ;   D3( 8-15)=D4
+        MOVE.B      D4,D3
+
+        MOVE.L      D1,D5                   ;   D5=C1(n)
+        LSR.L       #8,D5
+        ANDI.L      #$FF,D5
+
+        ADD.W       D5,D4                   ;   D4=(D4+D5)/2
+        ASR.W       #1,D4
+        LSL.L       #8,D2                   ;   D2( 8-15)=D4
+        MOVE.B      D4,D2
+
+        MOVEQ       #0,D4                   ;   D4=C2(n+2)
+        MOVE.B      (A2)+,D4
+        LSL.L       #8,D3                   ;   D3( 0- 7)=D4
+        MOVE.B      D4,D3
+
+        MOVEQ       #0,D5                   ;   D5=C2(n)
+        MOVE.B      D1,D5
+
+        ADD.W       D5,D4                   ;   D4=(D4+D5)/2
+        ASR.W       #1,D4
+        LSL.L       #8,D2                   ;   D2( 0- 7)=D4
+        MOVE.B      D4,D2
+
+2$:
+        *
+        *   Write pixel
+        *
+
+        MOVE.L      D1,(A3)+                ;   *(pDest++)=D1
+
+        *
+        *   End of pixel processing loop
+        *
+
+        DBRA        D0,1$                   ;   Loop until all pixels are processed
+
+        *
+        *   Special-case for last pixel
+        *
+
+                                            ;   D1 contains xx|Y(n-1)|C1(n-1)|C2(n-1)
+                                            ;   and D2 contains xx|Y(n)|junk|junk
+                                            ;       at this point
+
+        ROR.L       #8,D1                   ;   Rotate Y(n-1) into D1( 0- 7)
+        ROR.L       #8,D1
+        ROR.L       #8,D2                   ;   Rotate Y(n) into D2(0 - 7)
+        ROR.L       #8,D2
+        MOVE.B      D2,D1                   ;   D1( 0- 7)=Y(n)
+        ROL.L       #8,D1                   ;   Rotate D1 back to xx|Y(n)|C1(n)|C2(n)
+        ROL.L       #8,D1
+
+        MOVE.L      D1,(A3)+                ;   *(pDest++)=D1
+
+        *
+        *   Return
+        *
+
+        MOVEM.L     (SP)+,A0-A3/D0-D5       ;   Pop A0-A3, D0-D5 from stack
+
+        RTS                                 ; Return to caller

@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	35
+DATE	MACRO
+		dc.b	'30.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'lowlevel 40.35'
+	ENDM
+VSTRING	MACRO
+		dc.b	'lowlevel 40.35 (30.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: lowlevel 40.35 (30.7.93)',0
+	ENDM

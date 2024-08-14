@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	15
+DATE	MACRO
+		dc.b	'2.4.93'
+	ENDM
+VERS	MACRO
+		dc.b	'envoy 37.15'
+	ENDM
+VSTRING	MACRO
+		dc.b	'envoy 37.15 (2.4.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: envoy 37.15 (2.4.93)',0
+	ENDM

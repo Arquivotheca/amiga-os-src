@@ -1,0 +1,194 @@
+Attached is a rough-draft of the MemHandler system that I wish to add
+to EXEC for 3.0.  This would make caching such as for fonts possible in
+a much more complete and "standard" manner.  It will also help increase
+the performance of AllocMem() since the jump through RAMLIB will no
+longer be there.  (This is minor point, but non-expunge allocations are
+many in a standard system and this will help make those faster)
+
+This MemHandler system, once implemented, would make possible a number
+of optimizations for various parts of the system and make our outline
+font support be able to do font caching, something that is needed very
+badly.
+
+			-- Mike
+
+-------------------------------------------------------------------------------
+
+MemHandler - A Low-memory handler chain for 3.0 EXEC.
+
+One of the more interesting features of the Amiga is the fact that
+system resources such as libraries and devices can expunge from the
+system under low memory conditions.  This made it possible for an often
+used resource to stay in memory (cache) between uses of that resource
+and yet release the memory to the system on demand.
+
+However, as the system has grown, this feature has also shown itself to
+be lacking the abilities to do the complex caching that is needed for
+disk I/O and font generation.  The problem is that the expunge calls
+would only happen once and all of the resources would need to be
+released in that one call, even if the required memory was very small.
+Another problem would be when a program would ask for MEMF_CHIP and
+fail and thus cause all of the MEMF_FAST memory items to flush. There
+was also no easy way to control the relative importance of the resource
+to be flushed and thus all resources had to go at the same time.  (No
+way to do an LRU type cache)
+
+The new EXEC based MemHandler would solve all of the above problems and
+add some new features too.
+
+------------
+
+Quick Overview
+
+The basic design is a handler list that is called when a memory
+allocation fails.  The handler list (just like input.device, etc) will
+contain routines that applicationss and libraries added.
+
+Each handler in the list will be called in order until the memory
+allocation works or the handler list is completed.  Only after the
+handler list has been completely traversed will the allocation fail.
+
+The handler list is a standard exec-style list that is stored in
+priority order.
+
+RAMLIB, which currently SetFunctions the AllocMem() routine will no
+longer do this but rather add itself to the handler list at priority 0.
+This lets applications come before and after the RAMLIB expunge.
+
+-------------
+
+New functions:
+
+There will need to be two new functions in EXEC to deal with the
+handler list.  There will also be a new flag to AllocMem()
+
+The basic functions are:
+
+void AddMemHandler(struct Interrupt *)
+                   a1
+
+void RemMemHandler(struct Interrupt *)
+                   a1
+
+AddMemHandler() - This function will take the handler given and enqueue
+it onto the memory handler list.  Once on the list, the handler must be
+ready to be called.  This means that the handler must be ready to be
+called before this function even returns.
+
+RemMemHandler() - This function will remove the handler from the list.
+This function *CAN* be called while within the handler.
+
+A new memory flag, MEMF_NO_EXPUNGE, will be added to exec. This flag
+will cause the memory allocation attempt to fail without going through
+the memory handler.  This is usefull for caching systems that may not
+really need the memory but will take it is available and also is
+required for use within the handler such that memory could be allocated
+during the expunge cycle.  (Or at least attempted)  This flag will be
+ignored in systems where there is no memory handler.
+
+    BITDEF  MEM,NO_EXPUNGE,31	;AllocMem: Do not call expunge on failure
+
+------------
+
+The MemHandler structure:
+
+This structure is the data passed to a MemHandler.  This structure
+is *READ ONLY*
+
+struct MemHandlerData
+{
+	ULONG	memh_RequestSize;	/* Size of the requested allocation */
+	ULONG	memh_RequestFlags;	/* Flags of the requested allocation */
+	ULONG	memh_Flags;		/* Flags (see below) */
+};
+
+The memh_RequestSize and memh_RequestFlags are the size and flags
+arguments from the AllocMem() call that failed.
+
+	BITDEF	MEMH,RECYCLE,0	; Recycle
+
+The MEMHF_RECYCLE flag is 0 if this was the first time this handler was
+called due to this allocation failure.  If this is 1, the handler
+is being called again for the same failure.  See below about handler
+return and recycling...
+
+------------
+
+The Handler:
+
+The protocal for a MemHandler must be strictly followed.  Due to the
+fact that the handlers are being called on the AllocMem() context and
+the fact that AllocMem() *MUST* *NOT* break a Forbid(), the handler
+*MUST* *NOT* break a Forbid().  Another issue is stack usage.  The
+handler could be running on any task in the system that calls
+AllocMem()  For this reason, the handler must try to keep stack usage
+as low as possible.  Exact stack usage is not available, but a good
+rule would be to keep it under 64 bytes if possible.
+
+A handler *MUST* *NOT* call AllocMem() or cause AllocMem() to be
+called.  (This includes calling AllocVec(), etc)  The handler may,
+however, call AllocMem() with the new MEMF_NO_EXPUNGE flag.  This flag
+is new to the exec that has the memory handler system.  Library expunge
+vectors can *not* make use of this feature. This flag would let a
+handler move memory from one location to another.  For example, if the
+requested memory is for CHIP, the handler could move any of its CHIP
+allocations that it can to FAST memory (if possible) and would then be
+able to help satisfy the MEMF_CHIP request.  Also caching systems may
+wish to only cache an item if memory is available and would not want to
+have the system do an expunge just to cache this "unimportant" item.
+
+The handler will be called in a Forbid() state that *MUST* *NOT* be
+broken.
+
+The handler can *NOT* call AddMemHandler() but it may call
+RemMemHandler().  A handler can RemMemHandler() itself *ONLY* if it
+returns MEM_DID_NOTHING or MEM_ALL_DONE.
+
+The handler code, with is in (*is_Code)() of the interrupt structure
+will be called as follows:
+
+a0=Pointer to (struct MemHandler)
+a1=Value from is_Data
+a2=Pointer to the Interrupt structure for this handler
+a6=ExecBase
+
+The handler must follow the standard rules about register usage. Only
+d0, d1, a0, and a1 may be modified, all other registers *MUST* remain
+unchanged.
+
+Return results:
+
+d0=		MEM_DID_NOTHING
+	or	MEM_ALL_DONE
+	or	MEM_TRY_AGAIN
+
+MEM_DID_NOTHING	If the handler could not release any resources
+		it should return with d0 set to this.
+
+MEM_ALL_DONE	If the handler released all of its resources, it
+		should return this in d0.
+
+MEM_TRY_AGAIN	If the handler released some resources in hopes
+		that it will have solved the memory problem
+		it can return with this value.  In that case,
+		EXEC will retry the allocation and if it does not
+		work, will call the handler again.  Note that
+		the handler can tell if it was already called by
+		the MEMHF_FIRST_TIME flag which will be 0 if this
+		is the first call to the handler.
+		The main use of this return value is to help
+		implement the RAMLIB handler but it could be usefull
+		for LRU caching code or caching code that
+		tries to defragment memory during expunge in order
+		to try to satisfy the allocation request.
+
+-------------
+
+RAMLIB:
+
+RAMLIB will, under this system, no longer setfunction the memory
+allocation routines but rather add a memory handler at priority 0.
+This handler would then be called when the allocation failed and RAMLIB
+could then call the library expunge vectors as it does today.  If
+RAMLIB wishes to continue to do the 2.0 partial expunge, that would be
+possible with the MEM_TRY_AGAIN return value.

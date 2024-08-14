@@ -1,0 +1,1151 @@
+head     1.10;
+access   ;
+symbols  ;
+locks    kodiak:1.10; strict;
+comment  @ * @;
+
+
+1.10
+date     89.12.09.13.22.39;  author kodiak;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     89.11.29.11.17.26;  author kodiak;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     89.10.26.18.24.48;  author kodiak;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     89.09.21.12.28.07;  author kodiak;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     89.03.13.17.38.38;  author kodiak;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     89.03.13.14.34.31;  author kodiak;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.02.01.12.28.52;  author kodiak;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     88.09.27.10.06.26;  author kodiak;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     88.06.15.18.11.30;  author kodiak;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     88.06.15.18.10.50;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@generate assembly files in $Vx/lib/autofd from the .fd files there
+@
+
+
+1.10
+log
+@split LVO definitions into 128/hunk to bypass BLINK bug
+@
+text
+@#include	<stdio.h>
+#include	<strings.h>
+
+char *Prog;
+char  LibName[32];
+char  SysName[32];
+char  BaseName[32];
+char  FunctionName[32];
+char  FileName[64];
+char  ProtectedRegs[48];
+int   AbsBase;			/* absolute base address (i.e. 4 for exec) */
+int   Bias;			/* current bias -6n offset in .fd file */
+short Public;			/* true if ##public, false if ##private */
+
+FILE *FDFile;			/* input library .fd file handle */
+FILE *AFile,			/* output library .asm file */
+     *BFile,			/* output library BCPL header file */
+     *PFile;			/* output library lattice #pragma file */
+FILE *MCFile,			/* output RAM/system/Makefile */
+     *MRFile;			/* output ROM/system/Makefile */
+FILE *CFile,			/* output function C ram interface .asm file */
+     *RFile;			/* output function C rom interface .asm file */
+
+#define	TOKEN_ABSBASE		1
+#define	TOKEN_ASMSRC		2
+#define	TOKEN_BASE		3
+#define	TOKEN_BIAS		4
+#define	TOKEN_CSRC		5
+#define	TOKEN_PUBLIC		6
+#define	TOKEN_PRIVATE		7
+#define	TOKEN_END		8
+
+char InBuffer[256];
+
+char *
+LSearch(item, table, tableSize, elementSize, compareFunction)
+char *item, *table;
+int tableSize, elementSize, (*compareFunction)();
+{
+    int i;
+    for (i = 0; i < tableSize; i++) {
+	if ((*compareFunction)(item, table) == 0) return(table);
+	table += elementSize;
+    }
+    return(NULL);
+}
+
+struct KeyWord {
+    char *Word;
+    int Key;
+};
+
+struct KeyWord Tokens[] = {
+    { "##asmsrc", TOKEN_ASMSRC },
+    { "##csrc", TOKEN_CSRC },
+    { "##public", TOKEN_PUBLIC },
+    { "##private", TOKEN_PRIVATE },
+    { "##bias", TOKEN_BIAS },
+    { "##base", TOKEN_BASE },
+    { "##end", TOKEN_END },
+    { "##absbase", TOKEN_ABSBASE }
+};
+
+int
+TokenCmp(s, t)
+char *s;
+struct KeyWord *t;
+{
+    return( strcmp( s, t->Word));
+}
+
+int
+NextToken(s)
+char **s;
+{
+    struct KeyWord *t;
+    char *z;
+
+    z = index(*s, ' ');
+    if (z != 0) *z = '\0';
+
+    t = (struct KeyWord *) LSearch(*s, Tokens,
+	    sizeof(Tokens)/sizeof(struct KeyWord), sizeof(struct KeyWord),
+	    TokenCmp);
+
+    if (t == NULL) return(0);
+    
+    *s += strlen(*s) + 1;
+    return(t->Key);
+}
+
+int
+NextInt(s)
+char **s;
+{
+    char *z;
+    int i;
+
+    i = 0;
+
+    if (sscanf(*s, "%d", &i)) {
+	while ((**s) && (**s == ' ')) (*s)++;
+	z = index(*s, ' ');
+	if (z != NULL) *s = z;
+    }
+
+    return(i);
+}
+
+char *
+GetLine()
+{
+    char *s, *z;
+
+    s = fgets(InBuffer, sizeof(InBuffer), FDFile);
+    if (s) {
+	while (z = rindex(s, '\n')) *z = 0;
+	while (z = rindex(s, '\r')) *z = 0;
+    }
+    return(s);
+}
+
+EndGame(format, arg1, arg2)
+char *format, *arg1, *arg2;
+{
+    if (format) fprintf(stderr, format, arg1, arg2);
+    if (FDFile) fclose(FDFile);
+    if (AFile) fclose(AFile);
+    if (BFile) fclose(BFile);
+    if (PFile) fclose(PFile);
+    if (CFile) fclose(CFile);
+    if (RFile) fclose(RFile);
+    if (MCFile) fclose(MCFile);
+    if (MRFile) fclose(MRFile);
+    if (format) exit(100);
+    exit(0);
+}
+
+main(argc, argv)
+int argc;
+char *argv[];
+{
+    char *q, *r, *s, *t;
+    char aP[8], dP[8], a6;		/* register flags */
+    char regError[6];			/* optimization errors */
+    short lvoCount;
+    unsigned long pragmaWord;
+    short pragmaCount, pragmaOK;
+    int i, j;
+
+    Prog = *argv++;
+    while (--argc > 0) {
+	FDFile = AFile = BFile = PFile = CFile = RFile = MCFile = MRFile = NULL;
+	/* get the library name */
+	strcpy(LibName, *argv);
+	s = rindex(LibName, '.');
+	if (s == NULL)
+	    EndGame("%s: ERROR  .fd file name \"%s\" ill formed\n",
+		    Prog, LibName);
+	
+	/* get the system name */
+	strcpy(SysName, *argv);
+	t = rindex(SysName, '.');
+	*t = '\0';
+	t = rindex(SysName, '_');
+	if (t == NULL)
+	    EndGame("%s: ERROR  .fd file name \"%s\" ill formed\n",
+		    Prog, LibName);
+	*t = '\0';
+
+	/* open the .fd file */
+	FDFile = fopen(LibName, "r");
+	if (FDFile == 0)
+	    EndGame("%s: ERROR  cannot open file \"%s\"\n",
+		    Prog, LibName);
+
+	/* open the .asm file */
+	strcpy(FileName, "LVO/");
+	strcat(FileName, *argv++);
+	t = rindex(FileName, '.');
+	strcpy(t, ".asm");
+	AFile = fopen(FileName, "w");
+	if (AFile == 0)
+	    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+		    Prog, FileName);
+	/* open the .b file */
+	strcpy(FileName, "HDR/");
+	r = FileName+4;
+	t = SysName;
+	do {
+	    *r++ = *t & 0x5f;
+	}
+	    while (*t++);
+	strcat(FileName, "LIBHDR");
+	BFile = fopen(FileName, "w");
+	if (BFile == 0)
+	    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+		    Prog, FileName);
+	/* open the pragma file */
+	strcpy(FileName, "PRAGMAS/");
+	strcat(FileName, SysName);
+	strcat(FileName, "_pragmas.h");
+	PFile = fopen(FileName, "w");
+	if (PFile == 0)
+	    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+		    Prog, FileName);
+
+	/* open the RAM Makefile file */
+	strcpy(FileName, "RAM/");
+	strcat(FileName, SysName);
+	strcat(FileName, "/Makefile");
+	MCFile = fopen(FileName, "w");
+	if (MCFile == 0)
+	    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+		    Prog, FileName);
+
+	/* open the ROM Makefile file */
+	FileName[1] = 'O';		/* ROM/ */
+	MRFile = fopen(FileName, "w");
+	if (MRFile == 0)
+	    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+		    Prog, FileName);
+
+	/* remove tail from LibName */
+	*s = '\0';
+	
+	/* initialize system files */
+	lvoCount = 0;
+	fprintf(AFile, "*** DO NOT EDIT: FILE BUILT AUTOMATICALLY\n");
+	fprintf(AFile, "*** %s.asm function offsets\n", LibName);
+	fprintf(AFile, "	IDNT	%s_LVO\n", SysName);
+
+	fprintf(BFile, "MANIFEST\n$(\n");
+
+	fprintf(MCFile,
+    "######################################################################\n");
+	fprintf(MCFile, "MAKEMETA=	../../../../tools/makemeta\n");
+	fprintf(MCFile, "\n");
+	fprintf(MCFile, "OBJS=");
+
+	fprintf(MRFile,
+    "######################################################################\n");
+	fprintf(MRFile, "MAKEMETA=	../../../../tools/makemeta\n");
+	fprintf(MRFile, "\n");
+	fprintf(MRFile, "OBJS=");
+
+	/* parse the .fd file */
+	AbsBase = -1;
+	BaseName[0] = BaseName[1] = '\0';
+	Bias = -6;
+	Public = 0;
+
+	while (s = GetLine()) {
+	    switch (*s) {
+		case '*':		/* comment */
+		case ';':
+		    /* write pragma file comment */
+		    fprintf(PFile, "/*%s*/\n", s+1);
+		    break;
+		case '#':		/* keyword possibility */
+		    /* search for keyword */
+		    switch (NextToken(&s)) {
+			case TOKEN_ABSBASE:
+			    AbsBase = NextInt(&s);
+			    break;
+			case TOKEN_BASE:
+			    strcpy(BaseName, s);
+			    break;
+			case TOKEN_BIAS:
+			    i = Bias;
+			    Bias = -NextInt(&s);
+			    if (Bias > i)
+				EndGame("%s: ERROR  bias overlap: %ld\n",
+				    Prog, i);
+			    break;
+			case TOKEN_PUBLIC:
+			    Public = 1;
+			    break;
+			case TOKEN_PRIVATE:
+			    Public = 0;
+			    break;
+			case TOKEN_END:
+			    AbsBase = -1;
+			    BaseName[0] = '\0';
+			    break;
+			default:
+			    EndGame("%s: ERROR  illegal keyword line \"%s\"\n",
+				    Prog, s);
+		    }
+		    break;
+		default:
+		    /* check for alpha function name */
+		    if ((*s < 'A') || ((*s > 'Z') && (*s < 'a')) || (*s > 'z'))
+			EndGame("%s: ERROR  illegal function line \"%s\"\n",
+				Prog, s);
+
+		    /* look for function name termination */
+		    t = index(s, '(');
+		    if (t == NULL)
+			EndGame("%s: ERROR  missing function ( in \"%s\"\n",
+				Prog, s);
+		    r = index(t, ')');
+		    if (r == NULL)
+			EndGame("%s: ERROR  missing function ) in \"%s\"\n",
+				Prog, s);
+
+		    /* look for register arguments */
+		    r = index(r, '(');
+		    if (r != NULL) {
+			q = index(++r, ')');
+			if (q == NULL)
+			    EndGame("%s: ERROR  missing register ) in \"%s\"\n",
+				Prog, s);
+			*q = '\0';
+			i = q - r;
+			if (i == 0) r = NULL;
+			else
+			    if ((i % 3) != 2)
+				EndGame("%s: ERROR  bad registers \"%s\"\n",
+					Prog, s);
+		    }
+
+		    *t = '\0';
+		    strcpy(FunctionName, s);
+
+		    /* open C interface files */
+		    strcpy(FileName, "ROM/");
+		    strcat(FileName, SysName);
+		    strcat(FileName, "/");
+		    strcat(FileName, FunctionName);
+		    strcat(FileName, ".asm");
+		    RFile = fopen(FileName, "w");
+		    if (RFile == 0)
+			EndGame("%s: ERROR  cannot create file \"%s\"\n",
+				Prog, FileName);
+		    /* add this to the Makefile */
+		    fprintf(MRFile, "\\\n	%s.obj", FunctionName);
+
+		    if (Public) {
+			FileName[1] = 'A';		/* RAM/ */
+			CFile = fopen(FileName, "w");
+			if (CFile == 0)
+			    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+				    Prog, FileName);
+			/* add this to the Makefile */
+			fprintf(MCFile, "\\\n	%s.obj", FunctionName);
+		    }
+		    else
+			CFile = 0;
+
+		    /* write C interface files */
+		    fprintf(RFile,
+			    "*** DO NOT EDIT: FILE BUILT AUTOMATICALLY\n");
+		    fprintf(RFile, "*** %s rom interface\n", FunctionName);
+		    if (r != NULL)
+			fprintf(RFile, "*** (%s)\n", t+1);
+		    if (BaseName[0] != '\0')
+			fprintf(RFile, "	XREF	%sOffset\n", BaseName);
+		    fprintf(RFile, "	SECTION	%s\n", SysName);
+		    fprintf(RFile, "	XDEF	_%s\n", FunctionName);
+		    fprintf(RFile, "_%s:\n", FunctionName);
+
+		    if (CFile) {
+			fprintf(CFile,
+				"*** DO NOT EDIT: FILE BUILT AUTOMATICALLY\n");
+			fprintf(CFile, "*** %s ram interface\n", FunctionName);
+			if (r != NULL)
+			    fprintf(CFile, "*** (%s)\n", t+1);
+			if (BaseName[0] != '\0')
+			    fprintf(CFile, "	XREF	%s\n", BaseName);
+			fprintf(CFile, "	SECTION	%s\n", SysName);
+			fprintf(CFile, "	XDEF	_%s\n", FunctionName);
+			fprintf(CFile, "_%s:\n", FunctionName);
+		    }
+
+		    pragmaWord = pragmaCount = 0;
+		    pragmaOK = Public;
+		    /*     save protected registers and a6 */
+		    if (r) {
+			for (j = 0; j < 8; j++) {
+			    aP[j] = dP[j] = 0;
+			}
+			j = 0;
+			do {
+			    if ((r[j] | 0x20) == 'a') aP[r[j+1]-'0'] = 1;
+			    else dP[r[j+1]-'0'] = 1;
+			    j += 3;
+			}
+			    while (r[j-1] != '\0');
+			a6 = aP[6];		/* save a6 from parameters */
+			aP[6] = 1;
+			i = 4;
+			t = ProtectedRegs;
+			for (j = 2; j < 8; j++) {
+			    if (dP[j]) {
+				*t++ = '/';
+				*t++ = 'd';
+				*t++ = '0'+j;
+				i += 4;
+			    }
+			}
+			for (j = 2; j < 8; j++) {
+			    if (aP[j]) {
+				*t++ = '/';
+				*t++ = 'a';
+				*t++ = '0'+j;
+				i += 4;
+			    }
+			}
+			*t = '\0';
+		    }
+		    else {
+			i = 8;
+			strcpy(ProtectedRegs, "/a6");
+		    }
+		    if (strlen(ProtectedRegs) > 3) {
+			fprintf(RFile, "		movem.l	%s,-(a7)\n",
+				ProtectedRegs+1);
+			if (CFile)
+			    fprintf(CFile, "		movem.l	%s,-(a7)\n",
+				    ProtectedRegs+1);
+		    }
+		    else {
+			fprintf(RFile, "		move.l	a6,-(a7)\n");
+			if (CFile)
+			    fprintf(CFile, "		move.l	a6,-(a7)\n");
+		    }
+		    if (a6 == 0) {
+			/* check for valid BaseName */
+			if ((BaseName[0] == '\0') && (AbsBase < 0))
+			    EndGame("%s: ERROR  no ##base for \"%s\"\n",
+				    Prog, s);
+			if (BaseName[0] != '\0') {
+			    fprintf(RFile, "\t\tmove.l\t%sOffset(a6),a6\n",
+				    BaseName);
+			    if (CFile)
+				fprintf(CFile, "\t\tmove.l\t%s,a6\n", BaseName);
+			}
+			else {
+			    fprintf(RFile, "\t\tmove.l\t$%lx,a6\n", AbsBase);
+			    if (CFile)
+				fprintf(CFile, "\t\tmove.l\t$%lx,a6\n",
+					AbsBase);
+			}
+		    }
+
+		    /*     fix up unspecified multiple registers */
+		    if (r) {
+			j = 0;
+			while (r+j+2 != q) {
+			    /* there are >=2 register specifications left */
+			    if (
+				    (r[j+2] == '/') &&
+				    ((((r[j] | 0x20) == (r[j+3] | 0x20)) &&
+				    (r[j+1] > r[j+4])) ||
+				    (((r[j] | 0x20) == 'a') &&
+				    ((r[j+3] | 0x20) == 'd')))) {
+				strncpy(regError, r+j, 5);
+				regError[5] = '\0';
+				printf(
+				"%s %s >>> ILLEGAL movem <<< \"... %s ...\"\n",
+					LibName, FunctionName, regError);
+				r[j+2] = ',';
+			    }
+			    else if (
+				    (r[j+2] != '/') &&
+				    ((((r[j] | 0x20) == (r[j+3] | 0x20)) &&
+				    (r[j+1] < r[j+4])) ||
+				    (((r[j] | 0x20) == 'd') &&
+				    ((r[j+3] | 0x20) == 'a')))) {
+				strncpy(regError, r+j, 5);
+				regError[5] = '\0';
+				printf(
+				"%s %s need to optimize movem \"... %s ...\"\n",
+					LibName, FunctionName, regError);
+				r[j+2] = '/';
+			    }
+			    j += 3;
+			}
+
+			/* gather this entry into pragma word */
+			j = 0;
+			do {
+			    if ((r[j] | 0x20) == 'a') {
+				pragmaWord |= ((r[j+1]-'0'+8) & 0xf) <<
+					(pragmaCount++ * 4);
+				if (r[j+1] >= '6')
+				    pragmaOK = 0;
+			    }
+			    else
+				pragmaWord |= ((r[j+1]-'0') & 0xf) <<
+					(pragmaCount++ * 4);
+			    j += 3;
+			}
+			    while (r[j-1] != '\0');
+		    }
+
+
+		    /*     copy parameters into registers */
+		    while (r) {
+			/* look for multiple registers */
+			for (j = 0; r[j+2] == '/'; j += 3) {
+			    r[j] |= 0x20;		/* make lower case */
+			}
+			r[j] |= 0x20;		/* make lower case */
+			r[j+2] = '\0';
+			if (j != 0) {
+			    /* move multiple register */
+			    fprintf(RFile, "\t\tmovem.l\t%ld(a7),%s\n",
+				    i, r);
+			    if (CFile)
+				fprintf(CFile, "\t\tmovem.l\t%ld(a7),%s\n",
+					i, r);
+			}
+			else {
+			    /* move single register */
+			    fprintf(RFile, "\t\tmove.l\t%ld(a7),%s\n",
+				    i, r);
+			    if (CFile)
+				fprintf(CFile, "\t\tmove.l\t%ld(a7),%s\n",
+					i, r);
+			}
+			if ((r+j+2) == q) r = NULL;
+			else {
+			    i += ((j/3)*4) + 4;
+			    r += j+3;
+			}
+		    }
+
+		    fprintf(RFile, "\t	jsr	%ld(a6)\n", Bias);
+		    if (CFile)
+			fprintf(CFile, "\t	jsr	%ld(a6)\n", Bias);
+		    if (strlen(ProtectedRegs) > 3) {
+			fprintf(RFile, "		movem.l	(a7)+,%s\n",
+				ProtectedRegs+1);
+			if (CFile)
+			    fprintf(CFile, "		movem.l	(a7)+,%s\n",
+				    ProtectedRegs+1);
+		    }
+		    else {
+			fprintf(RFile, "		move.l	(a7)+,a6\n");
+			if (CFile)
+			    fprintf(CFile, "		move.l	(a7)+,a6\n");
+		    }
+		    fprintf(RFile, "		rts\n");
+		    fprintf(RFile, "	END\n");
+		    fclose(RFile);
+		    if (CFile) {
+			fprintf(CFile, "		rts\n");
+			fprintf(CFile, "	END\n");
+			fclose(CFile);
+		    }
+		    CFile = RFile = NULL;
+
+
+		    /* write this entry into the library files */
+		    if ((lvoCount & 0x7f) == 0) {
+			/* create a new section every 128 names so as to */
+			/* not overflow BLINK 5.04's 150 symbol limit */
+			if (lvoCount) {
+			    /* generate something that looks like code so */
+			    /* that the symbols associated with the previous */
+			    /* section get flushed by the assembler */
+			    fprintf(AFile, "	OFFSET	0\n");
+			    fprintf(AFile, "_LVO%d	ds.w	1\n");
+			}
+			fprintf(AFile, "	SECTION	_LVO%d\n", lvoCount>>7);
+		    }
+		    lvoCount++;
+		    fprintf(AFile, "	XDEF	_LVO%s\n", FunctionName);
+		    fprintf(AFile, "_LVO%s EQU	%ld\n", FunctionName, Bias);
+
+		    fprintf(BFile, "    e.%s = %ld\n", FunctionName, Bias);
+
+
+		    /* write pragma file */
+		    if (pragmaCount > 6) {
+			pragmaOK = 0;
+			pragmaCount = 7;
+		    }
+		    pragmaWord = (pragmaWord << 8) | pragmaCount; 
+		    if (strcmp(BaseName, "_SysBase") == 0)
+			if (pragmaOK)
+			    fprintf(PFile, "#pragma syscall %s %x %lx\n",
+				    FunctionName, -Bias, pragmaWord);
+			else
+			    fprintf(PFile, "/*pragma syscall %s %x %lx*/\n",
+				    FunctionName, -Bias, pragmaWord);
+		    else if (BaseName[1])
+			if (pragmaOK)
+			    fprintf(PFile, "#pragma libcall %s %s %x %lx\n",
+				    BaseName+1, FunctionName, -Bias,
+				    pragmaWord);
+			else
+			    fprintf(PFile, "/*pragma libcall %s %s %x %lx*/\n",
+				    BaseName+1, FunctionName, -Bias,
+				    pragmaWord);
+		    else
+			fprintf(PFile, "/*pragma libcall  %s %x %lx*/\n",
+				FunctionName, -Bias, pragmaWord);
+
+
+		    /* decrement Bias */
+		    Bias -= 6;
+		    break;
+	    }
+	}
+	fclose(FDFile);
+	fprintf(AFile, "	END\n");
+	fclose(AFile);
+	fprintf(BFile, "$)\n");
+	fclose(BFile);
+	fclose(PFile);
+	fprintf(MCFile, "\n\n");
+	fprintf(MCFile, "lib.timestamp:	asm.timestamp\n");
+	fprintf(MCFile, "	make objs ${MFLAGS} ${MARGS}\n");
+	fprintf(MCFile, "	cat *.obj >../%s.lib\n", SysName);
+	fprintf(MCFile, "	rm -f *.obj\n");
+	fprintf(MCFile, "	touch lib.timestamp\n");
+	fprintf(MCFile, "\n");
+	fprintf(MCFile, "asm.timestamp:\n");
+	fprintf(MCFile, "\n");
+	fprintf(MCFile, "objs:		${OBJS}\n");
+	fprintf(MCFile, "	rm -f *.asm\n");
+	fprintf(MCFile, "	touch asm.timestamp\n");
+	fprintf(MCFile, "\n");
+	fprintf(MCFile, ".INCLUDE=${MAKEMETA}\n");
+	fclose(MCFile);
+	fprintf(MRFile, "\n\n");
+	fprintf(MRFile, "lib.timestamp:	asm.timestamp\n");
+	fprintf(MRFile, "	make objs ${MFLAGS} ${MARGS}\n");
+	fprintf(MRFile, "	cat *.obj >../%s.lib\n", SysName);
+	fprintf(MRFile, "	rm -f *.obj\n");
+	fprintf(MRFile, "	touch lib.timestamp\n");
+	fprintf(MRFile, "\n");
+	fprintf(MRFile, "asm.timestamp:\n");
+	fprintf(MRFile, "\n");
+	fprintf(MRFile, "objs:		${OBJS}\n");
+	fprintf(MRFile, "	rm -f *.asm\n");
+	fprintf(MRFile, "	touch asm.timestamp\n");
+	fprintf(MRFile, "\n");
+	fprintf(MRFile, ".INCLUDE=${MAKEMETA}\n");
+	fclose(MRFile);
+
+	FDFile = AFile = BFile = PFile = MCFile = MRFile = NULL;
+    }
+}
+@
+
+
+1.9
+log
+@create #pragma files for lattice
+@
+text
+@d146 1
+d228 1
+d231 1
+a231 1
+	fprintf(AFile, "	SECTION	_LVO\n");
+d557 13
+d572 1
+@
+
+
+1.8
+log
+@better register list checking and diagnostics
+@
+text
+@d17 2
+a18 1
+     *BFile;			/* output library .hdr file */
+d130 1
+d146 2
+d152 1
+a152 1
+	FDFile = AFile = BFile = CFile = RFile = MCFile = MRFile = NULL;
+d175 1
+d177 3
+a179 3
+	strcpy(LibName, "LVO/");
+	strcat(LibName, *argv);
+	t = rindex(LibName, '.');
+d181 1
+a181 1
+	AFile = fopen(LibName, "w");
+d184 1
+a184 1
+		    Prog, LibName);
+d186 2
+a187 2
+	strcpy(LibName, "HDR/");
+	r = LibName+4;
+d193 2
+a194 2
+	strcat(LibName, "LIBHDR");
+	BFile = fopen(LibName, "w");
+d197 9
+a205 1
+		    Prog, LibName);
+d208 4
+a211 4
+	strcpy(LibName, "RAM/");
+	strcat(LibName, SysName);
+	strcat(LibName, "/Makefile");
+	MCFile = fopen(LibName, "w");
+d214 1
+a214 1
+		    Prog, LibName);
+d217 2
+a218 2
+	LibName[1] = 'O';		/* ROM/ */
+	MRFile = fopen(LibName, "w");
+d221 1
+a221 1
+		    Prog, LibName);
+a223 1
+	strcpy(LibName, *argv++);
+d233 2
+a234 1
+	fprintf(MCFile, "######################################################################\n");
+d239 2
+a240 1
+	fprintf(MRFile, "######################################################################\n");
+d247 1
+a247 1
+	BaseName[0] = '\0';
+d255 2
+d374 2
+d383 1
+a383 1
+			    if ((r[j] & 0x4f) == 'A') aP[r[j+1]-'0'] = 1;
+d478 16
+d496 1
+d553 1
+d559 28
+d597 1
+d629 1
+a629 1
+	FDFile = AFile = BFile = MCFile = MRFile = NULL;
+@
+
+
+1.7
+log
+@restructure makefile to eliminate .asm & .obj files
+@
+text
+@d143 1
+d433 13
+d448 1
+a448 1
+				    ((r[j+1]+1) == r[j+4])) ||
+d450 6
+a455 5
+				    (r[j+1] == '7') &&
+				    ((r[j+3] | 0x20) == 'a') &&
+				    (r[j+1] == '0')))) {
+				printf("%s %s movem optimization needed\n",
+					LibName, FunctionName);
+@
+
+
+1.6
+log
+@build c interfaces for ROM all the time
+@
+text
+@d519 5
+a523 1
+	fprintf(MCFile, "all:		${OBJS}\n");
+d525 6
+d534 11
+a544 1
+	fprintf(MRFile, "all:		${OBJS}\n");
+@
+
+
+1.5
+log
+@fix up unspecified multiple registers
+@
+text
+@d307 13
+d321 1
+a321 6
+			/* open C interface files */
+			strcpy(FileName, "RAM/");
+			strcat(FileName, SysName);
+			strcat(FileName, "/");
+			strcat(FileName, FunctionName);
+			strcat(FileName, ".asm");
+d326 1
+a326 7
+			FileName[1] = 'O';		/* ROM/ */
+			RFile = fopen(FileName, "w");
+			if (RFile == 0)
+			    EndGame("%s: ERROR  cannot create file \"%s\"\n",
+				    Prog, FileName);
+			
+			/* add these to the Makefile */
+d328 3
+a330 1
+			fprintf(MRFile, "\\\n	%s.obj", FunctionName);
+d332 13
+a344 1
+			/* write C interface files */
+a346 2
+			fprintf(RFile,
+				"*** DO NOT EDIT: FILE BUILT AUTOMATICALLY\n");
+d348 1
+a348 2
+			fprintf(RFile, "*** %s rom interface\n", FunctionName);
+			if (r != NULL) {
+d350 1
+a350 4
+			    fprintf(RFile, "*** (%s)\n", t+1);
+			}
+
+			if (BaseName[0] != '\0') {
+a351 2
+			    fprintf(RFile, "	XREF	%sOffset\n", BaseName);
+			}
+a352 1
+			fprintf(RFile, "	SECTION	%s\n", SysName);
+a353 1
+			fprintf(RFile, "	XDEF	_%s\n", FunctionName);
+d355 24
+a378 5
+			fprintf(RFile, "_%s:\n", FunctionName);
+			/*     save protected registers and a6 */
+			if (r) {
+			    for (j = 0; j < 8; j++) {
+				aP[j] = dP[j] = 0;
+d380 7
+a386 5
+			    j = 0;
+			    do {
+				if ((r[j] & 0x4f) == 'A') aP[r[j+1]-'0'] = 1;
+				else dP[r[j+1]-'0'] = 1;
+				j += 3;
+a387 22
+			        while (r[j-1] != '\0');
+			    a6 = aP[6];		/* save a6 from parameters */
+			    aP[6] = 1;
+			    i = 4;
+			    t = ProtectedRegs;
+			    for (j = 2; j < 8; j++) {
+				if (dP[j]) {
+				    *t++ = '/';
+				    *t++ = 'd';
+				    *t++ = '0'+j;
+				    i += 4;
+				}
+			    }
+			    for (j = 2; j < 8; j++) {
+				if (aP[j]) {
+				    *t++ = '/';
+				    *t++ = 'a';
+				    *t++ = '0'+j;
+				    i += 4;
+				}
+			    }
+			    *t = '\0';
+d389 10
+a398 5
+			else {
+			    i = 8;
+			    strcpy(ProtectedRegs, "/a6");
+			}
+			if (strlen(ProtectedRegs) > 3) {
+d401 16
+a416 2
+			    fprintf(RFile, "		movem.l	%s,-(a7)\n",
+				    ProtectedRegs+1);
+d419 2
+a420 14
+			    fprintf(CFile, "		move.l	a6,-(a7)\n");
+			    fprintf(RFile, "		move.l	a6,-(a7)\n");
+			}
+			if (a6 == 0) {
+			    /* check for valid BaseName */
+			    if ((BaseName[0] == '\0') && (AbsBase < 0))
+				EndGame("%s: ERROR  no ##base for \"%s\"\n",
+					Prog, s);
+			    if (BaseName[0] != '\0') {
+				fprintf(CFile, "\t\tmove.l\t%s,a6\n", BaseName);
+				fprintf(RFile, "\t\tmove.l\t%sOffset(a6),a6\n",
+					BaseName);
+			    }
+			    else {
+a422 3
+				fprintf(RFile, "\t\tmove.l\t$%lx,a6\n",
+					AbsBase);
+			    }
+d424 1
+d426 16
+a441 18
+			/*     fix up unspecified multiple registers */
+			if (r) {
+			    j = 0;
+			    while (r+j+2 != q) {
+				/* there are >=2 register specifications left */
+				if (
+					(r[j+2] != '/') &&
+					((((r[j] | 0x20) == (r[j+3] | 0x20)) &&
+					((r[j+1]+1) == r[j+4])) ||
+					(((r[j] | 0x20) == 'd') &&
+					(r[j+1] == '7') &&
+					((r[j+3] | 0x20) == 'a') &&
+					(r[j+1] == '0')))) {
+				    printf("%s %s movem optimization needed\n",
+					    LibName, FunctionName);
+				    r[j+2] = '/';
+				}
+				j += 3;
+d443 1
+d445 1
+d447 4
+a450 6
+			/*     copy parameters into registers */
+			while (r) {
+			    /* look for multiple registers */
+			    for (j = 0; r[j+2] == '/'; j += 3) {
+				r[j] |= 0x20;		/* make lower case */
+			    }
+d452 8
+a459 3
+			    r[j+2] = '\0';
+			    if (j != 0) {
+				/* move multiple register */
+d462 6
+a467 5
+				fprintf(RFile, "\t\tmovem.l\t%ld(a7),%s\n",
+					i, r);
+			    }
+			    else {
+				/* move single register */
+a469 8
+				fprintf(RFile, "\t\tmove.l\t%ld(a7),%s\n",
+					i, r);
+			    }
+			    if ((r+j+2) == q) r = NULL;
+			    else {
+				i += ((j/3)*4) + 4;
+				r += j+3;
+			    }
+d471 6
+d478 2
+d481 1
+a481 4
+			fprintf(RFile, "\t	jsr	%ld(a6)\n", Bias);
+			if (strlen(ProtectedRegs) > 3) {
+			    fprintf(CFile, "		movem.l	(a7)+,%s\n",
+				ProtectedRegs+1);
+d484 7
+a490 2
+			}
+			else {
+d492 5
+a496 2
+			    fprintf(RFile, "		move.l	(a7)+,a6\n");
+			}
+a497 1
+			fprintf(RFile, "		rts\n");
+a498 1
+			fprintf(RFile, "	END\n");
+a499 2
+			fclose(RFile);
+			CFile = RFile = NULL;
+d501 1
+@
+
+
+1.4
+log
+@change HDR names to be all caps
+@
+text
+@d416 21
+@
+
+
+1.3
+log
+@change B to HDR (and .b to .hdr)
+@
+text
+@d181 7
+a187 3
+	strcat(LibName, *argv);
+	t = rindex(LibName, '.');
+	strcpy(t, ".hdr");
+@
+
+
+1.2
+log
+@rearrange assembly files to another level under RAM and ROM
+and make appropriate Makefile there
+@
+text
+@d17 1
+a17 1
+     *BFile;			/* output library .b file */
+d180 1
+a180 1
+	strcpy(LibName, "B/");
+d183 1
+a183 1
+	strcpy(t, ".b");
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d5 2
+a6 1
+char  SystemName[32];
+d9 1
+a9 1
+char  FileName[48];
+d18 2
+d131 2
+d147 4
+a150 4
+	FDFile = AFile = BFile = CFile = NULL;
+	/* get the system file name */
+	strcpy(SystemName, *argv);
+	s = rindex(SystemName, '.');
+d153 11
+a163 1
+		    Prog, SystemName);
+d166 1
+a166 1
+	FDFile = fopen(SystemName, "r");
+d169 1
+a169 1
+		    Prog, SystemName);
+d171 3
+a173 3
+	strcpy(SystemName, "LVO/");
+	strcat(SystemName, *argv);
+	t = rindex(SystemName, '.');
+d175 1
+a175 1
+	AFile = fopen(SystemName, "w");
+d178 1
+a178 1
+		    Prog, SystemName);
+d180 3
+a182 3
+	strcpy(SystemName, "B/");
+	strcat(SystemName, *argv);
+	t = rindex(SystemName, '.');
+d184 1
+a184 1
+	BFile = fopen(SystemName, "w");
+d187 1
+a187 1
+		    Prog, SystemName);
+d189 18
+a206 2
+	/* remove tail from SystemName */
+	strcpy(SystemName, *argv++);
+d211 1
+a211 1
+	fprintf(AFile, "*** %s.asm function offsets\n", SystemName);
+d216 10
+d306 2
+d320 4
+d340 2
+a341 2
+			fprintf(CFile, "	SECTION	%s\n", SystemName);
+			fprintf(RFile, "	SECTION	%s\n", SystemName);
+d477 12
+a488 1
+	FDFile = AFile = BFile = NULL;
+@

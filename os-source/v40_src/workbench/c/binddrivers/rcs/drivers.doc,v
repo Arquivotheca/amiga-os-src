@@ -1,0 +1,184 @@
+head     38.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+38.1
+date     91.09.23.14.03.54;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Old doc file for BindDrivers
+@
+
+
+
+38.1
+log
+@Checked under RCS
+@
+text
+@
+Copyright (c) 1986, Commodore-Amiga Inc.  All rights reserved.
+
+this document:	drivers.doc
+last changed:	26 March 1986, Neil Katin
+
+
+This document talks about how the "binddrivers" program finds your
+driver and links it into the system.  It also hints on how
+you should write your code to take advantage of this.
+
+This code is very preliminary.  If you find any bugs, or have
+suggestions for the documentation, please let me know!  I will
+try and maintain compatibility, but may change things to correct
+design flaws or add useful enhancements.  Rember that this is
+still in alpha testing.
+
+First off, the expansion library goes out and configures the expansion
+boards in the system.  It puts each board in its own address space,
+and links memory boards into the memory free pool.  This is done
+by the expansion.library's ConfigChain entry point.  This code
+is intended to be run early on in system startup, before any
+other code is around.
+
+Later on, after the dos is running, the binddrivers program should
+be run.  This program searches the directory "SYS:Expansion" for
+workbench icon files.  If it finds one with a tooltypes variable
+"PRODUCT" then it parses the rest of the line (see below) and
+looks for an unconfigured board that matches the description.
+
+This method makes user installation of a new driver trivial:
+the user only has to copy a workbench icon into the expansion
+directory on his sys disk.  Everything else is automatic the
+next time he boots.
+
+In addition, the binddrivers program may be run repeatedly without
+ill effect.  Devices will not be configured twice, so binddrivers
+may be run after a new driver is installed (so the user does not
+have to reboot after installing a driver).
+
+
+Here is an overview of the process:
+
+search:
+    for each file that ends in .info, do test()
+
+test:
+1.  Call GetDiskObject() on this file.  If not a workbench object,
+	return.
+2.  Call FindToolType() to see if there is a PRODUCT definition.
+	If not, return.
+3.  If the description does not match an unconfigured board, return.
+	If there are boards, link them all together and record them
+	in a static area.
+4.  LoadSeg() the code file.  If LoadSeg fails, return.
+5.  Search the first hunk for a Resident structure.  If no structure,
+	UnLoadSeg() the segment and return.
+6.  InitResident() the loaded code.  If an error (NULL) is returned,
+	UnLoadSeg() the segment.
+
+your driver code:
+    Find the list of boards.  Mark them a configured, and record
+    your driver in them (for system debugging).  return non-zero
+    value if everything went ok.  If something went wrong (or you
+    just want to be unloaded) then return NULL.
+
+
+Now for some more detail.
+
+1.  GetDiskObject() is a routine in icon.library.  It will read in
+    the disk object, and return a pointer to it.  Part of a disk object
+    structure is a "tooltypes" field.
+
+2.  The FindToolType() routine (also in the icon.library) searches
+    the tooltypes database associated with the disk object.  If there
+    is an entry for PRODUCT then it is assumed that this is an info
+    file for a driver.  The PRODUCT field is of the format:
+
+	PRODUCT=<idlist>
+
+	<idlist> ::= <id> | <idlist>BAR<id>
+	<id> ::= <manufacturer> | <manufacturer>SLASH<product>
+	<manufacturer> ::= <a decimal number>
+	<product> ::= <a decimal number>
+	BAR ::= <a vertical bar -- '|'>
+	SLASH ::= <a forwards slant char -- '/'>
+
+    Spaces are not legal.  Some examples:
+
+	PRODUCT=1000/30			; matches man 1000, product 30
+	PRODUCT=1000			; matches any man 1000 board
+	PRODUCT=1000/20|1000/21		; matches man 1000, product 20 or 21
+
+
+3.  Each unconfigured board in the system is searched.  An unconfigured
+    board has the CDB_CONFIGME bit set in the cd_Flags byte.  Search
+    all these unconfigured boards to find the ones that matche any of the
+    product codes.  Link all these boards together using the cd_NextCD
+    field of the ConfigDev structure.  Record the head of this list,
+    along with the product field and the name of the file that was
+    loaded in a CurrentBinding structure.  This structure may be
+    retrieved via the GetCurrentBinding() call.
+
+4.  Attempt to load in the driver.  The driver may be a device, library,
+    task, process, or anything else that you may want.  The only requirement
+    is that it have a Resident structure in its first hunk.  (By the
+    way, this means that you can not directly use startup.obj).  This
+    is why we refer to loading a "driver" rather than a "device" -- you
+    can write any sort of code you want to handle your device.
+
+5.  Binddriver will search the first hunk for a Resident structure.
+    If it cannot find one, it will assume some awful mistake has
+    been made, and will unload the segment.
+
+6.  Finally we get to running some of YOUR code.  InitResident() is
+    used to start you off and running.  The return value from
+    InitResident (and therefore the return value from your init
+    entry point) will be checked on exit.  If it is zero then the
+    segment will be unloaded.  This can be useful if you only
+    need to do a bit of initialization and then can go away, such
+    as allocate additional expansion memory for a non-expansion
+    architecture board.
+
+
+Hints for writing your driver code:
+
+    Your driver will be launched via InitResident() as discussed
+    above.  If you use the underdocumented, but very useful
+    RT_AUTOINIT option you will have a library node constructed
+    for you, and then have the code you specified entered.  If you
+    don't use AUTOINIT, then your code will be entered directly.
+
+    You should (among everything else you might be doing) open
+    the expansion.library and ask for the current bindings
+    (GetCurrentBinding()).  In this structure will be the head
+    of a singly linked list of ConfigDev structures.  The structures
+    are linked via the cd_NextCD field.  You should deal with
+    each member of the list -- they are for you!
+
+    There are two actions that you MUST take.  One is to unset
+    the CDB_CONFIGME bit in the cd_Flags.  If you do not do this
+    then the board is still available for other drivers (of course,
+    you may actually want this...).  If you do unset the CONFIGME
+    bit, please also record your "node" in the cd_Driver structure.
+    It is assumed that this is an exec node, whose LN_NAME field
+    points your your name, and LN_TYPE field is your type of "thing" --
+    libarary, resource, device, task, etc.  I know that this will
+    not always hold, but try it anyway.  It will help the rest of
+    us debug the system when something goes wrong.
+
+    You have now done everything you wanted to.  Your init routine
+    is about to return.  If you return a zero, then your code
+    will be unloaded.  If you return non-zero then you will stay
+    around.
+
+Well, thats it.  Hope it helps.
+
+
+@

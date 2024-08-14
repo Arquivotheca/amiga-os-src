@@ -1,0 +1,474 @@
+/******************************************************************************
+*
+*	$Id: loadview.c,v 39.7 92/05/15 07:27:21 spence Exp $
+*
+******************************************************************************/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/interrupts.h> 
+#include <exec/libraries.h>
+#include "/gfx.h"
+#include "/gfxbase.h"
+#include "/copper.h"
+#include "/view.h"
+#include "/display.h"
+#include "/vp_internal.h"
+#include <hardware/intbits.h>
+#include <hardware/custom.h>
+#include <hardware/dmabits.h>
+#include "c.protos"
+
+#define ZD_BP
+
+/*#define DEBUG*/
+
+/*#define DEBUGS*/
+/*#define BARTDEBUG*/
+
+#include "/macros.h"
+
+extern struct Custom custom;
+
+#define DOWN_UPDATE
+
+#ifndef DOWN_UPDATE
+update_top_color(mspc)
+struct MonitorSpec *mspc;
+{
+    /* put correct copper color in upper half of screen */
+    struct Custom *io;
+    struct View *v;
+    struct ViewPort *vp,*bestvp;
+    struct ColorMap *cm;
+    io = &custom;
+
+    /* single thread access to ActiView hardware copper list */
+    ObtainSemaphore(GBASE->ActiViewCprSemaphore);
+
+    if (v = GBASE->ActiView)
+    if (bestvp = vp = v->ViewPort)
+    {
+	WORD bestdy;
+	WORD tempdy;
+	ULONG modes;
+	bestdy = 10000;
+	/* find topmost vp */
+	while ( vp )
+	{
+	    if ( (vp->Modes & VP_HIDE) == 0)
+	    {
+		tempdy = vp->DyOffset;
+		if (new_mode(vp) & INTERLACE) tempdy >>= 1;
+		if (bestdy > tempdy) { bestvp = vp; bestdy = tempdy; }
+	    }
+	    vp = vp->Next;
+	}
+	if (cm = bestvp->ColorMap)
+	{
+	    ULONG color = (0x1FE&(int)(&io->color[0])) << 16;
+	    ULONG *p = GBASE->copinit->diagstrt;
+	    UWORD *ct;
+	    UWORD qwe;
+	    UWORD gen;
+	    ct = (UWORD *)cm->ColorTable;
+	    qwe = *ct;
+	    gen = check_genlock(cm,0);
+	    if ((modes = new_mode(bestvp)) & SUPERHIRES)
+	    {
+		qwe &= 0xccc;	/* clear unused bits */
+		qwe |= (qwe>>2); /* funny hardware */
+		gen |= gen>>1;
+	    }
+
+	    color |= (qwe | gen);
+
+	    *p = color; /* top color */
+
+#ifdef ZD_BP
+	    if ((mspc) && (GBASE->ChipRevBits0 & GFXF_HR_DENISE))
+	    {
+		ULONG *q = GBASE->copinit->genloc;
+		ULONG  bplcon0 = (0x1FE&(int)(&io->bplcon0)) << 16;
+		ULONG  bplcon2 = (0x1FE&(int)(&io->bplcon2)) << 16;
+		ULONG  bplcon3 = (0x1FE&(int)(&io->bplcon3)) << 16;
+
+		/* note that bitplane depth of zero is ok here */
+
+		bplcon0 |= ( GBASE->system_bplcon0 | 
+			   ( v->Modes & INTERLACE ) |
+			   ( (modes & SUPERHIRES)? 0x40: 0 ) | 
+			   ( (modes & (HOLDNMODIFY|DUALPF|HIRES)) ) );
+
+
+		bplcon2 |= (modes & SUPERHIRES)?
+			   (bestvp->SpritePriorities>>1): /* temp hack */
+			   (bestvp->SpritePriorities);
+
+		bplcon2 |= (modes & PF2PRI);
+
+		if(cm->Type)
+		{
+		    if(cm->Flags & COLORMAP_TRANSPARENCY)
+		    {
+			bplcon2 |= BPLCON2_ZDCTEN;
+		    }
+
+		    if(cm->Flags & COLORPLANE_TRANSPARENCY)
+		    {
+			bplcon2 |= BPLCON2_ZDBPEN;
+			bplcon2 |= cm->TransparencyPlane <<12;
+		    }
+
+		    if(cm->Flags & BORDER_BLANKING)
+		    {
+			bplcon0 |= USE_BPLCON3;    /* permission to listen */
+			bplcon3 |= BPLCON3_BRDNBLNK;
+		    }
+
+		    if(cm->Flags & BORDER_NOTRANSPARENCY)
+		    {
+			bplcon0 |= USE_BPLCON3;    /* permission to listen */
+			bplcon3 |= BPLCON3_BRDNTRAN;
+		    }
+		}
+
+		if (mspc->BeamCon0 & CSBLANK) /* for new chips */
+		{
+		    bplcon0 |= USE_BPLCON3;        /* permission to listen */
+		    bplcon3 |= BPLCON3_EXTBLNKEN;  /* ok to listen ?       */
+		}
+
+		*++p = bplcon0; /* unfortunate but necessary   */
+		*q++ = bplcon2; /* setting up bplcon registers */
+		*q++ = bplcon3; /* may be dangerous... -- bart */
+	    }
+#endif
+
+	}
+	else
+	{
+	    ULONG *p = GBASE->copinit->diagstrt;
+	    ULONG kill = (0x1FE&(int)(&io->bplpt[0])) << 16;
+
+	    *p   = kill; /* kill top color set up */
+#ifdef ZD_BP
+	    /* kill top bplcon set ups */
+	    if(GBASE->ChipRevBits0 & GFXF_HR_DENISE)
+	    {
+		ULONG *q = GBASE->copinit->genloc;
+		*q++ = kill; /* kill newgenloc modes */
+		kill = (0x1FE&(int)(&io->bplpt[0])+2) << 16;
+		*++p = kill; /* kill viewport modes */
+		*q++ = kill; /* kill extended modes */
+	    }
+#endif
+	}
+	if(GBASE->ChipRevBits0 & GFXF_HR_DENISE)
+	{
+	    /* must set up diwstart here because copper list */
+	    /* may have just moved down and the old one is */
+	    /* now incorrect */
+	    /* all we have to do is delay it till the proper */
+	    /* one is loaded */
+	    ULONG val = 0;
+	    ULONG *p = GBASE->copinit->diwstart;
+	    val = (0x1FE&(int)(&io->diwstrt)) << 16;
+	    val |= 0xffff;
+	    *p++ = val;
+	    val = (0x1FE&(int)(&io->diwhigh)) << 16;
+	    val |= 0xff;	/* never */
+	    *p++ = val;
+	}
+    }
+
+    ReleaseSemaphore(GBASE->ActiViewCprSemaphore);
+}
+#endif
+
+void default_monitor(mspc)
+struct MonitorSpec *mspc;
+{
+    struct Custom *io;
+
+    io = &custom;
+
+    /* if we get here we must have indirected through ms_Special.do_monitor */
+    {
+	int hcenter;
+
+	io->htotal = mspc->total_colorclocks;
+
+#ifdef BARTDEBUG
+    kprintf("default_monitor: io->htotal == 0x%08lx\n",mspc->total_colorclocks);
+#endif
+
+	io->hbstrt = mspc->ms_Special->hblank.asi_Start;
+	io->hbstop = mspc->ms_Special->hblank.asi_Stop;
+	io->hsstrt = mspc->ms_Special->hsync.asi_Start;
+	io->hsstop = mspc->ms_Special->hsync.asi_Stop;
+
+#ifdef BARTDEBUG
+    kprintf("default_monitor: io->hbstrt == 0x%08lx\n",
+	     mspc->ms_Special->hblank.asi_Start);
+    kprintf("default_monitor: io->hsstrt == 0x%08lx\n",
+	     mspc->ms_Special->hsync.asi_Start);
+    kprintf("default_monitor: io->hsstop == 0x%08lx\n",
+	     mspc->ms_Special->hsync.asi_Stop);
+    kprintf("default_monitor: io->hbstop == 0x%08lx\n",
+	     mspc->ms_Special->hblank.asi_Stop);
+#endif
+
+	hcenter = ( mspc->total_colorclocks >> 1) +
+		    mspc->ms_Special->hsync.asi_Start;
+
+	io->hcenter = hcenter;
+	io->vtotal = mspc->total_rows;
+
+#ifdef BARTDEBUG
+    kprintf("default_monitor: io->hcenter == 0x%08lx\n",hcenter);
+    kprintf("default_monitor: io->vtotal == 0x%08lx\n",mspc->total_rows);
+#endif
+
+	io->vsstrt = mspc->ms_Special->vsync.asi_Start/mspc->total_colorclocks;
+	io->vsstop = mspc->ms_Special->vsync.asi_Stop/mspc->total_colorclocks;
+	io->vbstrt = mspc->ms_Special->vblank.asi_Start/mspc->total_colorclocks;
+	io->vbstop = mspc->ms_Special->vblank.asi_Stop/mspc->total_colorclocks;
+
+#ifdef BARTDEBUG
+    kprintf("default_monitor: io->vbstrt == 0x%08lx\n",
+	     mspc->ms_Special->vblank.asi_Start/mspc->total_colorclocks);
+    kprintf("default_monitor: io->vsstrt == 0x%08lx\n",
+	     mspc->ms_Special->vsync.asi_Start/mspc->total_colorclocks);
+    kprintf("default_monitor: io->vsstop == 0x%08lx\n",
+	     mspc->ms_Special->vsync.asi_Stop/mspc->total_colorclocks);
+    kprintf("default_monitor: io->vbstop == 0x%08lx\n",
+	     mspc->ms_Special->vblank.asi_Stop/mspc->total_colorclocks);
+#endif
+
+	newdefras(GBASE,mspc->ratioh,mspc->ratiov);
+
+    }
+
+#ifdef BARTDEBUG
+    kprintf("default_monitor: beamcon0 == 0x%08lx\n",mspc->BeamCon0);
+#endif
+
+    io->beamcon0 = mspc->BeamCon0;
+
+}
+
+void loadview(d)
+struct View *d;
+{
+    typedef volatile struct Custom vcustom;
+    vcustom *io;
+    UWORD vpos;
+
+    io = &custom;
+
+#ifdef BARTDEBUG
+    kprintf("loadview: view == 0x%08lx\n",d);
+#endif
+
+    /* don't want a spurious interupt occuring before its time */
+    /* only allow interlace->noninterlace transitions during short frame */
+
+    if( (d) && ( (GBASE->Modes&INTERLACE) && (!(d->Modes&INTERLACE))) )
+    {
+	vpos = io->vposr;
+	while (vpos & VPOSRLOF)	/* wait for shortframe */
+	{
+		vpos = io->vposr;	/* stupid fucking compiler */
+	}
+	vpos = io->vhposr;
+	while (((vpos >> 8) & 0xff) < 10)  /* wait till after vblank occurs */
+	{
+		vpos = io->vhposr;
+	}
+    }
+
+    /* single thread access to ActiView hardware copper list */
+
+#ifdef BARTDEBUG
+    kprintf("Getting the Semaphore\n");
+#endif
+
+    ObtainSemaphore(GBASE->ActiViewCprSemaphore);
+
+    io->intena = BITCLR|INTF_VERTB;
+
+    if (GBASE->Flags & TOPLINE_CHANGE)
+    {
+    	GBASE->Flags &= ~TOPLINE_CHANGE;
+    	GBASE->copinit->wait14[0] = (COPPER_WAIT | GBASE->TopLine);	/* risky */
+	if (GBASE->copinit->norm_hblank[0] & COPPER_WAIT)
+		GBASE->copinit->norm_hblank[0] = (COPPER_WAIT | GBASE->TopLine);
+    }
+
+    if (GBASE->ActiView = d)
+    {
+	int	tot_rows = 0;
+	int	tot_cclks = 0;
+	UWORD	old_dma;
+	struct	ViewExtra *ve = 0;
+	struct	MonitorSpec *mspc = 0;
+	char	mode_change = FALSE;
+
+#ifdef BARTDEBUG
+    kprintf("ActiView and View are the same\n");
+#endif
+
+	if (d->LOFCprList == 0)
+	{
+		goto no_cpr_list;
+	}
+
+	GBASE->Modes = d->Modes;
+	GBASE->LOFlist = d->LOFCprList->start;
+
+	mspc = GBASE->default_monitor;
+
+	if (d->Modes & EXTEND_VSTRUCT)
+	{
+	    if((ve = (struct ViewExtra *) GfxLookUp(d)) && ve->Monitor)
+	    {
+		mspc = ve->Monitor;
+	    }
+	}
+
+	if (d->SHFCprList)
+	{
+#ifndef VBLANK_BUG
+		/* LPEN bit is set in bplcon0, swap the long frame and short
+		 * frame. This hides a chip bug.
+		 */
+		if (GBASE->system_bplcon0 & 0x8)
+
+#else		 * Also hide another chip bug - if programmed beamsync and
+		 * interlace, then swap lof/shf.
+		 */
+
+		if ((GBASE->system_bplcon0 & 0x8) ||
+		    ((GBASE->Bugs & BUG_VBLANK) && (mspc->ms_Flags & REQUEST_SPECIAL)))
+#endif
+		{
+			GBASE->SHFlist = GBASE->LOFlist;
+			GBASE->LOFlist = d->SHFCprList->start;
+		}
+		else
+		{
+			GBASE->SHFlist = d->SHFCprList->start;
+		}
+	}
+
+	if(!(mspc == GBASE->current_monitor))
+	{
+	    mode_change = TRUE; /* force change */
+	}
+
+	GBASE->current_monitor = mspc; /* update current */
+
+	update_top_color(mspc);     /* update topmost */
+
+#ifdef BARTDEBUG
+    kprintf("loadview: mspc == 0x%08lx\n",mspc);
+#endif
+
+	if (mspc->ms_Flags)
+	{
+		/* found new 1.3 stuff */
+		tot_rows = mspc->total_rows;
+		tot_cclks = mspc->total_colorclocks;
+	}
+	else	
+	{
+	    io->beamcon0 = beamconpal(GBASE);	/* going to old mode */
+#ifdef BARTDEBUG
+	    kprintf("old mode: beamcon0 == %04lx\n",beamconpal(GBASE));
+#endif
+	}
+
+	old_dma = io->dmaconr;
+
+	/* changing modes? */
+
+	if ( ( tot_rows != GBASE->current_tot_rows) ||
+	     (tot_cclks != GBASE->current_tot_cclks)  )
+	{
+		/* turn off all dma that may blow up */
+
+		io->dmacon = DMAF_COPPER|DMAF_RASTER|DMAF_SPRITE;
+		mode_change = TRUE;
+
+		io->beamcon0 = beamconpal(GBASE);
+#ifdef BARTDEBUG
+		kprintf("mode_change: beamcon0 == %04lx\n",beamconpal(GBASE));
+#endif
+	}
+
+	if(mode_change)
+	{
+	    if ( ( tot_rows || tot_cclks ) && (d->LOFCprList) )
+	    {
+		if(!(mspc->ms_Flags & REQUEST_SPECIAL))
+		{
+#ifdef BARTDEBUG
+		    kprintf("not special: beamcon0 == %04lx\n",mspc->BeamCon0);
+		    kprintf("@beamcon0 == %04lx\n",&mspc->BeamCon0);
+#endif
+		    io->beamcon0 = mspc->BeamCon0;
+		}
+		else
+		{
+		    /* call special monitor routine */
+		    if((mspc->ms_Special) && (mspc->ms_Special->do_monitor))
+		    {
+			(*mspc->ms_Special->do_monitor)(mspc); /* indirect */
+		    }
+		    else 
+		    { 
+			io->beamcon0 = 0x0000; /* stub error hardcode */ 
+		    }
+		}
+		GBASE->MaxDisplayRow = mspc->total_rows - 1; /* for vbasm */
+		GBASE->MaxDisplayColumn = mspc->DeniseMaxDisplayColumn; 
+		GBASE->MinDisplayColumn = mspc->DeniseMinDisplayColumn;
+	    }
+	    else
+	    {
+		GBASE->MaxDisplayRow = ( ( GBASE->DisplayFlags & PAL ) ?
+		                        STANDARD_PAL_ROWS :
+		                        STANDARD_NTSC_ROWS )
+		                        - 1; /* for vbasm */
+		GBASE->MaxDisplayColumn = STANDARD_DENISE_MAX; /* bart */
+		GBASE->MaxDisplayColumn = STANDARD_DENISE_MIN; /* bart */
+	    }
+	}
+	GBASE->current_tot_rows = tot_rows;
+	GBASE->current_tot_cclks = tot_cclks;
+	if (mode_change) io->dmacon = old_dma | DMAF_SETCLR;
+    }
+    else
+    {
+	GBASE->current_monitor = NULL; /* no view, so no monitor either */
+no_cpr_list:
+	GBASE->hedley_flags = 0;
+	GBASE->LOFlist = GBASE->copinit->wait_forever;
+	GBASE->Modes = 0;
+	defras(GBASE);
+    }
+
+    ReleaseSemaphore(GBASE->ActiViewCprSemaphore);
+#ifdef BARTDEBUG
+    kprintf("Released the Semaphore\n");
+#endif
+    io->intena = BITSET|INTF_VERTB;
+
+#ifdef BARTDEBUG
+    kprintf("ByeBye loadview()\n");
+#endif
+
+}
+

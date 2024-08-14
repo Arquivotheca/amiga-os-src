@@ -1,0 +1,650 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.39.49;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@catchall for file system miscellany
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+******************************************************************************/
+// Many, many alterations since then by Nick Garnett and Tim King
+
+// At all points in this file care must be taken in noting that any
+// call to read or write blocks will result in potential loss of control,
+// during which time global values may be altered by other coroutines.
+// A buffer should never be held onto over one of these IO calls, as the
+// contents in the buffer may well shift under your feet.
+
+SECTION "WORK"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+
+// Support routines to aid shared code
+LET discardblock(b) BE freeblock(b, buf.invalid )
+
+LET looseblock(b) BE freeblock(b, buf.valid )
+
+// Locate an existing file or directory (object)
+
+LET locate ( pkt ) = VALOF
+$(
+   // this routine may run either as a coroutine ( locateobject )
+   // or under the access coroutine ( findinput )
+   // hence the dubious bits of code !
+
+   LET ptype     = pkt ! pkt.type
+   LET is.locate = ptype = action.locateobject
+   LET locktype  = is.locate -> pkt!pkt.arg3,   // User specified
+                   ptype = act.findinput -> shared.lock, exclusive.lock
+   LET lock = ?
+
+   LET dir  = pkt ! ( is.locate -> pkt.arg1, pkt.arg2 )
+   LET dkey = vlock ( dir, pkt, FALSE )
+   LET lock = ?
+
+   LET name = VEC 30 / bytesperword
+   LET str  = pkt ! ( is.locate -> pkt.arg2, pkt.arg3 )
+
+   // Split off name from device name if present
+   IF splitname ( name, ':', str, 1 ) \= str % 0 + 1 THEN  // tjk
+   $(
+      dkey := finddir ( dkey, str, pkt, name )
+
+      UNLESS name%0 = 0 DO    // NHG 
+      $(
+         UNLESS [findentry ( dkey, name )] DO workfail ( pkt )
+         dkey := obj.key
+      $)
+   $)
+
+   lock := getlock( dkey, locktype )
+
+   TEST is.locate THEN
+      workdone( pkt, lock )
+   ELSE 
+      RESULTIS lock
+$)
+
+// Create a new file, or create a directory.
+
+AND create ( pkt ) = VALOF
+$(
+   // also runs as a coroutine or under access
+   // so similar dubiousnesses as above !!!
+
+   LET is.cdir = pkt ! pkt.type = action.createdir
+
+   LET dir    = pkt ! ( is.cdir -> pkt.arg1, pkt.arg2 )
+   AND string = pkt ! ( is.cdir -> pkt.arg2, pkt.arg3 )
+   AND  name  = VEC 30 / bytesperword
+   AND  comm  = VEC comm.upb 
+
+
+   LET dkey      = vlock ( dir, pkt, TRUE )
+   LET pkey, okey = ?, ?
+
+   dkey := finddir ( dkey, string, pkt, name )
+
+   $(
+      LET buf, key = ?, ?
+
+      UNLESS checkname ( name ) DO workfail ( pkt )
+
+      notecomment( dkey, name, pkt, comm )
+
+      IF [ NOT scratch ( dkey, name, pkt ) ] &
+         [ errcode \= error.objectnotfound   ] THEN workfail ( pkt )
+
+      key := getkey   ( dkey, -1)
+
+      IF key = -1 DO          // NHG 17/11/83
+      $(
+         errcode := error.discfull
+         workfail( pkt )
+      $)
+
+      buf := getblock ( TRUE )
+
+      clearvec(buf,b.file.upb)
+
+      buf ! b.file.type   := t.short
+      buf ! b.file.ownkey := key
+      buf ! b.file.stype  := is.cdir -> st.userdir, st.file
+
+      copyvec( comm, buf+b.file.infobase, comm.upb ) // CARL
+
+      datstamp   ( buf + b.file.date )
+      writeblock ( buf, key, buf.valid )
+
+      // the following must be done before the pointer on disc is altered.
+
+      alterroot()   	// Bitmap now invalid
+
+      insert     ( dkey, key, name )
+
+      $(
+         LET lock = getlock ( key, exclusive.lock )
+
+         TEST is.cdir
+         THEN $(
+              workdone ( pkt, lock ) 
+         $)
+         ELSE
+              RESULTIS lock
+      $)
+   $)
+$)
+
+// Return a lock representing the parent of this lock.
+
+AND parent ( pkt ) BE            // NHG 17/11/83
+$(
+   LET lock = pkt ! pkt.arg1
+   LET dir  = ?
+   LET key  = vlock( lock , pkt, FALSE )
+   LET pkey = parkey( key )
+
+   TEST pkey = 0    // We are are at root. Return zero.
+   THEN $(
+      errcode := 0  // But set errcode to zero to show this fact.
+      workdone( pkt, 0 )
+   $)
+   ELSE $(
+      dir := getlock( pkey , shared.lock )
+      workdone( pkt , dir )
+   $)
+$)
+
+// Return the key representing the parent of the specified key
+
+AND parkey ( okey ) = VALOF
+$(
+   LET buf = readblock( okey , wait )
+   LET pkey = buf ! b.file.parent
+   looseblock( buf )
+   RESULTIS pkey
+$)
+
+// Delete a file or directory.
+
+AND delete ( pkt ) BE
+$(
+   LET dir  = pkt ! pkt.arg1
+   LET dkey = vlock ( dir, pkt, TRUE )
+   LET res = scratch ( dkey, pkt ! pkt.arg2, pkt )
+   if res THEN alterroot()
+   workdone ( pkt, res )
+$)
+
+// Rename a file or directory. The destination object must not pre-exist.
+
+AND rename ( pkt ) BE
+$(
+   LET from.dir  = pkt ! pkt.arg1
+   AND   to.dir  = pkt ! pkt.arg3
+   AND from.str  = pkt ! pkt.arg2
+   AND to.str    = pkt ! pkt.arg4
+
+   LET to.name   = VEC 30 / bytesperword
+   AND from.name = VEC 30 / bytesperword
+
+   LET from.dkey = vlock ( from.dir, pkt, TRUE )
+   LET to.dkey   = vlock (   to.dir, pkt, TRUE )
+
+   LET object.lock, from.pkey, from.okey, res = ?, ?, ?, ?
+   LET samename = ?
+   LET comm = VEC comm.upb 
+
+   from.dkey := finddir ( from.dkey, from.str, pkt, from.name )
+
+   UNLESS findentry ( from.dkey, from.name ) DO workfail ( pkt )
+
+   from.okey :=  obj.key
+   from.pkey := prev.key
+
+   // This might fail, so do before lock request (TJK)
+   to.dkey := finddir ( to.dkey, to.str, pkt, to.name )
+
+   // Allow the same name but with different cases
+   samename := compstring( from.name, to.name ) = 0 &
+               to.dkey = from.dkey
+
+   // Cannot rename over existing file
+   IF NOT samename & findentry( to.dkey, to.name ) THEN
+   $( errcode := error.objectexists
+      workfail( pkt )
+   $)
+
+   object.lock := getlock ( from.okey, shared.lock )
+
+   IF object.lock = 0 THEN workfail ( pkt )
+
+   UNLESS checkname ( to.name ) DO
+   $(
+      freelock ( object.lock )
+      workfail ( pkt )
+   $)
+
+   alterroot()
+   TEST samename THEN
+   $( LET buf = readblock ( from.okey, grab )
+      copystring(to.name, buf+b.file.name)
+      writeblock ( buf, from.okey, buf.invalid )
+   $) 
+   ELSE
+   $( // An attempt to rename a directory within itself
+      // will always fail
+      IF to.dkey = from.okey THEN
+      $( freelock( object.lock )
+         errcode := error.objectinuse
+         workfail( pkt )
+      $)
+      
+      notecomment( to.dkey, to.name, pkt, comm )
+   
+      insert   ( to.dkey, from.okey, to.name )
+
+      // this will have put the object at the end of the hash chain at
+      // the target - note that the objects own hashchain pointer will
+      // not yet be cleared so that if the m/c crashes the file will
+      // not be lost although the disc will be corrupt ( re-entrant
+      // file structures now present )
+
+      remove ( from.pkey, from.okey, from.name, from.dkey )
+
+      // the object has now been removed from its original location
+      // now it just remains to remove the hashchain entry from it
+
+      $(
+         LET buf = readblock ( from.okey, grab )
+
+         buf ! b.file.hashchain := 0
+
+         IF [(buf+b.file.infobase)%0=0] & [comm%0 NE 0] THEN
+            copystring(comm, buf+b.file.infobase)
+
+         writeblock ( buf, from.okey, buf.invalid )
+      $)
+   $)
+
+   // All done
+   freelock ( object.lock )
+   workdone ( pkt, TRUE )
+$)
+
+// Insert the object key into the directory indicated by dkey.
+
+AND insert ( dkey, okey, name ) BE
+$(
+   LET buf, pkey = ?, ?
+
+   // Call findentry to set prev.key to end of hash chain
+   findentry ( dkey, name )
+   pkey := prev.key
+
+   // First write out file header key
+   buf := readblock ( okey, grab )
+   buf ! b.file.parent := dkey
+   copystring(name, buf + b.file.name)
+   writeblock ( buf, okey, buf.invalid )
+
+   // Now write out the previous block to point to it
+   buf  := readblock ( pkey, grab )
+   buf ! ( dkey = pkey -> hash ( name ), b.file.hashchain ) := okey
+
+   // Write the block back, and ensure directory time stamped
+   dirstamp( buf, pkey, dkey )
+$)
+
+// Write the buffer back to memory. Also timestamp the directory
+// indicated by dkey. We optimise the common case of pkey=dkey.
+// In addition we scan the lock list and modify the access permission
+// of all locks which refer to dkey. The locks will still appear shared
+// due to the way in which the tests are done.
+// now also clear the archive bit.
+
+AND dirstamp( buf, pkey, dkey ) BE
+$( LET ptr = lock.queue
+   UNTIL ptr=0 DO
+   $( IF ptr!lock.key = dkey & ptr!lock.access = shared.lock THEN
+	 ptr!lock.access := altered.lock
+      ptr := !ptr
+   $)
+   IF pkey=dkey THEN
+   $(
+      datstamp( buf+b.file.date )
+      buf!b.file.protect := buf!b.file.protect & ~prot.archive
+   $)
+   // Write the previous key
+   writeblock ( buf, pkey, buf.invalid )
+   UNLESS pkey=dkey DO     // Must fetch & update directory
+   $( buf := readblock( dkey, grab )
+      datstamp( buf+b.file.date )
+      buf!b.file.protect := buf!b.file.protect & ~prot.archive
+      writeblock( buf, dkey, buf.invalid )
+   $)
+$)
+
+// Return the directory key of the object specified by the
+// orginal lock (dkey) and the name 'string'. 'name' is workspace
+// which is filled in with the simple name left.
+
+AND finddir ( dkey, string, pkt, name ) = VALOF
+$(
+   LET ptr  = splitname ( name, ':', string, 1 )
+
+   IF ptr = 0 THEN ptr := 1
+
+   $(
+      LET p = splitname ( name, '/', string, ptr )
+
+      IF p = 0 THEN RESULTIS dkey
+
+      TEST p = ptr + 1
+      THEN $(
+         dkey := parkey( dkey )
+         IF dkey = 0 DO workfail ( pkt )
+         IF ptr = string%0 RESULTIS dkey
+         ptr := p
+         LOOP
+      $)
+      ELSE ptr := p
+
+      TEST findentry ( dkey, name )
+      THEN
+           dkey := obj.key
+      ELSE
+           workfail ( pkt )
+
+   $) REPEAT
+$)
+
+// Find the entry for the specified simple name in the directory indicated
+// by dkey. The result is boolean indicating whether the object could be 
+// found. If TRUE, then the globals obj.key and prev.key point to the
+// object's own key and the predecessor's key (not neccesarily the dir key).
+
+AND findentry ( dkey, name ) = VALOF
+$(
+   LET buf = readblock ( dkey, wait )
+
+   LET pkey, okey = dkey, ?
+
+   UNLESS isdir ( buf ) DO
+   $(
+      discardblock ( buf )
+      RESULTIS FALSE
+   $)
+
+   okey := buf ! hash ( name )
+
+   UNTIL okey = 0 DO
+   $(
+      looseblock ( buf ) ; buf := readblock ( okey, wait )
+
+      IF compstring ( name, buf + b.file.name ) = 0 THEN
+      $(
+         looseblock ( buf )
+
+         obj.key, prev.key := okey, pkey
+
+         RESULTIS TRUE
+      $)
+
+      pkey := okey
+      okey  := buf ! b.file.hashchain
+   $)
+
+   looseblock ( buf )
+
+   obj.key, prev.key := 0, pkey
+
+   errcode  := error.objectnotfound
+   RESULTIS FALSE
+$)
+
+// Remove the specified objet key (okey) from the predecessor's chain.
+
+AND remove ( ckey, okey, name, dkey ) BE
+$(
+   LET buf  = readblock ( okey, wait )
+   LET hval = hash ( name )
+   LET nkey = buf ! b.file.hashchain
+   LET slot = ckey = dkey -> hval,b.file.hashchain
+   LET validtype = ( buf ! b.file.type & t.deleted )=0
+
+   freeblock( buf, validtype )
+   buf := readblock ( ckey, grab )  //TJK3Feb Was wait
+   buf!slot := nkey
+
+   dirstamp( buf, ckey, dkey )
+$)
+
+// The actual implementation of delete. Remove the specified name
+// from the key indicated by dkey.
+
+AND scratch ( dkey, string, pkt ) = VALOF
+$(
+   LET pkey, okey, buf, lock, otype = ?, ?, ?, ?, ?
+   LET name                         = VEC 30 / bytesperword
+
+   dkey := finddir ( dkey, string, pkt, name )
+
+   UNLESS findentry ( dkey, name ) DO RESULTIS FALSE
+
+   pkey, okey := prev.key, obj.key
+   buf        := readblock ( okey, wait )
+   otype      := type      ( buf        )
+
+   UNLESS ((buf!b.file.protect) & prot.delete)=0 THEN
+   $( discardblock( buf )
+      errcode := error.deleteprotected
+      RESULTIS false
+   $)
+
+   IF ( otype = st.userdir ) &
+        VALOF
+           $( FOR i = b.dir.hashtab TO b.dir.hashmax DO
+                  IF buf ! i \= 0 THEN RESULTIS TRUE
+
+              RESULTIS FALSE
+           $)
+           THEN $( discardblock ( buf )
+                   errcode := error.directorynotempty
+                   RESULTIS   FALSE
+                $)
+
+
+   lock := getlock ( okey, exclusive.lock )
+
+   IF lock = 0 THEN
+   $(
+      discardblock ( buf ) ; RESULTIS  FALSE
+   $)
+
+
+
+   IF otype = st.file THEN
+   $(
+      LET extkey, curkey, nblks = ?, okey, ?
+
+      $( nblks := buf ! b.file.highseq
+
+         FOR i = b.file.keymax - ( nblks > b.size.hashtab ->
+                                           b.size.hashtab, nblks ) + 1 TO
+                 b.file.keymax DO
+                                  freekey ( buf ! i )
+
+         extkey := buf ! b.file.extension
+
+         UNLESS curkey = okey DO freekey ( curkey )
+
+         IF extkey = 0 THEN
+         $(
+            IF curkey \= okey THEN
+            $(
+               discardblock ( buf ) ; buf := readblock ( okey, grab )
+            $)
+
+            BREAK
+         $)
+
+         discardblock( buf )
+         buf := readblock ( extkey, grab )   // TJK3Feb Was wait
+
+         curkey := extkey
+
+      $) REPEAT
+   $)
+
+   // We have now marked all blocks as  free. Alter the previous
+   // block to this file header.
+   buf ! b.file.type := buf ! b.file.type | t.deleted
+   looseblock( buf )
+   remove( pkey, okey, name, dkey )
+   freekey( okey )
+
+   freelock   ( lock )
+
+   RESULTIS TRUE
+$)
+
+// Return TRUE or FALSE if this name is valid or not.
+
+AND checkname ( name ) = VALOF
+$(
+   LET length = name % 0
+
+   errcode := error.invalidcomponentname
+
+   RESULTIS
+    ( 1 <= length   <= 30 ) -> VALOF
+    $( FOR i=1 TO length DO 
+       $( LET ch = capitalch(name%i) & #X7F
+          IF ch<'*S' | ch='/' | ch=':' THEN
+             RESULTIS FALSE 
+       $)
+       RESULTIS TRUE
+    $), FALSE
+$)
+
+// Verify the given lock
+
+AND vlock ( lock, pkt, wflag ) = VALOF
+$(
+   LET res = checklock ( lock )
+
+   IF res = 0 | (wflag & diskprotected()) THEN
+      workfail ( pkt )
+
+   RESULTIS res
+$)
+
+
+// Set the comment field in a file header or directory;
+// or the protection or the date. This cannot be performed on the root.
+
+AND comment ( pkt ) BE
+$(
+   // format of packet is : 
+   //           : arg1 - **unused**
+   //           : arg2 - lock on directory
+   //           : arg3 - name of object
+   //           : arg4 - comment string OR protection bits
+   LET type = pkt ! pkt.type
+   LET comm = type = action.setcomment
+   LET str  = pkt ! pkt.arg4
+   LET lock = ?
+   LET okey = ?
+   LET buf  = ?
+
+   IF comm & (str % 0 > 80) THEN 
+   $( errcode := error.commenttoobig
+      workfail ( pkt )
+   $)
+
+   lock := locate ( pkt )
+
+   IF lock = 0 DO workfail( pkt )
+
+   okey := lock ! lock.key
+
+   // Fail the attempt to do this on the root
+   IF okey=rootkey | diskprotected() THEN
+   $( freelock(lock)
+      IF okey=rootkey THEN
+         errcode := error.objectwrongtype
+      workfail(pkt)
+   $)
+
+   buf  := readblock ( okey, grab )   // TJK3Feb was wait
+
+   TEST comm THEN
+   $( clearvec(buf+b.file.infobase, comm.upb)
+      copystring( str, buf+b.file.infobase)
+   $)
+   ELSE TEST type=action.setdate THEN
+      FOR i=0 TO 2 do
+         buf!(b.file.date+i) := getlong(i,str)
+   ELSE
+      buf!b.file.protect := str
+
+   writeblock ( buf, okey, buf.invalid )
+   alterroot()
+   freelock   ( lock )
+   workdone   ( pkt, TRUE )
+$)
+
+// Note the value of an existing comment in comm
+
+AND notecomment ( dkey, name, pkt, comm ) BE
+   TEST findentry ( dkey, name ) THEN
+   $( LET key = obj.key
+      LET buf = readblock ( key, wait )
+      copyvec( buf+b.file.infobase, comm, comm.upb)
+      looseblock ( buf )
+   $)
+   ELSE clearvec(comm, comm.upb)
+
+AND diskprotected() = VALOF
+$( errcode := 0
+   TEST bitmap=0 THEN errcode := error.discnotvalidated
+   ELSE IF wrprot THEN errcode := error.discwriteprotected
+   RESULTIS errcode
+$)
+@

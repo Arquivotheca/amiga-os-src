@@ -1,0 +1,1 @@
+€…†±SPAtan 1E 001…†±SPSin 24 001…†±SPCos 2A 001…†±SPTan 30 001…†±SPSincos 36 0102…†±SPSinh 3C 001…†±SPCosh 42 001…†±SPTanh 48 001…†±SPExp 4E 001…†±SPLog 54 001…†±SPPow 5A 0102…†±SPSqrt 60 001…†±SPTieee 66 001…†±SPFieee 6C 001…†±SPAsin 72 001…†±SPAcos 78 001…†±SPLog10 7E 001

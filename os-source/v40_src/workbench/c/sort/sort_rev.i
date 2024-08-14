@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'6.6.91'
+	ENDM
+VERS	MACRO
+		dc.b	'sort 37.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'sort 37.3 (6.6.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: sort 37.3 (6.6.91)',0
+	ENDM

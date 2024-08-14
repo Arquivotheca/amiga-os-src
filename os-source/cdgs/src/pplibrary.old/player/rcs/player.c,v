@@ -1,0 +1,4094 @@
+head     1.14;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.14
+date     93.02.26.19.03.51;  author peter;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     93.02.23.15.38.12;  author peter;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     93.02.05.13.22.49;  author jerryh;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     93.02.01.15.32.42;  author jerryh;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     93.02.01.15.29.20;  author jerryh;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     93.01.22.11.50.42;  author jerryh;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     93.01.07.11.02.08;  author jerryh;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.12.18.11.42.22;  author jerryh;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.09.21.13.48.43;  author jerryh;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.08.03.09.52.46;  author jerryh;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.07.31.14.10.16;  author jerryh;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.07.30.13.18.39;  author jerryh;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.07.29.10.10.46;  author jerryh;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.07.23.11.36.18;  author jerryh;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@main module for player program.  This is basically a flow
+control module.
+@
+
+
+1.14
+log
+@Major work.  Intuitionized.  Prototyped.  Improved behavior.  Added comments.
+@
+text
+@/* $Id: $ */
+
+#include <exec/types.h>
+#include <exec/io.h>
+#include <exec/execbase.h>
+#include <exec/memory.h>
+
+#include <graphics/gfxbase.h>
+#if 000
+#else	/* Only needed for WriteTinyStr() code */
+#include <intuition/intuition.h>
+#endif
+#include <devices/input.h>
+#include <devices/inputevent.h>
+
+#include <gs:cd/cd.h>
+
+#include <cdtv/cdtvprefs.h>
+#include <cdtv/debox.h>
+
+#include "/screensaver/screensaver.h"
+
+#include "/cdtvkeys.h"
+#include "/playerprefs.h"
+#include "/display.h"
+#include "/playerprefsbase.h"
+
+#include "/playerprefs_pragmas.h"
+#include "/playerprefs_protos.h"
+#include "/display_protos.h"
+#include "/other_protos.h"
+
+#include <clib/alib_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#if 000
+#include <cdtv/debox_protos.h>
+#endif
+#include <pragmas/exec_old_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <cdtv/debox_pragmas.h>
+
+#include <cdtv/cdg_cr_pragmas.h>
+#include <cdtv/cdg_cr_protos.h>
+#ifndef CDTV_CDGPREFS_H
+#include <cdtv/cdg_cr_prefs.h>
+#endif
+
+#include <libraries/game.h>
+#include <clib/game_protos.h>
+#include <pragmas/game_pragmas.h>
+
+#include <internal/playerlibrary.h>
+#include <clib/player_protos.h>
+#include <pragmas/player_pragmas.h>
+
+#include <string.h>
+
+/*************************** External Functions ****************************/
+
+extern BOOL             CDGBegin();
+extern VOID             CDGEnd();
+extern VOID             CDGChannel(ULONG);
+extern void             UpdateGadgets(void);
+extern VOID             EndPPScreen(VOID);
+extern VOID             InitVarBase(struct PlayerPrefsBase *ppb);
+extern                  StartPPScreen(struct GadDir *gl, struct BuildBG_Info *bg, UBYTE *buttondata, UBYTE initfade);
+extern UWORD *          DoAnimation(UWORD *ins);
+extern int NOOP(void);
+
+/********************* External Structures/Variables ***********************/
+
+extern struct GfxBase          *GfxBase;
+extern struct Library          *IntuitionBase;
+extern struct DeBoxBase        *DeBoxBase;
+extern struct ExecBase         *SysBase;
+extern struct PlayerPrefsBase  *PlayerPrefsBase;
+
+extern struct IBuffer          *CurrentIB;
+extern struct IBuffer          *WorkIB;
+extern struct IBuffer          *MasterIB;
+
+extern UWORD volatile __far     vhposr;                     /* Custom chip register. */
+extern char __far               TimerDeviceName[];
+
+extern UBYTE __far              scrdata[];
+extern UBYTE __far              playerstrip[];
+
+/******************************* Functions *********************************/
+
+LONG __asm DoPlayer(register __a6 struct PlayerPrefsBase *);
+
+void  PlayerLoop(struct CDGPrefs *);
+void  DoKeyStroke(UWORD);
+void  UpdateGadgets(void);
+void  SetupPlayer(void);
+void  ShutDown(void);
+void  DoReset(void);
+UBYTE inlist(UBYTE);
+void  AbortQCode(void);
+UWORD GetControllerEvent(void);
+int SubmitKeys(UWORD event);
+
+LONG __asm changeintr(register __a1 struct changedata *);
+
+/************************* Structures/Variables ****************************/
+
+struct BuildBg_Info __far PlayerBg =
+{
+    NULL,		/* struct Header *BackHeader */
+    playerstrip,	/* UBYTE *BackData (strip) */
+    NULL,		/* struct Header *ForHeader */
+    scrdata,		/* UBYTE *ForData (foreground image) */
+    352, 296, 6,	/* Width, Height, Depth */
+    14, 54,		/* ForXOff, ForYOff */
+    NULL		/* Flags */
+};
+
+UBYTE  LastTrack = 0;
+UWORD  IntroCount;
+WORD  IntroFlashTicks = 0;
+UBYTE  LastPlayState, LastPlayMode;
+LONG ShuffleMode = 0;
+LONG haveCD = 0;
+LONG playertofront = 0;
+
+union  CDTOC         *TOC;
+struct QCode          qcode, copyqcode;
+int                   qvalid, qoutstanding, toutstanding;
+struct MsgPort       *cdreply, *qcodereply, *TimeReplyPort;
+struct IOStdReq      *cdio, *cdqcode;
+struct timerequest   *TimeReq;
+
+struct PlayerOptions  PlayerOptions, OptionsSet;
+struct PlayerState    PlayerState;
+struct PlayList      *PlayList;
+struct PlayList      *UndoPlayList;
+
+struct Library       *CDGBase;
+struct PlayerBase    *PlayerBase;
+struct GameBase      *GameBase;
+
+int    CDGAvail = 0, CDGPlaying = 0, CDGDisplaying = 0;
+
+int    ScreenFront = 0;
+
+UBYTE  channel;
+ULONG  currsec;
+
+UBYTE  KeyPressed = PKSF_RELEASE;
+
+/********************************* Tables **********************************/
+
+UWORD IntroData[] =
+{
+    PLGAD_DISK,38, PLGAD_MIN, 100, PLGAD_SEC, 100, PLGAD_NEG, 0, 0xffff,
+    PLGAD_DISK,37, 0xffff,
+    PLGAD_DISK,36, 0xffff,
+    PLGAD_DISK,35, 0xffff,
+    PLGAD_DISK,34, 0xffff,
+    PLGAD_DISK,33, 0xffff,
+    PLGAD_DISK,32, 0xffff,
+    PLGAD_DISK,31, 0xffff,
+    PLGAD_DISK,30, 0xffff,
+    PLGAD_DISK,29, 0xffff,
+    PLGAD_DISK,28, 0xffff,
+    PLGAD_DISK,27, 0xffff,
+    PLGAD_DISK,26, 0xffff,
+    PLGAD_DISK,25, 0xffff,
+    PLGAD_DISK,24, 0xffff,
+    PLGAD_DISK,23, PLGAD_COUNTER, 0x8000+ 0, 0xffff,
+    PLGAD_DISK,22, PLGAD_COUNTER, 0x8000+ 1, 0xffff,
+    PLGAD_DISK,21, PLGAD_COUNTER, 0x8000+ 2, 0xffff,
+    PLGAD_DISK,20, PLGAD_COUNTER, 0x8000+ 3, 0xffff,
+    PLGAD_DISK,19, PLGAD_COUNTER, 0x8000+ 4, 0xffff,
+    PLGAD_DISK,18, PLGAD_COUNTER, 0x8000+ 5, 0xffff,
+    PLGAD_DISK,17, PLGAD_COUNTER, 0x8000+ 6, 0xffff,
+    PLGAD_DISK,16, PLGAD_COUNTER, 0x8000+ 7, 0xffff,
+    PLGAD_DISK,15, PLGAD_COUNTER, 0x8000+ 8, 0xffff,
+    PLGAD_DISK,14, PLGAD_COUNTER, 0x8000+ 9, 0xffff,
+    PLGAD_DISK,13, PLGAD_COUNTER, 0x8000+10, 0xffff,
+    PLGAD_DISK,12, PLGAD_COUNTER, 0x8000+11, 0xffff,
+    PLGAD_DISK,11, PLGAD_COUNTER, 0x8000+12, 0xffff,
+    PLGAD_DISK,10, PLGAD_COUNTER, 0x8000+13, 0xffff,
+    PLGAD_DISK, 9, PLGAD_COUNTER, 0x8000+14, 0xffff,
+    PLGAD_DISK, 8, PLGAD_COUNTER, 0x8000+15, 0xffff,
+    PLGAD_DISK, 7, PLGAD_COUNTER, 0x8000+16, 0xffff,
+    PLGAD_DISK, 6, PLGAD_COUNTER, 0x8000+17, 0xffff,
+    PLGAD_DISK, 5, PLGAD_COUNTER, 0x8000+18, 0xffff,
+    PLGAD_DISK, 4, PLGAD_COUNTER, 0x8000+19, 0xffff,
+    PLGAD_DISK, 3, PLGAD_COUNTER, 0x8000+20, 0xffff,
+    PLGAD_DISK, 2, PLGAD_COUNTER, 0x8000+21, 0xffff,
+    PLGAD_DISK, 1, PLGAD_COUNTER, 0,         0xffff,
+    PLGAD_DISK, 1, 0xffff,
+    0xffff
+};
+
+
+UWORD ShutdownAnim[] =
+{
+    PLGAD_STOP,0,PLGAD_REV,0,PLGAD_PLAY,0,PLGAD_FF,0,
+    PLGAD_SHUFF,0,PLGAD_CDG,4,PLGAD_MIN, 100, PLGAD_SEC, 100, PLGAD_NEG, 0, 0xffff,
+    PLGAD_20, 0, 0xffff,
+    PLGAD_19, 0, 0xffff,
+    PLGAD_18, 0, 0xffff,
+    PLGAD_17, 0, 0xffff,
+    PLGAD_16, 0, 0xffff,
+    PLGAD_15, 0, 0xffff,
+    PLGAD_14, 0, 0xffff,
+    PLGAD_13, 0, 0xffff,
+    PLGAD_12, 0, 0xffff,
+    PLGAD_11, 0, 0xffff,
+    PLGAD_10, 0, 0xffff,
+    PLGAD_9 , 0, 0xffff,
+    PLGAD_8 , 0, 0xffff,
+    PLGAD_7 , 0, 0xffff,
+    PLGAD_6 , 0, 0xffff,
+    PLGAD_5 , 0, 0xffff,
+    PLGAD_4 , 0, 0xffff,
+    PLGAD_3 , 0, 0xffff,
+    PLGAD_2 , 0, 0xffff,
+    PLGAD_1 , 0, 0xffff,
+    0xffff
+};
+
+
+UWORD DiskOutAnim[] =
+{
+    PLGAD_DISK, 1, 0xffff,
+    PLGAD_DISK, 2, 0xffff,
+    PLGAD_DISK, 3, 0xffff,
+    PLGAD_DISK, 4, 0xffff,
+    PLGAD_DISK, 5, 0xffff,
+    PLGAD_DISK, 6, 0xffff,
+    PLGAD_DISK, 7, 0xffff,
+    PLGAD_DISK, 8, 0xffff,
+    PLGAD_DISK, 9, 0xffff,
+    PLGAD_DISK,10, 0xffff,
+    PLGAD_DISK,11, 0xffff,
+    PLGAD_DISK,12, 0xffff,
+    PLGAD_DISK,13, 0xffff,
+    PLGAD_DISK,14, 0xffff,
+    PLGAD_DISK,15, 0xffff,
+    PLGAD_DISK,16, PLGAD_COUNTER,0x8000+21, 0xffff,
+    PLGAD_DISK,17, PLGAD_COUNTER,0x8000+20, 0xffff,
+    PLGAD_DISK,18, PLGAD_COUNTER,0x8000+19, 0xffff,
+    PLGAD_DISK,19, PLGAD_COUNTER,0x8000+18, 0xffff,
+    PLGAD_DISK,20, PLGAD_COUNTER,0x8000+17, 0xffff,
+    PLGAD_DISK,21, PLGAD_COUNTER,0x8000+16, 0xffff,
+    PLGAD_DISK,22, PLGAD_COUNTER,0x8000+15, 0xffff,
+    PLGAD_DISK,23, PLGAD_COUNTER,0x8000+14, 0xffff,
+    PLGAD_DISK,24, PLGAD_COUNTER,0x8000+13, 0xffff,
+    PLGAD_DISK,25, PLGAD_COUNTER,0x8000+12, 0xffff,
+    PLGAD_DISK,26, PLGAD_COUNTER,0x8000+11, 0xffff,
+    PLGAD_DISK,27, PLGAD_COUNTER,0x8000+10, 0xffff,
+    PLGAD_DISK,28, PLGAD_COUNTER,0x8000+ 9, 0xffff,
+    PLGAD_DISK,29, PLGAD_COUNTER,0x8000+ 8, 0xffff,
+    PLGAD_DISK,30, PLGAD_COUNTER,0x8000+ 7, 0xffff,
+    PLGAD_DISK,31, PLGAD_COUNTER,0x8000+ 6, 0xffff,
+    PLGAD_DISK,32, PLGAD_COUNTER,0x8000+ 5, 0xffff,
+    PLGAD_DISK,33, PLGAD_COUNTER,0x8000+ 4, 0xffff,
+    PLGAD_DISK,34, PLGAD_COUNTER,0x8000+ 3, 0xffff,
+    PLGAD_DISK,35, PLGAD_COUNTER,0x8000+ 2, 0xffff,
+    PLGAD_DISK,36, PLGAD_COUNTER,0x8000+ 1, 0xffff,
+    PLGAD_DISK,37, PLGAD_COUNTER,0x8000+ 0, 0xffff,
+    PLGAD_DISK,38, 0xffff,
+    0xffff
+};
+
+
+/****** playerprefs.library/DoPlayer ****************************************
+*
+*   NAME
+*   DoPlayer -- Start CD audio control panel.
+*
+*   SYNOPSIS
+*   DoPlayer();
+*
+*   VOID DoPlayer(void);
+*
+*   FUNCTION
+*   Starts the CD audio control panel.  This function never returns.
+*
+*   RESULT
+*   Like the fabled DETONATE instruction, the function returning
+*   indicates an error.
+*
+*   EXAMPLE
+*   DoPlayer();
+*   error_exit();
+*
+*   NOTES
+*
+*   BUGS
+*   Yes.
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*/
+
+
+LONG __asm
+DoPlayer(register __a6 struct PlayerPrefsBase *ppb)
+{
+extern struct GadDir                PlayGADList[];
+extern UBYTE  __far                 scrbuttons[];
+extern struct BuildBg_Info __far    PlayerBg;
+extern ULONG __far RangeSeed;
+#define LVOScreenDepth -0x312
+
+struct CDTVPrefs    prefs;
+struct CDGPrefs     cdp;
+int                 i;
+
+    InitVarBase(ppb);                                                                                    /* Initilize the varables */
+    SetChipRev( SETCHIPREV_BEST );
+
+    /* Patching ScreenDepth() to fail prevents Amiga-M/N from having
+     * any effect
+     */
+    SetFunction( IntuitionBase, LVOScreenDepth, NOOP );
+
+    RangeSeed = (-vhposr & 0x7fff) ^ 0x1D6539A3;
+
+    if (!StartPPScreen(PlayGADList, &PlayerBg, scrbuttons, 15))
+    {
+	for (i=PLGAD_STOP; i<=PLGAD_20; i++) WorkIB->ib_GState[i] = CurrentIB->ib_GState[i] = -1;
+
+	if (cdreply = (struct MsgPort *)CreateMsgPort())
+	{
+	    if (qcodereply = (struct MsgPort *)CreateMsgPort())
+	    {
+		if (cdio = (struct IOStdReq *)CreateStdIO(cdreply))
+		{
+		    if (cdqcode = (struct IOStdReq *)CreateStdIO(qcodereply))
+		    {
+			if (!OpenDevice("cd.device", 0, cdio, 0))
+			{
+			    CopyMem(cdio, cdqcode, sizeof(*cdio));
+
+			    cdio->io_Message.mn_ReplyPort   = cdreply;
+			    cdqcode->io_Message.mn_ReplyPort = qcodereply;
+			    qoutstanding = toutstanding = qvalid = 0;
+
+			    FillCDTVPrefs(&prefs);
+
+			    if (TOC = AllocMem(sizeof(union CDTOC) * 100, MEMF_PUBLIC))
+			    {
+				if (UndoPlayList = AllocMem(sizeof(struct PlayList), MEMF_PUBLIC))
+				{
+				    if (TimeReplyPort = CreateMsgPort())
+				    {
+					if (TimeReq = (struct timerequest *)
+					    CreateExtIO(TimeReplyPort, sizeof(struct timerequest)))
+					{
+					    if (!OpenDevice("timer.device", UNIT_VBLANK, TimeReq, 0))
+					    {
+						if (PlayerBase = OpenLibrary("player.library", NULL))
+						{
+						    if (GameBase = (struct GameBase *)OpenLibrary("game.library", 0L))
+						    {
+							if (CDG_Open(&cdp))
+							{
+							    if (UnpackSprites(&cdp))
+							    {
+								PlayerLoop(&cdp);
+								CDG_Close();
+							    }
+
+							}
+
+							CloseLibrary(GameBase);
+						    }
+
+						    CloseLibrary(PlayerBase);
+						}
+
+						CloseDevice(TimeReq);
+					    }
+
+					    DeleteExtIO(TimeReq);
+					}
+
+					DeleteMsgPort(TimeReplyPort);
+				    }
+
+				    FreeMem(UndoPlayList, sizeof(struct PlayList));
+				}
+
+				FreeMem(TOC, sizeof(union CDTOC) * 100);
+			    }
+
+			    AbortQCode();
+
+			    CloseDevice(cdio);
+			}
+
+			DeleteStdIO(cdqcode);
+		    }
+
+		    DeleteStdIO(cdio);
+		}
+
+		DeleteMsgPort(qcodereply);
+	    }
+
+	    DeleteMsgPort(cdreply);
+	}
+
+	EndPPScreen();
+    }
+
+    return(20);
+}
+
+
+
+
+/************************ Main Player Event Loop ***************************/
+
+void
+PlayerLoop(struct CDGPrefs *cdp)
+{
+ULONG               event;
+    CDGAvail = CDGBegin(cdp);
+
+    SetupPlayer();
+
+    while(1)
+    {
+	if ( haveCD )
+	{
+	    while( event = GetIDCMPEvent() )
+	    {
+		DoKeyStroke( event );
+	    }
+	    while ( event = GetControllerEvent() )
+	    {
+		DoKeyStroke(event);
+	    }
+
+	    /* -1 indicates a non-audio disk.  Let's not reboot if
+	     * the user is changing audio disks.
+	     */
+	    if ( PlayerState.AudioDisk != 1 )
+	    {
+		ShutDown();
+		if ( PlayerState.AudioDisk == ~0 )
+		{
+		    DoReset();
+		}
+	    }
+	    else
+	    {
+		UpdateGadgets();
+
+		if (!CDGPlaying)
+		{
+		    if (CDGAvail && PlayerState.PlayState >= PLS_PLAYING)
+		    {
+			MasterIB->ib_GState[PLGAD_CDG] = CDGDraw(CDGF_GRAPHICS|CDGF_MIDI);
+			if ( MasterIB->ib_GState[PLGAD_CDG] & CDGF_GRAPHICS )
+			
+			{
+			    CDGPlaying = channel = 1;
+			    CDGChannel( channel );
+			    CDGClearScreen();
+
+			    if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+			    else                                     CDGPlay(0);
+
+
+			    /* Because of the loss of the B-button to toggle
+			     * in/out of CD+G, we'll always play CD+G
+			     */
+			    CDGDisplaying = 1;
+			    AbleColorChanger( FALSE );
+			    CDGFront();
+			    MasterIB->ib_BoxNo = PLGAD_CDG;
+
+			    if (MasterIB->ib_GState[PLGAD_FF])       CDGFastForward();
+			    else if (MasterIB->ib_GState[PLGAD_REV]) CDGRewind();
+			}
+		    }
+		}
+
+		else CDGDraw(CDGF_GRAPHICS|CDGF_MIDI);
+
+		if (!CDGDisplaying)
+		{
+		    UpdateDisplay();
+		    if ( playertofront )
+		    {
+			playertofront = 0;
+			RethinkDisplay();
+			AbleColorChanger( TRUE );
+		    }
+		}
+	    }
+	}
+	else
+	{
+	    GetPlayerState(&PlayerState);
+	    if ( PlayerState.AudioDisk == 1 )
+	    {
+		SetupPlayer();
+	    }
+	    else if ( PlayerState.AudioDisk == ~0 )
+	    {
+		DoReset();
+	    }
+	}
+	WaitTOF();
+    }
+}
+
+
+
+
+
+/*********************** Interpret KeyStroke Event *************************/
+
+void
+DoKeyStroke(UWORD event)
+{
+UWORD  dir;
+
+    if (!CDGDisplaying)
+    {
+	if (event & BOXMOVE)
+	{
+		DoBoxMove(event);
+		return;
+	}
+
+	if ((event == IECODE_LBUTTON) || (event == (IECODE_LBUTTON+IECODE_UP_PREFIX))
+	    || (event == RAWKEY_RETURN) || (event == (RAWKEY_RETURN | IECODE_UP_PREFIX)))
+	    event = GetBoxKey( MasterIB, event );
+
+	if (!SubmitKeys(event)) switch (event)
+	{
+	    case RAWKEY_ARROWUP: dir = DIR_UP;      DoBoxMove(dir);  break;
+
+	    case RAWKEY_ARROWDN: dir = DIR_DOWN;    DoBoxMove(dir);  break;
+
+	    case RAWKEY_ARROWLT: dir = DIR_LEFT;    DoBoxMove(dir);  break;
+
+	    case RAWKEY_ARROWRT: dir = DIR_RIGHT;   DoBoxMove(dir);  break;
+
+	    case KEY_GBUTTON:
+
+		togglegnum();
+		return;
+
+	    case KEY_SHUFFLE:
+
+		/* We want shuffle to scramble the tracks and
+		 * initiate a fresh play.  So we stop playing
+		 * if paused, and restart after shuffling, if
+		 * stopped.
+		 */
+		if ( PlayerState.PlayState == PLS_PAUSED )
+		{
+		    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_PRESS);
+		    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_RELEASE);
+		}
+
+		ShuffleGrid();                                                                                      /* Call zero for not quick */
+
+		if ( PlayerState.PlayState == PLS_STOPPED )
+		{
+		    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+		    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+		}
+
+
+		return;
+
+	    case KEY_TIMEMODE:                                                                                      /* Change time display mode. */
+
+		GetOptions(&OptionsSet);
+		OptionsSet.TimeMode = (OptionsSet.TimeMode + 1) & 0x03;
+		OptionsSet.Loop = OptionsSet.Intro = OptionsSet.Subcode = -1;
+		SetOptions(&OptionsSet);
+		break;
+
+	    case KEY_REPEAT:                                                                                        /* A/B loop */
+
+		GetOptions(&OptionsSet);
+		OptionsSet.Loop = !OptionsSet.Loop;
+		OptionsSet.TimeMode = OptionsSet.Intro = OptionsSet.Subcode = -1;
+		SetOptions(&OptionsSet);
+		break;
+
+	    case KEY_INTRO:                                                                                         /* Intro mode */
+		GetOptions(&OptionsSet);
+		OptionsSet.Intro = !OptionsSet.Intro;
+		IntroFlashTicks = ~0;	/* Signifies initial */
+		OptionsSet.Loop = OptionsSet.TimeMode = OptionsSet.Subcode = -1;
+		SetOptions(&OptionsSet);
+
+		LastTrack  = 0;
+		IntroCount = -1;
+
+		if (OptionsSet.Intro && PlayerState.PlayState == PLS_STOPPED)
+		{
+		    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+		    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+		}
+
+		break;
+
+	    case RAWKEY_PREVTRAK:
+
+		MasterIB->ib_GState[PLGAD_REV] = 1;
+		if (CDGPlaying) CDGClearScreen();
+		return;
+
+	    case RAWKEY_NEXTTRAK:
+
+		MasterIB->ib_GState[PLGAD_FF] = 1;
+		if (CDGPlaying) CDGClearScreen();
+		return;
+
+	    case (RAWKEY_PREVTRAK | IECODE_UP_PREFIX):
+
+		MasterIB->ib_GState[PLGAD_REV] = 0;
+		break;
+
+	    case (RAWKEY_NEXTTRAK | IECODE_UP_PREFIX):
+
+		MasterIB->ib_GState[PLGAD_FF] = 0;
+		break;
+
+	    case KEY_CDG:
+		if (!CDGDisplaying && CDGPlaying)
+		{
+		    CDGDisplaying = 1;
+		    MasterIB->ib_BoxNo = PLGAD_CDG;
+		    AbleColorChanger( FALSE );
+		    CDGFront();
+		    if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+
+		    if (MasterIB->ib_GState[PLGAD_FF])       CDGFastForward();
+		    else if (MasterIB->ib_GState[PLGAD_REV]) CDGRewind();
+		}
+
+		break;
+
+	    case RAWKEY_ESC:
+
+		if (MasterIB->ib_BoxNo >= PLGAD_1 && MasterIB->ib_BoxNo <= PLGAD_20)
+		{
+		    if (PlayList->EntryCount) ResetPlayList(1);
+		    else                      ResetPlayList(0);
+
+		    UpdatePlayTime();
+		}
+
+		break;
+
+	    case RAWKEY_ENTER:                                                                                      /* Numeric keypad */
+
+		if (MasterIB->ib_BoxNo >= PLGAD_1 && MasterIB->ib_BoxNo <= PLGAD_20) DoBoxMove(DIR_RIGHT);
+
+		break;
+
+	    default:
+		return;
+	}
+    }
+
+    else if (!SubmitKeys(event)) switch (event)
+    {
+	case RAWKEY_PREVTRAK:
+	    CDGRewind();
+	    break;
+
+	case RAWKEY_NEXTTRAK:
+	    CDGFastForward();
+	    break;
+
+	case (RAWKEY_PREVTRAK | IECODE_UP_PREFIX):
+	case (RAWKEY_NEXTTRAK | IECODE_UP_PREFIX):
+	    if (PlayerState.PlayState == PLS_PAUSED)
+	    {
+		CDGPause();
+	    }
+	    else
+	    {
+		CDGPlay(0);
+	    }
+	    break;
+
+	case IECODE_LBUTTON:
+	    CDGDisplaying = 0;
+	    CDGBack();
+	    SetTrackCounter(1);
+	    MasterIB->ib_GState[PLGAD_REV] = MasterIB->ib_GState[PLGAD_FF]  = 0;
+	    playertofront = 1;
+	    break;
+
+	case DIR_UP:
+	    if (++channel > 15) channel = 1;
+	    CDGChannel((channel & 0x0f));
+	    break;
+
+	case DIR_DOWN:
+	    if (channel-- == 0) channel = 15;
+	    CDGChannel((channel & 0x0f));
+	    break;
+
+	case (DIR_UP | IECODE_UP_PREFIX):
+	case (DIR_DOWN | IECODE_UP_PREFIX):
+	    if ((KeyPressed & PKSF_STROKEDIR) == PKSF_PRESS)
+		SubmitKeyStroke(KeyPressed = ((KeyPressed & PKSF_KEY) | PKSF_RELEASE));
+	    break;
+    }
+}
+
+
+
+
+int
+SubmitKeys(UWORD event)
+{
+    switch(event)
+    {
+	case KEY_PAUSE:                                                                                         /* Pause */
+
+	    if (PlayerState.PlayState > PLS_SELECTED)
+	    {
+		SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+		SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+	    }
+
+	    return(1);
+
+	case KEY_PLAY:                                                                                          /* Play */
+
+	    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+	    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+	    return(1);
+
+	case KEY_STOP:                                                                                          /*  Stop  */
+
+	    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_PRESS);
+	    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_RELEASE);
+
+	    if ( ShuffleMode )
+
+	    {
+		UnShuffleGrid();
+		ShuffleMode = 0;
+	    }
+	    return(1);
+
+	case KEY_BACK:                                                                                          /* Back track */
+
+	    MasterIB->ib_GState[PLGAD_REV]  = 1;
+	    SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_PRESS);
+	    return(1);
+
+	case KEY_FWD:                                                                                           /* Next track */
+
+	    MasterIB->ib_GState[PLGAD_FF]   = 1;
+	    SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_PRESS);
+	    return(1);
+
+	case (KEY_BACK|IECODE_UP_PREFIX):
+
+	    MasterIB->ib_GState[PLGAD_REV]  = 0;
+	    SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_RELEASE);
+	    AbortQCode();
+	    return(1);
+
+	case (KEY_FWD|IECODE_UP_PREFIX):
+
+	    MasterIB->ib_GState[PLGAD_FF]   = 0;
+	    SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_RELEASE);
+	    AbortQCode();
+	    return(1);
+
+	default: return(0);
+    }
+}
+
+
+/************** Update Screen Gadgets Based on Current State ***************/
+
+void
+UpdateGadgets()
+{
+    GetPlayerState(&PlayerState);
+
+    if (PlayerState.PlayState >= PLS_PLAYING)
+    {
+	if (toutstanding)
+	{
+	    if (CheckIO(TimeReq))
+	    {
+		if (!qoutstanding)
+		{
+		    SendIO(cdqcode);
+		    qoutstanding = 1;
+		}
+
+		if (CheckIO(cdqcode))
+		{
+		    WaitIO(cdqcode);
+		    qoutstanding = 0;
+
+		    if (!cdqcode->io_Error)
+		    {
+			copyqcode = qcode;
+			qvalid = 1;
+		    }
+
+		    WaitIO(TimeReq);
+
+#if DEBUGGING
+		    if (TimeReq->tr_node.io_Error) kprintf("Error %d\n", TimeReq->tr_node.io_Error);
+#endif
+
+		    TimeReq->tr_time.tv_secs    = 1;
+		    TimeReq->tr_time.tv_micro   = 0;
+		    SendIO(TimeReq);
+		}
+	    }
+	}
+    }
+
+    if (CDGPlaying)
+    {
+	if (CDGDisplaying && LastPlayMode == PlayerState.PlayMode && LastPlayState == PlayerState.PlayState) return;
+
+	if (LastPlayState != PlayerState.PlayState) switch (PlayerState.PlayState)
+	{
+	    case PLS_STOPPED:
+
+		CDGStop();
+		CDGBack();
+		if (CDGDisplaying)
+		{
+		    playertofront = 1;
+		}
+		CDGPlaying = CDGDisplaying = 0;
+
+		MasterIB->ib_GState[PLGAD_REV] = MasterIB->ib_GState[PLGAD_FF]  = 0;
+		break;
+
+	    case PLS_PLAYING: CDGPlay(1); break;
+	    case PLS_PAUSED:  CDGPause(); break;
+	}
+    }
+
+    switch (PlayerState.PlayState)
+    {
+	case PLS_STOPPED:
+
+	    AbortQCode();
+	    break;
+
+	case PLS_PLAYING:
+	case PLS_PAUSED:
+
+	    if (!toutstanding)
+	    {
+		TimeReq->tr_time.tv_secs    = 1;
+		TimeReq->tr_time.tv_micro   = 0;
+		SendIO(TimeReq);
+		toutstanding = 1;
+	    }
+
+	    break;
+    }
+
+    if (PlayerState.PlayState == PLS_STOPPED) MasterIB->ib_GState[PLGAD_TTRACK] = PlayerState.Tracks;
+
+    else
+    {
+	MasterIB->ib_GState[PLGAD_TTRACK] = PlayerState.Track;
+
+	if (PlayerState.Track != LastTrack)
+	{
+	    if (PlayerState.PlayMode == PLM_SKIPREV) --IntroCount;
+	    else                                     IntroCount++;
+
+	    LastTrack = PlayerState.Track;
+
+	    /* The Intro gadget has two primary states: off and on.
+	     * When it's on, the whole thing is yellow.  But whenever
+	     * we change tracks, we want to wink one of the arrows
+	     * for FLASHLENGTH vblanks.  IntroFlashTicks counts that down.
+	     * Note that we get here the first time Intro is
+	     * turned on, and we don't want to wink the gadget
+	     * in that case.  We handle that by detecting
+	     * IntroFlashTicks of ~0.
+	     */
+	    if ( IntroFlashTicks == ~0 )
+	    {
+		IntroFlashTicks = 0;
+	    }
+	    else
+	    {
+		IntroFlashTicks = FLASHLENGTH;
+	    }
+	}
+    }
+
+    if (PlayerState.AudioDisk == 1)
+    {
+	MasterIB->ib_GState[PLGAD_MIN]    = PlayerState.Minute;
+	MasterIB->ib_GState[PLGAD_SEC]    = PlayerState.Second;
+    }
+
+    if (PlayerState.PlayMode == PLM_NORMAL)
+    {
+	MasterIB->ib_GState[PLGAD_STOP]  =  (PlayerState.PlayState == PLS_STOPPED)
+				    || (PlayerState.PlayState == PLS_SELECTED)
+				    || (PlayerState.PlayState == PLS_NUMENTRY);
+
+	if ( PlayerState.PlayState == PLS_PAUSED )
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 1;
+	}
+	else if ( PlayerState.PlayState == PLS_PLAYING )
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 2;
+	}
+	else
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 0;
+	}
+    }
+
+    GetOptions(&PlayerOptions);
+
+    MasterIB->ib_GState[PLGAD_TIME]   = PlayerOptions.TimeMode;
+    /* We post a negative sign in the time-display if the time mode
+     * set to "remaining", not "elapsed".
+     */
+    MasterIB->ib_GState[PLGAD_NEG]    = ( ( PlayerOptions.TimeMode & 1 ) && ( PlayerState.PlayState != PLS_STOPPED ) );
+
+    MasterIB->ib_GState[PLGAD_REPEAT] = PlayerOptions.Loop;
+    if ( PlayerOptions.Intro )
+    {
+	if ( IntroFlashTicks )
+	{
+	    MasterIB->ib_GState[PLGAD_INTRO] = ( 0x03 & IntroCount ) + 1;
+	    IntroFlashTicks--;
+	}
+	else
+	{
+	    MasterIB->ib_GState[PLGAD_INTRO] = 5;
+	}
+    }
+    else
+    {
+	MasterIB->ib_GState[PLGAD_INTRO] = 0;
+    }
+
+    if (PlayerState.LastModify) MasterIB->ib_GState[PLGAD_SHUFF] = 0;
+
+    SetTrackCounter(0);
+
+    if (PlayerState.AudioDisk == 1) DisplayGrid();
+
+    LastPlayMode  = PlayerState.PlayMode;
+    LastPlayState = PlayerState.PlayState;
+}
+
+
+/**************** Initialize Structures/Variables/Gadgets ******************/
+
+void
+SetupPlayer(void)
+{
+extern UWORD     IntroData[];
+UWORD  *anim;
+    static int firstinit = 1;
+
+    PlayList = ObtainPlayList();
+
+    OptionsSet.Loop     = -1;
+    OptionsSet.Intro    = -1;
+    OptionsSet.TimeMode = -1;
+    OptionsSet.Subcode  = 1;
+    SetOptions(&OptionsSet);
+
+    MasterIB->ib_GState[PLGAD_STOP]   = 1;
+    MasterIB->ib_GState[PLGAD_TIME]   = 0;
+    MasterIB->ib_GState[PLGAD_REPEAT] = 0;
+    MasterIB->ib_GState[PLGAD_SHUFF]  = 0;
+    MasterIB->ib_GState[PLGAD_CDG] = 4;
+    ShuffleMode = 0;
+
+    CDGPlaying = 0;
+    CDGDisplaying = 0;
+    cdio->io_Command = CD_ATTENUATE;                                                                                /* Turn on the speakers; full volume, right now(sorta). */
+    cdio->io_Offset  = 0x7FFF;
+    cdio->io_Length  = 0;
+    DoIO(cdio);
+
+    cdqcode->io_Command  = CD_QCODELSN;                                                                             /* Initialize the qcode packet. */
+    cdqcode->io_Data     = (APTR)&qcode;
+
+    TimeReq->tr_node.io_Command = TR_ADDREQUEST;                                                                    /* Create timer request */
+    TimeReq->tr_time.tv_secs    = 1;
+    TimeReq->tr_time.tv_micro   = 0;
+
+    GetPlayerState(&PlayerState);
+
+    if (PlayerState.PlayMode == PLM_NORMAL)
+    {
+	MasterIB->ib_GState[PLGAD_STOP]  =  (PlayerState.PlayState == PLS_STOPPED)
+				    || (PlayerState.PlayState == PLS_SELECTED);
+
+	if ( PlayerState.PlayState == PLS_PAUSED )
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 1;
+	}
+	else if ( PlayerState.PlayState == PLS_PLAYING )
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 2;
+	}
+	else
+	{
+	    MasterIB->ib_GState[PLGAD_PLAY] = 0;
+	}
+    }
+
+    GetOptions(&PlayerOptions);
+
+    MasterIB->ib_GState[PLGAD_TIME]   = PlayerOptions.TimeMode;
+    MasterIB->ib_GState[PLGAD_REPEAT] = PlayerOptions.Loop;
+    MasterIB->ib_GState[PLGAD_INTRO]  = PlayerOptions.Intro * ((0x03 & IntroCount) + 1);
+
+    LastPlayMode  = PlayerState.PlayMode;
+    LastPlayState = PlayerState.PlayState;
+
+    UpdateDisplay();
+
+    if ( firstinit )
+    {
+	FadeTo(0);
+    }
+
+    anim = IntroData;
+    while (anim)
+    {
+	anim = DoAnimation(anim);
+    }
+
+    haveCD = 1;
+    AbleColorChanger( TRUE );
+    MasterIB->ib_BoxNo = PLGAD_PLAY;
+
+    GetPlayerState(&PlayerState);
+    GetOptions(&PlayerOptions);
+
+    cdio->io_Command  = CD_TOCLSN;                                                                          /* Gimme summary. */
+    cdio->io_Offset   = 0;
+    cdio->io_Length   = 100;
+    cdio->io_Data     = (APTR)TOC;
+    DoIO(cdio);
+
+    if (!cdio->io_Error) InitTrackCounter();
+
+    else
+    {
+	ShutDown();
+	DoReset();
+    }
+
+    currsec = TOC[PlayerState.Track].Entry.Position.LSN;
+    firstinit = 0;
+}
+
+
+/***************************** Shutdown Routine ****************************/
+
+void
+ShutDown()
+{
+UWORD *anim;
+
+    AbleColorChanger( FALSE );
+    haveCD = 0;
+    anim = ShutdownAnim;
+    MasterIB->ib_BoxNo = -1;
+
+    /* Shutdown anim turns all gadgets to off.  Do that simultaneously
+     * to bringing the disk-head back to the outside.
+     */
+    while ((MasterIB->ib_GState[PLGAD_COUNTER] != 0) || anim)
+    {
+	if (MasterIB->ib_GState[PLGAD_COUNTER] != 0)
+	{
+	    MasterIB->ib_GState[PLGAD_COUNTER]--;
+	}
+
+	if (anim)
+	{
+	    anim = DoAnimation(anim);
+	}
+	else
+	{
+	    UpdateDisplay();
+	}
+    }
+
+    /* The DiskOutAnim makes the disk head fly up and the disk itself
+     * fly left
+     */
+    anim = DiskOutAnim;
+    while(anim = DoAnimation(anim));
+}
+
+
+
+/****************************** Fade and Reset *****************************/
+
+void
+DoReset()
+{
+    FadeTo(15);
+    ColdReboot();
+}
+
+
+
+/**************** Determine if a Track is in the PlayList ******************/
+
+UBYTE
+inlist(UBYTE track)
+{
+int i;
+
+    for (i=0; i!=PlayList->EntryCount; i++)
+	if ((PlayList->Entry[i] & PLEF_TRACK) == track) return(PlayList->Entry[i]);
+
+    return(0);
+}
+
+
+
+/*********************** Abort Q-Code related requests *********************/
+
+void
+AbortQCode(void)
+{
+    if (qoutstanding)
+    {
+	AbortIO(cdqcode);
+	WaitIO(cdqcode);
+	qoutstanding = 0;
+    }
+
+    if (toutstanding)
+    {
+	AbortIO(TimeReq);
+	WaitIO(TimeReq);
+	toutstanding = 0;
+    }
+
+    qvalid = 0;
+}
+
+
+
+/************* Simulate a keypress when using Game Controller **************/
+
+#define NO_JOYEVENT	~0
+
+
+/* We usually get called here once every VBlank.
+ *
+ * REPEAT_INITIAL is the number of VBlanks to skip before repeating
+ * 	directional movement.
+ * REPEAT_ONGOING is the number of VBlanks to skip between each
+ *	successive repeat.
+ * MOUSEMOVE_THRESH is the number of mouse ticks below which we
+ *	ignore the event completely.  This is to prevent drift
+ *	of the highlight box in the axis perpendicular to the
+ *	principal motion of the mouse.
+ * MOUSEJUMP_THRESH is the number of mouse ticks that must
+ *	be exceeded to cause a jump of the highlight box in
+ *	that direction.
+ */
+#define REPEAT_INITIAL		45
+#define REPEAT_ONGOING		10
+#define MOUSEMOVE_THRESH	2
+#define MOUSEJUMP_THRESH	100
+
+#define REPEATING	0x80000000
+
+ULONG LastJoyBits = 0;
+UWORD LastJoyEvent = NO_JOYEVENT;
+UWORD RepeatCount = 0;
+LONG MouseX = 0;
+LONG MouseY = 0;
+
+
+/* Map of Game Controller buttons to functions: */
+#define NUM_JOYPORTEVENTS 11
+ULONG JoyEventMap[ NUM_JOYPORTEVENTS ][ 2 ] =
+{
+    { JPF_BTN1,  KEY_STOP },		/* A (Red) button is select */
+    { JPF_BTN2,  IECODE_LBUTTON },	/* B (Blue) button is stop */
+    { JPF_BTN3,  KEY_REPEAT },		/* C (Yellow) button is repeat */
+    { JPF_BTN4,  KEY_SHUFFLE },		/* D (Green) button is shuffle */
+    { JPF_BTN5,  KEY_FWD },		/* Right Ear button is forward */
+    { JPF_BTN6,  KEY_BACK },		/* Left Ear button is rewind */
+    { JPF_BTN7,  KEY_PLAY },		/* Play/Pause button toggles play/pause */
+    { JPF_UP,    DIR_UP | REPEATING },		/* Move up */
+    { JPF_DOWN,  DIR_DOWN | REPEATING },	/* Move down */
+    { JPF_LEFT,  DIR_LEFT | REPEATING },	/* Move left */
+    { JPF_RIGHT, DIR_RIGHT | REPEATING },	/* Move right */
+};
+
+UWORD
+GetControllerEvent(void)
+{
+ULONG joybits0, joybits1, joybits;
+UWORD i;
+ULONG event = 0;
+UWORD joyevent;
+
+    joybits0 = ReadJoyPort(0);
+    joybits1 = ReadJoyPort(1);
+
+    joybits = 0;
+    /* We'll heed a joystick or controller in either port.
+     * Also, we listen for a mouse in port zero.  Note that
+     * here we look only for mouse buttons.  Mouse movement
+     * is handled near the end.
+     */
+    if ( ( ( joybits0 & JP_TYPE_MASK ) == JP_TYPE_GAMECTLR ) ||
+	( ( joybits0 & JP_TYPE_MASK ) == JP_TYPE_JOYSTK ) )
+    {
+	joybits = joybits0;
+    }
+
+    if ( ( ( joybits1 & JP_TYPE_MASK ) == JP_TYPE_GAMECTLR ) ||
+	( ( joybits1 & JP_TYPE_MASK ) == JP_TYPE_JOYSTK ) )
+    {
+	joybits  |= joybits1;
+    }
+
+    if ( ( joybits0 & JP_TYPE_MASK ) == JP_TYPE_MOUSE )
+    {
+	joybits |= ( joybits0 & ( JPF_BTN1 | JPF_BTN2 | JPF_BTN3 ) );
+    }
+
+    joyevent = NO_JOYEVENT;
+    for ( i = 0; i < NUM_JOYPORTEVENTS; i++ )
+    {
+	if ( joybits & JoyEventMap[ i ][ 0 ] )
+	{
+	    /* Note which button is down.  If two or more buttons are
+	     * down, we do nothing, and wait for the situation to
+	     * normalize.
+	     */
+	    if ( joyevent == NO_JOYEVENT )
+	    {
+		joyevent = i;
+	    }
+	    else
+	    {
+		return( 0 );
+	    }
+	}
+    }
+
+    /* If no button was down previously */
+    if ( LastJoyEvent == NO_JOYEVENT )
+    {
+	/* If there's a button down now */
+	if ( joyevent != NO_JOYEVENT )
+	{
+	    /* Send the event for the button in question */
+	    event = ( JoyEventMap[ joyevent ][ 1 ] );
+	    LastJoyEvent = joyevent;
+	    if ( event & REPEATING )
+	    {
+		RepeatCount = REPEAT_INITIAL;
+	    }
+	    else
+	    {
+		RepeatCount = 0;
+	    }
+	}
+    }
+    else
+    {
+	/* We know a button used to be down.  If no buttons are now down,
+	 * or if the button that is down is different from the last one
+	 * we handled, send the upstroke for the last one down.
+	 */
+	if ( ( joyevent == NO_JOYEVENT ) || ( LastJoyEvent != joyevent ) )
+	{
+	    event = ( JoyEventMap[ LastJoyEvent ][ 1 ] | IECODE_UP_PREFIX );
+	    LastJoyEvent = NO_JOYEVENT;
+	}
+	else /* Button is still down */
+	{
+	    if ( RepeatCount )
+	    {
+		if ( --RepeatCount == 0 )
+		{
+		    event = JoyEventMap[ joyevent ][ 1 ];
+		    RepeatCount = REPEAT_ONGOING;
+		}
+	    }
+	}
+    }
+    if ( !event )
+    {
+	if ( ( joybits0 & JP_TYPE_MASK ) == JP_TYPE_MOUSE )
+	{
+	    static firstread = 1;
+	    static BYTE lastMouseCountX;
+	    static BYTE lastMouseCountY;
+	    BYTE mouseCountX = ( joybits0 & JP_MHORZ_MASK );
+	    BYTE mouseCountY = ( joybits0 & JP_MVERT_MASK ) >> 8;
+	    BYTE deltax = mouseCountX - lastMouseCountX;
+	    BYTE deltay = mouseCountY - lastMouseCountY;
+
+	    lastMouseCountX = mouseCountX;
+	    lastMouseCountY = mouseCountY;
+	    if ( firstread )
+	    {
+		firstread = 0;
+	    }
+	    else
+	    {
+		if ( ( deltax > MOUSEMOVE_THRESH ) || ( deltax < -MOUSEMOVE_THRESH ) )
+		{
+		    MouseX += deltax;
+		}
+		if ( ( deltay > MOUSEMOVE_THRESH ) || ( deltay < -MOUSEMOVE_THRESH ) )
+		{
+		    MouseY += deltay;
+		}
+
+		if ( MouseX > MOUSEJUMP_THRESH )
+		{
+		    MouseX = 0;
+		    event = DIR_RIGHT;
+		}
+		else if ( MouseX < -MOUSEJUMP_THRESH )
+		{
+		    MouseX = 0;
+		    event = DIR_LEFT;
+		}
+		else if ( MouseY > MOUSEJUMP_THRESH )
+		{
+		    MouseY = 0;
+		    event = DIR_DOWN;
+		}
+		else if ( MouseY < -MOUSEJUMP_THRESH )
+		{
+		    MouseY = 0;
+		    event = DIR_UP;
+		}
+	    }
+	}
+    }
+    return( event & ~REPEATING );
+}
+@
+
+
+1.13
+log
+@First round of major improvements by Peter.
+@
+text
+@d1 1
+a2 1
+
+d9 4
+a12 1
+
+a21 1
+#include "/basicio/keyclick.h"
+d25 1
+d30 2
+d33 6
+a38 3
+#include "clib/exec_protos.h"
+#include "clib/dos_protos.h"
+#include "clib/graphics_protos.h"
+d40 1
+a40 1
+
+d44 1
+d47 5
+a51 2
+#include "cdtv/cdg_cr_pragmas.h"
+#include "cdtv/cdg_cr_prefs.h"
+d54 2
+a55 2
+#include "cdgs:src/game/Game_pragmas.h"
+#include "cdgs:src/game/Game_protos.h"
+d57 3
+a59 3
+#include "cdgs:include/internal/playerlibrary.h"
+#include "cdgs:include/internal/player_protos.h"
+#include "cdgs:include/internal/player_pragmas.h"
+d69 2
+a70 2
+extern VOID __stdargs   EndCDTVScreen(VOID);
+extern VOID             InitVarBase(register struct PlayerPrefsBase *ppb);
+d72 2
+a73 4
+extern UWORD           *DoAnimation();
+#if NUMBER_ENTRY
+extern void             PlayerNumPad(int);
+#endif
+d78 1
+d80 1
+a80 1
+extern void                    *SysBase;
+d83 4
+a86 1
+extern struct CycleIntInfo      intdata;
+d100 1
+a100 1
+void  SetupPlayer();
+a102 2
+void  disableclick(int);
+void  click(void);
+d105 2
+a106 1
+UWORD GetJoyPortEvent(void);
+d112 2
+a113 2
+struct BuildBg_Info __far PlayerBg = {
+
+d121 1
+a121 1
+    };
+a125 1
+WORD CDGFlashTicks = 0;
+d129 1
+d148 1
+a149 4
+int    LastEntryCount = -1;
+#if NUMBER_ENTRY
+int    NumericPadEnabled = 1;
+#endif
+a150 2
+short  changesigbit = -1;
+BYTE   keyclick;
+a151 1
+WORD   blank;
+d158 41
+a198 41
+UWORD IntroData[] = {
+
+    1, PLGAD_DISK,38, PLGAD_MIN, 100, PLGAD_SEC, 100, PLGAD_NEG, 0, 0xffff,
+    1, PLGAD_DISK,37, 0xffff,
+    1, PLGAD_DISK,36, 0xffff,
+    1, PLGAD_DISK,35, 0xffff,
+    1, PLGAD_DISK,34, 0xffff,
+    1, PLGAD_DISK,33, 0xffff,
+    1, PLGAD_DISK,32, 0xffff,
+    1, PLGAD_DISK,31, 0xffff,
+    1, PLGAD_DISK,30, 0xffff,
+    1, PLGAD_DISK,29, 0xffff,
+    1, PLGAD_DISK,28, 0xffff,
+    1, PLGAD_DISK,27, 0xffff,
+    1, PLGAD_DISK,26, 0xffff,
+    1, PLGAD_DISK,25, 0xffff,
+    1, PLGAD_DISK,24, 0xffff,
+    1, PLGAD_DISK,23, PLGAD_COUNTER, 0x8000+ 0, 0xffff,
+    1, PLGAD_DISK,22, PLGAD_COUNTER, 0x8000+ 1, 0xffff,
+    1, PLGAD_DISK,21, PLGAD_COUNTER, 0x8000+ 2, 0xffff,
+    1, PLGAD_DISK,20, PLGAD_COUNTER, 0x8000+ 3, 0xffff,
+    1, PLGAD_DISK,19, PLGAD_COUNTER, 0x8000+ 4, 0xffff,
+    1, PLGAD_DISK,18, PLGAD_COUNTER, 0x8000+ 5, 0xffff,
+    1, PLGAD_DISK,17, PLGAD_COUNTER, 0x8000+ 6, 0xffff,
+    1, PLGAD_DISK,16, PLGAD_COUNTER, 0x8000+ 7, 0xffff,
+    1, PLGAD_DISK,15, PLGAD_COUNTER, 0x8000+ 8, 0xffff,
+    1, PLGAD_DISK,14, PLGAD_COUNTER, 0x8000+ 9, 0xffff,
+    1, PLGAD_DISK,13, PLGAD_COUNTER, 0x8000+10, 0xffff,
+    1, PLGAD_DISK,12, PLGAD_COUNTER, 0x8000+11, 0xffff,
+    1, PLGAD_DISK,11, PLGAD_COUNTER, 0x8000+12, 0xffff,
+    1, PLGAD_DISK,10, PLGAD_COUNTER, 0x8000+13, 0xffff,
+    1, PLGAD_DISK, 9, PLGAD_COUNTER, 0x8000+14, 0xffff,
+    1, PLGAD_DISK, 8, PLGAD_COUNTER, 0x8000+15, 0xffff,
+    1, PLGAD_DISK, 7, PLGAD_COUNTER, 0x8000+16, 0xffff,
+    1, PLGAD_DISK, 6, PLGAD_COUNTER, 0x8000+17, 0xffff,
+    1, PLGAD_DISK, 5, PLGAD_COUNTER, 0x8000+18, 0xffff,
+    1, PLGAD_DISK, 4, PLGAD_COUNTER, 0x8000+19, 0xffff,
+    1, PLGAD_DISK, 3, PLGAD_COUNTER, 0x8000+20, 0xffff,
+    1, PLGAD_DISK, 2, PLGAD_COUNTER, 0x8000+21, 0xffff,
+    1, PLGAD_DISK, 1, PLGAD_COUNTER, 0,         0xffff,
+    1, PLGAD_DISK, 1, 0xffff,
+d200 1
+a200 1
+    };
+d203 24
+a226 24
+UWORD ShutdownAnim[] = {
+
+    0,PLGAD_STOP,0,PLGAD_REV,0,PLGAD_PLAY,0,PLGAD_FF,0,
+      PLGAD_SHUFF,0,PLGAD_CDG,0,0xffff,
+    0, PLGAD_20, 0, 0xffff,
+    0, PLGAD_19, 0, 0xffff,
+    0, PLGAD_18, 0, 0xffff,
+    0, PLGAD_17, 0, 0xffff,
+    0, PLGAD_16, 0, 0xffff,
+    0, PLGAD_15, 0, 0xffff,
+    0, PLGAD_14, 0, 0xffff,
+    0, PLGAD_13, 0, 0xffff,
+    0, PLGAD_12, 0, 0xffff,
+    0, PLGAD_11, 0, 0xffff,
+    0, PLGAD_10, 0, 0xffff,
+    0, PLGAD_9 , 0, 0xffff,
+    0, PLGAD_8 , 0, 0xffff,
+    0, PLGAD_7 , 0, 0xffff,
+    0, PLGAD_6 , 0, 0xffff,
+    0, PLGAD_5 , 0, 0xffff,
+    0, PLGAD_4 , 0, 0xffff,
+    0, PLGAD_3 , 0, 0xffff,
+    0, PLGAD_2 , 0, 0xffff,
+    0, PLGAD_1 , 0, 0xffff,
+d228 1
+a228 1
+    };
+d231 40
+a270 40
+UWORD DiskOutAnim[] = {
+
+    1, PLGAD_DISK, 1, 0xffff,
+    1, PLGAD_DISK, 2, 0xffff,
+    1, PLGAD_DISK, 3, 0xffff,
+    1, PLGAD_DISK, 4, 0xffff,
+    1, PLGAD_DISK, 5, 0xffff,
+    1, PLGAD_DISK, 6, 0xffff,
+    1, PLGAD_DISK, 7, 0xffff,
+    1, PLGAD_DISK, 8, 0xffff,
+    1, PLGAD_DISK, 9, 0xffff,
+    1, PLGAD_DISK,10, 0xffff,
+    1, PLGAD_DISK,11, 0xffff,
+    1, PLGAD_DISK,12, 0xffff,
+    1, PLGAD_DISK,13, 0xffff,
+    1, PLGAD_DISK,14, 0xffff,
+    1, PLGAD_DISK,15, 0xffff,
+    1, PLGAD_DISK,16, PLGAD_COUNTER,0x8000+21, 0xffff,
+    1, PLGAD_DISK,17, PLGAD_COUNTER,0x8000+20, 0xffff,
+    1, PLGAD_DISK,18, PLGAD_COUNTER,0x8000+19, 0xffff,
+    1, PLGAD_DISK,19, PLGAD_COUNTER,0x8000+18, 0xffff,
+    1, PLGAD_DISK,20, PLGAD_COUNTER,0x8000+17, 0xffff,
+    1, PLGAD_DISK,21, PLGAD_COUNTER,0x8000+16, 0xffff,
+    1, PLGAD_DISK,22, PLGAD_COUNTER,0x8000+15, 0xffff,
+    1, PLGAD_DISK,23, PLGAD_COUNTER,0x8000+14, 0xffff,
+    1, PLGAD_DISK,24, PLGAD_COUNTER,0x8000+13, 0xffff,
+    1, PLGAD_DISK,25, PLGAD_COUNTER,0x8000+12, 0xffff,
+    1, PLGAD_DISK,26, PLGAD_COUNTER,0x8000+11, 0xffff,
+    1, PLGAD_DISK,27, PLGAD_COUNTER,0x8000+10, 0xffff,
+    1, PLGAD_DISK,28, PLGAD_COUNTER,0x8000+ 9, 0xffff,
+    1, PLGAD_DISK,29, PLGAD_COUNTER,0x8000+ 8, 0xffff,
+    1, PLGAD_DISK,30, PLGAD_COUNTER,0x8000+ 7, 0xffff,
+    1, PLGAD_DISK,31, PLGAD_COUNTER,0x8000+ 6, 0xffff,
+    1, PLGAD_DISK,32, PLGAD_COUNTER,0x8000+ 5, 0xffff,
+    1, PLGAD_DISK,33, PLGAD_COUNTER,0x8000+ 4, 0xffff,
+    1, PLGAD_DISK,34, PLGAD_COUNTER,0x8000+ 3, 0xffff,
+    1, PLGAD_DISK,35, PLGAD_COUNTER,0x8000+ 2, 0xffff,
+    1, PLGAD_DISK,36, PLGAD_COUNTER,0x8000+ 1, 0xffff,
+    1, PLGAD_DISK,37, PLGAD_COUNTER,0x8000+ 0, 0xffff,
+    1, PLGAD_DISK,38, 0xffff,
+d272 1
+a272 1
+    };
+d307 3
+a309 2
+LONG __asm DoPlayer(register __a6 struct PlayerPrefsBase *ppb) {
+
+d313 2
+d320 88
+a407 1
+    InitVarBase(ppb);                                                                                           /* Initilize the varables */
+d409 2
+a410 1
+    srand((-vhposr & 0x7fff) ^ 0x1D6539A3);
+d412 2
+a413 89
+    if (!StartPPScreen(PlayGADList, &PlayerBg, scrbuttons, 15)) {
+
+        for (i=PLGAD_STOP; i<=PLGAD_20; i++) WorkF->gstate[i] = CurrentF->gstate[i] = -1;
+
+        if (cdreply = (struct MsgPort *)CreatePort(0, 0)) {
+
+            if (qcodereply = (struct MsgPort *)CreatePort(0, 0)) {
+
+                if (cdio = (struct IOStdReq *)CreateStdIO(cdreply)) {
+
+                    if (cdqcode = (struct IOStdReq *)CreateStdIO(qcodereply)) {
+
+                        if (!OpenDevice("cd.device", 0, cdio, 0)) {
+
+                            CopyMem(cdio, cdqcode, sizeof(*cdio));
+
+                            cdio->io_Message.mn_ReplyPort   = cdreply;
+                            cdqcode->io_Message.mn_ReplyPort = qcodereply;
+                            qoutstanding = toutstanding = qvalid = 0;
+
+                            FillCDTVPrefs(&prefs);
+
+                            keyclick = (prefs.Flags & CDTVPF_KEYCLICK) != 0;
+
+                            if (TOC = AllocMem(sizeof(union CDTOC) * 100, MEMF_PUBLIC)) {
+
+                                if (UndoPlayList = AllocMem(sizeof(struct PlayList), MEMF_PUBLIC)) {
+
+                                    InstallKeyClick();
+
+                                    if (TimeReplyPort = CreateMsgPort()) {
+
+                                        if (TimeReq = (struct timerequest *)
+                                            CreateExtIO(TimeReplyPort, sizeof(struct timerequest))) {
+
+                                            if (!OpenDevice("timer.device", UNIT_VBLANK, TimeReq, 0)) {
+
+                                                if (PlayerBase = OpenLibrary("player.library", NULL)) {
+
+                                                    if (GameBase = (struct GameBase *)OpenLibrary("game.library", 0L)) {
+
+                                                        if (CDG_Open(&cdp)) {
+
+                                                            if (UnpackSprites(&cdp)) {
+
+                                                                PlayerLoop(&cdp);
+                                                                CDG_Close();
+                                                                }
+
+                                                            }
+
+                                                        CloseLibrary(GameBase);
+                                                        }
+
+                                                    CloseLibrary(PlayerBase);
+                                                    }
+
+                                                CloseDevice(TimeReq);
+                                                }
+
+                                            DeleteExtIO(TimeReq);
+                                            }
+
+                                        DeleteMsgPort(TimeReplyPort);
+                                        }
+
+                                    KeyClickCommand(CLKCMD_DIE, 0, 0, 0, 0, 0);
+                                    FreeMem(UndoPlayList, sizeof(struct PlayList));
+                                    }
+
+                                FreeMem(TOC, sizeof(union CDTOC) * 100);
+                                }
+
+                            AbortQCode();
+
+                            CloseDevice(cdio);
+                            }
+
+                        DeleteStdIO(cdqcode);
+                        }
+
+                    DeleteStdIO(cdio);
+                    }
+
+                DeletePort(qcodereply);
+                }
+
+            DeletePort(cdreply);
+            }
+d415 2
+a416 2
+        EndCDTVScreen();
+        }
+d419 1
+a419 1
+    }
+d426 3
+a428 2
+void PlayerLoop(struct CDGPrefs *cdp) {
+
+d430 1
+d434 12
+a445 8
+    CDGAvail = CDGBegin(cdp);
+
+    while(1) {
+
+	if ( haveCD ) {
+	    while(event = GetEvent(&input_data)) DoKeyStroke(event);
+
+	    while(event = GetJoyPortEvent())     DoKeyStroke(event);
+d450 5
+a454 3
+	    if ( PlayerState.AudioDisk != 1 ) {
+	        ShutDown();
+		if ( PlayerState.AudioDisk == ~0 ) {
+d456 33
+d490 1
+a490 1
+	        }
+d492 1
+a492 1
+	    UpdateGadgets();
+d494 10
+a503 44
+	    if (!CDGPlaying) {
+
+	        if (CDGAvail && PlayerState.PlayState >= PLS_PLAYING)
+	            if ((CDGDraw(CDGF_GRAPHICS|CDGF_MIDI)) & CDGF_GRAPHICS) {
+
+	            CDGPlaying = channel = 1;
+	            CDGChannel( channel );
+	            CDGClearScreen();
+
+	            if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+	            else                                     CDGPlay(0);
+
+
+		    /* Because of the loss of the B-button to toggle
+		     * in/out of CD+G, we'll always play CD+G
+		     */
+	            CDGDisplaying = 1;
+	            CDGFront();
+
+	            if (MasterF.gstate[PLGAD_FF])       CDGFastForward();
+	            else if (MasterF.gstate[PLGAD_REV]) CDGRewind();
+	            }
+	        }
+
+	    else CDGDraw(CDGF_GRAPHICS|CDGF_MIDI);
+
+	    if (!CDGDisplaying) {
+
+	        UpdateDisplay();
+
+	        if (ScreenFront) {
+
+	            if (!--ScreenFront) {
+
+	                if (intdata.cintd_View) {
+
+	                    LoadView((struct View *)intdata.cintd_View);
+	                    WaitTOF();
+	                    }
+
+	                intdata.cintd_Bump = 1;
+	                }
+	            }
+	        }
+d505 3
+a507 1
+	else {
+d509 2
+a510 1
+	    if ( PlayerState.AudioDisk == 1 ) {
+d512 3
+a514 2
+		}
+	    else if ( PlayerState.AudioDisk == ~0 ) {
+a515 1
+		}
+d517 2
+a518 2
+        WaitTOF();
+        }
+d520 1
+d528 12
+a539 1
+void DoKeyStroke(UWORD event) {
+d541 3
+a543 4
+#if NUMBER_ENTRY
+register short  up;
+#endif
+register UWORD  dir;
+d545 9
+a553 1
+    if (!CDGDisplaying) {
+d555 1
+a555 1
+	if (event & BOXMOVE) {
+d557 1
+a557 2
+		click();
+		DoBoxMove(event);
+a558 23
+	    }
+
+        blank = 0;
+
+        if ((event == IECODE_LBUTTON) || (event == (IECODE_LBUTTON+IECODE_UP_PREFIX))
+            || (event == RAWKEY_RETURN) || (event == (RAWKEY_RETURN | IECODE_UP_PREFIX)))
+            event = GetBoxKey(&MasterF, event);
+
+        if (!SubmitKeys(event)) switch (event) {
+
+            case RAWKEY_ARROWUP: dir = DIR_UP;      DoBoxMove(dir);  break;
+
+            case RAWKEY_ARROWDN: dir = DIR_DOWN;    DoBoxMove(dir);  break;
+
+            case RAWKEY_ARROWLT: dir = DIR_LEFT;    DoBoxMove(dir);  break;
+
+            case RAWKEY_ARROWRT: dir = DIR_RIGHT;   DoBoxMove(dir);  break;
+
+            case KEY_GBUTTON:
+
+                click();
+                togglegnum();
+                return;
+d560 1
+a560 1
+            case KEY_SHUFFLE:
+d567 87
+a653 2
+                click();
+                if ( PlayerState.PlayState == PLS_PAUSED ) {
+d655 1
+a655 107
+                    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_PRESS);
+                    SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_RELEASE);
+                    }
+
+                ShuffleGrid();                                                                                      /* Call zero for not quick */
+
+                if ( PlayerState.PlayState == PLS_STOPPED ) {
+
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+                    }
+
+
+                return;
+
+            case KEY_TIMEMODE:                                                                                      /* Change time display mode. */
+
+                GetOptions(&OptionsSet);
+                OptionsSet.TimeMode = (OptionsSet.TimeMode + 1) & 0x03;
+                OptionsSet.Loop = OptionsSet.Intro = OptionsSet.Subcode = -1;
+                SetOptions(&OptionsSet);
+                break;
+
+            case KEY_REPEAT:                                                                                        /* A/B loop */
+
+                GetOptions(&OptionsSet);
+                OptionsSet.Loop = !OptionsSet.Loop;
+                OptionsSet.TimeMode = OptionsSet.Intro = OptionsSet.Subcode = -1;
+                SetOptions(&OptionsSet);
+                break;
+
+            case KEY_INTRO:                                                                                         /* Intro mode */
+
+                GetOptions(&OptionsSet);
+                OptionsSet.Intro = !OptionsSet.Intro;
+                IntroFlashTicks = ~0;	/* Signifies initial */
+                OptionsSet.Loop = OptionsSet.TimeMode = OptionsSet.Subcode = -1;
+                SetOptions(&OptionsSet);
+
+                LastTrack  = 0;
+                IntroCount = -1;
+
+                if (OptionsSet.Intro && PlayerState.PlayState == PLS_STOPPED) {
+
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+                    }
+
+                break;
+
+            case RAWKEY_PREVTRAK:
+
+                MasterF.gstate[PLGAD_REV] = 1;
+                if (CDGPlaying) CDGClearScreen();
+                return;
+
+            case RAWKEY_NEXTTRAK:
+
+                MasterF.gstate[PLGAD_FF] = 1;
+                if (CDGPlaying) CDGClearScreen();
+                return;
+
+            case (RAWKEY_PREVTRAK | IECODE_UP_PREFIX):
+
+                MasterF.gstate[PLGAD_REV] = 0;
+                break;
+
+            case (RAWKEY_NEXTTRAK | IECODE_UP_PREFIX):
+
+                MasterF.gstate[PLGAD_FF] = 0;
+                break;
+
+            case KEY_CDG:
+                if (!CDGDisplaying && CDGPlaying) {
+
+		    CDGFlashTicks = FLASHLENGTH;
+                    CDGDisplaying = 1;
+                    CDGFront();
+                    if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+
+                    if (MasterF.gstate[PLGAD_FF])       CDGFastForward();
+                    else if (MasterF.gstate[PLGAD_REV]) CDGRewind();
+                    }
+
+                break;
+
+            case RAWKEY_ESC:
+
+                if (MasterF.BoxNo >= PLGAD_1 && MasterF.BoxNo <= PLGAD_20) {
+
+                    if (PlayList->EntryCount) ResetPlayList(1);
+                    else                      ResetPlayList(0);
+
+                    UpdatePlayTime();
+                    }
+
+                break;
+
+            case RAWKEY_ENTER:                                                                                      /* Numeric keypad */
+
+                if (MasterF.BoxNo >= PLGAD_1 && MasterF.BoxNo <= PLGAD_20) DoBoxMove(DIR_RIGHT);
+
+                break;
+
+            default:
+#if NUMBER_ENTRY
+                if ((up = IsNumKey(event)) >= 0) {
+d657 84
+a740 7
+                    enternum(up);
+                    break;
+                    }
+#endif
+                return;
+            }
+        }
+d742 12
+a753 83
+    else if (!SubmitKeys(event)) switch (event) {
+
+        case RAWKEY_PREVTRAK:
+
+            CDGRewind();
+            break;
+
+        case RAWKEY_NEXTTRAK:
+
+            CDGFastForward();
+            break;
+
+        case (RAWKEY_PREVTRAK | IECODE_UP_PREFIX):
+        case (RAWKEY_NEXTTRAK | IECODE_UP_PREFIX):
+
+            if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+            else                                     CDGPlay(0);
+
+            break;
+
+        case IECODE_LBUTTON:
+
+            CDGDisplaying = 0;
+            CDGBack();
+
+            SetTrackCounter(1);
+            MasterF.gstate[PLGAD_REV] = MasterF.gstate[PLGAD_FF]  = 0;
+            ScreenFront = 20;
+
+            break;
+
+        case DIR_UP:
+            if (++channel > 15) channel = 1;
+            CDGChannel((channel & 0x0f));
+
+            break;
+
+        case DIR_DOWN:
+            if (channel-- == 0) channel = 15;
+            CDGChannel((channel & 0x0f));
+
+            break;
+
+        case (DIR_UP | IECODE_UP_PREFIX):
+        case (DIR_DOWN | IECODE_UP_PREFIX):
+            if ((KeyPressed & PKSF_STROKEDIR) == PKSF_PRESS)
+                SubmitKeyStroke(KeyPressed = ((KeyPressed & PKSF_KEY) | PKSF_RELEASE));
+            break;
+        }
+
+    if (!(event & IECODE_UP_PREFIX)) {
+
+        click();
+        }
+    }
+
+
+
+
+int SubmitKeys(UWORD event) {
+
+    switch(event) {
+
+        case KEY_PAUSE:                                                                                         /* Pause */
+
+            if (PlayerState.PlayState > PLS_SELECTED) {
+
+                SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+                SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+                }
+
+            return(1);
+
+        case KEY_PLAY:                                                                                          /* Play */
+
+            SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+            SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+            return(1);
+
+        case KEY_STOP:                                                                                          /*  Stop  */
+
+            SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_PRESS);
+            SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_RELEASE);
+d755 1
+a755 2
+            if ( ShuffleMode )
+            {
+d757 1
+d761 1
+a761 1
+            return(1);
+d763 1
+a763 1
+        case KEY_BACK:                                                                                          /* Back track */
+d765 25
+a789 26
+            MasterF.gstate[PLGAD_REV]  = 1;
+            SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_PRESS);
+            return(1);
+
+        case KEY_FWD:                                                                                           /* Next track */
+
+            MasterF.gstate[PLGAD_FF]   = 1;
+            SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_PRESS);
+            return(1);
+
+        case (KEY_BACK|IECODE_UP_PREFIX):
+
+            MasterF.gstate[PLGAD_REV]  = 0;
+            SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_RELEASE);
+            AbortQCode();
+            return(1);
+
+        case (KEY_FWD|IECODE_UP_PREFIX):
+
+            MasterF.gstate[PLGAD_FF]   = 0;
+            SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_RELEASE);
+            AbortQCode();
+            return(1);
+
+        default: return(0);
+        }
+d791 1
+d796 3
+a798 2
+void UpdateGadgets() {
+
+d801 11
+a811 1
+    if (PlayerState.PlayState >= PLS_PLAYING) {
+d813 4
+a816 1
+        if (toutstanding) {
+d818 5
+a822 18
+            if (CheckIO(TimeReq)) {
+
+                if (!qoutstanding) {
+
+                    SendIO(cdqcode);
+                    qoutstanding = 1;
+                    }
+
+                if (CheckIO(cdqcode)) {
+
+                    WaitIO(cdqcode);
+                    qoutstanding = 0;
+
+                    if (!cdqcode->io_Error) {
+
+                        copyqcode = qcode;
+                        qvalid = 1;
+                        }
+d824 1
+a824 1
+                    WaitIO(TimeReq);
+d827 1
+a827 1
+                    if (TimeReq->tr_node.io_Error) kprintf("Error %d\n", TimeReq->tr_node.io_Error);
+d830 63
+a892 60
+                    TimeReq->tr_time.tv_secs    = 1;
+                    TimeReq->tr_time.tv_micro   = 0;
+                    SendIO(TimeReq);
+                    }
+                }
+            }
+        }
+
+    if (CDGPlaying) {
+
+        if (CDGDisplaying && LastPlayMode == PlayerState.PlayMode && LastPlayState == PlayerState.PlayState) return;
+
+        if (LastPlayState != PlayerState.PlayState) switch (PlayerState.PlayState) {
+
+            case PLS_STOPPED:
+
+                if (CDGDisplaying) ScreenFront = 20;
+
+                CDGStop();
+                CDGBack();
+                CDGPlaying = CDGDisplaying = 0;
+                MasterF.gstate[PLGAD_REV] = MasterF.gstate[PLGAD_FF]  = 0;
+                break;
+
+            case PLS_PLAYING: CDGPlay(1); break;
+            case PLS_PAUSED:  CDGPause(); break;
+            }
+        }
+
+    switch (PlayerState.PlayState) {
+
+        case PLS_STOPPED:
+
+            AbortQCode();
+            break;
+
+        case PLS_PLAYING:
+        case PLS_PAUSED:
+
+            if (!toutstanding) {
+
+                TimeReq->tr_time.tv_secs    = 1;
+                TimeReq->tr_time.tv_micro   = 0;
+                SendIO(TimeReq);
+                toutstanding = 1;
+                }
+
+            break;
+        }
+
+    if (PlayerState.PlayState == PLS_STOPPED) MasterF.gstate[PLGAD_TTRACK] = PlayerState.Tracks;
+
+    else {
+
+        MasterF.gstate[PLGAD_TTRACK] = PlayerState.Track;
+
+        if (PlayerState.Track != LastTrack) {
+
+            if (PlayerState.PlayMode == PLM_SKIPREV) --IntroCount;
+            else                                     IntroCount++;
+d894 1
+a894 1
+            LastTrack = PlayerState.Track;
+d905 2
+a906 1
+	    if ( IntroFlashTicks == ~0 ) {
+d908 3
+a910 2
+		}
+	    else {
+a911 24
+		}
+            }
+        }
+
+    if (PlayerState.AudioDisk == 1) {
+
+        MasterF.gstate[PLGAD_MIN]    = PlayerState.Minute;
+        MasterF.gstate[PLGAD_SEC]    = PlayerState.Second;
+        }
+
+    if (PlayerState.PlayMode == PLM_NORMAL) {
+
+        MasterF.gstate[PLGAD_STOP]  =  (PlayerState.PlayState == PLS_STOPPED)
+                                    || (PlayerState.PlayState == PLS_SELECTED)
+                                    || (PlayerState.PlayState == PLS_NUMENTRY);
+
+	if ( PlayerState.PlayState == PLS_PAUSED ) {
+	    MasterF.gstate[PLGAD_PLAY] = 1;
+	    }
+	else if ( PlayerState.PlayState == PLS_PLAYING ) {
+	    MasterF.gstate[PLGAD_PLAY] = 2;
+	    }
+	else {
+	    MasterF.gstate[PLGAD_PLAY] = 0;
+d913 2
+a914 1
+        }
+d916 11
+a926 3
+#if NUMBER_ENTRY
+    if (NumericPadEnabled && PlayList->EntryCount == LastEntryCount+1) MasterF.D0 = 80;
+#endif
+d928 13
+a940 1
+    LastEntryCount = PlayList->EntryCount;
+d944 1
+a944 1
+    MasterF.gstate[PLGAD_TIME]   = PlayerOptions.TimeMode;
+d948 1
+a948 1
+    MasterF.gstate[PLGAD_NEG]    = ( PlayerOptions.TimeMode & 1 );
+d950 1
+a950 1
+    MasterF.gstate[PLGAD_REPEAT] = PlayerOptions.Loop;
+d955 1
+a955 1
+	    MasterF.gstate[PLGAD_INTRO] = ( 0x03 & IntroCount ) + 1;
+d960 1
+a960 1
+	    MasterF.gstate[PLGAD_INTRO] = 5;
+d965 1
+a965 11
+	MasterF.gstate[PLGAD_INTRO] = 0;
+    }
+
+    if ( CDGFlashTicks )
+    {
+	MasterF.gstate[PLGAD_CDG] = 1;
+	CDGFlashTicks--;
+    }
+    else
+    {
+	MasterF.gstate[PLGAD_CDG] = 0;
+d968 1
+a968 1
+    if (PlayerState.LastModify) MasterF.gstate[PLGAD_SHUFF] = 0;
+a975 6
+    }
+
+int Nobody( void )
+{
+	int hello = 5;
+	return( hello );
+a978 2
+
+
+d981 6
+a986 1
+void SetupPlayer() {
+a987 3
+extern UWORD     IntroData[], *DoAnimation();
+register UWORD  *anim;
+
+d996 5
+a1000 5
+    MasterF.BoxNo                = PLGAD_PLAY;
+    MasterF.gstate[PLGAD_STOP]   = 1;
+    MasterF.gstate[PLGAD_TIME]   = 0;
+    MasterF.gstate[PLGAD_REPEAT] = 0;
+    MasterF.gstate[PLGAD_SHUFF]  = 0;
+d1003 2
+a1009 4
+#if NUMBER_ENTRY
+    PlayerNumPad(1);
+#endif
+
+d1019 4
+a1022 1
+    if (PlayerState.PlayMode == PLM_NORMAL) {
+d1024 13
+a1036 13
+        MasterF.gstate[PLGAD_STOP]  =  (PlayerState.PlayState == PLS_STOPPED)
+                                    || (PlayerState.PlayState == PLS_SELECTED);
+
+	if ( PlayerState.PlayState == PLS_PAUSED ) {
+	    MasterF.gstate[PLGAD_PLAY] = 1;
+	    }
+	else if ( PlayerState.PlayState == PLS_PLAYING ) {
+	    MasterF.gstate[PLGAD_PLAY] = 2;
+	    }
+	else {
+	    MasterF.gstate[PLGAD_PLAY] = 0;
+	    }
+        }
+d1040 3
+a1042 3
+    MasterF.gstate[PLGAD_TIME]   = PlayerOptions.TimeMode;
+    MasterF.gstate[PLGAD_REPEAT] = PlayerOptions.Loop;
+    MasterF.gstate[PLGAD_INTRO]  = PlayerOptions.Intro * ((0x03 & IntroCount) + 1);
+d1049 10
+a1058 1
+    FadeTo(0);
+a1059 1
+    anim = IntroData; while (anim) anim = DoAnimation(anim, NULL);
+d1061 2
+a1062 2
+
+    ClearEvent(&input_data);                                                                                        /* Remove any queued events. */
+a1063 2
+    disableclick(1);
+
+d1075 5
+a1079 5
+    else {
+
+        ShutDown();
+        DoReset();
+        }
+d1082 2
+a1083 1
+    }
+d1088 4
+a1091 1
+void ShutDown() {
+d1093 1
+a1093 2
+register UWORD *anim;
+
+d1096 1
+a1096 1
+    MasterF.BoxNo = -1;
+d1098 9
+a1106 1
+    while ((MasterF.gstate[PLGAD_COUNTER] != 0) || anim) {
+d1108 9
+a1116 3
+        if (MasterF.gstate[PLGAD_COUNTER] != 0) MasterF.gstate[PLGAD_COUNTER]--;
+
+        if (anim) anim = DoAnimation(anim);
+d1118 3
+a1120 3
+        else UpdateDisplay();
+        }
+
+d1123 1
+a1123 1
+    }
+d1129 3
+a1131 2
+void DoReset() {
+
+d1134 1
+a1134 6
+    }
+
+
+/*************************** Make Keyclick Sound ***************************/
+
+void click() {
+a1135 16
+    if (keyclick && (PlayerState.PlayState < PLS_PLAYING)) {
+
+        disableclick(0);
+        KeyClickCommand(CLKCMD_CLICK, 0, 0, 0, 0, 0);
+        disableclick(1);
+        }
+    }
+
+
+/******************* Disable/Enable Automatic Keyclick *********************/
+
+void disableclick(int disable) {
+
+    if (keyclick) KeyClickCommand(CLKCMD_DISABLE, 0, disable, 0, 0, 0);
+    }
+
+d1140 3
+a1142 2
+UBYTE inlist(UBYTE track) {
+
+d1146 1
+a1146 1
+        if ((PlayList->Entry[i] & PLEF_TRACK) == track) return(PlayList->Entry[i]);
+d1149 1
+a1149 1
+    }
+d1155 16
+a1170 3
+void AbortQCode(void) {
+
+    if (qoutstanding) {
+a1171 12
+        AbortIO(cdqcode);
+        WaitIO(cdqcode);
+        qoutstanding = 0;
+        }
+
+    if (toutstanding) {
+
+        AbortIO(TimeReq);
+        WaitIO(TimeReq);
+        toutstanding = 0;
+        }
+
+d1173 1
+a1173 1
+    }
+d1180 20
+a1199 2
+#define REPEAT_ONGOING	15
+#define REPEAT_INITIAL	(3*(REPEAT_ONGOING))
+d1206 2
+d1209 1
+a1213 1
+
+d1227 2
+a1228 1
+UWORD GetJoyPortEvent(void)
+d1230 1
+a1230 2
+
+ULONG joybits0, joybits1, joybits = 0;
+d1238 6
+d1247 1
+a1247 1
+	joybits  = joybits0;
+d1256 5
+d1319 52
+@
+
+
+1.12
+log
+@Modified to handle game controller keys more effectively.
+@
+text
+@d41 3
+a43 4
+#include "cdgs:src/game/gamebase.h"
+#include "cdgs:src/game/readjoyport.h"
+#include "cdgs:src/game/game_pragmas.h"
+#include "cdgs:src/game/game_protos.h"
+d61 1
+d63 1
+d101 7
+a107 4
+    NULL, playerstrip, NULL, scrdata,
+    352, 296, 6,
+    14, 54,
+    NULL
+d112 2
+d115 2
+d136 4
+a139 1
+int    LastEntryCount = -1, NumericPadEnabled = 1;
+a148 11
+UWORD  JoyPortEvent = 0, JoyPortBits = 0;
+UWORD  JoyPortEvents[] = {
+
+    KEY_PAUSE,
+    KEY_BACK,
+    KEY_FWD,
+    KEY_PLAY,
+    KEY_STOP
+    };
+
+
+d153 1
+a153 1
+    1, PLGAD_DISK,38, PLGAD_MIN, 100, PLGAD_SEC, 100, 0xffff,
+d190 1
+a190 1
+    1, PLGAD_DISK, 1, PLGAD_COUNTER, 0,         0xffff,        
+d198 2
+a199 2
+    0,PLGAD_STOP,0,PLGAD_REV,0,PLGAD_PLAY,0,PLGAD_FF,0,PLGAD_PAUSE,0,
+      PLGAD_SHUFF,0,PLGAD_GCLR,0,PLGAD_CDG,0,0xffff,
+d242 1
+a242 1
+    1, PLGAD_DISK,17, PLGAD_COUNTER,0x8000+20, 0xffff, 
+d263 1
+a263 1
+    1, PLGAD_DISK,38, 0xffff,        
+d270 1
+a270 1
+*   NAME   
+d315 1
+a315 1
+    
+a342 1
+                                    InstallJoyMouse();
+a379 1
+                                    RemoveJoyMouse();
+d425 2
+a426 46
+        while(event = GetEvent(&input_data)) DoKeyStroke(event); 
+
+        while(event = GetJoyPortEvent())     DoKeyStroke(event);
+
+        if (!PlayerState.AudioDisk) {
+
+            ShutDown();
+            DoReset();
+            }
+
+        UpdateGadgets();
+
+        if (!CDGPlaying) {
+
+            if (CDGAvail && PlayerState.PlayState >= PLS_PLAYING)
+                if ((CDGDraw(CDGF_GRAPHICS|CDGF_MIDI)) & CDGF_GRAPHICS) {
+
+                CDGPlaying = channel = 1;
+                CDGClearScreen();
+
+                if (PlayerState.PlayState == PLS_PAUSED) CDGPause();
+                else                                     CDGPlay(0);
+
+                if (!MasterF.gstate[PLGAD_CDG]) {
+
+                    CDGDisplaying = 1;
+
+                    CDGFront();
+
+                    if (MasterF.gstate[PLGAD_FF])       CDGFastForward();
+                    else if (MasterF.gstate[PLGAD_REV]) CDGRewind();
+                    }
+
+                else CDGDisplaying = 0;
+                }
+            }
+
+        else CDGDraw(CDGF_GRAPHICS|CDGF_MIDI);
+
+        if (!CDGDisplaying) {
+
+            UpdateDisplay();
+
+            if (ScreenFront) {
+
+                if (!--ScreenFront) {
+d428 1
+a428 1
+                    if (intdata.cintd_View) {
+d430 66
+a495 9
+                        LoadView((struct View *)intdata.cintd_View);
+                        WaitTOF();
+                        }
+
+                    intdata.cintd_Bump = 1;
+                    }
+                }
+            }
+
+d508 1
+d510 1
+d513 1
+a513 1
+    if (event & BOXMOVE) {
+d515 1
+a515 4
+        click();
+        DoBoxMove(event);
+        return;
+        }
+d517 4
+a520 1
+    if (!CDGDisplaying) {
+d531 1
+a531 1
+    
+d533 1
+a533 1
+    
+d535 1
+a535 1
+    
+d537 1
+a537 1
+    
+d544 1
+a544 1
+            case KEY_GCLR:
+d546 5
+d552 5
+a556 4
+                DoGCLRGad();
+                return;
+    
+            case KEY_SHUFFLE:
+a557 1
+                click();
+d559 8
+d568 1
+a568 1
+    
+d576 1
+a576 1
+    
+d589 1
+d622 1
+a622 1
+    
+d627 1
+a627 7
+
+                if (MasterF.gstate[PLGAD_CDG] = (MasterF.gstate[PLGAD_CDG] ? 0:1)) CDGDisplaying = 0;
+                break;
+    
+            case IECODE_RBUTTON:
+
+                if (!MasterF.gstate[PLGAD_CDG] && CDGPlaying) {
+d629 1
+d639 1
+a639 1
+    
+d644 2
+a645 2
+                    if (PlayList->EntryCount) ResetPlayList(0, 1);
+                    else                      ResetPlayList(0, 0);
+d657 1
+a657 1
+    
+d659 1
+a659 1
+
+d665 1
+a665 1
+
+d690 1
+a690 1
+        case IECODE_RBUTTON:
+a699 2
+    
+        case IECODE_LBUTTON:
+d701 2
+a703 1
+            if (++channel > 15) channel = 1;
+d707 5
+a711 1
+        case (IECODE_LBUTTON | IECODE_UP_PREFIX):
+d713 2
+a716 1
+
+d725 1
+a725 1
+    
+d753 7
+d824 1
+d826 1
+d878 1
+a878 1
+    if (PlayerState.PlayState == PLS_STOPPED) MasterF.gstate[PLGAD_TTRACK] = 100;
+d890 16
+d909 1
+a909 1
+    if (PlayerState.AudioDisk) {
+d921 9
+a929 4
+        MasterF.gstate[PLGAD_PLAY]  =  (PlayerState.PlayState == PLS_PLAYING)
+                                    || (PlayerState.PlayState == PLS_PAUSED);
+
+        MasterF.gstate[PLGAD_PAUSE] =   PlayerState.PlayState == PLS_PAUSED;
+d932 1
+d934 1
+d941 5
+d947 26
+a972 1
+    MasterF.gstate[PLGAD_INTRO]  = PlayerOptions.Intro * ((0x03 & IntroCount) + 1);
+d978 1
+a978 1
+    if (PlayerState.AudioDisk) DisplayGrid();
+d984 5
+d992 1
+a998 1
+int              i, j, k, l;
+d1013 1
+d1020 1
+d1022 1
+d1038 9
+a1046 4
+        MasterF.gstate[PLGAD_PLAY]  =  (PlayerState.PlayState == PLS_PLAYING)
+                                    || (PlayerState.PlayState == PLS_PAUSED);
+
+        MasterF.gstate[PLGAD_PAUSE] =   PlayerState.PlayState == PLS_PAUSED;
+a1057 21
+    j = 1; k = l = 0;
+
+    if (PlayList->EntryCount == TOC[0].Summary.LastTrack && !PlayerState.LastModify) {
+
+        for (i=0; i!=PlayList->EntryCount; i++) {
+
+            if (!inlist(i+1))                             j = 0;                                                    /* all list entries must be present */
+            if ((PlayList->Entry[i] & PLEF_TRACK) != i+1) k = 1;                                                    /* at least 1 entry must be out of order */
+            if (PlayList->Entry[i] & PLEF_ENABLE)         l = 1;                                                    /* at least 1 entry must be enabled */
+            }
+        }
+
+    if (j && k && l) {
+
+        MasterF.gstate[PLGAD_SHUFF] = 1;
+
+        UndoPlayList->EntryCount = PlayList->EntryCount;
+
+        for (i=0; i!=PlayList->EntryCount; i++) UndoPlayList->Entry[i] = inlist(i+1);
+        }
+
+d1063 1
+d1072 1
+a1072 1
+    cdio->io_Command  = CD_TOCLSN;                                                                                  /* Gimme summary. */
+d1095 2
+a1096 1
+    
+d1185 3
+a1187 32
+UWORD GetJoyPortEvent(void) {
+
+ULONG TempJP0, TempJP1, Temp = 0;
+UWORD i, j, k;
+
+    TempJP0 = ReadJoyPort(0);
+    TempJP1 = ReadJoyPort(1);
+
+    if ((TempJP0 & JP_TYPE_MASK) == JP_TYPE_GAMECTLR) Temp  = TempJP0;
+    if ((TempJP1 & JP_TYPE_MASK) == JP_TYPE_GAMECTLR) Temp |= TempJP1;
+
+    Temp &= (JPF_BTN3|JPF_BTN4|JPF_BTN5|JPF_BTN6|JPF_BTN7);
+    Temp >>= JPB_BTN7;
+
+    for (i=j=0,k=Temp; i!=5; i++,k>>=1) if (k & 1) j++;
+
+    if (j <= 1) {
+
+        if (Temp != JoyPortBits) {
+
+            if (JoyPortEvent) {
+
+                i = JoyPortEvent;
+                JoyPortEvent = 0;
+                JoyPortBits  = Temp;
+
+                return(i | IECODE_UP_PREFIX);
+                }
+
+            if (Temp) {
+
+                for (i=0,k=Temp; (i!=5) && !(k&1); i++,k>>=1);
+d1189 108
+a1296 9
+                JoyPortBits  = Temp;
+                JoyPortEvent = JoyPortEvents[i];
+
+                return(JoyPortEvent);
+                }
+            }
+        }
+
+    return(0);
+d1298 2
+@
+
+
+1.11
+log
+@removed debugging.
+@
+text
+@a140 1
+    0,
+d356 1
+a357 2
+/*                                                      if (CDG_Open(&cdp)) {*/
+
+d361 1
+a361 1
+/*                                                              CDG_Close();*/
+d364 1
+a364 1
+/*                                                          }*/
+d381 2
+d422 1
+a422 1
+/*
+d424 1
+a424 1
+*/
+d438 1
+a438 1
+/*
+a464 1
+*/
+a469 1
+            /*
+a482 1
+            */
+d515 1
+a515 37
+        switch (event) {
+
+            case KEY_PAUSE:                                                                                         /* Pause */
+
+                if (PlayerState.PlayState) {
+
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+                    SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+                    }
+
+                return;
+
+            case KEY_PLAY:                                                                                          /* Play */
+
+                SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_PRESS);
+                SubmitKeyStroke(KeyPressed = PKS_PLAYPAUSE|PKSF_RELEASE);
+                return;
+
+            case KEY_STOP:                                                                                          /*  Stop  */
+
+                SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_PRESS);
+                SubmitKeyStroke(KeyPressed = PKS_STOP|PKSF_RELEASE);
+                return;
+
+            case KEY_BACK:                                                                                          /* Back track */
+
+                MasterF.gstate[PLGAD_REV] = 1;
+                SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_PRESS);
+                return;
+
+            case KEY_FWD:                                                                                           /* Next track */
+
+                MasterF.gstate[PLGAD_FF] = 1;
+                SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_PRESS);
+                return;
+
+            case (KEY_BACK|IECODE_UP_PREFIX):
+a516 12
+                MasterF.gstate[PLGAD_REV] = 0;
+                SubmitKeyStroke(KeyPressed = PKS_REVERSE|PKSF_RELEASE);
+                AbortQCode();
+                return;
+
+            case (KEY_FWD|IECODE_UP_PREFIX):
+
+                MasterF.gstate[PLGAD_FF] = 0;
+                SubmitKeyStroke(KeyPressed = PKS_FORWARD|PKSF_RELEASE);
+                AbortQCode();
+                return;
+
+d648 1
+a648 1
+    else switch (event) {
+d703 57
+d1046 6
+a1051 3
+    disableclick(0);
+    if (keyclick && PlayerState.PlayState < PLS_PLAYING) KeyClickCommand(CLKCMD_CLICK, 0, 0, 0, 0, 0);
+    disableclick(1);
+d1115 1
+a1115 1
+    Temp >>= JPB_RSVDBTN;
+d1117 1
+a1117 1
+    for (i=j=0,k=Temp; i!=6; i++,k>>=1) if (k & 1) j++;
+d1134 1
+a1134 1
+                for (i=0,k=Temp; (i!=6) && !(k&1); i++,k>>=1);
+@
+
+
+1.10
+log
+@player now can use game controller buttons.
+@
+text
+@d429 1
+a429 1
+        while(event = GetJoyPortEvent()) {
+a430 4
+            kprintf("Event = %04lx\n", event);
+            DoKeyStroke(event);
+            }
+
+a1125 2
+
+                kprintf("i=%ld\n", i);
+@
+
+
+1.9
+log
+@Exec ColdReboot() function replaces REBOOT().
+@
+text
+@d41 5
+d92 1
+d124 1
+d138 11
+d355 2
+a356 1
+/*                                                  if (CDG_Open(&cdp)) {*/
+d358 1
+a358 1
+                                                        if (UnpackSprites(&cdp)) {
+d360 7
+a366 3
+                                                            PlayerLoop(&cdp);
+/*                                                          CDG_Close();*/
+                                                            }
+d368 2
+a369 1
+/*                                                        }*/
+d429 6
+d1095 48
+@
+
+
+1.8
+log
+@commented out the cd+g stuff.
+Did some mods for q-code positioning.
+@
+text
+@a48 1
+extern void             REBOOT(void);
+d1006 1
+a1006 1
+    REBOOT();
+@
+
+
+1.7
+log
+@Revised to work with cd.device.
+Removed CD+G functions for now.
+@
+text
+@d87 1
+d107 2
+a108 2
+int                   qvalid, qoutstanding;
+struct MsgPort       *cdreply, *qcodereply;
+d110 1
+a110 1
+struct timerequest   *timer;
+d316 1
+a316 1
+                            qoutstanding = qvalid = 0;
+d329 1
+a329 1
+                                    if (PlayerBase = OpenLibrary("player.library", NULL)) {
+d331 2
+d334 13
+a346 1
+/*                                        if (CDG_Open(&cdp)) {*/
+d348 2
+a349 1
+                                            if (UnpackSprites(&cdp)) {
+d351 1
+a351 2
+                                                PlayerLoop(&cdp);
+/*                                                CDG_Close();*/
+d354 2
+a355 1
+/*                                            }*/
+d357 1
+a357 1
+                                        CloseLibrary(PlayerBase);
+d366 1
+a366 1
+                            if (qoutstanding) {
+a367 4
+                                AbortIO(cdqcode);
+                                WaitIO(cdqcode);
+                                }
+
+d533 1
+d540 1
+d737 22
+a758 1
+        if (qoutstanding) {
+d760 1
+a760 1
+            if (CheckIO(cdqcode)) {
+d762 3
+a764 6
+                WaitIO(cdqcode);
+
+                if (!cdqcode->io_Error) {
+
+                    copyqcode = qcode;
+                    qvalid = 1;
+a765 2
+
+                SendIO(cdqcode);
+d795 1
+a795 7
+            if (qoutstanding) {
+
+                AbortIO(cdqcode);
+                WaitIO(cdqcode);
+                qoutstanding = qvalid = 0;
+                }
+
+d801 1
+a801 1
+            if (!qoutstanding) {
+d803 4
+a806 2
+                SendIO(cdqcode);
+                qoutstanding = 1;
+d900 4
+d1040 23
+@
+
+
+1.6
+log
+@Now uses player.library instead of player.resource.
+@
+text
+@d13 1
+a13 1
+#include <cdtv:include/cdtv/cdtv.h>
+a56 1
+extern                  handlescrsave(struct CycleIntInfo *ci, int blank, struct PlayerPrefsBase *PlayerPrefsBase);
+d104 5
+a108 4
+struct CDTOC         *TOC;
+struct CDSubQ         subq;
+struct MsgPort       *cdreply, *subqreply;
+struct IOStdReq      *cdio, *cdsubq;
+d303 1
+a303 1
+            if (subqreply = (struct MsgPort *)CreatePort(0, 0)) {
+d307 1
+a307 1
+                    if (cdsubq = (struct IOStdReq *)CreateStdIO(subqreply)) {
+d309 1
+a309 1
+                        if (!OpenDevice("cdtv.device", 0, cdio, 0)) {
+d311 1
+a311 1
+                            CopyMem(cdio, cdsubq, sizeof(*cdio));
+d314 2
+a315 1
+                            cdsubq->io_Message.mn_ReplyPort = subqreply;
+d321 1
+a321 1
+                            if (TOC = AllocMem(TOCSIZE, MEMF_PUBLIC)) {
+a325 1
+                                    InstallScreenSaver();
+a329 1
+                                        if (CDG_Open(&cdp)) {
+d331 2
+d336 1
+a336 1
+                                                CDG_Close();
+d338 2
+a339 1
+                                            }
+d347 7
+a353 1
+                                FreeMem(TOC, TOCSIZE);
+a355 2
+                            AbortIO(cdsubq);
+                            SafeWaitIO(cdsubq);
+d359 1
+a359 1
+                        DeleteStdIO(cdsubq);
+d365 1
+a365 1
+                DeletePort(subqreply);
+d387 1
+a387 1
+
+d389 1
+a389 1
+
+a395 2
+            ScreenSaverCommand(SCRSAV_UNSAVE);
+            blank = handlescrsave(&intdata, 0, PlayerPrefsBase);
+a399 2
+        SafeDoIO(cdsubq);
+
+d401 1
+a401 1
+
+d404 1
+a404 1
+            if (CDGAvail && PlayerState.PlayState >= PLS_PLAYING && subq_valid())
+d428 1
+d432 1
+a432 1
+            if (!(blank = handlescrsave(&intdata, blank, PlayerPrefsBase))) {
+d434 2
+a435 1
+                UpdateDisplay();
+d437 1
+a437 3
+                if (ScreenFront) {
+
+                    if (!--ScreenFront) {
+d439 1
+a439 1
+                        if (intdata.cintd_View) {
+d441 3
+a443 3
+                            LoadView((struct View *)intdata.cintd_View);
+                            WaitTOF();
+                            }
+d445 1
+a445 2
+                        intdata.cintd_Bump = 1;
+                        }
+d448 1
+a450 2
+        else ScreenSaverCommand(SCRSAV_UNSAVE);
+
+d475 1
+a475 1
+        blank = 0; ScreenSaverCommand(SCRSAV_UNSAVE);
+d684 1
+a716 1
+
+d721 19
+d747 1
+a753 1
+
+d756 2
+a757 2
+            case PLS_PLAYING:   CDGPlay(1); break;
+            case PLS_PAUSED:    CDGPause(); break;
+d761 25
+d864 1
+a864 1
+    cdio->io_Command = CD_MUTE;                                                                                     /* Turn on the speakers; full volume, right now(sorta). */
+d866 2
+a867 2
+    cdio->io_Length  = 1;
+    SafeDoIO(cdio);
+d871 2
+a872 2
+    cdsubq->io_Command  = CD_SUBQMSF;                                                                               /* Initialize the SubQ packet. */
+    cdsubq->io_Data     = (APTR)&subq;
+d898 1
+a898 1
+    if (PlayList->EntryCount == TOC[0].LastTrack && !PlayerState.LastModify) {
+a916 3
+    currsec = ((TOC[PlayerState.Track].Position.Raw >> 16) & 0xff) * 60
+            + ((TOC[PlayerState.Track].Position.Raw >> 8) & 0xff);
+
+d921 1
+a921 1
+    blank = handlescrsave(&intdata, -1, PlayerPrefsBase);
+a922 2
+    anim = IntroData; while (anim) anim = DoAnimation(anim, NULL);
+    
+d930 1
+a930 1
+    cdio->io_Command  = CD_TOCMSF;                                                                                  /* Gimme summary. */
+d934 1
+a934 1
+    SafeDoIO(cdio);
+d943 2
+@
+
+
+1.5
+log
+@ScreenSaver now disabled when disk is ejected.
+@
+text
+@a37 1
+#include "internal/cdtv_cr_hw.h"
+d41 3
+a43 3
+#include "cdtv:include/internal/playerresource.h"
+#include "cdtv:include/internal/player_protos.h"
+#include "cdtv:include/internal/player_pragmas.h"
+d328 1
+a328 1
+                                    if (PlayerBase = OpenResource("player.resource")) {
+d330 1
+a330 1
+                                        if (OwnPlayer()) {
+d332 1
+a332 3
+                                            if (CDG_Open(&cdp)) {
+
+                                                if (UnpackSprites(&cdp)) {
+d334 2
+a335 3
+                                                    PlayerLoop(&cdp);
+                                                    CDG_Close();
+                                                    }
+d338 2
+d507 1
+d513 1
+d519 1
+d525 1
+@
+
+
+1.4
+log
+@Does not allow highlighted box to change when the A button is being held down.
+@
+text
+@d392 2
+d922 1
+a922 1
+    
+@
+
+
+1.3
+log
+@Significantly cleaned up code and comments.
+@
+text
+@d13 1
+a13 1
+#include <cr2:dev/cdtv.h>
+d42 3
+a44 3
+#include "cr2:playerresource/playerresource.h"
+#include "cr2:playerresource/player_protos.h"
+#include "cr2:playerresource/player_pragmas.h"
+d466 1
+a466 1
+    if ((event & BOXMOVE) && !(input_data.CurrButtonPos & CURRBUTTONA)) {
+d470 1
+d487 2
+a488 2
+                    SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_PRESS);
+                    SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_RELEASE);
+d495 2
+a496 2
+                SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_PRESS);
+                SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_RELEASE);
+d501 2
+a502 2
+                SubmitKeyStroke(PKS_STOP|PKSF_PRESS);
+                SubmitKeyStroke(PKS_STOP|PKSF_RELEASE);
+d579 2
+a580 2
+                    SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_PRESS);
+                    SubmitKeyStroke(PKS_PLAYPAUSE|PKSF_RELEASE);
+d620 1
+a620 1
+                    if (MasterF.gstate[PLGAD_FF]) CDGFastForward();
+d695 3
+a697 1
+            if ((KeyPressed & PKSF_STROKEDIR) == PKSF_PRESS) SubmitKeyStroke((KeyPressed & PKSF_KEY) | PKSF_RELEASE);
+@
+
+
+1.2
+log
+@Cleaned up code.  Put headers on functions.
+@
+text
+@a93 13
+struct changedata {
+
+    struct Task *me;
+    ULONG        sig;
+    } changeintrdata;
+
+struct Interrupt changeintrnode = {
+
+    { NULL, NULL, NT_INTERRUPT, 0, "Audio Panel CD Eject" },
+    (APTR) &changeintrdata,
+    (VOID (*)()) changeintr
+    };
+
+d109 1
+a109 1
+struct IOStdReq      *cdio, *cdsubq, *cdintr;
+d310 3
+a312 1
+                        if (cdintr = (struct IOStdReq *)CreateStdIO(cdreply)) {
+d314 20
+a333 1
+                            if (!OpenDevice("cdtv.device", 0, cdio, 0)) {
+d335 1
+a335 35
+                                CopyMem(cdio, cdsubq, sizeof(*cdio));
+                                CopyMem(cdio, cdintr, sizeof(*cdio));
+
+                                cdio->io_Message.mn_ReplyPort   = cdreply;
+                                cdintr->io_Message.mn_ReplyPort = cdreply;
+                                cdsubq->io_Message.mn_ReplyPort = subqreply;
+
+                                if ((changesigbit = AllocSignal(-1)) != -1) {
+
+                                    changeintrdata.me   = FindTask(NULL);
+                                    changeintrdata.sig  = 1L<<changesigbit;
+                                    cdintr->io_Command  = CD_ADDCHANGEINT;
+                                    cdintr->io_Length   = sizeof(changeintrnode);
+                                    cdintr->io_Data     = (APTR)&changeintrnode;
+                                    SendIO(cdintr);
+
+                                    FillCDTVPrefs(&prefs);
+
+                                    keyclick = (prefs.Flags & CDTVPF_KEYCLICK) != 0;
+
+                                    if (TOC = AllocMem(TOCSIZE, MEMF_PUBLIC)) {
+
+                                        if (UndoPlayList = AllocMem(sizeof(struct PlayList), MEMF_PUBLIC)) {
+
+                                            InstallKeyClick();
+                                            InstallScreenSaver();
+                                            InstallJoyMouse();
+
+                                            if (PlayerBase = OpenResource("player.resource")) {
+
+                                                if (OwnPlayer()) {
+
+                                                    if (CDG_Open(&cdp)) {
+
+                                                        if (UnpackSprites(&cdp)) {
+d337 2
+a338 4
+                                                            PlayerLoop(&cdp);
+                                                            CDG_Close();
+                                                            }
+                                                        }
+a341 2
+
+                                        FreeMem(TOC, TOCSIZE);
+d344 1
+a344 10
+                                    AbortIO(cdsubq);
+                                    SafeWaitIO(cdsubq);
+
+                                    cdio->io_Command = CD_REMCHANGEINT;
+                                    cdio->io_Length  = sizeof(changeintrnode);
+                                    cdio->io_Data    = (APTR)&changeintrnode;
+                                    SafeDoIO(cdio);
+                                    SafeWaitIO(cdintr);
+
+                                    FreeSignal(changesigbit);
+d347 1
+a347 1
+                                CloseDevice(cdio);
+d350 3
+a352 1
+                            DeleteStdIO(cdintr);
+a379 2
+register ULONG      SigEvent;
+ULONG               sigchg;
+a385 2
+    sigchg = 1L << changesigbit;
+
+a387 5
+        Forbid();
+        SigEvent = SetSignal(0, 0);
+        SetSignal(0, SigEvent);
+        Permit();
+
+d390 1
+a390 1
+        if (SigEvent & sigchg) {
+d397 1
+d474 2
+d750 5
+a754 2
+    MasterF.gstate[PLGAD_MIN]    = PlayerState.Minute;
+    MasterF.gstate[PLGAD_SEC]    = PlayerState.Second;
+a780 1
+    DisplayGrid();
+d782 2
+a800 8
+    cdio->io_Command  = CD_TOCMSF;                                                                                  /* Gimme summary. */
+    cdio->io_Offset   = 0;
+    cdio->io_Length   = 100;
+    cdio->io_Data     = (APTR)TOC;
+    SafeDoIO(cdio);
+
+    InitTrackCounter();
+
+d880 17
+a960 9
+    return(0);
+    }
+
+
+/********************* Disk Change Interrupt Server ************************/
+
+LONG __asm changeintr(register __a1 struct changedata *cd) {
+
+    Signal(cd->me, cd->sig);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a1 1
+/* #define dcat 1 */
+d48 1
+a48 1
+/* ------------------ ROM GETS RID OF ERROR MESSAGE ----------------- */
+d50 11
+d62 1
+a62 1
+#define DIE( str )  goto errxit
+d64 8
+d73 21
+a99 69
+
+
+
+BOOL CDGBegin();
+VOID CDGEnd();
+VOID CDGChannel(ULONG);
+void CDGDiskRemoved(void);
+
+void SetPanelMode(int newmode);
+void SetPanelCounter(int newmin,int newsec);
+void notupkey(void);
+void SetPanelTrack(int track);
+
+LONG __asm DoPlayer(register __a6 struct PlayerPrefsBase * ppb);
+void dokey(ULONG sevent);
+void docdgkey(ULONG sevent);
+void click(void);
+void disableclick(int);
+void stabilize(void);
+void updatestat(void);
+int  checklimits(void);
+void showuserdata(void);
+int  computetrackpos(ULONG diskpos, ULONG *trackpos, UBYTE *track, UBYTE *index);
+LONG computeplaytime(int, LONG);
+void setwaits(int track);
+void handlediskchange(void);
+void initdisk(void);
+int  openstuff(void);
+void closestuff(void);
+void diemsg(char *str);
+void abortwait(struct IOStdReq *ior);
+LONG __asm changeintr(register __a1 struct changedata * cd);
+void kprintMSF(LONG);
+
+
+extern void     REBOOT(void);
+
+extern LONG __asm   addMSF(register __d0 LONG, register __d1 LONG);
+extern LONG __asm   subMSF(register __d0 LONG, register __d1 LONG);
+extern int __stdargs    kprintf(char *, ...);
+extern int __stdargs    sprintf(char *, char *, ...);
+extern int __stdargs    kputs(char *);
+extern void __stdargs   kputchar(char);
+
+
+extern struct CycleIntInfo  intdata;
+extern UWORD volatile       __far vhposr;   /*  Custom chip register.  */
+extern char         __far TimerDeviceName[];
+
+extern VOID __stdargs EndCDTVScreen(VOID);
+extern VOID InitVarBase(register struct PlayerPrefsBase *ppb);
+extern StartPPScreen(struct GadDir *gl, struct BuildBG_Info *bg, UBYTE *buttondata, UBYTE initfade);
+
+extern handlescrsave(struct CycleIntInfo *ci, int blank, struct PlayerPrefsBase *PlayerPrefsBase);
+
+extern void SetNumPad(void);
+extern void PlayerNumPad(int);
+
+extern UWORD *Gcptr;
+extern UWORD  **Gsptr;
+extern int Gi;
+
+void Endgetsprites( struct CDGPrefs *cdgp);
+
+
+extern ULONG currsec;
+
+/* global data */
+
+a106 28
+
+struct CDTOC        *playlist, single;
+struct CDSubQ        subq, curstat;
+struct MsgPort      *cdreply, *subqreply;
+struct IOStdReq     *cdio, *cdsubq, *cdintr;
+struct timerequest  *timer;
+
+LONG    scanval = TOMSF (0, 2, 37);
+LONG    lowlim, highlim;
+LONG    apos, bpos;                                                 /* For A/B loop          */
+short   aidx, bidx;
+short   changesigbit = -1;
+short   playlistlen, activelistlen, curlistidx, undolistlen;
+BYTE    playing, paused, scanning, scandir,
+        timemode, abmode, intromode, listloop, statchanged,
+        lowlimtype, highlimtype, keyclick, poked, errcnt,
+        playonemode;
+
+UBYTE   channel;
+int     cdgactive;
+int     lastmin,lastsec;
+int     lastseek;
+
+WORD            blank;
+
+extern UBYTE __far scrdata[];
+extern UBYTE __far playerstrip[];
+
+d115 1
+a115 9
+struct CDGPrefs  cdp;                                               /* FIX: CALL CDG STRUCTURE ALLOC ROUTINES */
+
+
+/****************** Definitions I know are required ******************/
+
+
+struct CDTOC        *TOC;                                           /* Table of contents */
+
+UBYTE  LastTrack;
+d119 7
+a125 1
+struct PlayerOptions  PlayerOptions;
+d130 2
+a131 1
+struct PlayerOptions  OptionsSet;
+a132 4
+struct Library    *CDGBase;
+struct PlayerBase *PlayerBase;
+
+
+d137 6
+a144 5
+extern struct GfxBase          *GfxBase;
+extern struct DeBoxBase        *DeBoxBase;
+extern void                    *SysBase;
+extern struct PlayerPrefsBase  *PlayerPrefsBase;
+
+d146 1
+a146 1
+extern void UpdateGadgets(void);
+d196 1
+a196 2
+      PLGAD_TIME,0,PLGAD_SHUFF,0,PLGAD_GCLR,0,
+      PLGAD_CDG,0,0xffff,
+a263 34
+/*---------------- SHUTDOWN ROUTINE ----------------*/
+
+UWORD *DoAnimation();
+
+ShutDown() {
+
+register UWORD *anim;
+extern struct IOStdReq *cdio;
+    
+    anim = ShutdownAnim;
+    MasterF.BoxNo = -1;
+
+    while ((MasterF.gstate[PLGAD_COUNTER] != 0) || anim) {
+
+        if (MasterF.gstate[PLGAD_COUNTER] != 0) MasterF.gstate[ PLGAD_COUNTER ]--;
+
+        if (anim) anim = DoAnimation(anim);
+
+        else UpdateDisplay();
+        cdio->io_Command = CD_CHANGESTATE;
+        SafeDoIO(cdio);
+
+        if (!cdio->io_Actual) return(1);
+        }
+    
+    anim = DiskOutAnim;
+    while( anim = DoAnimation(anim));
+    return(0);
+    }
+
+
+
+/*-----------------------------------------------------------------*/
+
+a264 7
+void DoReset() {
+
+    FadeTo(15);
+    REBOOT();
+    }
+
+
+d297 100
+a396 1
+LONG __asm DoPlayer( register __a6 struct PlayerPrefsBase *ppb ) {
+d398 5
+a402 3
+register ULONG      SigEvent;                                                               /* sigwait; */
+ULONG               sigchg;
+ULONG               event;
+d404 2
+d407 2
+a408 1
+    InitVarBase(ppb);                                                                       /* Initilize the varables */
+a409 1
+    if (!openstuff()) return(20);
+a410 1
+    if (!(PlayerBase = OpenResource("player.resource"))) return(20);
+a411 1
+    if (!OwnPlayer()) return(20);
+d413 1
+a413 1
+    PlayList = ObtainPlayList();
+d415 1
+a415 1
+    LastTrack = 0;
+d417 3
+a419 1
+    disableclick(1);
+d421 1
+a421 1
+    initdisk();
+d423 1
+a423 1
+    CDGAvail = CDGBegin(&cdp);
+d425 1
+a425 1
+    sigchg  = 1L << changesigbit;
+d430 2
+a431 2
+        SigEvent = SetSignal(0, 0);                                                         /* Wait(sigwait); */
+        SetSignal(0, SigEvent);                                                             /* Clear wakeup signals. */
+d434 3
+a436 1
+        while(event = GetEvent(&input_data)) dokey(event); 
+d438 3
+a440 1
+        if (SigEvent & sigchg) handlediskchange();
+d462 1
+a462 1
+                    if (MasterF.gstate[PLGAD_FF]) CDGFastForward();
+a502 75
+void UpdateGadgets() {
+
+    GetPlayerState(&PlayerState);
+
+    if (CDGPlaying) {
+
+        if (CDGDisplaying && LastPlayMode == PlayerState.PlayMode && LastPlayState == PlayerState.PlayState) return;
+
+        if (LastPlayState != PlayerState.PlayState) switch (PlayerState.PlayState) {
+
+            case PLS_STOPPED:
+                if (CDGDisplaying) ScreenFront = 20;
+
+                CDGStop();
+                CDGBack();
+                CDGPlaying = CDGDisplaying = 0;
+                MasterF.gstate[PLGAD_REV] = MasterF.gstate[PLGAD_FF]  = 0;
+
+                break;
+
+            case PLS_PLAYING:   CDGPlay(1); break;
+            case PLS_PAUSED:    CDGPause(); break;
+            }
+        }
+
+    if (PlayerState.PlayState == PLS_STOPPED) MasterF.gstate[PLGAD_TTRACK] = 100;
+
+    else {
+
+        MasterF.gstate[PLGAD_TTRACK] = PlayerState.Track;
+
+        if (PlayerState.Track != LastTrack) {
+
+            if (PlayerState.PlayMode == PLM_SKIPREV) --IntroCount;
+            else                                     IntroCount++;
+
+            LastTrack = PlayerState.Track;
+            }
+        }
+
+    MasterF.gstate[PLGAD_MIN]    = PlayerState.Minute;
+    MasterF.gstate[PLGAD_SEC]    = PlayerState.Second;
+
+    if (PlayerState.PlayMode == PLM_NORMAL) {
+
+        MasterF.gstate[PLGAD_STOP]  =  (PlayerState.PlayState == PLS_STOPPED)
+                                    || (PlayerState.PlayState == PLS_SELECTED)
+                                    || (PlayerState.PlayState == PLS_NUMENTRY);
+
+        MasterF.gstate[PLGAD_PLAY]  =  (PlayerState.PlayState == PLS_PLAYING)
+                                    || (PlayerState.PlayState == PLS_PAUSED);
+
+        MasterF.gstate[PLGAD_PAUSE] =   PlayerState.PlayState == PLS_PAUSED;
+        }
+
+    if (NumericPadEnabled && PlayList->EntryCount == LastEntryCount+1) MasterF.D0 = 80;
+
+    LastEntryCount = PlayList->EntryCount;
+
+    GetOptions(&PlayerOptions);
+
+    MasterF.gstate[PLGAD_TIME]   = PlayerOptions.TimeMode;
+    MasterF.gstate[PLGAD_REPEAT] = PlayerOptions.Loop;
+    MasterF.gstate[PLGAD_INTRO]  = PlayerOptions.Intro * ((0x03 & IntroCount) + 1);
+
+    if (PlayerState.LastModify) MasterF.gstate[PLGAD_SHUFF] = 0;
+
+    SetTrackCounter(0);
+    DisplayGrid();
+
+    LastPlayMode  = PlayerState.PlayMode;
+    LastPlayState = PlayerState.PlayState;
+    }
+
+
+d504 1
+d506 1
+a506 1
+void dokey(ULONG sevent) {
+d509 1
+a509 3
+register UWORD  event, dir;
+
+    event = sevent;
+d750 6
+a755 1
+void click() {
+d757 1
+a757 4
+    disableclick(0);
+    if (keyclick && PlayerState.PlayState < PLS_PLAYING) KeyClickCommand(CLKCMD_CLICK, 0, 0, 0, 0, 0);
+    disableclick(1);
+    }
+d759 1
+d761 1
+a761 1
+void disableclick(int disable) {
+d763 2
+a764 2
+    if (keyclick) KeyClickCommand(CLKCMD_DISABLE, 0, disable, 0, 0, 0);
+    }
+d766 4
+d771 1
+d773 4
+a776 1
+void handlediskchange(void) {
+d778 1
+a778 2
+    cdio->io_Command = CD_CHANGESTATE;
+    SafeDoIO(cdio);
+d780 1
+a780 1
+    ScreenSaverCommand(SCRSAV_UNSAVE);                                                                              /* Turn off the screen blanker. */
+d782 1
+a782 1
+    blank = handlescrsave(&intdata, -1, PlayerPrefsBase);
+d784 1
+a784 1
+    if (cdio->io_Actual) {
+d786 2
+a787 2
+        abortwait(cdsubq);
+        ShutDown();
+d789 2
+a790 1
+        if (cdgactive) CDGDiskRemoved();
+d793 14
+a806 1
+    DoReset();                                                                                                      /* Check to see if there are any data tracks.  If so, reboot and let Carl/Jerry tell us if we should be playing it. */
+d808 1
+a808 2
+    ClearEvent(&input_data);                                                                                        /* kill any stored keys */
+    }
+d810 1
+d812 1
+d814 3
+a816 1
+UBYTE inlist(UBYTE track) {
+d818 1
+a818 1
+int i;
+d820 2
+a821 2
+    for (i=0; i!=PlayList->EntryCount; i++)
+        if ((PlayList->Entry[i] & PLEF_TRACK) == track) return(PlayList->Entry[i]);
+d823 2
+a824 1
+    return(0);
+a826 4
+/*
+ * This routine returns TRUE if any of the tracks on the disk is a
+ * data track.
+ */
+a827 1
+void initdisk(void) {
+d829 5
+d836 3
+a838 1
+int              i, j, k;
+d840 1
+a840 1
+    cdio->io_Command  = CD_TOCMSF;                                                                                /* Gimme summary. */
+a845 2
+    activelistlen = playlistlen;
+
+d892 1
+a892 1
+    j = 1; k = 0;
+d898 1
+a898 1
+            if (!inlist(i+1)) j = 0;                                                                                /* all list entries must be present */
+d900 1
+d904 1
+a904 1
+    if (j && k) {
+d922 1
+a922 13
+    CDG_Open(&cdp);
+
+    StartUnpack(&cdp);
+
+    anim = IntroData;
+
+    while (anim) {
+
+        if (Gi < 46) GetSprites(&cdp,250,160);                                                                    /* getsprites immediately returns if sprites are already unpacked and set up */
+        anim = DoAnimation(anim, NULL);
+        }
+
+    while (Gi < 46) GetSprites(&cdp,250,160);
+d925 2
+d930 3
+a932 1
+openstuff() {
+d934 4
+a937 3
+extern struct GadDir    PlayGADList[];
+extern UBYTE        __far scrbuttons[];
+extern struct BuildBg_Info __far PlayerBg;
+d939 1
+a939 3
+struct CDTVPrefs    prefs;
+struct MsgPort      *ireply = NULL;
+struct timerequest  *iio = NULL;
+d941 1
+a941 1
+int i;
+d943 1
+a943 1
+    srand((-vhposr & 0x7fff) ^ 0x1D6539A3);
+d945 2
+a946 1
+    if (StartPPScreen(PlayGADList, &PlayerBg, scrbuttons, 15))                          DIE("Can't open CDTV Screen.\n");
+d948 4
+a951 1
+    for (i=PLGAD_STOP; i<=PLGAD_20; i++) WorkF->gstate[i] = CurrentF->gstate[i] = -1;
+d953 2
+a954 53
+    if (!(cdreply = (struct MsgPort *)CreatePort(0, 0)))                                DIE("Can't create reply port.\n");
+
+    if (!(subqreply = (struct MsgPort *)CreatePort(0, 0)))                              DIE("Can't create subq reply port.\n");
+
+    if (!(cdio =(struct IOStdReq *)CreateStdIO(cdreply))
+        || !(cdsubq =(struct IOStdReq *)CreateStdIO(subqreply))
+        || !(cdintr =(struct IOStdReq *)CreateStdIO(cdreply)))                          DIE("Can't create IO packets.\n");
+
+    if (OpenDevice("cdtv.device", 0, cdio, 0)) {
+
+        cdio->io_Device = NULL;
+        DIE("Can't open cdtv.device.\n");
+        }
+
+    CopyMem(cdio, cdsubq, sizeof(*cdio));
+    CopyMem(cdio, cdintr, sizeof(*cdio));
+
+    cdio->io_Message.mn_ReplyPort   = cdreply;
+    cdintr->io_Message.mn_ReplyPort = cdreply;
+    cdsubq->io_Message.mn_ReplyPort = subqreply;
+
+    if ((changesigbit = AllocSignal(-1)) == -1)                                         DIE("Can't procure signal bit.\n");
+
+    changeintrdata.me   = FindTask(NULL);
+    changeintrdata.sig  = 1L<<changesigbit;
+    cdintr->io_Command  = CD_ADDCHANGEINT;
+    cdintr->io_Length   = sizeof(changeintrnode);
+    cdintr->io_Data     = (APTR)&changeintrnode;
+    SendIO(cdintr);
+
+    FillCDTVPrefs(&prefs);
+
+    keyclick = (prefs.Flags & CDTVPF_KEYCLICK) != 0;
+
+    if (!(TOC = AllocMem(TOCSIZE, MEMF_PUBLIC)))                                        DIE("Can't allocate TOC.\n");
+
+    if (!(UndoPlayList = AllocMem(sizeof(struct PlayList), MEMF_PUBLIC)))               DIE("Can't allocate UndoPlayList.\n");
+
+    InstallKeyClick();
+
+    InstallScreenSaver();
+
+    InstallJoyMouse();
+
+    return(1);
+
+
+errxit:
+    if (iio) {
+
+        if (iio->tr_node.io_Device) CloseDevice(iio);
+        DeleteStdIO(iio);
+        }
+d956 1
+a956 1
+    if (ireply) DeletePort(ireply);
+d958 2
+a959 2
+    closestuff();
+    return(0);
+d963 1
+d965 1
+a965 1
+void closestuff(void) {
+d967 4
+a970 1
+    RemoveJoyMouse();
+a971 38
+    if (cdio) {
+
+        if (cdio->io_Device) {
+
+            abortwait(cdsubq);
+
+            cdio->io_Command = CD_REMCHANGEINT;
+            cdio->io_Length  = sizeof(changeintrnode);
+            cdio->io_Data    = (APTR)&changeintrnode;
+            SafeDoIO(cdio);
+            SafeWaitIO(cdintr);
+
+            CloseDevice(cdio);
+            }
+
+        DeleteStdIO(cdio);
+        }
+
+    if (UndoPlayList)        FreeMem(UndoPlayList, sizeof(struct PlayList));
+    if (TOC)                 FreeMem(TOC, TOCSIZE);
+    if (changesigbit >= 0)   FreeSignal(changesigbit);
+    if (cdsubq)              DeleteStdIO(cdsubq);
+    if (subqreply)           DeletePort(subqreply);
+    if (cdreply)             DeletePort(cdreply);
+
+    KeyClickCommand(CLKCMD_DIE, 0, 0, 0, 0, 0); 
+    EndCDTVScreen();
+    }
+
+
+
+void abortwait(register struct IOStdReq *ior) {
+
+    AbortIO(ior);
+    SafeWaitIO(ior);
+    }
+
+
+d973 1
+a973 3
+/*
+ * Diskchange interrupt handler.
+ */
+d975 1
+a975 1
+LONG __asm changeintr(register __a1 struct changedata *cd) {
+d977 1
+a977 2
+    Signal(cd->me, cd->sig);
+    return(0);
+d981 9
+a989 1
+void SetNumPad() {
+d991 1
+a991 2
+    if (MasterF.BoxNo >= PLGAD_1 && MasterF.BoxNo <= PLGAD_20) PlayerNumPad(0);
+    else                                                       PlayerNumPad(1);
+d993 3
+a995 3
+
+
+void PlayerNumPad(int on) {
+d997 1
+a997 5
+    cdio->io_Command = CDTV_FRONTPANEL;
+    cdio->io_Data    = NULL;
+    cdio->io_Offset  = 0;
+    cdio->io_Length  = CDTV_PANEL_ENABLED | CDTV_PANEL_PLAY_EJECT | (on ? CDTV_PANEL_NUMERIC:0);
+    SafeDoIO(cdio);
+d999 2
+a1000 1
+    NumericPadEnabled = on;
+@

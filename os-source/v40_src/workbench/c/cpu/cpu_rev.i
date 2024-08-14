@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'24.6.91'
+	ENDM
+VERS	MACRO
+		dc.b	'cpu 38.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cpu 38.1 (24.6.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cpu 38.1 (24.6.91)',0
+	ENDM

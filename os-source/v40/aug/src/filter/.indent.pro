@@ -1,0 +1,2 @@
+-l132 -nfc1 -sc -bad -bap -bbb -badp -bs -nsob -bl -nce -cli4 -ss -pcs
+-ncs -di1 -i4 -ci2 -lp -ip4 -npsl

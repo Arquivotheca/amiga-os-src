@@ -1,0 +1,27 @@
+€ˆGRAPHICS_LAYERS_HŒ<graphics/layers.h>‡
+ƒ§*§;
+‹InitLayers(ƒLayer_Info*);
+ƒLayer*CreateUpfrontLayer(ƒLayer_Info*,ƒBitMap*,,,,,,ƒBitMap*);
+ƒLayer*CreateBehindLayer(ƒLayer_Info*,ƒBitMap*,,,,,,ƒBitMap*);
+UpfrontLayer(ƒLayer_Info*,ƒLayer*);
+BehindLayer(ƒLayer_Info*,ƒLayer*);
+‹MoveLayer(ƒLayer_Info*,ƒLayer*,,);
+‹SizeLayer(ƒLayer_Info*,ƒLayer*,,);
+‹ScrollLayer(ƒLayer_Info*,ƒLayer*,,);
+‹BeginUpdate(ƒLayer*);
+‹EndUpdate(ƒLayer*,);
+‹DeleteLayer(ƒLayer_Info*,ƒLayer*);
+‹LockLayer(ƒLayer_Info*,ƒLayer*);
+‹UnlockLayer(ƒLayer*);
+‹LockLayers(ƒLayer_Info*);
+‹UnlockLayers(ƒLayer_Info*);
+‹LockLayerInfo(ƒLayer_Info*);
+‹SwapBitsRastPortClipRect(ƒRastPort*,ƒClipRect*);
+ƒLayer*WhichLayer(ƒLayer_Info*,,);
+‹UnlockLayerInfo(ƒLayer_Info*);
+ƒLayer_Info*NewLayerInfo(‹);
+‹DisposeLayerInfo(ƒLayer_Info*);
+‹FattenLayerInfo(ƒLayer_Info*);
+‹ThinLayerInfo(ƒLayer_Info*);
+MoveLayerInFrontOf(ƒLayer*,ƒLayer*);
+ƒRegion*InstallClipRegion(ƒLayer*,ƒRegion*);ˆNO_PRAGMAS…†§InitLayers 1e‘…†§UpfrontLayer 30³…†§BehindLayer 36³…†§MoveLayer 3c 109804…†§SizeLayer 42 109804…†§ScrollLayer 48 109804…†§BeginUpdate 4e‘…†§EndUpdate 54´…†§DeleteLayer 5a³…†§LockLayer 60³…†§UnlockLayer 66‘…†§LockLayers 6c‘…†§UnlockLayers 72‘…†§LockLayerInfo 78‘…†§SwapBitsRastPortClipRect 7e³…†§WhichLayer 84 10803…†§UnlockLayerInfo 8a‘…†§NewLayerInfo 90 0…†§DisposeLayerInfo 96‘…†§FattenLayerInfo 9c‘…†§ThinLayerInfo a2‘…†§MoveLayerInFrontOf a8³…†§InstallClipRegion ae³‡

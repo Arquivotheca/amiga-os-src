@@ -1,0 +1,2315 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.10
+date     92.09.28.16.51.21;  author bj;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.09.11.17.31.53;  author bj;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.07.17.15.25.34;  author bj;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.03.29.21.49.55;  author martin;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.03.06.00.02.36;  author martin;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.03.05.23.50.31;  author martin;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.03.02.22.25.29;  author Martin;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.18.20.37.09;  author Unknown;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.08.21.09.46.52;  author Unknown;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.04.26.21.26.18;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@   
+@
+
+
+1.10
+log
+@1.5 binary version.
+a. added to code check Readargs() return (grrrr Martin).
+b. added "-D" (debug) flag to the Readargs Template.
+c. added extra error reporting to the user.
+@
+text
+@
+/* -----------------------------------------------------------------------
+ * inetd.c
+ *
+ * $Locker:  $
+ *
+ * $Id: inetd.c,v 1.9 92/09/11 17:31:53 bj Exp $
+ *
+ * $Revision: 1.9 $
+ *
+ * $Log:	inetd.c,v $
+ * Revision 1.9  92/09/11  17:31:53  bj
+ * binary version 1.4.  Remake and checkin. Minor changes.
+ * 
+ *
+ * $Header: AS225:src/serv/inetd/RCS/inetd.c,v 1.9 92/09/11 17:31:53 bj Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+/*
+ * Inetd uses a configuration file which is read at startup
+ * and, possibly, at some later time in response to a hangup signal.
+ * The configuration file is ``free format'' with fields given in the
+ * order shown below.  Continuation lines for an entry must being with
+ * a space or tab.  All fields must be present in each entry.
+ *
+ *	service name			must be in /etc/services
+ *	socket type			stream/dgram/raw/rdm/seqpacket
+ *	protocol			must be in /etc/protocols
+ *	wait/nowait			single-threaded/multi-threaded
+ *	server program			full path name
+ *	server program arguments	maximum of MAXARGS (5)
+ *
+ * Comment lines are indicated by a `#' in column 1.
+ */
+
+#define MAXSOCKS    32
+#define FD_SETSIZE	MAXSOCKS
+
+#include <ss/socket.h>
+#include <exec/libraries.h>
+#include <exec/memory.h>
+#include <dos/dos.h>
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/alib_protos.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+/*
+#include <sys/param.h>
+#include <sys/file.h>
+#include <sys/time.h>
+#include <arpa/inet.h>
+*/
+#include <stdio.h>
+#include <string.h>
+#include <netdb.h>
+#include <syslog.h>
+#include <stdarg.h>
+#include "inetd_rev.h"
+
+struct Library *SockBase ;
+extern struct Library *DOSBase ;
+/*extern struct Library *SysBase = (*((struct Library **) 4)) ;*/
+
+#define PORTNAME	"inetd"
+
+void startit(register struct servtab *, int) ;
+void config(void) ;
+void setup( register struct servtab *sep ) ;
+struct servtab *enter(struct servtab *cp ) ;
+int setconfig(void) ;
+void endconfig(void) ;
+struct servtab *getconfigent(void) ;
+void freeconfig(register struct servtab *cp ) ;
+void cleanup(void) ;
+char *skip(char **cpp) ;
+char *nextline(BPTR fh) ;
+char *strdup(char *cp) ;
+void print_service(char *, struct servtab *) ;
+
+void Dprintf(char *fmt, ...) ;
+void syslog(int pri, ...) ;
+
+int	debug = 0 ;
+BPTR debugfh ;
+
+int	maxsock ;
+fd_set	allsock ;
+struct	servent *sp ;
+int errno ;
+
+#define MAXARGV 5
+struct	servtab {
+	char	*se_service ;		/* name of service */
+	int	se_socktype ;		/* type of socket to use */
+	char	*se_proto ;		/* protocol used */
+	short	se_wait ;		/* single threaded server */
+	short	se_checked ;		/* looked at during merge */
+	char	*se_server ;		/* server program */
+	char	*se_argv[MAXARGV+1] ;	/* program arguments */
+	int	se_fd ;			/* open descriptor */
+	struct	sockaddr_in se_ctrladdr ;/* bound address */
+	struct	servtab *se_next ;
+} *servtab ;
+
+
+char	*CONFIG = INETDFILE ;
+
+struct inetmsg {
+	struct Message	msg ;
+	ULONG	id ;
+} ;
+
+struct MsgPort *inet_port ;
+
+#define CMDREV  "\0$VER: " VSTRING
+#define TEMPLATE    "-D=DEBUG/S" CMDREV
+#define OPT_DEBUG    0
+#define OPT_COUNT    1
+
+int main(void)
+{
+	fd_set readable ;
+	int n, ev, ctrl ;
+	register struct servtab *sep ;
+	ULONG port_sig ;
+	struct inetmsg *msg ;
+	long opts[OPT_COUNT] ;
+	struct RDargs *rdargs ;
+
+	memset((char *)opts, 0, sizeof(opts)) ;
+	if(rdargs = ReadArgs(TEMPLATE, opts, NULL))
+	{
+		if(opts[OPT_DEBUG])
+		{
+			debug=1 ;
+		}
+		FreeArgs(rdargs) ;
+	}
+	else
+	{
+		Dprintf("readargs failure\n") ;
+		Close(debugfh) ;
+		Exit(20) ;
+	}
+
+	Forbid() ;
+	if( FindPort(PORTNAME) ) 
+	{
+		Permit() ;
+		Exit(20) ;
+	}
+	inet_port = CreatePort(PORTNAME,0) ;
+	Permit() ;
+	if(inet_port==NULL)
+	{
+		Exit(20) ;
+	}
+
+	port_sig = 1 << inet_port->mp_SigBit ;
+	if((SockBase = OpenLibrary( "inet:libs/socket.library", 4L )) == NULL)
+	{
+		Dprintf("Error opening socket.library\n") ;
+		Close(debugfh) ;
+		DeletePort(inet_port) ;
+		Exit(20) ;
+	}
+
+	setup_sockets( MAXSOCKS, &errno ) ;
+
+
+	config() ;
+
+
+	while(1) 
+	{
+		readable = allsock ;
+		ev = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | port_sig ;
+		n = selectwait(maxsock+1,&readable,0L,0L,0L,&ev) ;
+
+		if( ev & SIGBREAKF_CTRL_C )
+		{
+			cleanup() ;
+		}
+/*		if( ev & SIGBREAKF_CTRL_D )
+		{
+			config() ;
+		}
+*/
+		if( ev & SIGBREAKF_CTRL_D ) 
+		{
+			if(debug)
+			{
+				debug=0 ;
+			}
+			else
+			{
+				debug = 1 ;
+			}
+		}
+		if( ev & port_sig ) 
+		{
+			if( msg = (struct inetmsg *)GetMsg(inet_port) ) 
+			{
+				if(debug)
+				{
+					Dprintf("got message with id=%ld\n",msg->id) ;
+				}
+				setup((struct servtab *)msg->id) ;
+				ReplyMsg((struct Message *)msg) ;
+			}
+		}
+
+		if( n < 0 ) 
+		{
+			if( errno == EBADF ) 
+			{
+				syslog(LOG_WARNING,"INETD: Selectwait: %s\n",strerror(errno)) ;
+				cleanup() ;
+			}
+			continue ;
+		}
+		for( sep = servtab ;n && sep ; sep = sep->se_next) 
+		{
+			if( FD_ISSET(sep->se_fd,&readable)) 
+			{
+				n-- ;
+				if (debug)
+				{
+					Dprintf("someone wants %s\n",sep->se_service) ;
+				}
+				if( sep->se_socktype == SOCK_STREAM) 
+				{
+					ctrl = accept(sep->se_fd,(struct sockaddr *)0,0) ;
+					if (debug)
+					{
+						Dprintf("accept, ctrl=%ld  fd=%ld\n",ctrl,sep->se_fd) ;
+					}
+					if ( ctrl < 0 ) 
+					{
+						if (errno == EINTR)
+						{
+							continue ;
+						}
+						syslog(LOG_WARNING,"INETD: accept: %s\n",strerror(errno)) ;
+						continue ;
+					}
+				} else 	/* UDP socket */
+					ctrl = sep->se_fd ;
+				startit(sep,ctrl) ;
+			}
+		}
+	}
+}
+
+void startit(register struct servtab *sep, int ctrl)
+{
+	char cmdbuf[256] ;
+	void *sockptr ;
+	int i ;
+	long id=0 ;
+
+	if(sep->se_wait || sep->se_socktype==SOCK_DGRAM) 
+	{
+		FD_CLR(sep->se_fd,&allsock) ;
+		id = (long)sep ;
+	}
+
+	sockptr = s_release(ctrl) ;
+	sprintf(cmdbuf, "run >nil: %s %s %ld %ld ", sep->se_server,
+		sep->se_service, sockptr, id) ;
+	for(i = 0 ; sep->se_argv[i] ; i++) 
+	{
+		strcat(cmdbuf, sep->se_argv[i]) ;
+		strcat(cmdbuf," ") ;
+	}
+	if(debug) 
+	{
+		Dprintf("executing %s\n",cmdbuf) ;
+	}
+	Execute(cmdbuf, 0L, 0L) ;
+}
+
+
+void config(void)
+{
+	register struct servtab *sep, *cp, **sepp ;
+
+	if (!setconfig()) 
+	{
+		syslog(LOG_ERR,"INETD: cannot open config file %s\n",CONFIG) ;
+		return ;
+	}
+	for (sep = servtab ; sep ; sep = sep->se_next)
+	{
+		sep->se_checked = 0 ;
+	}
+
+	while (cp = getconfigent()) 
+	{
+		for (sep = servtab ; sep ; sep = sep->se_next)
+		{
+			if (strcmp(sep->se_service, cp->se_service) == 0 &&
+			    strcmp(sep->se_proto, cp->se_proto) == 0)
+			{
+				break ;
+			}
+		}
+		if (sep != 0) 
+		{
+			int i ;
+
+#define SWAP(a, b) { char *c = a ; a = b ; b = c ; }
+			if (cp->se_server)
+			{
+				SWAP(sep->se_server, cp->se_server) ;
+			}
+			for (i = 0 ; i < MAXARGV ; i++)
+			{
+				SWAP(sep->se_argv[i], cp->se_argv[i]) ;
+			}
+			freeconfig(cp) ;
+			if (debug)
+			{
+				print_service("REDO", sep) ;
+			}
+		} 
+		else 
+		{
+			sep = enter(cp) ;
+			if (debug)
+			{
+				print_service("ADD ", sep) ;
+			}
+		}
+		sep->se_checked = 1 ;
+		sp = getservbyname(sep->se_service, sep->se_proto) ;
+		if (sp == 0) 
+		{
+			syslog(LOG_ERR,"INETD: %s/%s: unknown service\n",
+			    sep->se_service, sep->se_proto) ;
+			sep->se_checked=0 ;
+			continue ;
+		}
+		if (sp->s_port != sep->se_ctrladdr.sin_port) 
+		{
+			sep->se_ctrladdr.sin_port = sp->s_port ;
+			if (sep->se_fd != -1)
+			{
+				(void)s_close(sep->se_fd) ;
+			}
+			sep->se_fd = -1 ;
+		}
+		if (sep->se_fd == -1)
+		{
+			setup(sep) ;
+		}
+	}
+	endconfig() ;
+	/*
+	 * Purge anything not looked at above.
+	 */
+	sepp = &servtab ;
+	while (sep = *sepp) {
+		if (sep->se_checked) 
+		{
+			sepp = &sep->se_next ;
+			continue ;
+		}
+		*sepp = sep->se_next ;
+		if (sep->se_fd != -1) 
+		{
+			FD_CLR(sep->se_fd, &allsock) ;
+			(void) s_close(sep->se_fd) ;
+		}
+		if (debug)
+		{
+			print_service("FREE", sep) ;
+		}
+		freeconfig(sep) ;
+		FreeMem(sep,sizeof(struct servtab)) ;
+	}
+}
+
+void setup( register struct servtab *sep )
+{
+	int on = 1 ;
+
+	if ((sep->se_fd = socket(AF_INET, sep->se_socktype, 0)) < 0) 
+	{
+		syslog(LOG_ERR,"INETD: socket: %s/%s\n",
+		    sep->se_service, sep->se_proto) ;
+		return ;
+	}
+#define	turnon(fd, opt) \
+setsockopt(fd, SOL_SOCKET, opt, (char *)&on, sizeof (on))
+
+/*	if (strcmp(sep->se_proto, "tcp") == 0 && (options & SO_DEBUG) &&
+	    turnon(sep->se_fd, SO_DEBUG) < 0)
+	{
+		syslog(LOG_ERR, "inetd: setsockopt (SO_DEBUG)\n") ;
+	}
+*/
+	if (turnon(sep->se_fd, SO_REUSEADDR) < 0)
+	{
+		syslog(LOG_ERR, "INETD: setsockopt (SO_REUSEADDR)\n") ;
+	}
+#undef turnon
+	if(bind(sep->se_fd, (struct sockaddr *)&sep->se_ctrladdr,sizeof(sep->se_ctrladdr))<0)
+	{
+		syslog(LOG_ERR,"INETD: bind: %s/%s\n", sep->se_service, sep->se_proto) ;
+		(void) s_close(sep->se_fd) ;
+		sep->se_fd = -1 ;
+		return ;
+	}
+	if (sep->se_socktype == SOCK_STREAM)
+	{
+		listen(sep->se_fd, 10) ;
+	}
+	FD_SET(sep->se_fd, &allsock) ;
+	if (sep->se_fd > maxsock)
+	{
+		maxsock = sep->se_fd ;
+	}
+}
+
+
+struct servtab *enter(struct servtab *cp)
+{
+	register struct servtab *sep ;
+
+	sep = (struct servtab *)AllocMem(sizeof(struct servtab),MEMF_PUBLIC) ;
+	if (sep == (struct servtab *)0) 
+	{
+		syslog(LOG_ERR, "INETD: Out of memory.\n") ;
+		cleanup() ;  
+	}
+	*sep = *cp ;
+	sep->se_fd = -1 ;
+	sep->se_next = servtab ;
+	servtab = sep ;
+	return (sep) ;
+}
+
+BPTR fconfig = NULL ;
+struct	servtab serv ;
+char	line[256] ;
+
+int setconfig(void)
+{
+
+	if (fconfig != NULL) 
+	{
+		(void)Seek(fconfig, 0L, OFFSET_BEGINNING) ;
+		return (1) ;
+	}
+	fconfig = Open(CONFIG, MODE_OLDFILE) ;
+	return (fconfig != NULL) ;
+}
+
+void endconfig(void)
+{
+	if (fconfig) 
+	{
+		(void)Close(fconfig) ;
+		fconfig = NULL ;
+	}
+}
+
+struct servtab *getconfigent(void)
+{
+	register struct servtab *sep = &serv ;
+	int argc ;
+	char *cp, *arg ;
+more:
+	while ((cp = nextline(fconfig)) && *cp == '#')
+	{
+		 ;
+	}
+
+	if (cp == NULL)
+	{
+		return ((struct servtab *)0) ;
+	}
+	sep->se_service = strdup(skip(&cp)) ;
+	arg = skip(&cp) ;
+	if (strcmp(arg, "stream") == 0)
+		sep->se_socktype = SOCK_STREAM ;
+	else if (strcmp(arg, "dgram") == 0)
+		sep->se_socktype = SOCK_DGRAM ;
+	else if (strcmp(arg, "rdm") == 0)
+		sep->se_socktype = SOCK_RDM ;
+	else if (strcmp(arg, "seqpacket") == 0)
+		sep->se_socktype = SOCK_SEQPACKET ;
+	else if (strcmp(arg, "raw") == 0)
+		sep->se_socktype = SOCK_RAW ;
+	else
+		sep->se_socktype = -1 ;
+	sep->se_proto = strdup(skip(&cp)) ;
+	arg = skip(&cp) ;
+	sep->se_wait = strcmp(arg, "wait") == 0 ;
+	sep->se_server = strdup(skip(&cp)) ;
+	argc = 0 ;
+	for (arg = skip(&cp) ; cp ; arg = skip(&cp))
+	{
+		if (argc < MAXARGV)
+		{
+			sep->se_argv[argc++] = strdup(arg) ;
+		}
+	}
+	while (argc <= MAXARGV)
+	{
+		sep->se_argv[argc++] = NULL ;
+	}
+	return (sep) ;
+}
+
+void freeconfig(register struct servtab *cp )
+{
+	int i ;
+
+	if (cp->se_service)
+	{
+		FreeVec(cp->se_service) ;
+	}
+	if (cp->se_proto)
+	{
+		FreeVec(cp->se_proto) ;
+	}
+	if (cp->se_server)
+	{
+		FreeVec(cp->se_server) ;
+	}
+	for (i = 0 ; i < MAXARGV ; i++)
+	{
+		if (cp->se_argv[i])
+		{
+			FreeVec(cp->se_argv[i]) ;
+		}
+	}
+}
+
+void cleanup(void)
+{
+	struct servtab *nsep, *sep = servtab ;
+
+	do 
+	{
+		nsep = sep->se_next ;
+		if( sep->se_fd != -1 )
+		{
+			(void)s_close(sep->se_fd) ;
+		}
+		freeconfig(sep) ;
+		FreeMem(sep,sizeof(struct servtab)) ;
+	} 
+	while ( sep = nsep) ;
+
+	if(debugfh) Close(debugfh) ;
+	cleanup_sockets() ;
+	CloseLibrary( SockBase ) ;
+	DeletePort(inet_port) ;
+	Exit(0) ;
+}
+
+
+char *skip(char **cpp)
+{
+	register char *cp = *cpp ;
+	char *start ;
+
+again:
+	while (*cp == ' ' || *cp == '\t')
+	{
+		cp++ ;
+	}
+	if (*cp == '\0') 
+	{
+		char c ;
+
+		c = FGetC(fconfig) ;
+		(void) UnGetC(fconfig,c) ;
+		if (c == ' ' || c == '\t')
+		{
+			if (cp = nextline(fconfig))
+			{
+				goto again ;
+			}
+		}
+		*cpp = (char *)0 ;
+		return ((char *)0) ;
+	}
+	start = cp ;
+	while (*cp && *cp != ' ' && *cp != '\t')
+	{
+		cp++ ;
+	}
+	if (*cp != '\0')
+	{
+		*cp++ = '\0' ;
+	}
+	*cpp = cp ;
+	return (start) ;
+}
+
+
+char *nextline(BPTR fh)
+{
+	char *cp ;
+
+	if (FGets(fh, line, sizeof (line)) == NULL)
+	{
+		return (NULL) ;
+	}
+	cp = strchr(line, '\n') ;
+	if (cp)
+	{
+		*cp = '\0' ;
+	}
+	return (line) ;
+}
+
+char *strdup(char *cp)
+{
+	char *new ;
+
+	if (cp == NULL)
+	{
+		cp = "" ;
+	}
+	new = AllocVec((ulong)(strlen(cp) + 1),0) ;
+	if (new == (char *)0) 
+	{
+		syslog(LOG_ERR, "INETD: Out of memory.\n") ;
+		cleanup() ;
+	}
+	(void)strcpy(new, cp) ;
+	return (new) ;
+}
+
+/*
+ * print_service:
+ *	Dump relevant information to stderr
+ */
+void print_service(char *action, struct servtab *sep)
+{
+	Dprintf("%s: %s proto=%s, wait=%ld, server=%s\n",
+	    action, sep->se_service, sep->se_proto,
+	    sep->se_wait, sep->se_server) ;
+
+}
+
+
+void Dprintf(char *fmt, ...)
+{
+
+    va_list args ;
+
+    if (debugfh==NULL) 
+    {
+		debugfh = Open("con:0/0/640/100/INETD/AUTO/WAIT", MODE_NEWFILE) ;
+    }
+
+    va_start(args,fmt) ;
+	VFPrintf(debugfh,fmt,(LONG *)args) ;
+
+    va_end(args) ;
+
+
+}
+
+
+/*
+void syslog(int pri, ...)
+{
+	va_list args ;
+	char *fmt, buf[256] ;
+	
+	va_start(args,pri) ;
+	fmt = va_arg(args,char *) ;
+	vsprintf(buf,fmt,args) ;
+	va_end(args) ;
+
+	syslog(pri,buf) ;
+}
+*/
+
+
+
+@
+
+
+1.9
+log
+@binary version 1.4.  Remake and checkin. Minor changes.
+@
+text
+@d1 1
+d5 1
+a5 3
+ * $Locker:$
+ *
+ * $Id:$
+d7 1
+a7 1
+ * $Revision:$
+d9 6
+a14 1
+ * $Log:$
+d16 1
+a16 1
+ * $Header:$
+d63 1
+a63 1
+extern struct Library *DOSBase;
+d68 24
+a91 24
+void startit(register struct servtab *, int);
+void config(void);
+void setup( register struct servtab *sep );
+struct servtab *enter(struct servtab *cp );
+int setconfig(void);
+void endconfig(void);
+struct servtab *getconfigent(void);
+void freeconfig(register struct servtab *cp );
+void cleanup(void);
+char *skip(char **cpp);
+char *nextline(BPTR fh);
+char *strdup(char *cp);
+void print_service(char *, struct servtab *);
+
+void Dprintf(char *fmt, ...);
+void syslog(int pri, ...);
+
+int	debug = 0;
+BPTR debugfh;
+
+int	maxsock;
+fd_set	allsock;
+struct	servent *sp;
+int errno;
+d95 11
+a105 11
+	char	*se_service;		/* name of service */
+	int	se_socktype;		/* type of socket to use */
+	char	*se_proto;		/* protocol used */
+	short	se_wait;		/* single threaded server */
+	short	se_checked;		/* looked at during merge */
+	char	*se_server;		/* server program */
+	char	*se_argv[MAXARGV+1];	/* program arguments */
+	int	se_fd;			/* open descriptor */
+	struct	sockaddr_in se_ctrladdr;/* bound address */
+	struct	servtab *se_next;
+} *servtab;
+d108 1
+a108 1
+char	*CONFIG = INETDFILE;
+d111 3
+a113 3
+	struct Message	msg;
+	ULONG	id;
+};
+d115 1
+a115 1
+struct MsgPort *inet_port;
+d118 1
+a118 1
+#define TEMPLATE    "DEBUG/S" CMDREV
+d124 57
+a180 44
+	fd_set readable;
+	int n, ev, ctrl;
+	register struct servtab *sep;
+	ULONG port_sig;
+	struct inetmsg *msg;
+	long opts[OPT_COUNT];
+	struct RDargs *rdargs;
+
+	Forbid();
+	if( FindPort(PORTNAME) ) {
+		Permit();
+		Exit(5);
+	}
+	inet_port = CreatePort(PORTNAME,0);
+	Permit();
+	if(inet_port==0)
+		Exit(10);
+
+	port_sig = 1 << inet_port->mp_SigBit;
+	SockBase = OpenLibrary( "inet:libs/socket.library", 4L );
+	if(SockBase==NULL)
+	{
+		Dprintf("Error opening socket.library\n");
+		CloseLibrary(SockBase);
+		Close(debugfh);
+		DeletePort(inet_port);
+		Exit(20);
+	}
+
+	setup_sockets( MAXSOCKS, &errno );
+
+	rdargs = ReadArgs(TEMPLATE, opts, NULL);
+	if(opts[OPT_DEBUG])
+		debug=1;
+	if(rdargs)
+		FreeArgs(rdargs);
+
+	config();
+
+
+	while(1) {
+		readable = allsock;
+		ev = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | port_sig;
+		n = selectwait(maxsock+1,&readable,0L,0L,0L,&ev);
+d183 3
+a185 1
+			cleanup();
+d187 3
+a189 1
+			config();
+d191 2
+a192 1
+		if( ev & SIGBREAKF_CTRL_D ) {
+d194 3
+a196 1
+				debug=0;
+d198 3
+a200 1
+				debug=1;
+d202 4
+a205 2
+		if( ev & port_sig ) {
+			if( msg = (struct inetmsg *)GetMsg(inet_port) ) {
+d207 22
+a228 16
+					Dprintf("got message with id=%ld\n",msg->id);
+				setup((struct servtab *)msg->id);
+				ReplyMsg((struct Message *)msg);
+			}
+		}
+
+		if( n < 0 ) {
+			if( errno == EBADF ) {
+				syslog(LOG_WARNING,"INETD: Selectwait: %s\n",strerror(errno));
+				cleanup();
+			}
+			continue;
+		}
+		for( sep = servtab;n && sep; sep = sep->se_next) {
+			if( FD_ISSET(sep->se_fd,&readable)) {
+				n--;
+d230 6
+a235 3
+					Dprintf("someone wants %s\n",sep->se_service);
+				if( sep->se_socktype == SOCK_STREAM) {
+					ctrl = accept(sep->se_fd,(struct sockaddr *)0,0);
+d237 5
+a241 2
+						Dprintf("accept, ctrl=%ld  fd=%ld\n",ctrl,sep->se_fd);
+					if ( ctrl < 0 ) {
+d243 5
+a247 3
+							continue;
+						syslog(LOG_WARNING,"INETD: accept: %s\n",strerror(errno));
+						continue;
+d250 2
+a251 2
+					ctrl = sep->se_fd;
+				startit(sep,ctrl);
+d259 4
+a262 4
+	char cmdbuf[256];
+	void *sockptr;
+	int i;
+	long id=0;
+d264 4
+a267 3
+	if(sep->se_wait || sep->se_socktype==SOCK_DGRAM) {
+		FD_CLR(sep->se_fd,&allsock);
+		id = (long)sep;
+d270 1
+a270 1
+	sockptr = s_release(ctrl);
+d272 5
+a276 4
+		sep->se_service, sockptr, id);
+	for(i = 0; sep->se_argv[i]; i++) {
+		strcat(cmdbuf, sep->se_argv[i]);
+		strcat(cmdbuf," ");
+d279 4
+a282 2
+		Dprintf("executing %s\n",cmdbuf);
+	Execute(cmdbuf, 0L, 0L);
+d288 1
+a288 1
+	register struct servtab *sep, *cp, **sepp;
+d290 8
+a297 6
+	if (!setconfig()) {
+		syslog(LOG_ERR,"INETD: cannot open config file %s\n",CONFIG);
+		return;
+	}
+	for (sep = servtab; sep; sep = sep->se_next){
+		sep->se_checked = 0;
+d300 4
+a303 2
+	while (cp = getconfigent()) {
+		for (sep = servtab; sep; sep = sep->se_next){
+d305 3
+a307 2
+			    strcmp(sep->se_proto, cp->se_proto) == 0){
+				break;
+d310 26
+a335 19
+		if (sep != 0) {
+			int i;
+
+#define SWAP(a, b) { char *c = a; a = b; b = c; }
+			if (cp->se_server){
+				SWAP(sep->se_server, cp->se_server);
+			}
+			for (i = 0; i < MAXARGV; i++){
+				SWAP(sep->se_argv[i], cp->se_argv[i]);
+			}
+			freeconfig(cp);
+			if (debug){
+				print_service("REDO", sep);
+			}
+		} else {
+			sep = enter(cp);
+			if (debug){
+				print_service("ADD ", sep);
+			}
+d337 4
+a340 3
+		sep->se_checked = 1;
+		sp = getservbyname(sep->se_service, sep->se_proto);
+		if (sp == 0) {
+d342 3
+a344 3
+			    sep->se_service, sep->se_proto);
+			sep->se_checked=0;
+			continue;
+d346 12
+a357 9
+		if (sp->s_port != sep->se_ctrladdr.sin_port) {
+			sep->se_ctrladdr.sin_port = sp->s_port;
+			if (sep->se_fd != -1){
+				(void)s_close(sep->se_fd);
+			}
+			sep->se_fd = -1;
+		}
+		if (sep->se_fd == -1){
+			setup(sep);
+d360 1
+a360 1
+	endconfig();
+d364 1
+a364 1
+	sepp = &servtab;
+d366 4
+a369 3
+		if (sep->se_checked) {
+			sepp = &sep->se_next;
+			continue;
+d371 12
+a382 10
+		*sepp = sep->se_next;
+		if (sep->se_fd != -1) {
+			FD_CLR(sep->se_fd, &allsock);
+			(void) s_close(sep->se_fd);
+		}
+		if (debug){
+			print_service("FREE", sep);
+		}
+		freeconfig(sep);
+		FreeMem(sep,sizeof(struct servtab));
+d388 1
+a388 1
+	int on = 1;
+d390 2
+a391 1
+	if ((sep->se_fd = socket(AF_INET, sep->se_socktype, 0)) < 0) {
+d393 2
+a394 2
+		    sep->se_service, sep->se_proto);
+		return;
+d400 3
+a402 2
+	    turnon(sep->se_fd, SO_DEBUG) < 0){
+		syslog(LOG_ERR, "inetd: setsockopt (SO_DEBUG)\n");
+d405 3
+a407 2
+	if (turnon(sep->se_fd, SO_REUSEADDR) < 0){
+		syslog(LOG_ERR, "INETD: setsockopt (SO_REUSEADDR)\n");
+d410 10
+a419 12
+	if(bind(sep->se_fd, (struct sockaddr *)&sep->se_ctrladdr,sizeof(sep->se_ctrladdr))<0){
+		syslog(LOG_ERR,"INETD: bind: %s/%s\n", sep->se_service, sep->se_proto);
+		(void) s_close(sep->se_fd);
+		sep->se_fd = -1;
+		return;
+	}
+	if (sep->se_socktype == SOCK_STREAM){
+		listen(sep->se_fd, 10);
+	}
+	FD_SET(sep->se_fd, &allsock);
+	if (sep->se_fd > maxsock){
+		maxsock = sep->se_fd;
+d421 5
+d431 1
+a431 1
+	register struct servtab *sep;
+d433 12
+a444 11
+	sep = (struct servtab *)AllocMem(sizeof(struct servtab),MEMF_PUBLIC);
+	if (sep == (struct servtab *)0) {
+		syslog(LOG_ERR, "INETD: Out of memory.\n");
+		cleanup();  
+	}
+	*sep = *cp;
+	sep->se_fd = -1;
+	sep->se_next = servtab;
+	servtab = sep;
+	return (sep);
+}
+d446 3
+a448 3
+BPTR fconfig = NULL;
+struct	servtab serv;
+char	line[256];
+d453 4
+a456 3
+	if (fconfig != NULL) {
+		(void)Seek(fconfig, 0L, OFFSET_BEGINNING);
+		return (1);
+d458 2
+a459 2
+	fconfig = Open(CONFIG, MODE_OLDFILE);
+	return (fconfig != NULL);
+d464 4
+a467 3
+	if (fconfig) {
+		(void)Close(fconfig);
+		fconfig = NULL;
+d473 3
+a475 3
+	register struct servtab *sep = &serv;
+	int argc;
+	char *cp, *arg;
+d477 3
+a479 2
+	while ((cp = nextline(fconfig)) && *cp == '#'){
+		;
+d482 3
+a484 2
+	if (cp == NULL){
+		return ((struct servtab *)0);
+d486 2
+a487 2
+	sep->se_service = strdup(skip(&cp));
+	arg = skip(&cp);
+d489 1
+a489 1
+		sep->se_socktype = SOCK_STREAM;
+d491 1
+a491 1
+		sep->se_socktype = SOCK_DGRAM;
+d493 1
+a493 1
+		sep->se_socktype = SOCK_RDM;
+d495 1
+a495 1
+		sep->se_socktype = SOCK_SEQPACKET;
+d497 1
+a497 1
+		sep->se_socktype = SOCK_RAW;
+d499 12
+a510 13
+		sep->se_socktype = -1;
+	sep->se_proto = strdup(skip(&cp));
+	arg = skip(&cp);
+	sep->se_wait = strcmp(arg, "wait") == 0;
+	sep->se_server = strdup(skip(&cp));
+	argc = 0;
+	for (arg = skip(&cp); cp; arg = skip(&cp)){
+		if (argc < MAXARGV){
+			sep->se_argv[argc++] = strdup(arg);
+		}
+	}
+	while (argc <= MAXARGV){
+		sep->se_argv[argc++] = NULL;
+d512 5
+a516 1
+	return (sep);
+d521 1
+a521 1
+	int i;
+d523 7
+a529 2
+	if (cp->se_service){
+		FreeVec(cp->se_service);
+d531 9
+a539 9
+	if (cp->se_proto){
+		FreeVec(cp->se_proto);
+	}
+	if (cp->se_server){
+		FreeVec(cp->se_server);
+	}
+	for (i = 0; i < MAXARGV; i++){
+		if (cp->se_argv[i]){
+			FreeVec(cp->se_argv[i]);
+d546 1
+a546 1
+	struct servtab *nsep, *sep = servtab;
+d548 3
+a550 2
+	do {
+		nsep = sep->se_next;
+d552 7
+a558 4
+			(void)s_close(sep->se_fd);
+		freeconfig(sep);
+		FreeMem(sep,sizeof(struct servtab));
+	} while ( sep = nsep);
+d560 2
+a561 2
+	if(debugfh) Close(debugfh);
+	cleanup_sockets();
+d563 2
+a564 2
+	DeletePort(inet_port);
+	Exit(0);
+d569 10
+d580 1
+a580 2
+	register char *cp = *cpp;
+	char *start;
+d582 20
+a601 3
+again:
+	while (*cp == ' ' || *cp == '\t'){
+		cp++;
+d603 2
+a604 22
+	if (*cp == '\0') {
+		char c;
+
+		c = FGetC(fconfig);
+		(void) UnGetC(fconfig,c);
+		if (c == ' ' || c == '\t'){
+			if (cp = nextline(fconfig)){
+				goto again;
+			}
+		}
+		*cpp = (char *)0;
+		return ((char *)0);
+	}
+	start = cp;
+	while (*cp && *cp != ' ' && *cp != '\t'){
+		cp++;
+	}
+	if (*cp != '\0'){
+		*cp++ = '\0';
+	}
+	*cpp = cp;
+	return (start);
+d610 1
+a610 1
+	char *cp;
+d612 3
+a614 2
+	if (FGets(fh, line, sizeof (line)) == NULL){
+		return (NULL);
+d616 4
+a619 3
+	cp = strchr(line, '\n');
+	if (cp){
+		*cp = '\0';
+d621 1
+a621 1
+	return (line);
+d626 1
+a626 1
+	char *new;
+d628 3
+a630 2
+	if (cp == NULL){
+		cp = "";
+d632 5
+a636 4
+	new = AllocVec((ulong)(strlen(cp) + 1),0);
+	if (new == (char *)0) {
+		syslog(LOG_ERR, "INETD: Out of memory.\n");
+		cleanup();
+d638 2
+a639 2
+	(void)strcpy(new, cp);
+	return (new);
+d650 1
+a650 1
+	    sep->se_wait, sep->se_server);
+d658 1
+a658 1
+    va_list args;
+d660 3
+a662 2
+    if (debugfh==NULL) {
+		debugfh = Open("con:0/0/640/100/INETD/AUTO/WAIT", MODE_NEWFILE);
+d665 2
+a666 2
+    va_start(args,fmt);
+	VFPrintf(debugfh,fmt,(LONG *)args);
+d668 1
+a668 1
+    va_end(args);
+d677 2
+a678 2
+	va_list args;
+	char *fmt, buf[256];
+d680 4
+a683 4
+	va_start(args,pri);
+	fmt = va_arg(args,char *);
+	vsprintf(buf,fmt,args);
+	va_end(args);
+d685 1
+a685 1
+	syslog(pri,buf);
+@
+
+
+1.8
+log
+@Changed the version of socket.library that is asked for.
+This is RELEASE VERSION 1.2.  July 15, 1992 (R2.1)
+
+Added RCS header.
+@
+text
+@a15 2
+
+
+d60 1
+d140 2
+a141 1
+	if(SockBase==NULL ) /* || SockBase->lib_Revision < 5) */ {
+d143 1
+a143 7
+		
+#ifdef CHECKING_LIB_REV_NUM
+		if(SockBase) {
+			Dprintf("Found version 3.%ld (need 3.5 or greater)\n",SockBase->lib_Revision);
+			CloseLibrary(SockBase);
+		}
+#endif		
+@
+
+
+1.7
+log
+@cleaned up includes
+eliminated unneeded variables
+added "DEBUG" argument
+now checks for version 3.4 or better socket library
+added new debug lines
+added \n to end of syslog messages
+@
+text
+@d1 17
+d140 2
+a141 2
+	SockBase = OpenLibrary( "inet:libs/socket.library", 3L );
+	if(SockBase==NULL || SockBase->lib_Revision < 4) {
+d143 7
+a149 2
+		if(SockBase)
+			Dprintf("Found version 3.%ld (need 3.4 or greater)\n",SockBase->lib_Revision);
+@
+
+
+1.6
+log
+@removed builtins
+@
+text
+@a11 1
+ *	user				user to run daemon as
+d18 4
+a21 1
+#include <exec/types.h>
+a22 1
+#include <exec/execbase.h>
+d25 6
+a30 3
+#include <proto/all.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+a33 1
+#include <netinet/in.h>
+d35 2
+a36 2
+
+#include <clib/alib_stdio_protos.h>
+a37 1
+#include <errno.h>
+d41 1
+a42 1
+#include <ss/socket.h>
+d44 1
+a45 4
+#define MAXSOCKS    40
+#define	TOOMANY     MAXSOCKS /* don't start more than TOOMANY */
+#define	CNT_INTVL   60       /* servers in CNT_INTVL sec. */
+#define	RETRYTIME   (60*10)  /* retry after bind or server fail */
+d63 1
+d65 1
+a65 1
+int	debug = 1;
+a70 1
+int options;
+a79 1
+	char	*se_user;		/* user name to run as */
+a83 2
+	int	se_count;		/* number started since se_time */
+	struct	timeval se_time;	/* start of se_count */
+a88 1
+char buf[128];
+d92 1
+a92 1
+	ULONG	sockptr;
+d97 5
+d109 2
+d120 1
+a120 1
+		Exit(5);
+d123 2
+a124 2
+	Dprintf("port_sig = %lx\n",port_sig);
+	if((SockBase = OpenLibrary( "inet:libs/socket.library", 1L )) == NULL) {
+d126 2
+d130 1
+a130 1
+		Exit(10);
+d135 6
+d147 1
+a147 1
+		Dprintf("ev = %lx\n",ev);
+a148 2
+		n = selectwait(maxsock+1,&readable,0L,0L,0L,&ev);
+		Dprintf("Got %ld\n",n);
+d151 1
+a151 1
+		if( ev & SIGBREAKF_CTRL_D )
+d153 7
+d161 5
+a165 5
+			Dprintf("port message\n");
+			if( msg = GetMsg(inet_port) ) {
+				Dprintf("got sep=%ld\n",msg->sockptr);
+				setup(msg->sockptr);
+				ReplyMsg(msg);
+d168 1
+d171 1
+a171 1
+				Dprintf("Selectwait: %s\n",strerror(errno));
+d188 1
+a188 2
+						sprintf(buf,"inetd: accept: %s\n",strerror(errno));
+						syslog(LOG_WARNING,buf);
+d208 1
+a208 1
+		id = sep;
+d212 1
+a212 1
+	sprintf(cmdbuf, "run >nil: %s %s %ld %ld ", sep->se_server, 
+d216 1
+a216 1
+		strcat(cmdbuf, " ");
+d218 2
+a219 1
+	Dprintf("%s\n",cmdbuf);
+a220 1
+	Dprintf("Done with startit\n");
+d223 1
+d229 1
+a229 2
+		sprintf(buf,"inetd: cannot open config file %s",CONFIG);
+		syslog(LOG_ERR, buf);
+a246 3
+			if (cp->se_user){
+				SWAP(sep->se_user, cp->se_user);
+			}
+d266 1
+a266 1
+			sprintf(buf,"%s/%s: unknown service",
+d268 1
+a268 1
+			syslog(LOG_ERR,buf); 
+d310 1
+a310 1
+		sprintf(buf,"inetd: socket: %s/%s",
+a311 1
+		syslog(LOG_ERR,buf); 
+a313 1
+	Dprintf("new socket=%ld\n",sep->se_fd);
+d316 2
+a317 1
+	if (strcmp(sep->se_proto, "tcp") == 0 && (options & SO_DEBUG) &&
+d319 1
+a319 1
+		syslog(LOG_ERR, "inetd: setsockopt (SO_DEBUG)");
+d321 1
+d323 1
+a323 1
+		syslog(LOG_ERR, "inetd: setsockopt (SO_REUSEADDR)");
+d327 1
+a327 2
+		sprintf(buf,"inetd: bind: %s/%s", sep->se_service, sep->se_proto);
+		syslog(LOG_ERR, buf);
+d348 1
+a348 1
+		syslog(LOG_ERR, "inetd: Out of memory.");
+a410 1
+	sep->se_user = strdup(skip(&cp));
+a433 3
+	if (cp->se_user){
+		FreeVec(cp->se_user);
+	}
+d446 1
+a446 1
+	struct servtab *sep;
+d448 2
+a449 1
+	for (sep = servtab; sep; sep = sep->se_next){
+d454 2
+a455 1
+	}
+d465 1
+a465 1
+{
+d521 1
+a521 1
+		syslog(LOG_ERR, "Out of memory.");
+d534 1
+a534 1
+	Dprintf("%s: %s proto=%s, wait=%d, user=%s server=%s\n",
+d536 2
+a537 1
+	    sep->se_wait, sep->se_user, sep->se_server);
+d540 1
+d557 18
+@
+
+
+1.5
+log
+@first fully functional version
+doesn't use builtins
+@
+text
+@a62 10
+void daytime(char *str);
+void echo_dg    (int s, struct servtab *sep);
+void discard_dg (int s, struct servtab *sep);
+void chargen_dg (int s, struct servtab *sep);
+void machtime_dg(int s, struct servtab *sep);
+void daytime_dg (int s, struct servtab *sep);
+long machtime(void);
+void machtime_stream(int s, struct servtab *sep);
+void daytime_stream( int, struct servtab * );
+
+a81 1
+	struct	biltin *se_bi;		/* if built-in, description */
+a91 15
+struct biltin {
+	char	*bi_service;		/* internally provided service name */
+	int	bi_socktype;		/* type of socket supported */
+	void	(*bi_func)(int,struct servtab *); /* function serving */
+} biltins[] = {
+	"echo",		SOCK_DGRAM,  echo_dg,
+	"discard",	SOCK_DGRAM,  discard_dg,
+	"time",		SOCK_STREAM, machtime_stream,
+	"time",		SOCK_DGRAM,  machtime_dg,
+	"daytime",	SOCK_STREAM, daytime_stream,
+	"daytime",	SOCK_DGRAM,  daytime_dg,
+	"chargen",	SOCK_DGRAM,  chargen_dg,
+	0
+};
+
+a230 3
+			if (cp->se_bi == 0){
+				sep->se_wait = cp->se_wait;
+			}
+a292 14
+/**********
+retry()
+{
+	register struct servtab *sep;
+
+	timingout = 0;
+	for (sep = servtab; sep; sep = sep->se_next){
+		if (sep->se_fd == -1){
+			setup(sep);
+		}
+	}
+}
+**********/
+
+a318 6
+/***
+		if (!timingout) {
+			timingout = 1;
+			alarm(RETRYTIME);
+		}
+***/
+d374 1
+a374 2
+	char *cp, *arg, *strdup();
+
+a401 18
+	if (strcmp(sep->se_server, "internal") == 0) {
+		register struct biltin *bi;
+		for (bi = biltins; bi->bi_service; bi++){
+			if (bi->bi_socktype == sep->se_socktype &&
+			    strcmp(bi->bi_service, sep->se_service) == 0){
+				break;
+			}
+		}
+		if (bi->bi_service == 0) {
+			sprintf(buf,"internal service %s unknown\n",
+				sep->se_service);
+			syslog(LOG_ERR, buf);
+			goto more;
+		}
+		sep->se_bi = bi;
+	} else {
+		sep->se_bi = NULL;
+	}
+d525 1
+a525 1
+	Dprintf("%s: %s proto=%s, wait=%ld, user=%s builtin=%lx server=%s\n",
+d527 1
+a527 160
+	    (long)sep->se_wait, sep->se_user, (long)sep->se_bi, sep->se_server);
+}
+
+
+#define BUFSIZ 1600
+
+void echo_dg(s, sep)			/* Echo service -- echo data back */
+	int s;
+	struct servtab *sep;
+{
+	char buffer[BUFSIZ];
+	int i, size;
+	struct sockaddr sa;
+
+	size = sizeof(sa);
+	if ((i = recvfrom(s, buffer, sizeof(buffer), 0, &sa, &size)) < 0){
+		return;
+	}
+	(void) sendto(s, buffer, i, 0, &sa, sizeof(sa));
+}
+
+/* Discard service -- ignore data */
+void discard_dg(int s, struct servtab *sep)		
+{
+	char buffer[BUFSIZ];
+
+	(void)recv(s, buffer, sizeof(buffer),0);
+}
+
+#include <ctype.h>
+#define LINESIZ 72
+char ring[128];
+char *endring;
+
+void initring(void)
+{
+	register int i;
+
+	endring = ring;
+
+	for (i = 0; i <= 128; ++i){
+		if (isprint(i)){
+			*endring++ = i;
+		}
+	}
+}
+
+void chargen_dg(int s, struct servtab *sep)		/* Character generator */
+{
+	struct sockaddr sa;
+	static char *rs;
+	int len, size;
+	char text[LINESIZ+2];
+
+	if (endring == 0) {
+		initring();
+		rs = ring;
+	}
+
+	size = sizeof(sa);
+	if (recvfrom(s, text, sizeof(text), 0, &sa, &size) < 0)
+		return;
+
+	if ((len = endring - rs) >= LINESIZ)
+		memcpy(text,rs,LINESIZ);
+	else {
+		memcpy(text,rs, len);
+		memcpy(text + len, ring, LINESIZ - len);
+	}
+	if (++rs == endring)
+		rs = ring;
+	text[LINESIZ] = '\r';
+	text[LINESIZ + 1] = '\n';
+	(void) sendto(s, text, sizeof(text), 0, &sa, sizeof(sa));
+}
+
+void machtime_dg(int s, struct servtab *sep)
+{
+	long result;
+	struct sockaddr sa;
+	int size;
+
+	size = sizeof(sa);
+	if (recvfrom(s, (char *)&result, sizeof(result), 0, &sa, &size) < 0)
+		return;
+	result = machtime();
+	(void) sendto(s, (char *) &result, sizeof(result), 0, &sa, sizeof(sa));
+}
+
+void daytime_dg(s, sep)		/* Return human-readable time of day */
+	int s;
+	struct servtab *sep;
+{
+	char buffer[256];
+	struct sockaddr sa;
+	int size;
+
+	size = sizeof(sa);
+	if (recvfrom(s, buffer, sizeof(buffer), 0, &sa, &size) < 0)
+		return;
+	daytime(buffer);
+	(void) sendto(s, buffer, strlen(buffer), 0, &sa, sizeof(sa));
+}
+
+/*
+ * Return a machine readable date and time, in the form of the
+ * number of seconds since midnight, Jan 1, 1900.  Since gettimeofday
+ * returns the number of seconds since midnight, Jan 1, 1970,
+ * we must add 2208988800 seconds to this figure to make up for
+ * some seventy years Bell Labs was asleep.
+ */
+
+
+long machtime(void)
+{
+	struct DateStamp ds;
+	long t;
+
+	(void)DateStamp(&ds);
+	t = ds.ds_Days*86400 + ds.ds_Minute*60 + (long)(ds.ds_Tick/50);
+	t += 2461449600;
+	return( t );
+}
+
+
+void machtime_stream(int s, struct servtab *sep)
+{
+
+	long result;
+
+	result = machtime();
+	(void) send(s, (char *) &result, sizeof(result),0);
+
+}
+
+
+void daytime_stream(s, sep)		/* Return human-readable time of day */
+	int s;
+	struct servtab *sep;
+{
+
+	char buffer[256];
+	daytime(buffer);
+	(void)send(s, buffer, strlen(buffer),0);
+
+}
+
+void daytime(char *str)
+{
+	struct DateTime dt;
+	char day[20], date[20], time[20];
+
+	dt.dat_Format = FORMAT_DOS;
+	dt.dat_Flags = 0;
+	dt.dat_StrDay = day;
+	dt.dat_StrTime = time;
+	dt.dat_StrDate = date;
+	(void)DateStamp(&dt.dat_Stamp);
+	(void)DateToStr(&dt);
+	sprintf(str,"%s %s %s\r\n",day,date,time);
+@
+
+
+1.4
+log
+@shared socket library
+intermediate version
+has builtins
+not complete!
+/
+@
+text
+@d47 1
+d121 7
+d133 2
+d136 9
+d146 2
+d151 1
+d159 1
+d162 3
+a164 1
+		ev = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D;
+d166 1
+d171 8
+d213 3
+d217 16
+a232 6
+	if(sep->se_bi) {
+		(*sep->se_bi->bi_func)(ctrl,sep);
+		if(sep->se_socktype==SOCK_STREAM)
+			s_close(ctrl);
+	} else {
+		if(sep->se_wait) {
+a233 12
+		} else {
+			sprintf(port, "%s %ld", sep->se_service, s_release(ctrl));
+			sprintf(cmdbuf, "run >nil: %s %s ", sep->se_server, port);
+			for(i = 0; sep->se_argv[i]; i++){
+				strcat(cmdbuf, sep->se_argv[i]);
+				strcat(cmdbuf, " ");
+			}
+			Execute(cmdbuf, 0L, 0L);
+		}
+	}
+			
+}
+d346 1
+d518 1
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@a1 25
+ * Copyright (c) 1983 Regents of the University of California.
+ * All rights reserved.
+ *
+ * Copyright 1989 Ameristar Technology, Inc.
+ */
+
+/*
+ * Inetd - Internet super-server
+ *
+ * This program invokes all internet services as needed.
+ * connection-oriented services are invoked each time a
+ * connection is made, by creating a process.  This process
+ * is passed the connection as file descriptor 0 and is
+ * expected to do a getpeername to find out the source host
+ * and port.
+ *
+ * Datagram oriented services are invoked when a datagram
+ * arrives; a process is created and passed a pending message
+ * on file descriptor 0.  Datagram servers may either connect
+ * to their peer, freeing up the original socket for inetd
+ * to receive further messages on, or ``take over the socket'',
+ * processing all arriving datagrams and, eventually, timing
+ * out.	 The first type of server is said to be ``multi-threaded'';
+ * the second type of server ``single-threaded''. 
+ *
+d18 9
+a27 3
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+d33 2
+a35 1
+#include <signal.h>
+d38 4
+a41 3
+#include <pwd.h>
+#include <stdio.h>
+#include <strings.h>
+d43 35
+a77 13
+#include <libraries/dos.h>
+
+#define	TOOMANY		40		/* don't start more than TOOMANY */
+#define	CNT_INTVL	60		/* servers in CNT_INTVL sec. */
+#define	RETRYTIME	(60*10)		/* retry after bind or server fail */
+
+extern	int errno;
+
+int	retry(), config(), quit();
+char	*index();
+char	*malloc();
+int	debug = 0;
+int	nsock, maxsock;
+a78 2
+int	options;
+int	timingout;
+d80 2
+a81 1
+extern int _alarm_timerbit;
+a100 2
+int	echo_dg(), discard_dg(), machtime_stream(), machtime_dg(),
+	daytime_stream(), daytime_dg(), chargen_dg();
+d105 1
+a105 1
+	int	(*bi_func)();		/* function serving */
+d107 7
+a113 7
+	"echo",		SOCK_DGRAM,	echo_dg,
+	"discard",	SOCK_DGRAM,	discard_dg,
+	"time",		SOCK_STREAM,	machtime_stream,
+	"time",		SOCK_DGRAM,	machtime_dg,
+	"daytime",	SOCK_STREAM,	daytime_stream,
+	"daytime",	SOCK_DGRAM,	daytime_dg,
+	"chargen",	SOCK_DGRAM,	chargen_dg,
+a116 1
+#define NUMINT	(sizeof(intab) / sizeof(struct inent))
+d118 1
+d120 1
+a120 3
+main(argc, argv)
+	int argc;
+	char *argv[];
+d122 2
+a124 26
+	extern char *optarg;
+	long ev, timerevent;
+	extern int optind;
+    	fd_set readable;
+    	int n, ctrl, ch;
+	extern int Enable_Abort;
+
+	Enable_Abort = 0;
+    	while ((ch = getopt(argc, argv, "d")) != EOF){
+		switch(ch) {
+		case 'd':
+		case 'D':
+			debug = 1;
+			options |= SO_DEBUG;
+			break;
+		case '?':
+		default:
+			fprintf(stderr, "usage: inetd [-d]");
+			exit(1);
+		}
+	}
+
+	argc -= optind;	argv += optind;
+	if (argc > 0){
+		CONFIG = argv[0];
+	}
+a125 5
+	timerevent = 1L << _alarm_timerbit;
+	signal(SIGALRM, retry);
+	signal(SIGHUP, config);
+	signal(SIGINT, quit);
+	config();
+d127 4
+a130 19
+for (;;){
+	readable = allsock;
+	ev = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | timerevent;
+    	n = selectwait(maxsock + 1, &readable, 0L, 0L, 0L, &ev);
+	if(ev & SIGBREAKF_CTRL_C){
+		take_signal(SIGINT);
+	}
+	if(ev & SIGBREAKF_CTRL_D){
+		take_signal(SIGHUP);
+	}
+	if(ev & timerevent){
+		take_signal(SIGALRM);
+	}
+	if(n < 0){
+		if(errno == EBADF){
+			perror("selectwait");
+			quit();
+		}	
+		continue;
+d133 16
+a148 5
+    	for (sep = servtab; n && sep; sep = sep->se_next){
+    		if (FD_ISSET(sep->se_fd, &readable)) {
+			n--;
+			if (debug){
+				fprintf(stderr, "someone wants %s\n", sep->se_service);
+d150 16
+a165 7
+			if(sep->se_socktype == SOCK_STREAM){
+				ctrl = accept(sep->se_fd, 0L, 0L);
+				if (debug){
+					fprintf(stderr, "accept, ctrl %d  fd=%d\n", ctrl,sep->se_fd);
+				}
+				if (ctrl < 0) {
+					if (errno == EINTR){
+d168 4
+a171 7
+					syslog(LOG_WARNING, "accept: %m");
+					continue;
+				}
+			} else {
+				ctrl = sep->se_fd;
+			}
+			startit(sep, ctrl);
+d173 6
+a178 23
+	}
+}
+}
+
+/*
+ * quit - make server quit
+ */
+quit()
+{
+	exit(0);
+}
+
+/*
+ * startit - startup given server.
+ */
+startit(sep, ctrl)
+	register struct servtab *sep;
+	int ctrl;
+{
+	static char cmdbuf[256];
+	static char port[32];
+	static int id;
+	int i;
+d180 4
+a183 3
+	if (sep->se_bi){
+		(*sep->se_bi->bi_func)(ctrl, sep);
+		close(ctrl);
+d185 1
+a185 17
+		sprintf(port, "%s%06x", sep->se_service, ++id);
+		sprintf(cmdbuf, "run >nil: %s %s ", sep->se_server, port);
+		for(i = 0; sep->se_argv[i]; i++){
+			strcat(cmdbuf, sep->se_argv[i]);
+			strcat(cmdbuf, " ");
+		}
+		if(debug){
+			fprintf(stderr,"Starting daemon by Execute(%s);\n", cmdbuf);
+		}
+		Execute(cmdbuf, 0L, 0L);
+		if(daemon_startupmsg(port, ctrl) < 0){
+			if(debug){
+				fprintf(stderr, "inetd: Could not start %s\n", 
+							sep->se_service);
+			}
+		}
+	}
+d187 9
+a195 8
+	/*
+	 * By convention datagram sockets are closed by the daemon which
+	 * we've just started up, so we need to set up the listener process
+	 * again.
+	 */
+	if(sep->se_socktype == SOCK_DGRAM){
+		FD_CLR(sep->se_fd, &allsock);
+		setup(sep);
+d197 1
+d199 1
+a199 2
+
+config()
+a201 2
+	struct servtab *getconfigent(), *enter();
+	long omask;
+d204 2
+a205 1
+		syslog(LOG_ERR, "%s: %m", CONFIG);
+d248 1
+a248 1
+			syslog(LOG_ERR, "%s/%s: unknown service",
+d250 1
+d256 1
+a256 1
+				(void) close(sep->se_fd);
+d277 1
+a277 2
+			nsock--;
+			(void) close(sep->se_fd);
+d283 1
+a283 1
+		free((char *)sep);
+d287 1
+d299 1
+d301 1
+a301 2
+setup(sep)
+	register struct servtab *sep;
+d306 1
+a306 1
+		syslog(LOG_ERR, "%s/%s: socket: %m",
+d308 1
+d315 1
+a315 1
+		syslog(LOG_ERR, "setsockopt (SO_DEBUG): %m");
+d318 1
+a318 1
+		syslog(LOG_ERR, "setsockopt (SO_REUSEADDR): %m");
+d321 4
+a324 3
+	if(bind(sep->se_fd, &sep->se_ctrladdr, sizeof (sep->se_ctrladdr))<0){
+		syslog(LOG_ERR, "%s/%s: bind: %m", sep->se_service, sep->se_proto);
+		(void) close(sep->se_fd);
+d326 1
+d331 1
+a337 1
+	nsock++;
+d343 2
+a344 3
+struct servtab *
+enter(cp)
+	struct servtab *cp;
+a346 1
+	long omask;
+d348 1
+a348 1
+	sep = (struct servtab *)malloc(sizeof (*sep));
+d350 2
+a351 2
+		syslog(LOG_ERR, "Out of memory.");
+		exit(-1);
+d360 1
+a360 1
+FILE	*fconfig = NULL;
+a362 1
+char	*skip(), *nextline();
+d364 1
+a364 1
+setconfig()
+d368 1
+a368 1
+		fseek(fconfig, 0L, L_SET);
+d371 1
+a371 1
+	fconfig = fopen(CONFIG, "r");
+d375 1
+a375 1
+endconfig()
+d378 1
+a378 1
+		(void) fclose(fconfig);
+d383 1
+a383 2
+struct servtab *
+getconfigent()
+a417 1
+
+d425 1
+a425 1
+			syslog(LOG_ERR, "internal service %s unknown\n",
+d427 1
+d446 1
+a446 2
+freeconfig(cp)
+	register struct servtab *cp;
+d451 1
+a451 1
+		free(cp->se_service);
+d454 1
+a454 1
+		free(cp->se_proto);
+d457 1
+a457 1
+		free(cp->se_user);
+d460 1
+a460 1
+		free(cp->se_server);
+d464 1
+a464 1
+			free(cp->se_argv[i]);
+d469 18
+a486 3
+char *
+skip(cpp)
+	char **cpp;
+d498 2
+a499 2
+		c = getc(fconfig);
+		(void) ungetc(c, fconfig);
+d519 2
+a520 3
+char *
+nextline(fd)
+	FILE *fd;
+d524 2
+a525 2
+	if (fgets(line, sizeof (line), fd) == NULL){
+		return ((char *)0);
+d527 1
+a527 1
+	cp = index(line, '\n');
+d534 1
+a534 3
+char *
+strdup(cp)
+	char *cp;
+d541 1
+a541 1
+	new = malloc((unsigned)(strlen(cp) + 1));
+d544 1
+a544 1
+		exit(-1);
+d554 1
+a554 3
+print_service(action, sep)
+	char *action;
+	struct servtab *sep;
+d556 1
+a556 2
+	fprintf(stderr,
+	    "%s: %s proto=%s, wait=%d, user=%s builtin=%x server=%s\n",
+d558 1
+a558 1
+	    sep->se_wait, sep->se_user, (int)sep->se_bi, sep->se_server);
+d561 4
+a564 1
+echo_dg(s, sep)			/* Echo service -- echo data back */
+d579 2
+a580 3
+discard_dg(s, sep)		/* Discard service -- ignore data */
+	int s;
+	struct servtab *sep;
+d584 1
+a584 1
+	(void) read(s, buffer, sizeof(buffer));
+d592 1
+a592 1
+initring()
+d605 1
+a605 3
+chargen_dg(s, sep)		/* Character generator */
+	int s;
+	struct servtab *sep;
+d622 1
+a622 1
+		bcopy(rs, text, LINESIZ);
+d624 2
+a625 2
+		bcopy(rs, text, len);
+		bcopy(ring, text + len, LINESIZ - len);
+d634 1
+a634 3
+machtime_dg(s, sep)
+	int s;
+	struct servtab *sep;
+d647 1
+a647 1
+daytime_dg(s, sep)		/* Return human-readable time of day */
+a651 1
+	time_t time(), clock;
+a653 3
+	char *ctime();
+
+	clock = time((time_t *) 0);
+d658 1
+a658 1
+	(void) sprintf(buffer, "%.24s\r\n", ctime(&clock));
+d669 3
+a671 2
+long
+machtime()
+d673 8
+a680 1
+	struct timeval tv;
+a681 6
+	if (gettimeofday(&tv, (struct timezone *)0) < 0) {
+		fprintf(stderr, "Unable to get time of day\n");
+		return (0L);
+	}
+	return (htonl((long)tv.tv_sec + 2208988800));
+}
+d683 1
+a683 3
+machtime_stream(s, sep)
+	int s;
+	struct servtab *sep;
+d685 1
+d689 2
+a690 1
+	(void) write(s, (char *) &result, sizeof(result));
+d693 2
+a694 1
+daytime_stream(s, sep)		/* Return human-readable time of day */
+d698 1
+d700 33
+a732 2
+	time_t time(), clock;
+	char *ctime();
+a733 1
+	clock = time((time_t *) 0);
+a734 2
+	(void) sprintf(buffer, "%.24s\r\n", ctime(&clock));
+	(void) write(s, buffer, strlen(buffer));
+@
+
+
+1.2
+log
+@fixed 1 debug statement to output to stderr
+@
+text
+@d186 1
+a186 1
+					fprintf(stderr, "accept, ctrl %d\n", ctrl);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d235 1
+a235 1
+			printf("Starting daemon by Execute(%s);\n", cmdbuf);
+@

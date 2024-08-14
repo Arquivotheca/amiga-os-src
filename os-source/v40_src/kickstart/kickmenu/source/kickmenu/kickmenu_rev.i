@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	134
+DATE	MACRO
+		dc.b	'20.3.90'
+	ENDM
+VERS	MACRO
+		dc.b	'kickmenu 36.134'
+	ENDM
+VSTRING	MACRO
+		dc.b	'kickmenu 36.134 (20.3.90)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: kickmenu 36.134 (20.3.90)',0
+	ENDM

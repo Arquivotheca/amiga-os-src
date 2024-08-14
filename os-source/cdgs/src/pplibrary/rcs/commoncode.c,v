@@ -1,0 +1,1842 @@
+head     1.12;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.12
+date     93.03.31.15.05.34;  author peter;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     93.03.25.18.56.57;  author peter;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     93.03.19.19.02.04;  author peter;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     93.03.17.16.48.35;  author peter;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     93.03.11.16.54.50;  author peter;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     93.03.08.18.25.24;  author peter;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     93.02.26.19.04.35;  author peter;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     93.02.23.22.16.55;  author peter;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     93.02.23.15.43.22;  author peter;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.12.18.11.48.36;  author jerryh;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.08.20.12.09.55;  author jerryh;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.07.24.13.36.39;  author jerryh;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@code shared by different modules of playerprefs.
+@
+
+
+1.12
+log
+@Now supports GDFLAGS_DISABLABLE.  Compiled out some dead code.
+@
+text
+@/* $Id: commoncode.c,v 1.11 93/03/25 18:56:57 peter Exp Locker: peter $ */
+
+#include <exec/types.h>
+#include <exec/interrupts.h>
+#include <exec/libraries.h>
+#include <exec/io.h>
+#include <exec/memory.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
+#include <resources/battclock.h>
+
+#include <graphics/gfxbase.h>
+
+#include <libraries/debox.h>
+#include "screensaver/screensaver.h"
+
+#include "playerprefs.h"
+#include "display.h"
+#include "playerprefsbase.h"
+#include "playerprefs_pragmas.h"
+#include "playerprefs_protos.h"
+#include "display_protos.h"
+#include <clib/debox_protos.h>
+#include <pragmas/debox_pragmas.h>
+
+#include <clib/alib_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/battclock_protos.h>
+
+#include "playerprefs_private_pragmas.h"
+#include <pragmas/exec_old_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/battclock_pragmas.h>
+
+struct Library          *IntuitionBase;
+struct GfxBase          *GfxBase;
+struct Library          *DeBoxBase;
+struct Library          *LowLevelBase;
+void                    *SysBase;
+struct PlayerPrefsBase  *PlayerPrefsBase;
+
+struct TimeClock                 CDTVTime = {1991,2,28,12,00};
+struct CDTVPrefs                 CDTVPrefs;
+WORD                             ViewCenterX,ViewCenterY;
+
+extern UBYTE           *mask;
+extern struct RastPort WorkRP;
+extern UBYTE                   *bmask;
+
+struct CDTVInputInfo    input_data;
+
+char __far TimerDeviceName[] = "timer.device";
+char __far  BattClock_Name[] = BATTCLOCKNAME;
+
+extern struct IBuffer *CurrentIB;
+extern struct IBuffer *WorkIB;
+extern struct IBuffer *MasterIB;
+
+extern WORD XOFF;
+extern WORD YOFF;
+
+typedef int (*RENDERFUNC)( struct RastPort *, struct BitMap *, struct GadDir *, WORD, WORD );
+typedef int (*BOXFUNC)(struct RastPort *, struct GadDir *, int , UWORD );
+
+int UpdateDisplay( void );
+
+void removehandler(struct PlayerPrefsBase *, struct IOStdReq *, struct Interrupt *);
+
+struct IOStdReq * installhandler(struct PlayerPrefsBase *, struct Interrupt *);
+
+struct IOStdReq *
+installhandler(struct PlayerPrefsBase *PlayerPrefsBase, struct Interrupt *ihdata)
+{
+struct MsgPort         *reply;
+struct IOStdReq        *io;
+
+    if (!(reply = (struct MsgPort *)CreateMsgPort())) return (0);
+
+    if (!(io = (struct IOStdReq *)CreateStdIO (reply))) return (0);
+
+    if (OpenDevice ("input.device", 0L, io, 0L))
+    {
+	io->io_Device = NULL;
+	return (0);
+    }
+
+    io->io_Command  = IND_ADDHANDLER;
+    io->io_Data     = (APTR)ihdata;
+    if (!DoIO (io)) return (io);
+
+    if (io)
+    {
+	if (io->io_Device) CloseDevice(io);
+	DeleteStdIO (io);
+    }
+
+    if (reply) DeleteMsgPort(reply);
+
+    return (NULL);
+}
+
+
+
+void
+removehandler(struct PlayerPrefsBase *PlayerPrefsBase, struct IOStdReq *io,
+    struct Interrupt *ihdata)
+{
+    if (io)
+    {
+	if (io->io_Device)
+	{
+	    io->io_Command = IND_REMHANDLER;
+	    io->io_Data = (APTR) ihdata;
+	    DoIO (io);
+	    CloseDevice (io);
+	}
+
+	if (io->io_Message.mn_ReplyPort) DeleteMsgPort(io->io_Message.mn_ReplyPort);
+
+	DeleteStdIO(io);
+    }
+}
+
+
+GADSTDBox(struct RastPort *rp, struct GadDir *g, int val, UWORD state)
+{
+struct GADSTDBox   *gb;
+struct GADImageLoc *gl;
+
+int x,y;
+
+    gb = (struct GADSTDBox *)g->BoxData;
+    gl = (val ? &gb->oni:&gb->offi);
+
+    x = g->LeftEdge + gb->xoffset + XOFF;
+    y = g->TopEdge + gb->yoffset + YOFF;
+    BltMaskBitMapRastPort( MasterIB->ib_ButtonBM, gl->xloc, gl->yloc,
+	rp, x, y, gb->width, gb->height, (ABC|ABNC|ANBC), bmask);
+
+    return( 0 );
+}
+
+
+
+GADInsDraw(struct RastPort *rp, struct GadDir *g, int val, UWORD state)
+{
+static   BYTE  inslen[INS_MAX+1] = { 1, 3, 3, 3, 1, 1, 1, 1 };
+BYTE *ptr;
+int   x,y;
+
+    /* If this gadget has the GDFLAGS_DISABLABLE attribute and the state
+     * is not max, then do nothing, else draw the highlight normally
+     */
+    if ( ( g->Flags & GDFLAGS_DISABLABLE ) && ( state != g->MaxStates-1 ) )
+    {
+	return( 1 );
+    }
+    else
+    {
+	x = g->LeftEdge + XOFF;
+	y = g->TopEdge + YOFF;
+
+	ptr = (UBYTE *)g->BoxData;
+
+	SetDrMd(rp, JAM1);
+
+	while(*ptr != INS_END)
+	{
+	    switch (*ptr)
+	    {
+		case INS_PEN:   SetAPen(rp, (long)(val ? ptr[2]:ptr[1]));   break;
+
+		case INS_MOVE:  Move(rp, x+ptr[1],y+ptr[2]);                break;
+
+		case INS_DRAW:  Draw(rp, x+ptr[1],y+ptr[2]);                break;
+
+		case INS_END:                                               return(0);
+
+#if 0 /* Unused */
+		case INS_ON_REDRAW:
+
+		    if (val)
+		    {
+			((RENDERFUNC)g->RenderFunc)(rp, MasterIB->ib_ButtonBM, g, state, state);
+			return(0);
+		    }
+
+		     else break;
+#endif
+
+		case INS_OFF_REDRAW:
+
+		    if (!val)
+		    {
+			((RENDERFUNC)g->RenderFunc)(rp, MasterIB->ib_ButtonBM, g, state, state);
+			return(0);
+		    }
+
+		     else break;
+
+#if 0 /* Unused */
+		case INS_ONSKIP:
+		case INS_OFFSKIP:                                           break;
+#endif
+	    }
+
+	    ptr += (*ptr < INS_MAX ? inslen[*ptr]:1);
+	}
+
+    }
+    return(0);
+}
+
+static
+PowerTen(UBYTE dig)
+{
+static WORD dignumarr[] = { 0, 1, 10, 100, 1000, 10000 };
+
+    return((int)dignumarr[dig]);
+}
+
+
+static
+getdigit(struct GADNumberInfo *gi, UWORD data, WORD digit, int last)
+{
+int dignum,dig;
+
+    if (data == -1) return(-1);
+
+    if ((gi->flags & GNIF_HALF) && (data & GNIF_HALF) ) dignum = 10;
+    else                                                dignum = 0;
+
+    data &= 0xfff;
+    dig = (data % PowerTen(digit+1))/PowerTen(digit);
+
+    /* if GNIF_BLANKLEAD is set (request to blank leading zeros)
+     *     Blank if next higher digit (last) was blank, and
+     *     this isn't the units digit, and the digit is zero.
+     * if GNIF_BLANKZERO is set (request to blank the entry zero)
+     *     Blank if the whole number is zero.
+     * if GNIF_BLANKMAX is set (request to blank when value maxes out)
+     *     Blank if the number can't be represented in the alloted digits.
+     */
+    if (((gi->flags & GNIF_BLANKLEAD) && (last == gi->offnum) && (digit != 1) && (dig==0))
+	|| ((gi->flags & GNIF_BLANKZERO) && !data)
+	|| ((gi->flags & GNIF_BLANKMAX) && (data >= PowerTen(gi->ndigits+1)))) return((int)gi->offnum);
+
+    else return((dignum + dig));
+}
+
+
+GADNumber(struct RastPort *rp, struct BitMap *buttonBM, struct GadDir *g, WORD old, WORD new)
+{
+struct GADNumberInfo *gi;
+int                            i;
+WORD                           o1, n1;
+int                            xloc, w, x, y, offx;
+
+    gi = (struct GADNumberInfo *)g->RenderData;
+
+    i    = gi->ndigits;
+    n1   =
+    o1   = gi->offnum;
+    offx = XOFF+g->LeftEdge+gi->xoffset-(gi->flags & GNIF_LEADONE ? gi->nwidth:0);
+    y    = YOFF+g->TopEdge + gi->yoffset;
+
+    while(i)
+    {
+	o1 = getdigit( gi, old, i, o1 );
+	n1 = getdigit( gi, new, i, n1 );
+
+	if (o1 != n1)
+	{
+	    if (n1 < 0) continue;
+	    if ((i == gi->ndigits) && (gi->flags & GNIF_LEADONE))
+	    {
+	        xloc = (n1==1 ? gi->oneloc:gi->blankoneloc);
+	        w    = gi->onewidth;
+	        x    = XOFF+g->LeftEdge + gi->oneoffset;
+	    }
+
+	    else
+	    {
+	        xloc = gi->xloc + (n1 * gi->width);
+	        w    = gi->width;
+	        x    = offx;
+	    }
+
+	    BltBitMap(buttonBM, xloc, gi->yloc, rp->BitMap, x, y, w, gi->height, 0xc0, 0xff, NULL);
+	}
+
+	offx += gi->nwidth;
+	i--;
+    }
+
+    return(g->Flags & GDFLAGS_SELECTABLE);
+}
+
+
+
+RNormal(struct RastPort *rp, struct BitMap *buttonBM, struct GadDir *g, WORD old, WORD new)
+{
+UWORD *d;
+
+    d = (UWORD *)g->RenderData;
+
+    BltBitMapRastPort(buttonBM, d[2*new], d[2*new+1],
+	rp, g->LeftEdge+XOFF, g->TopEdge+YOFF,
+	g->RightEdge-g->LeftEdge, g->BottomEdge-g->TopEdge, 0xc0);
+
+    return(g->Flags & GDFLAGS_SELECTABLE);
+}
+
+
+
+/*----------------------- ANIMATION ----------------------*/
+
+UWORD *
+DoAnimation(UWORD *ins, ULONG update )
+{
+    if (*ins == 0xffff) return(NULL);
+
+    while (*ins != 0xffff)
+    {
+	MasterIB->ib_GState[ *ins ] = ins[1];
+
+	ins += 2;
+    }
+
+    if ( update )
+    {
+	UpdateDisplay();
+    }
+    ins++;
+    return(ins);
+}
+
+
+
+/************************************************************************
+* UpdateDisplay()                                                       *
+*                                                                       *
+* This routine is responsible for all the updating of the display.  The *
+* goal of the routine is to get 'df' looking exactly like 'md' in as    *
+* few moves as possible                                                 *
+*                                                                       *
+* However, we also have to consider if the Master state is different    *
+* from the Current state, even if it isn't different from the Work      *
+* state.                                                                *
+************************************************************************/
+
+/*
+ * Master is different from Current; therefore we *must*
+ * flip the view.
+ **
+ * Note: A "more efficient" method of this would involve
+ * checking MasterIB against CurrentIB; if there are any
+ * differences, then a full loop would be run to synchronize
+ * WorkIB with MasterIB.  Otherwise, no rendering to WorkIB is
+ * done, even though MasterIB may differ from WorkIB (but not
+ * from CurrentIB).
+ */
+
+static int
+DrawDisplay( void )
+{
+struct GadDir *g;
+UWORD *masterstate, *workstate, *currentstate, oldworkstate;
+int i;
+int ans = 0;
+
+    /* Wait for WorkIB to be safe to render into */
+    MakeWorkIBSafe();
+
+    g = MasterIB->ib_GadList;
+    masterstate = MasterIB->ib_GState;
+    workstate = WorkIB->ib_GState;
+    currentstate = CurrentIB->ib_GState;
+
+    for ( i=0; i<MasterIB->ib_MaxGad; i++, g++, masterstate++, workstate++, currentstate++ )
+    {
+	if (*masterstate != *currentstate)
+	{
+	    ans = 1;
+	}
+
+	/* Master is the same as Work; so we do no work for this one. */
+	if (*masterstate == *workstate)
+	{
+	    continue;
+	}
+
+	/* Handle states wrapping */
+	if ( ( *masterstate & 0x0fff ) >= g->MaxStates )
+	{
+	    *masterstate = (*masterstate & 0xf000)+(*masterstate % g->MaxStates);
+	}
+	if (*masterstate < 0)
+	{
+	    *masterstate = g->MaxStates-1;
+	}
+
+	/* Update the work state first, since this would allow the gadget
+	 * rendering function to override if needed.  (PLGAD_TTRACK does!)
+	 */
+	oldworkstate = *workstate;
+	*workstate = *masterstate;
+	if ( ((RENDERFUNC)g->RenderFunc)( &WorkRP, MasterIB->ib_ButtonBM, g,
+	    oldworkstate, *masterstate ) && ( i == WorkIB->ib_BoxNo ) )
+	{
+	    /* If the highlight has moved, there won't be a need to erase
+	     * the highlight off the currently highlighted one since we
+	     * just repainted it
+	     */
+	    WorkIB->ib_BoxNo = -1;
+	}
+    }
+
+    if (MasterIB->ib_BoxNo != WorkIB->ib_BoxNo)
+    {
+	/* If there was an old highlight, erase it */
+	if (WorkIB->ib_BoxNo >= 0)
+	{
+	    UWORD gstate = MasterIB->ib_GState[WorkIB->ib_BoxNo];
+	    g = &MasterIB->ib_GadList[ WorkIB->ib_BoxNo ];
+	    ((BOXFUNC)g->BoxFunc)( &WorkRP, g, 0, gstate );
+	}
+
+	/* If there is a new highlight, render it */
+	if (MasterIB->ib_BoxNo >= 0)
+	{
+	    UWORD gstate = MasterIB->ib_GState[MasterIB->ib_BoxNo];
+	    g = &MasterIB->ib_GadList[ MasterIB->ib_BoxNo ];
+	    ((BOXFUNC)g->BoxFunc)( &WorkRP, g, 1, gstate );
+	}
+
+	WorkIB->ib_BoxNo = MasterIB->ib_BoxNo;
+	ans = 1;
+    }
+
+    if (ans) MasterIB->ib_Updated = 1;
+
+    return(ans);
+}
+
+
+int
+UpdateDisplay( void )
+{
+    DrawDisplay();
+    if ( MasterIB->ib_Updated )
+    {
+	SwapIBuffer();
+	MasterIB->ib_Updated = 0;
+	return( 1 );
+    }
+    return( 0 );
+}
+
+
+
+void
+BoxMove(struct IBuffer *ib, UWORD event)
+{
+struct GadDir *g;
+
+    if (ib->ib_BoxNo < 0)
+    {
+	ib->ib_BoxNo = 0;
+	return;
+    }
+    g = &ib->ib_GadList[ ib->ib_BoxNo ];
+
+    switch(event)
+    {
+	case KEY_UP:    event = g->Up;          break;
+	case KEY_DOWN:  event = g->Down;        break;
+	case KEY_LEFT:  event = g->Left;        break;
+	case KEY_RIGHT: event = g->Right;       break;
+
+	default:        return;
+    }
+
+    if (event == PLGAD_NL) return;
+
+    ib->ib_BoxNo = event;
+}
+
+/*-----------------------------------------------------------------------*/
+
+handlescrsave(struct CycleIntInfo *ci, int blank, struct PlayerPrefsBase *PlayerPrefsBase)
+{
+    if (blank == -1)
+    {
+	ScreenSaverCommand( SCRSAV_FAKEIT );
+	ci->cintd_DestFade0 = 0;
+	return(0);
+    }
+
+    if (ScreenSaverCommand(SCRSAV_ISACTIVE))
+    {
+	if ((blank == 0) && (ci->cintd_Fade0 == 15))
+	{
+	    blank = 1;
+	    ScreenSaverCommand( SCRSAV_UNFAKEIT );
+	}
+
+	ci->cintd_DestFade0 = 15;
+    }
+
+    else
+    {
+	if (blank == 1)
+	{
+	    blank = 0;
+	    ScreenSaverCommand( SCRSAV_FAKEIT );
+	}
+
+	ci->cintd_DestFade0 = 0;
+    }
+
+    return(blank);
+}
+
+
+
+/*=========================== CLOCK FUNCTIONS ============================*/
+
+
+static void
+MakeDate(ULONG time, struct TimeClock *tc)
+{
+long n,m,y;
+
+    n = (time/SECS_DAY) + 671;
+
+    if (n <= 0)
+    {
+	y = 1978 ;
+	m = 1 ;
+	tc->day = 1 ;
+    }
+
+    else
+    {
+	y       =  (4 * n + 3) / 1461 ;
+	n       -= 1461 * y / 4 ;
+	y       += 1976;
+	m       =  (5 * n + 2) / 153 ;
+	tc->day =  n - (153 * m + 2) / 5 + 1 ;
+	m       += 3 ;
+
+	if (m > 12)
+	{
+	    y++;
+	    m -= 12;
+	}
+    }
+
+    tc->month = m;
+    tc->year  = y;
+
+    n  = (time % SECS_DAY)/60;
+
+    tc->min  = n % 60;
+    tc->hour = n / 60;
+}
+
+
+
+static
+FillCDTVTime(struct TimeClock *tc)
+{
+struct Library *BattClockBase;
+struct TimeClock tempc;
+ULONG tempsec;
+
+    if (!(BattClockBase = OpenResource( BattClock_Name ))) return(1);
+
+    tempsec=ReadBattClock();
+    MakeDate( tempsec,&tempc );
+
+    CopyMem( &tempc, tc, sizeof(struct TimeClock));
+
+    return(0);
+}
+
+
+
+
+/*========================================================================--*
+* InitBase() - Init base libs in local varables                             *
+*                                                                                                                                                       *
+*---------------------------------------------------------------------------*/
+
+
+VOID
+InitVarBase(struct PlayerPrefsBase *ppb)
+{
+struct View view;
+
+    SysBase         = ppb->ppb_ExecBase;
+    GfxBase         = ppb->ppb_GfxBase;
+    IntuitionBase   = ppb->ppb_IntuitionBase;
+    DeBoxBase       = ppb->ppb_DeBoxBase;
+    LowLevelBase    = ppb->ppb_LowLevelBase;
+    PlayerPrefsBase = ppb;
+
+    InitView(&view);
+    ViewCenterX = view.DxOffset;
+    ViewCenterY = view.DyOffset;
+
+    FillCDTVPrefs(&CDTVPrefs);
+    FillCDTVTime(&CDTVTime);
+
+    ConfigureCDTV( &CDTVPrefs );
+}
+
+@
+
+
+1.11
+log
+@Now initialize LowLevelBase vble from my lib base.
+@
+text
+@d1 1
+a1 1
+/* $Id: commoncode.c,v 1.10 93/03/19 19:02:04 peter Exp Locker: peter $ */
+d154 21
+a174 2
+    x = g->LeftEdge + XOFF;
+    y = g->TopEdge + YOFF;
+d176 1
+a176 1
+    ptr = (UBYTE *)g->BoxData;
+d178 33
+a210 36
+    SetDrMd(rp, JAM1);
+
+    while(*ptr != INS_END)
+    {
+	switch (*ptr)
+	{
+	    case INS_PEN:   SetAPen(rp, (long)(val ? ptr[2]:ptr[1]));   break;
+
+	    case INS_MOVE:  Move(rp, x+ptr[1],y+ptr[2]);                break;
+
+	    case INS_DRAW:  Draw(rp, x+ptr[1],y+ptr[2]);                break;
+
+	    case INS_END:                                               return(0);
+
+	    case INS_ON_REDRAW:
+
+	        if (val)
+		{
+		    ((RENDERFUNC)g->RenderFunc)(rp, MasterIB->ib_ButtonBM, g, state, state);
+		    return(0);
+		}
+
+		 else break;
+
+	    case INS_OFF_REDRAW:
+
+	        if (!val)
+		{
+		    ((RENDERFUNC)g->RenderFunc)(rp, MasterIB->ib_ButtonBM, g, state, state);
+		    return(0);
+		}
+
+		 else break;
+
+	    case INS_ONSKIP:
+	    case INS_OFFSKIP:                                           break;
+a212 1
+	ptr += (*ptr < INS_MAX ? inslen[*ptr]:1);
+a213 1
+
+a216 1
+
+d299 1
+a299 1
+    return(g->Flags & GDFLAGS_BOXOVER);
+d314 1
+a314 1
+    return(g->Flags & GDFLAGS_BOXOVER);
+d414 4
+d424 1
+d432 1
+@
+
+
+1.10
+log
+@Now use KEY_xxx defines instead of DIR_xxx defines.
+@
+text
+@d1 1
+a1 1
+/* $Id: commoncode.c,v 1.9 93/03/17 16:48:35 peter Exp Locker: peter $ */
+d41 1
+d590 1
+@
+
+
+1.9
+log
+@Handle offsets due to centering.  Removed dead code.  DoAnimation() now
+takes a parameter to tell it to call UpdateDisplay() or not.  Added
+static keywords.
+@
+text
+@d1 1
+a1 1
+/* $Id: commoncode.c,v 1.8 93/03/11 16:54:50 peter Exp Locker: peter $ */
+d459 4
+a462 4
+	case DIR_UP:    event = g->Up;          break;
+	case DIR_DOWN:  event = g->Down;        break;
+	case DIR_LEFT:  event = g->Left;        break;
+	case DIR_RIGHT: event = g->Right;       break;
+@
+
+
+1.8
+log
+@Minor cleanup for cleaner compiles.
+@
+text
+@d1 1
+a1 1
+/* $Id: commoncode.c,v 1.7 93/03/08 18:25:24 peter Exp Locker: peter $ */
+a50 1
+extern struct BitMap        *bm;
+d61 3
+a126 18
+GAD2SRender(struct RastPort *rp, struct BitMap *buttonBM, struct GadDir *g, WORD old, WORD new)
+{
+struct Render2S_Info *ri;
+struct BitMap *b;
+
+    ri = (struct Render2S_Info *)g->RenderData;
+
+    ri = &ri[new];
+    if (ri->boxinfo) g->BoxData = ri->boxinfo;
+
+    b = (ri->scr ? buttonBM:bm );
+
+    BltBitMapRastPort(b, ri->x, ri->y, rp, g->LeftEdge, g->TopEdge, g->RightEdge-g->LeftEdge, g->BottomEdge-g->TopEdge, 0xc0);
+
+    return(g->Flags & GDFLAGS_BOXOVER);
+}
+
+
+a128 1
+struct BitMap               *dispbm;
+d137 4
+a140 7
+    x = g->LeftEdge + gb->xoffset;
+    y = g->TopEdge + gb->yoffset;
+    dispbm = ( gl->map ? MasterIB->ib_ButtonBM : bm );
+
+    if (gl->mask < 0) BltBitMap(dispbm, gl->xloc, gl->yloc, rp->BitMap, x, y, gb->width, gb->height, 0xc0, 0xff, NULL);
+
+    else BltMaskBitMapRastPort(dispbm, gl->xloc, gl->yloc, rp, x, y, gb->width, gb->height, (ABC|ABNC|ANBC), (gl->mask ? bmask:mask));
+d153 2
+a154 1
+    x = g->LeftEdge; y = g->TopEdge;
+d203 1
+d253 2
+a254 2
+    offx = g->LeftEdge+gi->xoffset-(gi->flags & GNIF_LEADONE ? gi->nwidth:0);
+    y    = g->TopEdge + gi->yoffset;
+d268 1
+a268 1
+	        x    = g->LeftEdge + gi->oneoffset;
+d297 1
+a297 1
+	rp, g->LeftEdge, g->TopEdge,
+d308 1
+a308 1
+DoAnimation(UWORD *ins)
+d319 4
+a322 1
+    UpdateDisplay();
+d353 1
+a353 1
+int
+d513 1
+a513 1
+void
+d554 1
+a599 50
+
+
+
+
+
+/*----------------------- INPUT HANDLER SETTUP ----------------------*/
+
+
+
+#if 000
+VOID
+CloseIHandle(struct CDTVInputInfo *id)
+{
+struct CDTVEvent *ce;
+
+    if (id->input_io)
+    {
+	removehandler(PlayerPrefsBase, id->input_io, &id->Inter);
+
+	ClearEvent(id);
+
+	while(ce = (struct CDTVEvent *)GetMsg(&id->returnport)) FreeMem(ce, ce->cdtve_Msg.mn_Length);       /* Free all pending messages */
+    }
+}
+
+VOID __asm InputHDR(register __a0 struct InputEvent *, register __a1 struct CDTVInputInfo *);
+
+
+StartIHandle(struct CDTVInputInfo *id)
+{
+    MemSet(id, 0, sizeof(struct CDTVInputInfo));
+    NewList(&(id->MsgPort.mp_MsgList));
+    NewList(&(id->returnport.mp_MsgList));
+
+    id->returnport.mp_Flags     = id->MsgPort.mp_Flags = PA_IGNORE;
+
+    id->Inter.is_Node.ln_Name   = "cdtv.ihandler";
+    id->Inter.is_Data           = (APTR)&input_data;
+    id->Inter.is_Code           = InputHDR;
+    id->Inter.is_Node.ln_Pri    = 55;
+
+    id->MouseWait               = 150000;
+    id->MouseTDist              = 50;
+
+    if ((id->input_io = installhandler(PlayerPrefsBase, &id->Inter))) return(0);
+
+    CloseIHandle(id);
+    return(1);
+}
+#endif
+@
+
+
+1.7
+log
+@New state installed before renderfunc is called.  Removed unused code.
+@
+text
+@d1 1
+a1 1
+/* $Id: commoncode.c,v 1.6 93/02/26 19:04:35 peter Exp Locker: peter $ */
+d40 1
+a40 1
+struct DeBoxBase        *DeBoxBase;
+@
+
+
+1.6
+log
+@Major work.  Intuitionized.  Prototyped.  Improved behavior.  Added comments.
+Moved display stuff to display.c
+@
+text
+@d1 1
+a1 1
+/* $Id: $ */
+d14 1
+a14 2
+#include <cdtv/debox.h>
+#include "cdtvkeys.h"
+a22 1
+#if 000
+a23 1
+#endif
+d372 1
+a372 1
+UWORD *masterstate,*workstate,*currentstate;
+d407 7
+a413 2
+	if ( ((RENDERFUNC)g->RenderFunc)( &WorkRP, MasterIB->ib_ButtonBM, g, *workstate,
+	    *masterstate ) && ( i == WorkIB->ib_BoxNo ) )
+a416 2
+
+	*workstate = *masterstate;
+a481 2
+    if (ib->ib_BoxNo != event) ib->ib_D1 = 0;         /* box has moved */
+
+a485 25
+
+
+IsNumKey(UWORD event)
+{
+static UBYTE numkeys[] =
+{
+    RAWKEY_0, 0x0a, RAWKEY_1, 0x01, RAWKEY_2, 0x02, RAWKEY_3, 0x03, RAWKEY_4, 0x04,
+    RAWKEY_5, 0x05, RAWKEY_6, 0x06, RAWKEY_7, 0x07, RAWKEY_8, 0x08, RAWKEY_9, 0x09
+};
+
+int    i;
+UBYTE *n;
+
+    if (event & IECODE_UP_PREFIX) return(-1);
+
+    for(i=0,n=numkeys; i<10; i++)
+    {
+	if (event == *n++) return(i);
+	if (event == *n++) return(i);
+    }
+
+    return(-1);
+}
+
+
+@
+
+
+1.5
+log
+@Minor comment cleanup.
+@
+text
+@d1 1
+a7 2
+#include <graphics/gfxbase.h>
+
+d10 3
+a16 1
+#include <resources/battclock.h>
+d19 1
+d23 7
+a33 1
+#include <cdtv/debox_protos.h>
+a39 1
+#include <cdtv/debox_pragmas.h>
+d41 1
+d51 4
+a54 6
+struct BMInfo   *bmi;
+struct BMInfo   *bbmi;
+struct BitMap   *bbm;
+struct BitMap   *bm;
+UBYTE           *mask;
+struct RastPort Rp;
+a55 1
+struct CycleIntInfo     intdata;
+a56 1
+UBYTE                   *bmask;
+d61 6
+a66 2
+struct DisplayFrame Frame1,Frame2;
+struct DisplayFrame *CurrentF,*WorkF, MasterF;
+d68 1
+a68 2
+WORD FramesPerSec;
+LONG MicroPerFrame;
+d74 5
+d80 1
+a81 7
+struct IOStdReq *installhandler(register struct PlayerPrefsBase *PlayerPrefsBase, register struct Interrupt *ihdata) {
+
+register struct MsgPort         *reply;
+register struct IOStdReq        *io;
+
+    if (!(reply = (struct MsgPort *)CreatePort (NULL, 0))) return (0);
+
+d84 5
+a88 1
+    if (OpenDevice ("input.device", 0L, io, 0L)) {
+a89 4
+        io->io_Device = NULL;
+        return (0);
+        }
+
+d94 5
+a98 1
+    if (io) {
+d100 1
+a100 3
+        if (io->io_Device) CloseDevice(io);
+        DeleteStdIO (io);
+        }
+a101 2
+    if (reply) DeletePort (reply);
+
+d103 1
+a103 1
+    }
+d107 19
+a125 2
+void removehandler(register struct PlayerPrefsBase *PlayerPrefsBase,
+                   register struct IOStdReq *io, struct Interrupt *ihdata) {
+a126 1
+    if (io) {
+d128 2
+a129 17
+        if (io->io_Device) {
+
+            io->io_Command = IND_REMHANDLER;
+            io->io_Data = (APTR) ihdata;
+            DoIO (io);
+            CloseDevice (io);
+            }
+
+        if (io->io_Message.mn_ReplyPort) DeletePort(io->io_Message.mn_ReplyPort);
+
+        DeleteStdIO(io);
+        }
+    }
+
+
+GAD2SRender(struct RastPort *rp, struct BitMap *bbm, struct GadDir *g, WORD old, WORD new) {
+
+d134 1
+a134 1
+    
+d136 1
+a136 1
+    if (ri->boxinfo) g->BoxData = ri->boxinfo;      
+d138 1
+a138 1
+    b = (ri->scr ? bbm:bm );
+d143 2
+a144 4
+    }
+    
+    
+GADSTDBox(struct RastPort *rp, struct GadDir *g, int val, UWORD state) {
+d146 2
+a147 1
+extern struct BitMap        *bm;
+d149 2
+a150 2
+register struct GADSTDBox   *gb;
+register struct GADImageLoc *gl;
+d156 1
+a156 1
+    
+d159 1
+a159 1
+    dispbm = (gl->map ? MasterF.bbm:bm);
+d166 1
+a166 2
+    }
+
+a168 1
+GADInsDraw(struct RastPort *rp, struct GadDir *g, int val, UWORD state) {
+d170 2
+d173 2
+a174 2
+register BYTE *ptr;
+register int   x,y;
+d179 1
+a179 1
+    
+d182 35
+a216 1
+    while(*ptr != INS_END) {
+d218 2
+a219 1
+        switch (*ptr) {
+a220 35
+            case INS_PEN:   SetAPen(rp, (long)(val ? ptr[2]:ptr[1]));   break;
+
+            case INS_MOVE:  Move(rp, x+ptr[1],y+ptr[2]);                break;
+
+            case INS_DRAW:  Draw(rp, x+ptr[1],y+ptr[2]);                break;
+
+            case INS_END:                                               return(0);
+
+            case INS_ON_REDRAW:
+
+                 if (val) {
+
+                    g->RenderFunc(rp, MasterF.bbm, g, state, state);
+                    return(0);
+                    }
+
+                 else break;
+
+            case INS_OFF_REDRAW:
+
+                 if (!val) {
+
+                    g->RenderFunc(rp, MasterF.bbm, g, state, state);
+                    return(0);
+                    }
+
+                 else break;
+
+            case INS_ONSKIP:
+            case INS_OFFSKIP:                                           break;
+            }
+
+        ptr += (*ptr < INS_MAX ? inslen[*ptr]:1);
+        }
+
+d222 1
+a222 3
+    }
+ 
+
+a223 1
+GADScrSave(struct RastPort *rp, struct BitMap *bbm, struct GadDir *g, WORD old, WORD new) {
+d225 2
+a226 17
+int x;
+
+    x = 91 + (new & 0x000f) * 22;
+
+    BltBitMapRastPort(bm, 305, 68,  rp, 305, 68, 27, 57, 0xc0);
+    BltBitMapRastPort(bbm,  x, 139, rp, 307, 71, 20, 48, 0xc0);
+
+    x = (new & 0x8000 ? 201:230);                                                           /* down:up */
+
+    BltMaskBitMapRastPort(bbm, x, 132, rp, 305, 68, 27, 57, (ABC|ABNC|ANBC), bmask);
+    return(0x80);                                                                           /* no need to rewrite the box */
+    }
+
+
+
+__regargs PowerTen(register UBYTE dig) {
+
+d230 1
+a230 1
+    }
+d233 4
+a236 1
+static __regargs getdigit(register struct GADNumberInfo *gi, register UWORD data, WORD digit, int last) {
+a237 2
+register int dignum,dig;
+        
+d240 1
+a240 1
+    if ((gi->flags & GNIF_HALF) && (data & GNIF_HALF) ) dignum = 10; 
+d255 2
+a256 2
+        || ((gi->flags & GNIF_BLANKZERO) && !data)
+        || ((gi->flags & GNIF_BLANKMAX) && (data >= PowerTen(gi->ndigits+1)))) return((int)gi->offnum);
+d259 1
+a259 2
+    }
+
+a260 1
+GADNumber(struct RastPort *rp, struct BitMap *bbm, struct GadDir *g, WORD old, WORD new) {
+d262 3
+a264 1
+register struct GADNumberInfo *gi;
+d270 1
+a270 1
+    
+d277 4
+a280 1
+    while(i) {
+d282 19
+a300 2
+        o1 = getdigit( gi, old, i, o1 );
+        n1 = getdigit( gi, new, i, n1 );
+d302 3
+a304 19
+        if (o1 != n1) {
+
+            if (n1 < 0) continue;
+            if ((i == gi->ndigits) && (gi->flags & GNIF_LEADONE)) {
+
+                xloc = (n1==1 ? gi->oneloc:gi->blankoneloc);
+                w    = gi->onewidth;
+                x    = g->LeftEdge + gi->oneoffset;
+                }
+
+            else {
+
+                xloc = gi->xloc + (n1 * gi->width);
+                w    = gi->width;
+                x    = offx;
+                }
+
+            BltBitMap(bbm, xloc, gi->yloc, rp->BitMap, x, y, w, gi->height, 0xc0, 0xff, NULL);
+            }
+a305 4
+        offx += gi->nwidth;
+        i--;
+        }
+
+d307 1
+a307 3
+    }
+
+
+a308 1
+RNormal(struct RastPort *rp, struct BitMap *bbm, struct GadDir *g, WORD old, WORD new) {
+a309 1
+register UWORD *d;
+d311 5
+a315 1
+    d = &((UWORD *)g->RenderData)[new+new];
+d317 3
+a319 1
+    BltBitMapRastPort(bbm, *d, d[1], rp, g->LeftEdge, g->TopEdge, g->RightEdge-g->LeftEdge, g->BottomEdge-g->TopEdge, 0xc0);
+d322 1
+a322 1
+    }
+d328 3
+a330 2
+UWORD *DoAnimation(UWORD *ins, UWORD *org) {
+
+d333 3
+a335 1
+    while(intdata.cintd_VCountDown) WaitTOF(); 
+d337 2
+a338 6
+    intdata.cintd_VCountDown = *ins++;
+
+    while (*ins != 0xffff) {
+
+        if ((ins[1] == 0xffff) && org) MasterF.gstate[*ins] = org[*ins];
+        else                           MasterF.gstate[ *ins ] = ins[1];
+a339 3
+        ins += 2;
+        }
+
+d343 1
+a343 1
+    }
+d364 1
+a364 1
+ * checking MasterF against CurrentF; if there are any
+d366 3
+a368 3
+ * WorkF with MasterF.  Otherwise, no rendering to WorkF is
+ * done, even though MasterF may differ from WorkF (but not
+ * from CurrentF).
+d371 3
+a373 3
+DrawDisplay() {
+
+register struct DisplayFrame *df, *cf;
+d375 1
+a375 1
+UWORD *mstate,*dfstate,*cfstate;
+a377 3
+        
+    df = WorkF;
+    cf = CurrentF;
+d379 2
+a380 39
+    if (intdata.cintd_LoadView) while( intdata.cintd_LoadView );
+    
+    g = MasterF.GadList;
+    mstate = MasterF.gstate;
+    dfstate= df->gstate;
+    cfstate= cf->gstate;
+
+    for(i=0; i<MasterF.MaxGad; i++,g++,mstate++,dfstate++,cfstate++) {
+
+        if (*mstate != *cfstate) ans = 1;
+
+        if (*mstate == *dfstate) continue;                                                                   /* Master is the same as Work; so we do no work for this one. */
+
+        if ((*mstate & 0x0fff) >= g->MaxStates) *mstate = (*mstate & 0xf000)+(*mstate % g->MaxStates);
+                
+        if (*mstate < 0) *mstate = g->MaxStates-1;
+
+        if (g->RenderFunc(df->rp,MasterF.bbm, g, *dfstate, *mstate) && (i==df->BoxNo)) df->BoxNo = -1;
+
+        *dfstate = *mstate;
+        }
+    
+    if (MasterF.BoxNo != df->BoxNo) {
+
+        if (df->BoxNo >= 0) {
+
+            g = &MasterF.GadList[ df->BoxNo ];
+            g->BoxFunc( df->rp, g, 0, MasterF.gstate[df->BoxNo] );
+            }
+
+        if (MasterF.BoxNo >= 0) {
+
+            g = &MasterF.GadList[ MasterF.BoxNo ];
+            g->BoxFunc( df->rp, g, 1, MasterF.gstate[MasterF.BoxNo] );
+            }
+
+        df->BoxNo = MasterF.BoxNo;
+        ans = 1;
+        }
+d382 55
+a436 3
+    if (ans) MasterF.UpDated = 1;
+
+    return(ans);
+d439 1
+d441 2
+a442 1
+VOID __regargs LoadDisplayFrame(register struct CycleIntInfo *ci, register struct DisplayFrame *df) {
+a443 1
+struct View *v;
+d445 9
+a453 30
+    v = df->view;
+
+    LoadCycleView(ci, v, df->cclist);
+    }
+
+
+VOID __stdargs ToggleFrame(VOID) {
+
+register struct DisplayFrame *ds;
+        
+    ds        = CurrentF;
+    CurrentF  = WorkF;
+    WorkF     = ds;
+    Rp.BitMap = WorkF->bm;
+    }
+
+
+
+RefreshDisplay() {
+
+    if (MasterF.UpDated) {
+
+        WaitBlit();
+        ToggleFrame();
+        LoadDisplayFrame(&intdata, CurrentF);
+        MasterF.UpDated = 0;
+        return(1);
+        }
+
+    return(0);
+d455 2
+d460 4
+a463 1
+UpdateDisplay() {
+d465 15
+a479 2
+    DrawDisplay();
+    return(RefreshDisplay());
+d482 1
+a483 20
+
+void __regargs BoxMove(register struct DisplayFrame *mf, UWORD event) {
+
+register struct GadDir *g;
+        
+    if (mf->BoxNo < 0) { mf->BoxNo = 0; return; }
+    g = &mf->GadList[ mf->BoxNo ];
+
+    switch(event) { 
+
+        case DIR_UP:    event = g->Up;          break;
+        case DIR_DOWN:  event = g->Down;        break;
+        case DIR_LEFT:  event = g->Left;        break; 
+        case DIR_RIGHT: event = g->Right;       break;
+
+        default:        return;
+        }
+
+    if (mf->BoxNo != event) mf->D1 = 0;         /* box has moved */
+
+d486 2
+a487 5
+    mf->BoxNo = event;
+    }
+
+
+IsNumKey(UWORD event) {
+a488 1
+static UBYTE numkeys[] = {
+d490 4
+d496 1
+a496 1
+    };
+d498 2
+a499 2
+register int    i;
+register UBYTE *n;
+d503 5
+a507 1
+    for(i=0,n=numkeys; i<10; i++) {
+a508 4
+        if (event == *n++) return(i);
+        if (event == *n++) return(i);
+        }
+
+d510 1
+a510 1
+    }
+d516 27
+a542 1
+void FadeTo(int lv) {
+d544 2
+a545 36
+    intdata.cintd_DestFade0 = lv;
+    intdata.cintd_FadeMask  = 0;
+
+    while(intdata.cintd_Fade0 != intdata.cintd_DestFade0) WaitTOF();
+    }
+
+
+
+
+handlescrsave(struct CycleIntInfo *ci, int blank, struct PlayerPrefsBase *PlayerPrefsBase) {
+
+    if (blank == -1) {
+
+        ScreenSaverCommand( SCRSAV_FAKEIT );
+        ci->cintd_DestFade0 = 0;
+        return(0);
+        }
+
+    if (ScreenSaverCommand(SCRSAV_ISACTIVE)) {
+
+        if ((blank == 0) && (ci->cintd_Fade0 == 15)) {
+
+            blank = 1;
+            ScreenSaverCommand( SCRSAV_UNFAKEIT );
+            }
+
+        ci->cintd_DestFade0 = 15;
+        }
+
+    else {
+
+        if (blank == 1) {
+
+            blank = 0;
+            ScreenSaverCommand( SCRSAV_FAKEIT );
+            }
+a546 3
+        ci->cintd_DestFade0 = 0;
+        }
+
+d548 1
+a548 1
+    }
+d555 3
+a557 2
+void MakeDate(ULONG time, struct TimeClock *tc) {
+
+d562 22
+a583 1
+    if (n <= 0) {
+a584 21
+        y = 1978 ;
+        m = 1 ;
+        tc->day = 1 ;
+        }
+
+    else {
+
+        y       =  (4 * n + 3) / 1461 ;
+        n       -= 1461 * y / 4 ;
+        y       += 1976;
+        m       =  (5 * n + 2) / 153 ;
+        tc->day =  n - (153 * m + 2) / 5 + 1 ;
+        m       += 3 ;
+
+        if (m > 12) {
+
+            y++;
+            m -= 12;
+            }
+        }
+
+d592 1
+a592 1
+    }
+d596 2
+a597 2
+FillCDTVTime(register struct TimeClock *tc) {
+
+d603 1
+a603 1
+        
+d610 1
+a610 1
+    }
+d621 3
+a623 2
+VOID InitVarBase(register struct PlayerPrefsBase *ppb) {
+
+d628 1
+d640 1
+a640 2
+    
+    if (GfxBase->DisplayFlags & PAL) {
+a641 10
+        FramesPerSec  = 50;
+        MicroPerFrame = (1000000/50);
+        }
+
+    else {
+
+        FramesPerSec  = 60;
+        MicroPerFrame = (1000000/60);
+        }
+    }
+a645 1
+
+d650 4
+a653 2
+VOID __regargs CloseIHandle(register struct CDTVInputInfo *id) {
+
+d656 3
+a658 3
+    if (id->input_io) {
+
+        removehandler(PlayerPrefsBase, id->input_io, &id->Inter);
+d660 1
+a660 1
+        ClearEvent(id);
+d662 1
+a662 2
+        while(ce = (struct CDTVEvent *)GetMsg(&id->returnport)) FreeMem(ce, ce->cdtve_Msg.mn_Length);       /* Free all pending messages */
+        }
+d664 1
+d669 2
+a670 2
+__regargs StartIHandle(register struct CDTVInputInfo *id) {
+
+d689 2
+a690 167
+    }
+
+
+VOID __regargs FreeDisplayFrame(register struct DisplayFrame *df) {
+
+    if (df->gstate) FreeMem( df->gstate, df->MaxGad << 1);
+    if (df->view) DeleteView((struct SuperView *)df->view);
+    if (df->bm) FreeBitMap(df->bm);
+
+    MemSet(df, 0, sizeof(struct DisplayFrame));
+    }
+
+
+
+/*----------------------- VBLANK HANDLER SETTUP ----------------------*/
+
+VOID __regargs CloseVBlank(register struct CycleIntInfo *ci) {
+
+    CloseViewMgr(ci);
+    }
+
+
+
+__regargs StartVBlank(register struct CycleIntInfo *ci, struct BMInfo *bmi, struct DisplayFrame *df) {
+
+    StartViewMgr(ci, bmi, df->view, df->cclist, 0);
+    return(0);
+    }
+
+
+
+/*----------------------- DISPLAY FRAMES ------------------------*/
+
+
+VOID DisplayFramePos(struct DisplayFrame *df, struct CDTVPrefs *cp) {
+
+register struct View *v;
+        
+    v = df->view;
+    CenterCDTVView(cp, v, df->bmi->bmi_Width, df->bmi->bmi_Height);
+    FindViewRGB(v, df->cclist, 32);
+    }
+
+
+
+/* FillDisplayFrame()
+ *
+ * Clear all fields of the DisplayFrame structure.
+ * If you pass a non-zero BMInfo pointer, then it sets that, allocates a bitmap,
+ * 	then calls CreateView( NULL, bm, width, height, modes )
+ * 	then sets df->view to the viewport, df->rp to the passed in RastPort.
+ * 	Then, it blits the original bitmap into the one it allocated,
+ *	and calls DisplayFramePos().
+ * It always allocates MAX_PLGAD gadgets, and sets the MaxGad and BoxNo fields.
+ */ 
+FillDisplayFrame(register struct DisplayFrame *df, register struct BMInfo *bmi,
+                          struct RastPort *rp, struct BitMap *orgbm, int maxgad) {
+
+    MemSet(df, 0, sizeof( struct DisplayFrame ));
+
+    if (bmi) {
+
+        df->bmi = bmi;
+
+        if (!(df->bm = AllocBitMap(bmi->bmi_Depth, bmi->bmi_Width,bmi->bmi_Height))) return(1);
+
+        if (!(df->view = (struct View *)CreateView(NULL, df->bm, bmi->bmi_Width, bmi->bmi_Height, bmi->bmi_Modes))) {
+
+            FreeDisplayFrame(df);
+            return(1);
+            }
+
+        df->vp = df->view->ViewPort;
+        df->rp = rp;
+
+        BltBitMap(orgbm, 0, 0, df->bm, 0, 0, bmi->bmi_Width, bmi->bmi_Height, 0xc0, 0xff, NULL);
+        DisplayFramePos(df, &CDTVPrefs);
+        }
+    
+    
+    if (!(df->gstate = AllocMem(maxgad << 1, MEMF_CLEAR))) {
+
+        FreeDisplayFrame( df );
+        return(1);
+        }
+
+    df->MaxGad = maxgad;
+    df->BoxNo = -1;
+    return(0);
+    }
+
+
+
+/*-------------------------------------------------------------------------*/
+
+
+StartPPScreen(struct GadDir *gl, struct BuildBG_Info *bg, UBYTE *buttondata, UBYTE initfade) {
+
+    if (!(StartIHandle(&input_data))) {
+        
+        if (BuildBg(bg, &bmi, &bm)) {
+
+            mask = NULL;
+
+            bmi->bmi_Modes |= EXTRA_HALFBRITE;
+
+            if (GrabBm(NULL, buttondata, &bbmi, &bbm, &bmask)) {
+
+                InitRastPort(&Rp);
+        
+                if (!(FillDisplayFrame(&Frame1, bmi, &Rp, bm, MAX_PLGAD))) {
+
+                    if (!(FillDisplayFrame(&Frame2, bmi, &Rp, bm, MAX_PLGAD))) {
+
+                        if (!(FillDisplayFrame(&MasterF, NULL, NULL, NULL, MAX_PLGAD))) {
+
+                            MasterF.GadList     = gl;
+                            MasterF.bbm         = bbm;
+                            CurrentF            = &Frame1;
+                            WorkF               = &Frame2;
+                            Rp.BitMap           = WorkF->bm;
+        
+                            if (!(StartVBlank(&intdata, bmi, CurrentF))) {
+
+                                intdata.cintd_DestFade0 = initfade;
+                                intdata.cintd_DestFade1 = initfade;
+
+                                return(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    EndCDTVScreen();
+    return(1);
+    }
+
+
+
+
+
+/*------------------------ StartCDTVScreen ------------------------*/
+
+VOID __stdargs EndCDTVScreen(VOID) {
+
+    CloseVBlank(&intdata);
+    FreeDisplayFrame(&MasterF);
+    FreeDisplayFrame(&Frame1);
+    FreeDisplayFrame(&Frame2);
+
+    if (mask)        {bm->Planes[bm->Depth++] = mask;}
+    if (bm)          FreeBitMap(bm);
+    if (bmi)         FreeBMInfo(bmi);
+    if (bmask)       {bbm->Planes[bbm->Depth++] = bmask; }
+    if (bbm)         FreeBitMap(bbm);
+    if (bbmi)        FreeBMInfo(bbmi);
+
+    mask    = bmask = NULL;
+    bm      = bbm   = NULL;
+    bmi     = bbmi  = NULL;
+
+    CloseIHandle(&input_data);
+    }
+
+@
+
+
+1.4
+log
+@Doubled threshold for mouse to joystick conversion.  GNIF_BLANKLEAD
+(blank leading zeroes) now leaves the units digit zero non-blank.
+@
+text
+@d322 1
+a322 1
+RNormal(struct RastPort *rp, struct BitMap *bbm, struct GadDir *g, WORD old, WORD new) { 
+d361 2
+a362 2
+* UpdateDisplay()                                                                                                               *
+*                                                                                                                                               *
+d365 2
+a366 2
+* few moves as possible                                                                                                 *
+**                                                                                                                                              *
+d368 2
+a369 2
+* from the Current state, even if it isn't different from the Work              *
+* state.                                                                                                                                *
+d752 1
+a752 1
+__regargs StartVBlank(register struct CycleIntInfo *ci, struct BMInfo *bmi, struct DisplayFrame *df) {       
+d774 10
+@
+
+
+1.3
+log
+@No effective change.
+@
+text
+@d257 9
+a265 1
+    if (((gi->flags & GNIF_BLANKLEAD) && (last == gi->offnum) && (dig==0))
+d723 1
+a723 1
+    id->MouseTDist              = 25;
+@
+
+
+1.2
+log
+@no effective change.
+@
+text
+@d438 2
+a439 1
+    LoadCycleView(ci, v,df->cclist);
+d466 1
+a466 1
+     return(0);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a38 4
+extern void                     *SysBase;
+extern struct GfxBase           *GfxBase;
+extern struct PlayerPrefsBase   *PlayerPrefsBase;
+
+@

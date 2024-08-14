@@ -1,0 +1,296 @@
+/*** cbm_epson/render.c ***********************************************
+ *
+ * render.c -- graphics rendering
+ *
+ *	$Id: render.c,v 1.12 91/07/09 14:37:14 darren Exp $
+ *
+ *	Copyright (c) 1987,1991 Commodore-Amiga, Inc.
+ *	All Rights Reserved
+ *
+ **********************************************************************/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+
+#include <devices/printer.h>
+#include <devices/prtbase.h>
+#include <devices/prtgfx.h>
+
+/*
+	CBM_Epson driver.
+	David Berezowski - May/87
+*/
+
+#define NUMSTARTCMD	4	/* # of cmd bytes before binary data */
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD (NUMSTARTCMD + NUMENDCMD)	/* total of above */
+#define NUMLFCMD	4	/* # of cmd bytes for linefeed */
+
+#define STARTLEN	14
+#define PITCH		1
+#define CONDENSED	2
+#define LMARG		8
+#define RMARG		9
+#define DIREC		13
+
+static ULONG TwoBufSize;
+static UWORD RowSize, dpi_code, spacing;
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	UBYTE *CompactBuf();
+	static ULONG BufSize, TotalBufSize, dataoffset;
+	/*
+		00-01	\003P		set pitch (10 or 12 cpi)
+		02-02	\022		set condensed fine (on or off)
+		03-05	\033W\000	enlarge off
+		06-09	\033Xlr		set left and right margin
+		10-10	\015		carriage return
+		11-13	\033U1		set uni-directional mode
+	*/
+	static UBYTE StartBuf[STARTLEN] =
+		"\033P\022\033W\000\033Xlr\015\033U1";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+			RowSize = x;
+			BufSize = RowSize + NUMTOTALCMD + NUMLFCMD;
+			if (PED->ped_YDotsInch == 216) {
+				TwoBufSize = BufSize * 3;
+				TotalBufSize = BufSize * 6;
+			}
+			else if (PED->ped_YDotsInch == 144) {
+				TwoBufSize = BufSize * 2;
+				TotalBufSize = BufSize * 4;
+			}
+			else {
+				TwoBufSize = BufSize * 1;
+				TotalBufSize = BufSize * 2;
+			}
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = NUMSTARTCMD;
+				/*
+					This printer prints graphics within its
+					text margins.  This code makes sure the
+					printer is in 10 cpi and then sets the
+					left and right margins to their minimum
+					and maximum values (respectively).  A
+					carriage return is sent so that the
+					print head is at the leftmost position
+					as this printer starts printing from
+					the print head's position.  The printer
+					is put into unidirectional mode to
+					reduce wavy vertical lines.
+				*/
+				StartBuf[PITCH] = 'P'; /* 10 cpi */
+				StartBuf[CONDENSED] = '\022'; /* off */
+				StartBuf[LMARG] = 1; /* left margin of 1 */
+				/* right margin of 80 or 136 (or other Ax size */
+				StartBuf[RMARG] = PED->ped_MaxColumns;
+				StartBuf[DIREC] = '1'; /* uni-direct mode */
+				err = (*(PD->pd_PWrite))(StartBuf, STARTLEN);
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row.
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset],
+				BufSize);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD];
+			if (PED->ped_YDotsInch == 72) {
+				/* y range : 1 to 8 */
+				y = y * 3 - spacing;
+				ptr = CompactBuf(ptrstart + NUMSTARTCMD,
+					ptrstart, y, 1);
+			}
+			else if (PED->ped_YDotsInch == 144) {
+				/* y range : 1 to 16 */
+				ptr = CompactBuf(ptrstart + NUMSTARTCMD,
+					ptrstart, 2, 1);
+				if (y > 1) {
+					ptr = CompactBuf(&PD->pd_PrintBuf[
+						dataoffset + BufSize], ptr,
+						y * 3 / 2 - 2, 0);
+				}
+			}
+			else if (PED->ped_YDotsInch == 216) {
+				/* y range : 1 to 24 */
+				ptr = CompactBuf(ptrstart + NUMSTARTCMD,
+					ptrstart, 1, 1);
+				if (y > 1) {
+					ptr = CompactBuf(&PD->pd_PrintBuf[
+						dataoffset + BufSize],
+						ptr, 1, 0);
+				}
+				if (y > 2) {
+					ptr = CompactBuf(&PD->pd_PrintBuf[
+						dataoffset + BufSize * 2],
+						ptr, y - 2, 0);
+				}
+			}
+			err = (*(PD->pd_PWrite))(ptrstart, ptr - ptrstart);
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NUMSTARTCMD ?
+					TwoBufSize : 0) + NUMSTARTCMD;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ClearAndInit(&PD->pd_PrintBuf[dataoffset]);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel print */
+			if (ct != PDERR_CANCEL) {
+				/* restore preferences pitch and margins */
+				if (PD->pd_Preferences.PrintPitch == ELITE) {
+					StartBuf[PITCH] = ':'; /* 12 cpi */
+				}
+				else if (PD->pd_Preferences.PrintPitch == FINE) {
+					StartBuf[CONDENSED] = '\017'; /* on */
+				}
+				StartBuf[LMARG] =
+					PD->pd_Preferences.PrintLeftMargin;
+				StartBuf[RMARG] =
+					PD->pd_Preferences.PrintRightMargin;
+				StartBuf[DIREC] = '0'; /* bi-directional */
+				err = (*(PD->pd_PWrite))(StartBuf, STARTLEN);
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			/* kludge for sloppy tractor mechanism */
+			spacing = PD->pd_Preferences.PaperType == SINGLE ?
+				1 : 0;
+			dpi_code = SetDensity(x & SPECIAL_DENSITYMASK);
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+
+
+UBYTE *CompactBuf(ptrstart, ptr2start, y, flag)
+UBYTE *ptrstart, *ptr2start; /* source, dest */
+long y;
+int flag; /* 0 - not first pass, !0 - first pass */
+{
+	static int x;
+	UBYTE *ptr, *ptr2;
+	long ct;
+	int i;
+
+	ptr2 = ptr2start; /* where to put the compacted data */
+	if (flag) {
+		x = 0; /* flag no transfer required yet */
+	}
+	i = RowSize;
+	ptr = ptrstart + i -1;
+	while (i > 0 && *ptr == 0) {
+		i--;
+		ptr--;
+	}
+	if (i != 0) { /* if data */
+		ptr = ptrstart - NUMSTARTCMD;
+		*ptr++ = 27;
+		*ptr++ = dpi_code;		/* density */
+		*ptr++ = i & 0xff;
+		*ptr++ = i >> 8;		/* size */
+		i += NUMTOTALCMD;
+		if (x != 0) { /* if must transfer data */
+			ptr = ptrstart - NUMSTARTCMD; /* get src start */
+			do { /* transfer and update dest ptr */
+				*ptr2++ = *ptr++;
+			} while (--i);
+		}
+		else { /* no transfer required */
+			ptr2 += i; /* update dest ptr */
+		}
+	}
+	if (i != RowSize + NUMTOTALCMD) { /* if compacted or 0 */
+		x = 1; /* flag that we need to transfer next time */
+	}
+	*ptr2++ = 27;
+	*ptr2++ = 'J';
+	*ptr2++ = y; /* y/216 lf */
+	*ptr2++ = 13; /* cr */
+	return(ptr2);
+}
+
+ClearAndInit(ptr)
+UBYTE *ptr;
+{
+	ULONG *lptr, i, j;
+
+	/*
+		Note : Since 'NUMTOTALCMD + NUMLFCMD' is > 3 bytes if is safe
+		to do the following to speed things up.
+	*/
+	i = TwoBufSize - NUMTOTALCMD - NUMLFCMD;
+	j = (ULONG)ptr;
+	if (!(j & 1)) { /* if on a word boundary, clear by longs */
+		i = (i + 3) / 4;
+		lptr = (ULONG *)ptr;
+		do {
+			*lptr++ = 0;
+		} while (--i);
+	}
+	else { /* clear by bytes */
+		do {
+			*ptr++ = 0;
+		} while (--i);
+	}
+}

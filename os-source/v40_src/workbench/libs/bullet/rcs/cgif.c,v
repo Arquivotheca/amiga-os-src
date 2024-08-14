@@ -1,0 +1,1335 @@
+head     8.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+8.0
+date     91.03.24.12.16.44;  author kodiak;  state Exp;
+branches ;
+next     7.0;
+
+7.0
+date     91.03.19.18.35.38;  author kodiak;  state Exp;
+branches ;
+next     6.0;
+
+6.0
+date     91.03.18.15.25.29;  author kodiak;  state Exp;
+branches ;
+next     5.1;
+
+5.1
+date     91.03.18.08.56.37;  author kodiak;  state Exp;
+branches ;
+next     5.0;
+
+5.0
+date     91.02.26.10.40.12;  author kodiak;  state Exp;
+branches ;
+next     3.1;
+
+3.1
+date     91.02.07.15.40.01;  author kodiak;  state Exp;
+branches ;
+next     3.0;
+
+3.0
+date     90.11.09.17.07.52;  author kodiak;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     90.10.10.04.15.23;  author kodiak;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.10.10.03.12.40;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+8.0
+log
+@Phase 2 Beta 1 (38.2)
+@
+text
+@/*
+**	$Id: cgif.c,v 7.0 91/03/19 18:35:38 kodiak Exp Locker: kodiak $
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	$Log:	cgif.c,v $
+ * Revision 7.0  91/03/19  18:35:38  kodiak
+ * after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+ * 
+ * Revision 6.0  91/03/18  15:25:29  kodiak
+ * folded in Bullet 1.30
+ * 
+ * Revision 5.1  91/03/18  08:56:37  kodiak
+ * eliminate old style symbol table lookup
+ * 
+ * Revision 5.0  91/02/26  10:40:12  kodiak
+ * Phase 2 Alpha 1
+ * 
+ * Revision 3.1  91/02/07  15:40:01  kodiak
+ * Kodiak Phase 1 Final Release
+ * 
+*/
+/* cgif.c */
+/* Copyright (C) Agfa Compugraphic, 1989, 1990. All rights reserved. */
+/*
+ *  History:
+ *  original  awr 
+ *  18-May-90 dET add instance handling for MS-WINDOWS
+ *  23-Jul-90 awr added Blake's typePath in CGIFconfig()
+ *  07-Aug-90 awr in CGIFfont(), free previous FONT if no bitmaps
+ *  13-Aug-90 awr added return SUCCESS in CGIFexit
+ *  18-Aug-90 awr added making_bold parameter in call to MAKfontSize()
+ *                in CGIFchar_size()
+ *  24-Aug-90 jfd in CGIFpcleo(), changed "ENTRY UWORD" to "UWORD ENTRY";
+ *                in CGIFpcleo(), changed argument to INSTsetState()
+ *                from "CallerId" to "uCallerId"
+ *  28-Aug-90 dET moved uInitFirstTime and uEnterFirstTime declarations
+ *                and reset these upon CGIFexit().
+ *  27-Nov-90 bg  In INSTinit(), changed line "pInst->status == FREE;" to
+ *                "pInst->status = FREE;".
+ *  03-Dec-90 dET Moved "cgconfig.h" to after "port.h" and before "cgif.h"
+ *
+ */
+
+#include <string.h>
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include "debug.h"
+#include "port.h"
+#include "cgconfig.h"
+#include "cgif.h"
+#include "cache.h"
+#include "if_type.h"
+#include "ix.h"
+
+/* fc.c     */
+EXTERN VOID     FCcopy_fc();
+/* cache.c   */
+EXTERN UWORD    max_char_size;   /* max cached character bitmap size */
+EXTERN UWORD    CACinit();               /* Initialize the cache */
+EXTERN VOID     CACexit();
+EXTERN UWORD    make_char();                    /* make a chracter IFBITMAP */
+EXTERN FONT    *FNTfind();            /* Find a FONT with given FONTCONTEXT */
+EXTERN VOID     FNTfree();             /* Free a FONT                      */
+EXTERN VOID     BMmru();               /* make IFBITMAP most recently used */
+/* ix.c     */
+EXTERN UWORD    IXinit();
+EXTERN VOID     IXexit();
+EXTERN UWORD    IXget_fnt_index();
+EXTERN UWORD    max_open_files;
+EXTERN BYTE     libPath[];
+EXTERN BYTE     typePath[];
+EXTERN FONTINDEX *fi;
+/* maker.c  */
+EXTERN UBYTE   *cc_buf;          /* compound character buffer        */
+EXTERN UWORD    cc_size;         /* size of comp. char. buffer       */
+EXTERN UWORD    MAKfontSize();
+EXTERN UWORD    MAKchar_width();
+EXTERN WORD     MAKkern();
+/* if_init.c */
+EXTERN  IF_CHAR    c;
+
+/*-----------------------------------------*/
+#if CACHE
+GLOBAL  FONT       *fontCur;           /* ptr to current FONT            */
+MLOCAL  LONG        cur_font_id;
+#else
+MLOCAL  FONTCONTEXT fcCur;              /* current FONTCONTEXT            */
+#endif
+/*-----------------------------------------*/
+
+/*-----------------------------------------*/
+
+/*----------------*/
+/*  CGIFinit      */
+/*----------------*/
+/* This function initializes the memory manager. */
+UWORD ENTRY
+CGIFinit()
+{
+    return SUCCESS;
+}
+
+
+/*----------------*/
+/*  CGIFconfig    */
+/*----------------*/
+/*  The application calls this function to set or change the
+ *  configuration parameters.
+*/
+UWORD ENTRY
+CGIFconfig(cfg)
+    IFCONFIG *cfg;
+{
+  /*  Set configuration values  */
+
+#if CACHE
+    max_char_size = cfg->max_char_size; /* max cached character IFBITMAP size */
+#endif
+    max_open_files = cfg->num_files;  /* max number of open library files */
+
+    cc_buf  = cfg->cc_buf_ptr;                /* compund character buffer */
+    cc_size = cfg->cc_buf_size;
+
+    strcpy(typePath, cfg->typePath);
+
+    return SUCCESS;
+}
+
+
+/*----------------------*/
+/*    CGIFenter         */
+/*----------------------*/
+/*  This function is called once after the memory pools have been funded
+ *  to initialize the cache and the font management subsystem.
+ */
+UWORD  ENTRY
+CGIFenter()
+{
+#if CACHE
+    UWORD status;
+
+    if(status = CACinit())         /* Initialize the cache */
+    {
+        DBG1("CACinit() failed: %ld\n", status);
+        return status;
+    }
+#endif
+
+  /*  Initialize the font management subsystem */
+  
+    return IXinit();
+}
+
+
+/*----------------------*/
+/*    CGIFexit          */
+/*----------------------*/
+UWORD  ENTRY
+CGIFexit()
+{
+    DBG("CGIFexit()\n");
+
+#if CACHE
+    CACexit();
+#endif
+    IXexit();
+    return SUCCESS;
+}
+
+
+/*----------------------*/
+/*    CGIFfont          */
+/*----------------------*/
+/*  The application calls this function to change the current font.
+ *  A new symbol set is loaded if it changed.
+ *
+ *  CGIFchar may also call this function (via INSTsetState()) if CGIFchar
+ *  detects that the user id has changed from the previous caller.
+ */
+UWORD  ENTRY
+CGIFfont(fc)
+    FONTCONTEXT  *fc;
+{
+    INDEX_ENTRY *ie;
+
+#if CACHE
+  /*  Free old FONT if it has no bitmaps */
+
+    if(fontCur)
+        if(!fontCur->bitmapCount) FNTfree(fontCur);
+
+  /*  Find or create a FONT matching FONTCONTEXT fc */
+
+    if(!(fontCur  = FNTfind(fc))) return ERR_no_font;
+    cur_font_id = fc->font_id;
+
+#else
+    FCcopy_fc(fc, &fcCur);  /* Local copy of the FONTCONTEXT */
+#endif
+
+   /*
+    * update fi (KODIAK)
+    */
+    ie = (fi->index_entry)+(fi->entry_ct-1);
+    ie->tfnum = fc->font_id;
+    ie->fhoff = fc->fhoff;
+    ie->fhcount = fc->fhcount;
+    ie->bucket_num = fc->bucket_num;
+    strcpy((char *)(ie+1), fc->name);
+
+    return SUCCESS;
+}
+
+
+#if CACHE
+/*----------------------*/
+/*    CGIFchar          */
+/*----------------------*/
+/*  Return a pointer to the requested character IFBITMAP.
+ *  Return nil if the character is not in the cache and cannot be
+ *  made or if bad input data.
+ *  If caller ID has changed since the last call to this function, then the 
+ *  saved state (from CGIFconfig, CGIFfont) of the caller must be restored.
+ */
+UWORD ENTRY
+CGIFchar(chId, ppbm, alt_width)
+    UWORD    chId;
+    IFBITMAP **ppbm;
+    WORD     alt_width;
+{
+    IFBITMAP  *pbm;                   /* pointer to the new character IFBITMAP */
+    UWORD    status;
+
+    DBG1("CGIFchar(%ld)\n", chId);
+
+ /* point to handle of character's IFBITMAP in current FONT */
+
+    pbm = fontCur->buf + chId;
+
+#ifndef PROFILE
+    if(! *pbm)                            /* Is character in the cache ? */
+#endif
+    {                                              /* It isn't so make it */
+        c.alt_width = alt_width;
+
+        if(status = make_char(fontCur, chId, pbm))
+        {
+            DBG("    make_char() failed\n");
+            *ppbm = (IFBITMAP*)0;
+            return status;
+        }
+    }
+
+  /*  Make buffer most recently used if it hasn't
+   *  already been made so during this current font's reign.
+   */
+    if( pbm->notmru )
+    {
+        pbm->notmru = 0;               /* Keep from doing this again       */
+        Remove(pbm);                  /* Remove from lru list             */
+        AddTail(pBMlru, pbm);      /* Link at the head of the lru list */
+    }
+
+  /*  Return character bitmap pointer */
+
+    *ppbm = pbm;
+    return SUCCESS;
+}
+#else    /* not using cache */
+
+/*----------------------*/
+/*    CGIFchar_size     */
+/*----------------------*/
+UWORD  ENTRY
+CGIFchar_size(chId, size, alt_width)
+    UWORD    chId;
+    UWORD   *size;
+    WORD     alt_width;
+{
+    DBG1("CGIFchar_size(%ld)\n", chId);
+
+  /* Check for bad character id */
+
+    c.alt_width = alt_width;        /* Alternate width */
+
+    return MAKfontSize(&fcCur, chId, size,
+         /* are we makeing bold? */   ((fcCur.xbold | fcCur.ybold) != 0L));
+}
+#endif
+
+
+/*----------------------*/
+/*    CGIFwidthsetup    */
+/*----------------------*/
+UWORD  ENTRY
+CGIFwidthsetup()
+{
+    UWORD status;
+
+    DBG("CGIFwidthsetup()\n");
+
+#if CACHE
+    if(status = IXget_fnt_index(cur_font_id)) return status;
+#else
+    if(status = IXget_fnt_index(fcCur.font_id)) return status;
+#endif
+    return SUCCESS;
+}
+
+
+/*----------------------*/
+/*    CGIFkern          */
+/*----------------------*/
+UWORD  ENTRY
+CGIFkern( code, num_pairs, kern)
+    UWORD      code;
+    UWORD      num_pairs;
+    KERN_PAIR *kern;
+{
+    UWORD status;
+    UWORD i;
+
+    if((code != TEXT_KERN) && (code != DESIGN_KERN))
+        return ERR_bad_kern_code;
+#if CACHE
+    if(status = IXget_fnt_index(cur_font_id)) return status;
+#else
+    if(status = IXget_fnt_index(fcCur.font_id)) return status;
+#endif
+
+    for(i=0; i<num_pairs; i++, kern++)
+        kern->adj = MAKkern(code, kern->chId0, kern->chId1);
+    return SUCCESS;
+}
+
+
+#if PCLEO
+
+EXTERN UWORD pcleo();
+
+UWORD ENTRY  /* 08-24-90 jfd */
+CGIFpcleo(fileName, pcount)
+    BYTE  *fileName;
+    ULONG *pcount;
+{
+    UWORD status;
+
+#if CACHE
+    if(status = IXget_fnt_index(cur_font_id)) return status;
+    return pcleo(fileName, pcount, cur_font_id);
+#else
+    if(status = IXget_fnt_index(fcCur.font_id)) return status;
+    return pcleo(fileName, pcount, fcCur.font_id);
+#endif
+
+}
+
+#endif
+@
+
+
+7.0
+log
+@after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+@
+text
+@d2 1
+a2 1
+**	$Id: cgif.c,v 6.0 91/03/18 15:25:29 kodiak Exp Locker: kodiak $
+d8 3
+d295 1
+a295 1
+/*    CGIFwidth         */
+d298 1
+a298 5
+CGIFwidth(first_chId, num_chId, buffer_size, buffer)
+    UWORD  first_chId;
+    UWORD  num_chId;
+    UWORD  buffer_size;
+    UWORD *buffer;
+d300 1
+a300 3
+    UWORD    status;
+    UWORD   *p;
+    UWORD    chId;
+d302 1
+a302 2
+    DBG4("CGIFwidth(%ld, %ld, %ld, %ld)\n",
+                    first_chId, num_chId, buffer_size, buffer);
+a308 13
+
+    if(buffer_size < 2*num_chId)
+    {
+        DBG("    buffer too small\n");
+        return ERR_buffer_too_small;
+    }
+
+    p = (UWORD*)buffer;
+    for(chId=first_chId; chId<first_chId + num_chId; chId++)
+    {
+        *p++ = MAKchar_width(chId);
+    }
+
+@
+
+
+6.0
+log
+@folded in Bullet 1.30
+@
+text
+@d2 1
+a2 1
+**	$Id: cgif.c,v 5.1 91/03/18 08:56:37 kodiak Exp $
+d8 3
+d29 1
+a29 2
+ *  13-Aug-90 awr added return SUCCESS in CGIFexit to match MULTICALLER
+ *                version.
+a36 1
+ *  20-Nov-90 dET In CGIFchar_size(), added "UWORD status" for MULTICALLER
+d44 2
+a53 8
+/* mem.c    */
+EXTERN VOID     MEMinit();
+EXTERN BYTE    *MEMptr();
+EXTERN VOID     MEMinstFree();         /* frees all memory of caller id */
+EXTERN ULONG    mem_fund[];            /* Total memory managed by mem.c  */
+/* dll.c */
+EXTERN VOID    dll_remove ();          /* Removes p from a list           */
+EXTERN VOID    dll_after ();           /* Links q into p's list after p   */
+d61 1
+a61 1
+EXTERN HIFFONT  FNTfind();            /* Find a FONT with given FONTCONTEXT */
+a63 1
+EXTERN MEM_HANDLE  hBMlru;             /* LRU character IFBITMAPs         */
+a66 1
+EXTERN BOOLEAN  IXnew_ss();
+a69 1
+EXTERN BYTE     bulletPath[];
+d71 1
+a71 1
+EXTERN MEM_HANDLE  hfi;              /* Font Index */
+a74 1
+EXTERN UWORD    bit_map_width;   /* width of bitmap in bytes         */
+d83 1
+a83 2
+GLOBAL  HIFFONT     hfontCur;           /* handle of current FONT         */
+GLOBAL  FONT       *pfontCur;           /* ptr to current FONT            */
+a90 3
+#if MULTICALLER
+#define MAXCALLERS 10   /* arbitrary */
+#define FIRSTTIME  ~0   /* a large value */
+a91 24
+MLOCAL  UWORD  hCompCharBuf = 0;   /* handle for windows, flag for others */
+MLOCAL  BYTE  *ccBuffe;            /* buffer pointer for comp-char buffer */
+MLOCAL  UWORD  uLastCallerId = FIRSTTIME;  /* an initial value */
+MLOCAL  BOOLEAN uInitFirstTime  = TRUE;    /* TRUE == need to init system */
+MLOCAL  BOOLEAN uEnterFirstTime = TRUE;    /* TRUE == need to init cache  */
+
+#define FREE  0
+#define INUSE 1
+
+typedef struct
+{
+    UWORD       status;
+    FONTCONTEXT fc;
+    IFCONFIG    cfg;
+} INSTANCE;
+
+typedef INSTANCE * PINSTANCE;
+
+INSTANCE aInstance[MAXCALLERS];        /* array of instances  */
+
+/*-----------------------------------------*/
+
+/* initialize all handles to instances by marking status FREE */
+
+a92 239
+/*  INSTinit      */
+/*----------------*/
+MLOCAL VOID
+INSTinit()
+{
+    WORD i;
+    PINSTANCE pInst = aInstance;
+
+    for(i=0;i<MAXCALLERS;i++,pInst++)   /* all instances FREE */
+        pInst->status = FREE;      /* 11-27-90 bg */
+        
+}
+
+
+
+
+/*----------------*/
+/*  INSTfree      */
+/*----------------*/
+/* return the first free handle to an instance.  Return MAXCALLERS if
+** no free instances available.
+*/
+
+MLOCAL UWORD
+INSTfree()
+{
+    UWORD i;
+    PINSTANCE pInst = aInstance;
+
+    for(i=0;i<MAXCALLERS;i++,pInst++)      /* find first free instance */
+        if(pInst->status == FREE) {
+            pInst->status = INUSE;         /* mark this one INUSE */
+            break;
+        }
+    return i;                       /* return free instance or MAXCALLERS */
+}
+
+
+
+
+/*----------------*/
+/*  INSTfind      */
+/*----------------*/
+/* return a pointer to the instance data of caller 'id'.  Return a
+ * NULL pointer upon error.
+*/
+
+MLOCAL PINSTANCE
+INSTfind(id)
+    UWORD id;
+{
+    if(id > MAXCALLERS) return (PINSTANCE)NULL;
+
+    if(aInstance[id].status == INUSE)
+    {
+        uLastCallerId = id;                   /* remember current caller */
+        return (PINSTANCE)&aInstance[id];
+    }
+    else return (PINSTANCE)NULL;
+}
+
+
+
+
+/*----------------*/
+/*  INSTactive    */
+/*----------------*/
+/* return INUSE if any caller instances are active, otherwise return FREE */
+
+MLOCAL UWORD
+INSTactive()
+{
+    WORD i;
+    PINSTANCE pInst = aInstance;
+
+    for(i=0;i<MAXCALLERS;i++,pInst++)      /* find first inuse instance */
+        if(pInst->status == INUSE) 
+            return INUSE;
+    return FREE;                           /* no instances inuse */
+}
+
+
+
+
+/*----------------*/
+/*  INSTexit      */
+/*----------------*/
+/*  If an application exits the subsystem we must check to see if the 
+ *  application requested the sub-system to allocate a comp-char buffer.
+ *  If so then we free it.  It may be allocated again.
+ *  Mark the caller instance 'id' as being free and defund all memory
+ *  funded by this caller.
+*/
+
+MLOCAL UWORD
+INSTexit(id)
+    UWORD id;
+{
+#ifdef MSWINDOWS
+/* I do not want to include WINDOWS.H, so here are some definitions */
+    EXTERN WORD   far pascal GlobalUnlock(WORD);
+    EXTERN WORD   far pascal GlobalFree(WORD);
+#else
+    EXTERN VOID   free();
+#endif
+    PINSTANCE pInst;
+
+    if( (pInst = INSTfind(id)) == (PINSTANCE)NULL) return ERR_bad_ID;
+
+#ifdef MSWINDOWS
+    if(pInst->cfg.cc_buf_ptr == NULL && hCompCharBuf)
+    {
+        GlobalUnlock(hCompCharBuf);   /* unlock and free comp-char buffer */
+        GlobalFree(hCompCharBuf);
+        hCompCharBuf = 0; 
+    }
+#else
+    if(pInst->cfg.cc_buf_ptr == NULL && hCompCharBuf)
+    {
+        free(ccBuffer);       /* free comp-char buffer */
+        hCompCharBuf = 0;
+    }
+#endif
+    
+    MEMinstFree(id);                /* free memory funded by this instance */
+    pInst->status = FREE;
+    return SUCCESS;
+}
+
+
+
+
+/*----------------*/
+/* INSTsaveConfig */
+/*----------------*/
+MLOCAL UWORD
+INSTsaveConfig(id, cfg)
+    UWORD     id;
+    IFCONFIG *cfg;
+{
+    MLOCAL UWORD ccBufferSize = 0;
+    PINSTANCE pInst;
+
+    if( (pInst = INSTfind(id)) == (PINSTANCE)NULL) return ERR_bad_ID;
+
+    if(cfg->cc_buf_ptr == NULL)  /* must allocate or reallocate space */
+    {
+        /* buffer must be re-sized or allocated */
+        if(cfg->cc_buf_size != ccBufferSize || !hCompCharBuf)
+        {
+#ifdef  MSWINDOWS
+#define GMEM_FIXED        0x0000
+#define GMEM_MOVEABLE     0x0002
+
+/* I do not want to include WINDOWS.H so here are some definitions */
+
+            EXTERN WORD  far pascal       GlobalAlloc(WORD, ULONG);
+            EXTERN UBYTE far * far pascal GlobalLock(WORD);
+            EXTERN WORD  far pascal       GlobalReAlloc(WORD, ULONG, UWORD);
+
+            if(hCompCharBuf) 
+                hCompCharBuf = GlobalReAlloc(hCompCharBuf,
+                                            (ULONG)cfg->cc_buf_size,
+                                             GMEM_MOVEABLE);
+            else 
+                hCompCharBuf = GlobalAlloc(GMEM_MOVEABLE,
+                                         (ULONG)cfg->cc_buf_size);
+
+            if(hCompCharBuf == NULL) return ERR_ccBuff_alloc;
+            ccBuffer = GlobalLock(hCompCharBuf);
+            if(!ccBuffer) return ERR_ccBuff_alloc;
+#else
+            EXTERN BYTE *realloc();
+            EXTERN BYTE *malloc();
+
+            if(hCompCharBuf)
+                ccBuffer = realloc(ccBuffer, cfg->cc_buf_size);
+            else
+            {
+                ccBuffer = malloc(cfg->cc_buf_size);
+                hCompCharBuf = 1;           /* used as a flag in this case */
+            }
+            if(!ccBuffer)  return ERR_ccBuff_alloc;
+#endif
+
+            ccBufferSize = cfg->cc_buf_size;
+        }
+    }
+    pInst->cfg = *cfg;                        /* save config in state data */  
+
+    return SUCCESS;
+}
+
+
+
+
+/*----------------*/
+/*  INSTsaveState */
+/*----------------*/
+/* save the current FONTCONTEXT of the caller 'id' */
+
+MLOCAL UWORD
+INSTsaveState(id, fc)
+    UWORD        id;
+    FONTCONTEXT *fc;
+{
+    PINSTANCE pInst;
+
+    if( (pInst = INSTfind(id)) == (PINSTANCE)NULL) return ERR_bad_ID;
+
+    FCcopy_fc(fc, &pInst->fc);        /* Copy one FONTCONTEXT to another  */
+
+    return SUCCESS;
+}
+
+
+/*----------------*/
+/*  INSTsetState  */
+/*----------------*/
+/* reset the system from the state data of caller 'id' */
+
+MLOCAL UWORD
+INSTsetState(id)
+    UWORD   id;
+{
+    PINSTANCE pInst;
+
+    if( (pInst = INSTfind(id)) == (PINSTANCE)NULL) return ERR_bad_ID;
+
+    CGIFconfig(id, &pInst->cfg);    /* reconfigure buffers and others  */
+    CGIFfont(id, &pInst->fc);       /* set current font context        */
+
+    return SUCCESS;
+}
+
+#endif  
+   
+
+/*----------------*/
+a95 3
+
+#if !MULTICALLER
+
+a98 1
+    MEMinit();                /* Initialize memory manager   */
+a101 1
+#else
+a102 37
+/*  Multicaller is enabled. We also initialize the multicaller instance
+ *  manager. We wish to initialize via MEMinit() and INSTinit() only the
+ *  first time this function is called. This version of the function
+ *  also returns the current memory pool sizes.
+ */
+
+UWORD ENTRY
+CGIFinit(pCallerId, pCacheSize, pBufferSize)
+    UWORD *pCallerId;
+    ULONG *pCacheSize;
+    ULONG *pBufferSize;
+{
+  /* First time initialization */
+
+    if(uInitFirstTime)
+    {
+        uInitFirstTime = FALSE;
+        MEMinit();                /* Initialize memory manager   */
+        INSTinit();               /* Initialize instance manager */
+    }
+
+  /* Return current memory pool sizes */
+
+    *pCacheSize  = mem_fund[CACHE_POOL ];
+    *pBufferSize = mem_fund[BUFFER_POOL];
+
+  /* Return the caller's unique caller id */
+
+    if(!((*pCallerId = INSTfree()) < MAXCALLERS))
+        return ERR_max_callers;
+
+    return SUCCESS;
+}
+#endif
+
+
+
+a108 2
+#if !MULTICALLER
+
+a118 4
+    bit_map_width = cfg->bit_map_width;          /* bitmap width in bytes */
+    if(bit_map_width > 4)
+        return ERR_bad_bitmap_width;
+    bit_map_width <<= 3;                             /* Convert to pixels */
+a122 4
+    DBG3("bulletPath initially @@ $%lx contains $%lx... (%ld chars)\n",
+	    bulletPath, bulletPath[0], strlen(bulletPath));
+    if(strlen(bulletPath) <= 1)               /* cannot change bulletPath */
+        strcpy(bulletPath, cfg->bulletPath);
+a127 1
+#else
+a128 43
+/*  Multicaller is enabled
+ *
+ *  CGIFchar may also call this function (via INSTsetState()) if CGIFchar
+ *  detects that the user id has changed from the previous caller.
+ */
+
+UWORD ENTRY
+CGIFconfig(uCallerId, cfg)
+    UWORD    uCallerId;
+    IFCONFIG *cfg;
+{
+    UWORD status;
+
+    if(status = INSTsaveConfig(uCallerId, cfg)) return status;
+
+  /*  Set configuration values  */
+
+#if CACHE
+    max_char_size = cfg->max_char_size; /* max cached character IFBITMAP size */
+#endif
+    max_open_files = cfg->num_files;  /* max number of open library files */
+    bit_map_width = cfg->bit_map_width;          /* bitmap width in bytes */
+    if(bit_map_width > 4)
+        return ERR_bad_bitmap_width;
+    bit_map_width <<= 3;                             /* Convert to pixels */
+
+/* set cc_buf to point to valid buffer, cfg->cc_buf_ptr may point to NULL */
+
+    cc_buf  = (cfg->cc_buf_ptr) ? cfg->cc_buf_ptr : ccBuffer;
+    cc_size = cfg->cc_buf_size;
+
+    if(strlen(bulletPath) <= 1)               /* cannot change bulletPath */
+        strcpy(bulletPath, cfg->bulletPath);
+    strcpy(typePath, cfg->typePath);
+
+    return SUCCESS;
+}
+
+#endif
+
+
+
+
+a134 3
+
+#if !MULTICALLER
+
+a153 36
+#else
+
+/*  Multicaller is enabled.
+ */
+
+UWORD  ENTRY
+CGIFenter(uCallerId)
+    UWORD uCallerId;
+{
+    UWORD status;
+
+    if(uEnterFirstTime)  /* if the very first time called */
+    {
+        uEnterFirstTime = FALSE;
+#if CACHE
+        if(status = CACinit())         /* Initialize the cache */
+        {
+            DBG1("CACinit() failed: %ld\n", status);
+            return status;
+        }
+#endif
+
+  /*  Initialize the font management subsystem */
+  
+        return IXinit();
+
+    }
+
+    return SUCCESS;
+}
+#endif
+
+
+
+
+
+a156 2
+#if !MULTICALLER
+
+a168 1
+#else
+a169 33
+/*  Multicaller is enabled.
+ *  Call INSTexit() to tell the instance handler we're leaving. He'll
+ *  defund all of our funded memory. If we're the last instance to
+ *  leave, call CACexit() and IXexit(), then reset the first time
+ *  initialize variables.
+ *
+ */
+
+UWORD ENTRY
+CGIFexit(uCallerId)
+    UWORD uCallerId;
+{
+    UWORD status;
+
+    DBG1("CGIFexit(%ld)\n", uCallerId);
+
+    if( status = INSTexit(uCallerId)) return status;
+
+    if(!INSTactive())    /* any active instances ? */
+    {
+#if CACHE
+        CACexit();
+#endif
+        IXexit();
+        uInitFirstTime = TRUE;    /* reset instance system init */
+        uEnterFirstTime = TRUE; 	/* reset cache init */
+    }
+}
+#endif
+
+
+
+
+a179 4
+#if MULTICALLER
+CGIFfont(uCallerId, fc)
+    UWORD uCallerId;
+#else
+a180 1
+#endif
+a182 1
+    FONTINDEX *fi;
+a183 2
+#if MULTICALLER
+    UWORD status;
+a184 3
+    if(status = INSTsaveState(uCallerId, fc)) return status;
+#endif
+
+d188 2
+a189 2
+    if(pfontCur)
+        if(!pfontCur->bitmapCount) FNTfree(hfontCur);
+d193 1
+a193 2
+    if(!(hfontCur  = FNTfind(fc))) return ERR_no_font;
+    pfontCur = (FONT*)MEMptr(hfontCur);
+d201 1
+a201 1
+    * update hfi (KODIAK)
+d203 1
+a203 2
+    fi = (FONTINDEX*)MEMptr(hfi);
+    ie = ((INDEX_ENTRY*)MEMptr(fi->hindex_entry))+(fi->entry_ct-1);
+a209 7
+  /*  Read in new symbol if necessary */
+
+    if(!IXnew_ss(fc->ssnum))
+    {
+        return ERR_IXnew_ss;
+    }
+
+a224 4
+#if MULTICALLER
+CGIFchar(uCallerId, chId, ppbm, alt_width)
+    UWORD uCallerId;
+#else
+a225 1
+#endif
+a229 1
+    HIFBITMAP *phbm;
+a232 5
+#if MULTICALLER
+    if(uCallerId != uLastCallerId)   /* use correct font context */
+        if( status = INSTsetState(uCallerId)) return status;
+#endif
+
+d237 1
+a237 1
+    phbm = pfontCur->hbuf + chId;
+d240 1
+a240 1
+    if(! *phbm)                            /* Is character in the cache ? */
+d245 1
+a245 1
+        if(status = make_char(hfontCur, chId, phbm))
+a252 2
+    pbm = (IFBITMAP*)MEMptr(*phbm);
+
+d259 2
+a260 2
+        dll_remove(*phbm);             /* Remove from lru list             */
+        dll_after(hBMlru, *phbm);      /* Link at the head of the lru list */
+a273 4
+#if MULTICALLER
+CGIFchar_size(uCallerId, chId, size, alt_width)
+    UWORD    uCallerId;
+#else
+a274 1
+#endif
+a278 7
+#if MULTICALLER
+    UWORD status;
+
+    if(uCallerId != uLastCallerId)          /* use correct fontcontext */
+        if( status = INSTsetState(uCallerId))  return status;
+#endif
+
+a294 4
+#if MULTICALLER
+CGIFwidth(uCallerId, first_chId, num_chId, buffer_size, buffer)
+    UWORD  uCallerId;
+#else
+a295 1
+#endif
+a304 6
+#if MULTICALLER
+
+    if(uCallerId != uLastCallerId)          /* use correct fontcontext */
+        if( status = INSTsetState(uCallerId))  return status;
+#endif
+
+a333 4
+#if MULTICALLER
+CGIFkern(uCallerId, code, num_pairs, kern)
+    UWORD      uCallerId;
+#else
+a334 1
+#endif
+a341 6
+#if MULTICALLER
+
+    if(uCallerId != uLastCallerId)          /* use correct fontcontext */
+        if( status = INSTsetState(uCallerId))  return status;
+#endif
+
+a360 4
+#if MULTICALLER
+CGIFpcleo(uCallerId, fileName, pcount)
+    UWORD      uCallerId;
+#else
+a361 1
+#endif
+a365 6
+
+#if MULTICALLER
+
+    if(uCallerId != uLastCallerId)          /* use correct fontcontext */
+        if( status = INSTsetState(uCallerId))  return status;
+#endif
+@
+
+
+5.1
+log
+@eliminate old style symbol table lookup
+@
+text
+@d2 1
+a2 1
+**	$Id: cgif.c,v 5.0 91/02/26 10:40:12 kodiak Exp Locker: kodiak $
+d8 3
+d35 5
+a39 1
+ *                      
+d45 1
+a49 1
+#include "cgconfig.h"
+d106 1
+a106 1
+MLOCAL  BYTE  *ccBuffer;           /* buffer pointer for comp-char buffer */
+d139 2
+a140 2
+        pInst->status = FREE;
+
+d765 1
+@
+
+
+5.0
+log
+@Phase 2 Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id: cgif.c,v 3.1 91/02/07 15:40:01 kodiak Exp $
+d8 3
+a90 2
+GLOBAL  UWORD       ss_first_code;      /* current symbol set first code  */
+GLOBAL  UWORD       ss_last_code;       /*  "        "     "  last code   */
+d663 1
+a663 3
+  /*  Read in new symbol if necessary and set up
+   *  ss_first_code and ss_last_code.
+   */
+a666 2
+        ss_first_code = 0;
+        ss_last_code  = 0;
+a705 11
+  /* Check for bad character id */
+
+    if((chId < ss_first_code) || (ss_last_code < chId))
+    {
+	DBG3("ss first code $%lx, last code $%lx, bad chId $%lx\n",
+		ss_first_code, ss_last_code, chId)
+        *ppbm = (IFBITMAP*)0;
+        return ERR_bad_chID;
+    }
+    chId -= ss_first_code;
+
+a766 9
+    if((chId < ss_first_code) || (ss_last_code < chId))
+    {
+	DBG3("ss first code $%lx, last code $%lx, bad chId $%lx\n",
+		ss_first_code, ss_last_code, chId)
+        *size =  0;
+        return ERR_bad_chID;
+    }
+    chId -= ss_first_code;
+
+d818 1
+a818 4
+        if((chId < ss_first_code) || (ss_last_code < chId) )
+            *p++ = 0;
+        else
+            *p++ = MAKchar_width(chId - ss_first_code);
+d857 1
+a857 2
+        kern->adj = MAKkern(code, kern->chId0 - ss_first_code,
+                                  kern->chId1 - ss_first_code);
+@
+
+
+3.1
+log
+@Kodiak Phase 1 Final Release
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d7 4
+a10 1
+**	$Log$
+d98 1
+a98 1
+MLOCAL  BYTE  *ccBuffe;            /* buffer pointer for comp-char buffer */
+d713 2
+a714 1
+        DBG("    bad chId\n");
+d783 2
+a784 1
+        DBG("    bad chId\n");
+@
+
+
+3.0
+log
+@Kodiak's Alpha 1
+@
+text
+@d35 1
+d66 1
+d502 1
+a504 1
+#if CACHE
+d624 2
+a625 1
+
+d648 10
+a658 2
+
+
+a766 2
+    BOOLEAN  making_bold;
+
+@
+
+
+2.0
+log
+@from AGFA Bullet 1.20Beta, 02-Oct-90
+@
+text
+@d1 8
+a28 1
+#include <stdio.h>
+d93 1
+a93 1
+MLOCAL  BYTE  *ccBuffer;           /* buffer pointer for comp-char buffer */
+d126 2
+a127 2
+        pInst->status == FREE;
+        
+d143 1
+a143 1
+    WORD i;
+d215 1
+d219 1
+a219 1
+
+d221 1
+a221 1
+
+a322 1
+    UWORD status;
+d434 2
+d505 1
+a505 1
+        DBG1("CACinit() failed: %d\n", status);
+d533 1
+a533 1
+            DBG1("CACinit() failed: %d\n", status);
+d585 1
+a585 1
+    DBG1("CGIFexit(%u)\n", uCallerId);
+d693 1
+a693 1
+    DBG1("CGIFchar(%u)\n", chId);
+d764 1
+a764 1
+    DBG1("CGIFchar_size(%u)\n", chId);
+d809 1
+a809 1
+    DBG4("CGIFwidth(%u, %u, %u, %u)\n",
+@
+
+
+1.0
+log
+@from AGFA Bullet 1.10, 30-Mar-90
+@
+text
+@d3 17
+d22 1
+d33 2
+d46 1
+d55 3
+a67 1
+
+d80 245
+d327 22
+d351 4
+d358 1
+a358 1
+    MEMinit();                /* Initialize memory manager */
+d362 36
+d404 5
+d427 44
+d474 2
+d482 6
+d506 37
+d546 3
+a548 1
+VOID  ENTRY
+d557 32
+d590 2
+d594 1
+d600 3
+d605 4
+d610 1
+d614 6
+d621 5
+a653 1
+
+d661 2
+d665 4
+d670 1
+d679 5
+d737 4
+d742 1
+d747 8
+d767 1
+a767 1
+    c.alt_width = alt_width;
+d769 2
+a770 1
+    return MAKfontSize(&fcCur, chId, size);
+a774 1
+
+d779 4
+d784 1
+d794 6
+d832 6
+a837 1
+CGIFkern(code, num_pairs, kern)
+d845 6
+d865 34
+@

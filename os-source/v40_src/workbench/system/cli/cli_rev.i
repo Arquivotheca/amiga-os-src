@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'14.2.92'
+	ENDM
+VERS	MACRO
+		dc.b	'cli 38.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cli 38.1 (14.2.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cli 38.1 (14.2.92)',0
+	ENDM

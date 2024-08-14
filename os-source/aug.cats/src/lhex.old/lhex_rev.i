@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	56
+DATE	MACRO
+		dc.b	'23.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'lhex 1.56'
+	ENDM
+VSTRING	MACRO
+		dc.b	'lhex 1.56 (23.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: lhex 1.56 (23.7.93)',0
+	ENDM

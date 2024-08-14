@@ -1,0 +1,170 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.38.40;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file system disk access coroutine
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+******************************************************************************/
+
+
+SECTION "DISC"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+GET     "internal/EXECLIBHDR"
+GET     "ALERTHDR"
+
+//D GLOBAL $( putch: -41 $)
+
+LET disc () BE
+$(
+   LET buf, dat, req = ?, ?, ?
+
+   $( 
+      IF pending.queue = 0 THEN cowait ()
+
+      buf       := pending.queue
+      disc.running := TRUE
+      req       := buf ! buf.state
+      dat       := buf ! buf.buf
+
+      TEST req = IOC.write
+      THEN
+        $( dat ! b.file.checksum :=
+                 dat ! b.file.checksum - checksum ( dat, b.file.upb )
+           discact ( req, buf )
+           buf ! buf.state := IOC.read
+        $)
+      ELSE
+        $(
+           discact ( req, buf )
+
+           UNLESS checksum ( dat, b.file.upb ) = 0 DO
+	      UNLESS IOerr(buf,0) LOOP
+
+        $)
+
+        disc.running  := FALSE
+        pending.queue := ! buf
+
+        TEST buf ! buf.co
+        THEN
+             resumeco ( buf ! buf.co, buf )
+        ELSE
+        //TJK3Feb - Place dir and fileheaders (unless deleted) onto
+        //          valid list; other blocks goto invalid
+        //     freeblock ( buf + buf.prefix, buf ! buf.next )
+        freeblock( dat, dat!b.file.type=t.short )
+
+   $) REPEAT
+$)
+
+AND discact ( act, buf ) BE
+$(
+   LET key       = buf ! buf.key
+   LET pkt = VEC pkt.id
+   LET err = ?
+
+   pkt!pkt.id   := disc.dev      // Merely for dispatcher in MAIN
+   
+   UNLESS keylwb <= key <= keyupB DO
+       abort ( AN.keyrange, key ) REPEAT   // Key out of range
+
+   motor.ticks := motor.timeout
+
+//D    wrch := putch
+//D    wrch( act=IOC.read -> 'R', 'W' )
+//D    writed( key, 0 )
+//D    wrch('P')
+//D    $( let p = pending.queue
+//D       until p=0 do $( writed(p!buf.key,4); p := !p $)
+//D    $)
+//D    wrch('W')
+//D    $( let p = waiting.queue
+//D       until p=0 do $( writed(p!buf.key,4); p := !p $)
+//D    $)
+//D    wrch('V')
+//D    $( let p = valid.buffer.queue
+//D       until p=0 do $( writed(p!buf.key,4); p := !p $)
+//D    $)
+//D    wrch('*n')
+
+   SetIO( Disc.dev, act, buf!buf.buf, 
+          Disc.sector.size, (key+lowercyl)<<Disc.sector.shift )
+   SendIO( Disc.dev, pkt )
+   cowait()
+
+   err := disc.dev%IO.error
+   IF err = 0 THEN // It worked
+      RETURN
+
+   soft.errors := soft.errors + 1
+
+   IF IOerr(buf,err) RETURN
+
+$) REPEAT
+
+// Display error and return TRUE if we are to continue
+AND IOerr(buf,err) = VALOF
+$(
+   // turn the motor off
+   testdisc(IOC.motor,?,0)           // Turn off motor
+
+   // if we are having a look at a new disc after an inhibit
+   // don't complain if it has already been removed.
+   IF err = 29 & current.volume = 0 RESULTIS TRUE
+
+   // if disk changed error, tell user to put disk back,
+   // otherwise tell that it is a real error
+   result2(TRUE, err = 29 -> abort.busy , abort.discerror )
+   IF err.report(report.volume,current.volume) THEN
+   $( // Cancel the attempt
+      IF buf!buf.state=IOC.read THEN 
+         clearvec(buf!buf.buf,b.file.upb)
+      RESULTIS TRUE
+   $)
+   // retry
+
+   // if "put that disc back" then ignore disc change
+   test err = 29 then disc.attention.flag := -1
+   else testdisc(IOC.clear)
+
+   RESULTIS FALSE
+$) 
+@

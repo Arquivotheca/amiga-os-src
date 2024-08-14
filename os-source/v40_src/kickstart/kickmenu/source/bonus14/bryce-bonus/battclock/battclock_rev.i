@@ -1,0 +1,12 @@
+VERSION		EQU	36
+REVISION	EQU	16
+DATE	MACRO
+		dc.b	'28 Feb 1990'
+	ENDM
+VERS	MACRO
+		dc.b	'battclock 36.16'
+	ENDM
+VSTRING	MACRO
+		dc.b	'battclock 36.16 (28 Feb 1990)',13,10,0
+		ds.w	0
+	ENDM

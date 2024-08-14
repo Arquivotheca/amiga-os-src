@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'1.5.91'
+	ENDM
+VERS	MACRO
+		dc.b	'bru 37.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'bru 37.9 (1.5.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: bru 37.9 (1.5.91)',0
+	ENDM

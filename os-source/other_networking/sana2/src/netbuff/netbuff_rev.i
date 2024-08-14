@@ -1,0 +1,16 @@
+VERSION		EQU	0
+REVISION	EQU	0
+DATE	MACRO
+		dc.b	'199910421'
+	ENDM
+VERS	MACRO
+		dc.b	'netbuff 0.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'netbuff 0.1 (19910421)',13,10,0
+		ds.w	0
+	ENDM
+VERTAG	MACRO
+		dc.b	0,'$VER: netbuff 0.1 (19910421)',0
+		ds.w	0
+	ENDM

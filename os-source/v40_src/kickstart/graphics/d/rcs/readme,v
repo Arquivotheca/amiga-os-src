@@ -1,0 +1,241 @@
+head     37.0;
+branch   ;
+access   ;
+symbols  rel39_24:37.0 rel39_18:37.0 rel39_97:37.0 rel39_90:37.0 rel39_89:37.0 rel39_82:37.0 rel39_76:37.0 rel39_71:37.0 rel39_65:37.0 rel39_64:37.0 rel39_61:37.0 rel39_60:37.0 rel39_55:37.0 rel39_47:37.0 rel39_39:37.0 rel39_38:37.0 rel39_37:37.0 rel39_35:37.0 rel39_34:37.0;
+locks    ; strict;
+comment  @*   @;
+
+
+37.0
+date     91.01.31.15.34.02;  author bart;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.0
+log
+@added to rcs for updating
+@
+text
+@--------------------------------------------------------------------------------
+                Inroduction to the Graphics Display Database
+--------------------------------------------------------------------------------
+
+
+        The graphics display database was introduced for the 2.0 KS release
+in order to provide a means to abstract the specification of a mode (hires, 
+superhires, lace, dualpf, etc) and to prevent interperetation of specific
+bits in the Modes field by users or application programs. In the past,
+progams used to look at screen heights and say "if this screen is >320 wide
+it must be HIRES" or "if the HIRES bit is set in vp->Modes it must be 640
+wide".  With the advent of the ECS chipset and display clipping these and
+other naive assumptions are no longer true.
+
+
+        The graphics database itself consists of four elements:
+
+        1) code in d/startup.c to unpack a data driven database
+        specification and to create a database hanging off GfxBase.
+        (the internal record format is defined in displayinfo_internal.h)
+
+        2) routines to read information out of the database into user records
+        (the external record format is defined in displayinfo.h, a public file)
+
+        3) routines to set information in the internal database records
+        (translating from the external to the internal format in the process)
+
+        4) DisplayID definitions (32bit abstract specifiers) to uniquely
+        identify each record in the database (defined in displayinfo.h)
+
+--------------------------------------------------------------------------------
+
+
+        The database itself consists of DisplayInfoRecords, which are
+        linked both "vertically" (parent/child) and "horizontally" (siblings).
+        All records in the database begin with a RecordNode structure which
+        defines these links.
+
+        There is a root node from which the entire database is accessed,
+        after it is expanded by d/startup.c from a rom specifiction to
+        real DisplayInfoRecords in ram memory.
+
+        This root node is pointed to by GfxBase->DisplayInfoDataBase.
+
+        (GfxBase)               siblings <->
+            |
+            |                   children
+            V                       |   
+        RootNode                    V     
+            |
+            V
+        DfltNode <-> NtscNode <-> PalNode  <-> VgaNode  <-> A2024Node
+            |           |           |            |            | 
+            V           V           V            V            V
+        LoresNode    LoresNode    LoresNode    VgaLoresNode  10HzNode
+            |           |           |            |            | 
+            V           V           V            V            V
+        HiresNode    HiresNode    HiresNode    VgaHiresNode  15HzNode
+            |           |           |            |
+            V           V           V            V
+        SupHiresNode SupHiresNode SupHiresNode Productivity
+            |           |           |            |
+            V           V           V            V
+        LoresLace    LoresLace    LoresLace    VgaLoresLace
+            |           |           |            |
+            V           V           V            V
+        HiresLace    HiresLace    HiresLace    HiaLoresLace
+            |           |           |            |
+            V           V           V            V
+        SupHiresLace SupHiresLace SupHiresLace ProductivityLace
+
+        (there are more records than shown here, but this should give you
+         the idea)
+
+
+--------------------------------------------------------------------------------
+
+        each record in the database has a major key (16 bits) and a minor
+        key (another 16 bits) to identify it for searches of the database.
+
+        for a given DisplayID, say VGAPRODUCT_KEY :
+
+        #define VGAPRODUCT_KEY                  0x00039024
+
+        the major key is 0x0003 and the minor key is 0x9024
+
+        the VgaNode has a major key of 0x0000 and a minor key of 0x0003.
+        the Productivity has a major key of 0x0003 3nd a minor key of 0x9024.
+
+        when FindDisplayInfo(VGAPRODUCT_KEY) is called, the internal
+        routine RootNode out of  GfxBase->DisplayInfoDataBase and calls
+        the internal routine 
+        
+        find_id( GB->DisplayInfoDataBase, VGAPRODUCT_KEY);
+
+        this then splits VGAPRODUCT_KEY into its major and minor components
+        and calls:
+
+                first = find_key( SubRecord(root), major, ~0 )
+        
+        to find the "first level down off the root" node then calls
+
+                second = find_key( SubRecord(first), minor, ~0 )
+
+        to find the "second level down off the root" node, which is the
+        handle to the desired vga productivity mode displayinforecord node.
+
+
+--------------------------------------------------------------------------------
+
+        having gotten a handle to a displayinforecord via find_id()
+        ONLY graphics.library is allowed to derefernce this handle directly:
+
+        struct DisplayInfoRecord
+        {
+            struct RecordNode  rec_Node;
+            UWORD              rec_MajorKey;
+            UWORD              rec_MinorKey;
+            struct TagItem     rec_Tag; 
+            ULONG              rec_Control;
+            ULONG              (*rec_get_data)();
+            ULONG              (*rec_set_data)();
+            struct Rectangle   rec_ClipOScan;
+            ULONG              reserved[2];
+        };
+
+        struct RecordNode  rec_Node; links this node to its parent, child,
+        and sibling nodes.
+
+        UWORD  rec_MajorKey; see discussion above, used for finding this node
+        UWORD  rec_MinorKey; see discussion above, used for finding this node
+
+        ULONG rec_Control; are the mode bits that the graphics software in
+        makevp, etc. interperets directly. since the DisplayID used to 
+        get this handle consists of bits that can NOT be interpereted
+        directly, this is the place that graphics.library looks to
+        to determine if this is LACE, HAM, DUALPF, etc.
+
+        struct TagItem rec_Tag = { TAG_MORE, (pointer to chain of tag data) }
+        is used to "hang" data off of this displayinforecord. when an application
+        calls GetDisplayInfoData(handle,...,DTAG_XXXX,....); a search is
+        made of this linked list of TagItems to try and find that data 
+        in this list.  if the data is found it is "cooked" (translated
+        fron the internal to the external format) and stuffed into a 
+        user buffer.
+
+        struct Rectangle rec_ClipOScan; is used to "limit" displayclips for this
+        mode to some maximum legal values, and was added late in the game to
+        fix a few bugs easily (showing how easily we can extend this database
+        without screwing anyone up, since the internal representation is 
+        strictly graphics PRIVATE).
+
+        ULONG (*rec_get_data)();
+        is set to NULL by the system at powerup. after "cooking" data
+        from the database during the GetDisplayInfoData() call, the system
+        looks to see if an application has stuffed a function into the
+        get_data pointer, and that function is called to "cook" some tag
+        that the (commodore) application has linked into the TagItem list.
+        this is for flexible future extension/expansion of the database
+        without requiring a ROM mod.
+
+        ULONG (*rec_set_data)();
+        is set to NULL by the system at powerup. after "uncooking" data
+        into the database during the SetDisplayInfoData() call, the system
+        looks to see if an application has stuffed a function into the
+        get_data pointer, and that function is called to "uncook" some tag
+        that the (commodore) application has linked into the TagItem list.
+        this is for flexible future extension/expansion of the database
+        without requiring a ROM mod.
+
+--------------------------------------------------------------------------------
+
+        the TagItems in the tagitem list are of a special format for this
+        database: each begins with a QueryHeader structure
+
+        struct QueryHeader
+        {
+            ULONG   StructID;       /* datachunk type identifier */
+            ULONG   DisplayID;      /* copy of display record key   */
+            ULONG   SkipID;         /* TAG_SKIP -- see tagitems.h */
+            ULONG   Length;         /* length of local data in double-longwords */
+        };
+
+
+        and may look like
+        
+        struct MyRawDataBaseInfoListNode
+        {
+                DTAG_MINE,      <--- dispay info base tagid for this chunk
+                MY_DISPLAYID,   <--- copy of the id belonging to my parent node
+                TAG_SKIP,       <--- system tagid to skip this node unless known
+                N,              <--- how many double longwords of local data here
+                .
+                .               <--- N double longwords of local raw (uncooked) data
+                .
+                TAG_MORE,       <--- system tagid to get to the next tagitem
+                *nextitem       <--- pointer to next tagitem in node's list
+        }
+
+--------------------------------------------------------------------------------
+
+        note that SOME tag items (such as DTAG_MNTR are GLOBAL to a family
+        of "mode" records, ie: VGAPRODUCT_KEY and VGAPRODUCTLACE_KEY are each
+        seperate "modes" belonging to the vga "monitor" node. when somebody
+        asks to 
+        
+                GetDisplayInfoData(handle, ... , DTAG_MNTR, ... );
+
+        the search for the TagItem DTAG_MNTR is made, not of this handle's
+        TagItem list, but rather of the handle's PARENTs' TagItem list.
+        this allows the global monitor data to be "shared" among all
+        the modes on that monitor (see the function "cook()" in find_key.c
+        for details on this operation).
+
+--------------------------------------------------------------------------------
+
+
+@

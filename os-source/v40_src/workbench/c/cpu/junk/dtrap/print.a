@@ -1,0 +1,210 @@
+	include "exec/types.i"
+	include "exec/nodes.i"
+	include "exec/execbase.i"
+	include "libraries/dosextens.i"
+;	include "asmsupp.i"
+
+	XREF	_AbsExecBase
+	XREF	_LVOAlert
+	XREF	_LVOSupervisor
+	XREF	_LVORawDoFmt
+	XREF	_LVORawPutChar
+	XREF	_Base
+	XREF	Complete
+
+	XDEF	_PrintFrame
+	XDEF	_PrintPipeStageB
+	XDEF	_PrintPipeStageC
+	XDEF	_PrintDataFault
+	XDEF	_PrintBusError
+	XDEF	_PrintLimitViolation
+	XDEF	_PrintSupervisorOnly
+	XDEF	_PrintWriteProtected
+	XDEF	_PrintInvalid
+	XDEF	_PrintAccessLevel
+	XDEF	_PrintNotPMMU
+	XDEF	_PrintCompleting
+
+;
+; Put a message to the serial port at 9600 baud.  Used as so:
+;
+;     PUTMSG   30,<'%s/Init: called'>
+;
+; Parameters can be printed out by pushing them on the stack and
+; adding the appropriate C printf-style % formatting commands.
+
+		XREF	DPutFmt
+PUTMSG: 	MACRO	* level,msg
+
+		PEA	subSysName(PC)
+		MOVEM.L A0/A1/D0/D1,-(SP)
+		LEA	msg\@(pc),A0    ;Point to static format string
+		LEA	4*4(SP),A1      ;Point to args
+
+		jsr	DPutFmt
+
+		MOVEM.L (SP)+,D0/D1/A0/A1
+		ADDQ.L	#4,SP
+		BRA.S	end\@
+
+msg\@		DC.B	\2
+		DC.B	10
+		DC.B	0
+		DS.W	0
+end\@
+		ENDM
+
+
+	section text,code
+
+subSysName:
+	dc.b	"trap",0
+
+STK	EQU	$3C				; =60 decimal
+
+
+	CNOP	0,4
+
+_PrintFrame:
+	PUTMSG	0,<'%s+-----------------------------------'>
+
+	move.l	a0,-(sp)
+	PUTMSG	0,<'%s| Fault Address:            %lx'>
+	addq.l	#4,sp
+
+	clr.l	-(sp)
+	move.w	STK+8(sp),2(sp)
+	PUTMSG	0,<'%s| Status Register (word):   %lx'>
+	addq.l	#4,sp
+
+	move.l	a0,-(sp)
+	movec.l	usp,a0
+	move.l	a0,-(sp)
+	PUTMSG	0,<'%s| User Stack Pointer:       %lx'>
+	addq.l	#4,sp
+	move.l	(sp)+,a0
+
+
+	move.l	a7,a0
+	addq.l	#4,a0
+	movem.l	(a0),d0-d7/a0-a6
+
+	movem.l	d0-d3,-(sp)
+	PUTMSG	0,<'%s| Data Registers:           %08lx  %08lx  %08lx  %08lx'>
+	movem.l	d4-d7,-(sp)
+	PUTMSG	0,<'%s|                           %08lx  %08lx  %08lx  %08lx'>
+	movem.l	a0-a4,-(sp)
+	PUTMSG	0,<'%s| Address Registers:        %08lx  %08lx  %08lx  %08lx'>
+	movem.l	a4-a6,-(sp)
+	PUTMSG	0,<'%s|                           %08lx  %08lx  %08lx'>
+	add.l	#64,sp
+
+	move.l	STK+6(sp),-(sp)
+	PUTMSG	0,<'%s| Program Counter (maybe):  %lx'>
+	addq.l	#4,sp
+
+;	clr.l	-(sp)
+;	move.w	STK+$e(sp),2(sp)
+;	PUTMSG	0,<'%s| Frame and Vector (word):  %lx'>
+;	addq.l	#4,sp
+;
+;	clr.l	-(sp)
+;	move.w	STK+$12(sp),2(sp)
+;	PUTMSG	0,<'%s| Spec Status Reg (word):   %lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$14(sp),-(sp)
+;	PUTMSG	0,<'%s| Data Cycle Fault Address: %lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$1c(sp),-(sp)
+;	PUTMSG	0,<'%s| Data Output Buffer:       %lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$30(sp),-(sp)
+;	PUTMSG	0,<'%s| Data Input Buffer:        %lx'>
+;	addq.l	#4,sp
+
+	movem.l	d0/a6,-(sp)			; Save these registers
+
+	move.l	_Base,a6
+	move.l	ThisTask(a6),-(sp)
+	PUTMSG	0,<'%s| Task Pointer              %lx'>
+	move.l	(sp)+,a6
+
+	move.l	LN_NAME(a6),-(sp)
+	PUTMSG	0,<'%s| Task Name:                %s'>
+	addq.l	#4,sp
+
+	cmpi.b	#NT_PROCESS,LN_TYPE(a6)		; Is this a process
+	bne.s	pf_end				; Branch if not
+
+	move.l	pr_CLI(a6),d0			; Get CLI BPTR pointer
+	asl.l	#2,d0				; Make an APTR out of it
+	beq.s	pf_end				; Branch if NULL
+	move.l	d0,a6
+	move.l	cli_CommandName(a6),d0		; Get command name
+	asl.l	#2,d0				; Make an APTR out of it
+	beq.s	pf_end				; Branch if no command (NULL)
+	addq.l	#1,d0				; Get rid of preceding RETURN
+	move.l	d0,-(sp)
+	PUTMSG	0,<'%s| Cli Command:              %s'>
+	addq.l	#4,sp
+
+pf_end:
+	PUTMSG	0,<'            '>
+	movem.l	(sp)+,d0/a6			; Restore these registers
+	rts
+
+
+_PrintPipeStageC:
+	PUTMSG	0,<'%s| Pipe Stage C Error'>
+	rts
+
+_PrintPipeStageB:
+	PUTMSG	0,<'%s| Pipe Stage B Error'>
+	rts
+
+_PrintDataFault:
+	btst.b	#6,STK+$f(sp)		; Was it a read or write?
+	beq.s	pdf_write		; Branch if write
+	PUTMSG	0,<'%s| Read Data Cycle Fault'>
+	bra	pdf_cont
+pdf_write:
+	PUTMSG	0,<'%s| Write Data Cycle Fault'>
+pdf_cont:
+	rts
+
+_PrintBusError:
+	PUTMSG	0,<'%s| Bus Error (hardware?)'>
+	rts
+
+_PrintLimitViolation:
+	PUTMSG	0,<'%s| Limit Violation'>
+	rts
+
+_PrintSupervisorOnly:
+	PUTMSG	0,<'%s| Supervisor Only Violation'>
+	rts
+
+_PrintAccessLevel:
+	PUTMSG	0,<'%s| Access Level Violation'>
+	rts
+
+_PrintWriteProtected:
+	PUTMSG	0,<'%s| Write Protected Page'>
+	rts
+
+_PrintInvalid:
+	PUTMSG	0,<'%s| Invalid Memory Access'>
+	rts
+
+_PrintNotPMMU:
+	PUTMSG	0,<'%s| Not PMMU fault (hardware?)'>
+	rts
+
+_PrintCompleting:
+	PUTMSG	0,<'%s| Completing'>
+	rts
+
+	END

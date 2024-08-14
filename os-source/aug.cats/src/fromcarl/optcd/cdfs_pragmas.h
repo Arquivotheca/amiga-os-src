@@ -1,0 +1,13 @@
+#pragma libcall CDFSBase ResetCDTV 1E 0
+#pragma libcall CDFSBase SetDebug 24 001
+#pragma libcall CDFSBase ValidDisk 2A 0
+#pragma libcall CDFSBase MountFS 30 0
+#pragma libcall CDFSBase GetTMInfo 36 0
+#pragma libcall CDFSBase IsNoPrefs 3C 0
+#pragma libcall CDFSBase SetSpeed 42 001
+#pragma libcall CDFSBase InitFSE 48 10803
+#pragma libcall CDFSBase QuitFSE 4E 0
+#pragma libcall CDFSBase ReplyFSE 54 801
+#pragma libcall CDFSBase SetFSEMonitor 5A 001
+#pragma libcall CDFSBase StartFSE 60 0
+#pragma libcall CDFSBase StopFSE 66 0

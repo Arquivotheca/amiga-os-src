@@ -1,0 +1,466 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  r37-9:1.5 v37r4:1.4 Distillery:1.4;
+locks    ; strict;
+comment  @ * @;
+
+
+1.5
+date     91.05.15.15.21.41;  author dlarson;  state Stab;
+branches ;
+next     1.4;
+
+1.4
+date     91.03.09.21.03.34;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.01.22.00.01.22;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.01.17.01.10.35;  author Doug;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.01.15.02.56.45;  author Doug;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Handle the timer device, handle ACTION_TIMER
+@
+
+
+1.5
+log
+@spaces->tabs, etc.
+@
+text
+@/* Timer.c - Timer support routines */
+/*
+**      $Filename: timer.c $
+**      $Author: J_Toebes $
+**      $Revision: 1.4 $
+**      $Date: 91/03/09 21:03:34 $
+**      $Log:	timer.c,v $
+ * Revision 1.4  91/03/09  21:03:34  J_Toebes
+ * Add code for aging packets.
+ *
+ * Revision 1.3  91/01/22  00:01:22  Doug
+ * *** empty log message ***
+ *
+ * Revision 1.2  91/01/17  01:10:35  Doug
+ * Handle rebooting
+ *
+ * Revision 1.1  91/01/15  02:56:45  Doug
+ * Initial revision
+ *
+**
+**/
+
+#include "handler.h"
+
+int OpenTimer(global, port)
+GLOBAL global;
+struct MsgPort *port;
+{
+	int error;
+
+	/* assumes that a msg port has been allocated */
+
+	if ((global->timerpkt = (struct TimerPacket *)
+					 CreateExtIO(port, sizeof(struct TimerPacket)))== NULL)
+	  return(1);
+
+	global->timerpkt->tm_req.tr_node.io_Message.mn_Node.ln_Name =
+													  (char *)&(global->timerpkt->tm_pkt);
+	global->timerpkt->tm_pkt.dp_Link =
+											&(global->timerpkt->tm_req.tr_node.io_Message);
+	global->timerpkt->tm_pkt.dp_Port = port;
+
+	error = OpenDevice(TIMERNAME, UNIT_MICROHZ,
+								 (struct IORequest *)&(global->timerpkt->tm_req), 0);
+
+	return(error);
+}
+
+void CloseTimer(global)
+GLOBAL global;
+{
+	if (global->timerpkt != NULL)
+	{
+		CloseDevice((struct IORequest *)&(global->timerpkt->tm_req));
+		DeleteExtIO((struct IORequest *)global->timerpkt);
+		global->timerpkt = NULL;
+	}
+}
+
+void PostTimerReq(global, secs)
+GLOBAL global;
+int secs;
+{
+	/* Fill in the timer packet values */
+	/* that is the fields required for the timer device timerequest struct */
+	/* and the necessary fields of the DosPacket struct						  */
+	/* nothing like using 35 meg of store to accomplish a simple task		*/
+	/* oh well ! this is a 68K machine right ?									  */
+	/* some of them get trampled on so fill them all */
+
+	if (global->timerpkt != NULL)
+		{
+		global->timerpkt->tm_req.tr_node.io_Command = TR_ADDREQUEST;
+		global->timerpkt->tm_req.tr_time.tv_secs = secs;
+		global->timerpkt->tm_req.tr_time.tv_micro = 0;
+
+		global->timerpkt->tm_pkt.dp_Type = ACTION_TIMER;
+
+		/* Async IO so we don't sleep here for the msg */
+
+		SendIO((struct IORequest *)&global->timerpkt->tm_req);
+		}
+}
+
+ACTFN(ActTimer)
+{
+	HPACKET *thp, *nhp;
+	struct RPacket *RP;
+
+#define MAXAGENODES 10
+	struct NetNode *nodes[MAXAGENODES];
+	int curagenodes;
+	int tmp;
+
+	/* Timer requests come in every 2 seconds.  Every time one comes in, we	*/
+	/* check the HPackets for which we have no reply.  If no reply comes in	*/
+	/* after HPAGEOUT timer requests, we check the connection by sending an	*/
+	/* ACTION_NIL packet.  If the ACTION_NIL packet remains un-replied-to for */
+	/* HPAGEOUT timer packets, we assume the connection is bad and kill it.	*/
+
+	thp = global->qpkts;
+	while(thp)
+	{
+		curagenodes = 0;
+		for(thp=global->qpkts; thp && curagenodes < MAXAGENODES;)
+		{
+			if(thp->hp_Age < 0)
+			{
+				/* This is an ACTION_NIL packet already sent to check the other node */
+				if(--thp->hp_Age < -HPAGEOUT)
+				{
+					/* The node hasn't responded to our ACTION_NIL, either - kill it! */
+					struct Library *DriverBase = thp->hp_NNode->driver->libbase;
+					struct NetNode *killnode = thp->hp_NNode;
+					BUG(("***NODE NOT RESPONDING '%s'\n", thp->hp_NNode->name+1))
+					SDNTermNode(killnode->driver->drglobal, killnode->ioptr);
+					killnode->status = NODE_CRASHED;
+					killnode->ioptr = NULL;
+
+					/* Advance 'thp' to the next outstanding packet from a different */
+					/* node - after we call KillHPackets, all of this nodes' packets */
+					/* will be removed from the list											*/
+					for(thp=thp->hp_WNext;
+						 thp && thp->hp_NNode == killnode;
+						 thp=thp->hp_WNext);
+
+					/* If this node is already on the ageout list, remove it */
+					for(tmp=0; tmp<curagenodes; tmp++)
+					{
+						if(nodes[tmp] == killnode)
+						{
+							nodes[tmp] = nodes[curagenodes-1];
+							--curagenodes;
+							break;
+						}
+					}
+
+					/* Return all outstanding packets for this node with an error */
+					KillHPackets(global, killnode, ERROR_OBJECT_NOT_FOUND);
+					continue;
+				}
+			}
+			else if(++thp->hp_Age > HPAGEOUT)
+			{
+				BUG(("***NODE AGED OUT '%s'\n", thp->hp_NNode->name+1))
+				for(tmp=0; tmp<curagenodes && nodes[tmp] != thp->hp_NNode; tmp++);
+				if(tmp >= curagenodes)
+					nodes[curagenodes++] = thp->hp_NNode;
+				thp->hp_Age = 0;
+			}
+
+			thp = thp->hp_WNext;
+		}
+
+		/* Post writes to all aged-out nodes */
+		for(tmp=0; tmp<curagenodes; tmp++)
+		{
+			if(!(nhp = GetHPacket(global)) ||
+				!(RP = AllocRPacket(nodes[tmp], 0))) break;
+
+			RP->Type = ACTION_NIL;
+			RP->DLen = 0;
+
+			RP->handle = nhp;
+
+			nhp->hp_RP = RP;
+			nhp->hp_NPFlags = 0;
+			nhp->hp_NNode = nodes[tmp];
+			nhp->hp_Driver = nodes[tmp]->driver;
+			nhp->hp_Func = NULL;
+			nhp->hp_Pkt = NULL;
+
+			RemotePacket(global, nhp);
+		}
+	}
+
+	PostTimerReq(global, HPTICK);
+	hpkt->hp_Pkt = NULL;  /* So it doesn't get freed or returned */
+	retpkt(global, hpkt);
+}
+
+@
+
+
+1.4
+log
+@Add code for aging packets.
+@
+text
+@a1 9
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the author.                                           BBS:      */
+/* | o  | ||   John Toebes    Dave Baker                     (919)-471-6436  */
+/* |  . |//                                                                  */
+/* ======                                                                    */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+d3 4
+a6 4
+**      $Filename: timer.c $ 
+**      $Author: Doug $
+**      $Revision: 1.3 $
+**      $Date: 91/01/22 00:01:22 $
+d8 3
+d13 1
+a13 1
+ * 
+d16 1
+a16 1
+ * 
+d19 1
+a19 1
+ * 
+d26 1
+a26 1
+GLOBAL global;    
+d29 1
+a29 1
+   int error;
+d31 1
+a31 1
+   /* assumes that a msg port has been allocated */   
+d33 9
+a41 9
+   if ((global->timerpkt = (struct TimerPacket *)
+                CreateExtIO(port, sizeof(struct TimerPacket)))== NULL)
+     return(1);
+
+   global->timerpkt->tm_req.tr_node.io_Message.mn_Node.ln_Name = 
+                                         (char *)&(global->timerpkt->tm_pkt);
+   global->timerpkt->tm_pkt.dp_Link =
+                                 &(global->timerpkt->tm_req.tr_node.io_Message);
+   global->timerpkt->tm_pkt.dp_Port = port;
+d43 2
+a44 2
+   error = OpenDevice(TIMERNAME, UNIT_MICROHZ, 
+                         (struct IORequest *)&(global->timerpkt->tm_req), 0);
+d46 1
+a46 1
+   return(error);
+d52 6
+a57 6
+   if (global->timerpkt != NULL)
+   {
+      CloseDevice((struct IORequest *)&(global->timerpkt->tm_req));
+      DeleteExtIO((struct IORequest *)global->timerpkt);
+      global->timerpkt = NULL;
+   }
+d64 19
+a82 19
+   /* Fill in the timer packet values */
+   /* that is the fields required for the timer device timerequest struct */
+   /* and the necessary fields of the DosPacket struct                    */
+   /* nothing like using 35 meg of store to accomplish a simple task      */
+   /* oh well ! this is a 68K machine right ?                             */ 
+   /* some of them get trampled on so fill them all */
+
+   if (global->timerpkt != NULL)
+      {
+      global->timerpkt->tm_req.tr_node.io_Command = TR_ADDREQUEST;
+      global->timerpkt->tm_req.tr_time.tv_secs = secs; 
+      global->timerpkt->tm_req.tr_time.tv_micro = 0;
+
+      global->timerpkt->tm_pkt.dp_Type = ACTION_TIMER;
+      
+      /* Async IO so we don't sleep here for the msg */
+     
+      SendIO((struct IORequest *)&global->timerpkt->tm_req);
+      }
+d87 2
+a88 3
+   ULONG sigmask = 0L;
+   HPACKET *thp, *nhp;
+   struct RPacket *RP;
+d91 85
+a175 3
+   struct NetNode *nodes[MAXAGENODES];
+   int curagenodes;
+   int tmp;
+d177 3
+a179 85
+   /* Timer requests come in every 2 seconds.  Every time one comes in, we   */
+   /* check the HPackets for which we have no reply.  If no reply comes in   */
+   /* after HPAGEOUT timer requests, we check the connection by sending an   */
+   /* ACTION_NIL packet.  If the ACTION_NIL packet remains un-replied-to for */
+   /* HPAGEOUT timer packets, we assume the connection is bad and kill it.   */
+
+   thp = global->qpkts;
+   while(thp)
+   {
+      curagenodes = 0;
+      for(thp=global->qpkts; thp && curagenodes < MAXAGENODES;)
+      {
+         if(thp->hp_Age < 0)
+         {
+            /* This is an ACTION_NIL packet already sent to check the other node */
+            if(--thp->hp_Age < -HPAGEOUT)
+            {
+               /* The node hasn't responded to our ACTION_NIL, either - kill it! */
+               struct Library *DriverBase = thp->hp_NNode->driver->libbase;
+               struct NetNode *killnode = thp->hp_NNode;
+               BUG(("***NODE NOT RESPONDING '%s'\n", thp->hp_NNode->name+1))
+               SDNTermNode(killnode->driver->drglobal, killnode->ioptr);
+               killnode->status = NODE_CRASHED;
+               killnode->ioptr = NULL;
+
+               /* Advance 'thp' to the next outstanding packet from a different */
+               /* node - after we call KillHPackets, all of this nodes' packets */
+               /* will be removed from the list                                 */
+               for(thp=thp->hp_WNext; 
+                   thp && thp->hp_NNode == killnode; 
+                   thp=thp->hp_WNext);
+
+               /* If this node is already on the ageout list, remove it */
+               for(tmp=0; tmp<curagenodes; tmp++)
+               {
+                  if(nodes[tmp] == killnode) 
+                  {
+                     nodes[tmp] = nodes[curagenodes-1];
+                     --curagenodes;
+                     break;
+                  }
+               }
+
+               /* Return all outstanding packets for this node with an error */
+               KillHPackets(global, killnode, ERROR_OBJECT_NOT_FOUND);
+               continue;
+            }
+         }
+         else if(++thp->hp_Age > HPAGEOUT)
+         {
+            BUG(("***NODE AGED OUT '%s'\n", thp->hp_NNode->name+1))
+            for(tmp=0; tmp<curagenodes && nodes[tmp] != thp->hp_NNode; tmp++);
+            if(tmp >= curagenodes)
+               nodes[curagenodes++] = thp->hp_NNode;
+            thp->hp_Age = 0;
+         }
+
+         thp = thp->hp_WNext;
+      }
+
+      /* Post writes to all aged-out nodes */
+      for(tmp=0; tmp<curagenodes; tmp++)
+      {
+         if(!(nhp = GetHPacket(global)) ||
+            !(RP = AllocRPacket(nodes[tmp], 0))) break;
+
+         RP->Type = ACTION_NIL;
+         RP->DLen = 0;
+
+         RP->handle = nhp;
+
+         nhp->hp_RP = RP;
+         nhp->hp_NPFlags = 0;
+         nhp->hp_NNode = nodes[tmp];
+         nhp->hp_Driver = nodes[tmp]->driver;
+         nhp->hp_Func = NULL;
+         nhp->hp_Pkt = NULL;
+
+         RemotePacket(global, nhp);
+      }
+   }
+   
+   PostTimerReq(global, HPTICK);
+   hpkt->hp_Pkt = NULL;  /* So it doesn't get freed or returned */
+   retpkt(global, hpkt);
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.2 $
+**      $Date: 91/01/17 01:10:35 $
+d17 3
+d102 6
+d112 1
+a112 1
+      for(thp=global->qpkts; thp && curagenodes < MAXAGENODES; thp=thp->hp_WNext)
+d114 37
+a150 1
+         if(++thp->hp_Age > HPAGEOUT)
+d158 2
+d161 1
+d188 1
+@
+
+
+1.2
+log
+@Handle rebooting
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.1 $
+**      $Date: 91/01/15 02:56:45 $
+d17 3
+d123 1
+a123 1
+         RP->handle = thp;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d14 2
+a15 2
+**      $Revision: $
+**      $Date: $
+d17 3
+d104 1
+@

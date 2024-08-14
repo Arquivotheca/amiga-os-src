@@ -1,0 +1,1336 @@
+head     40.3;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:40.3; strict;
+comment  @ * @;
+
+
+40.3
+date     94.03.08.09.39.40;  author davidj;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     94.03.07.14.32.47;  author davidj;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     94.03.04.10.02.16;  author davidj;  state Exp;
+branches ;
+next     40.0;
+
+40.0
+date     94.03.03.10.51.16;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+40.3
+log
+@fixed a few discrepancies
+@
+text
+@/* gui.c
+ * Graphical User Interface routines for CDPlayer
+ * Copyright (c) 1994 Commodore International Services, Co.
+ *
+ */
+
+#include <dos/dos.h>
+#include <exec/types.h>
+#include <exec/libraries.h>
+#include <graphics/view.h>
+#include <intuition/screens.h>
+#include <intuition/intuition.h>
+#include <intuition/gadgetclass.h>
+#include <intuition/imageclass.h>
+#include <intuition/intuitionbase.h>
+#include <intuition/classusr.h>
+#include <gadgets/button.h>
+#include <images/led.h>
+#include <libraries/gadtools.h>
+
+#include <clib/macros.h>
+#include <clib/exec_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/layers_protos.h>
+#include <string.h>
+#include <stdio.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/gadtools_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/layers_pragmas.h>
+
+#include "cdaudio.h"
+
+/*****************************************************************************/
+
+/* safely close a window that shares a message port with another window */
+static void CloseWindowSafely (struct Window *win)
+{
+    struct IntuiMessage *msg, *succ;
+
+    Forbid ();
+
+    msg = (struct IntuiMessage *) win->UserPort->mp_MsgList.lh_Head;
+    while (succ = (struct IntuiMessage *) msg->ExecMessage.mn_Node.ln_Succ)
+    {
+	if (msg->IDCMPWindow == win)
+	{
+	    Remove ((struct Node *) msg);
+	    ReplyMsg ((struct Message *) msg);
+	}
+	msg = succ;
+    }
+    win->UserPort = NULL;
+    ModifyIDCMP (win, NULL);
+
+    Permit ();
+
+    /* clear the menu strip */
+    if (win->MenuStrip)
+	ClearMenuStrip (win);
+
+    /* close the window */
+    CloseWindow (win);
+}
+
+/*****************************************************************************/
+
+static LONG GetNumTracks (void)
+{
+    LONG tracks;
+
+    /* Get the number of tracks */
+    if (tracks = GetCDNumTracks ())
+    {
+	/* Calculate the scroller values */
+	visible = MATRIX_ROWS;
+	total = (tracks + (MATRIX_COLS - 1)) / MATRIX_COLS;
+    }
+    else
+    {
+	top = page = 0;
+	total = visible = MATRIX_ROWS;
+    }
+
+    /* Make sure we have a scroll gadget and that it isn't selected */
+    if (scrollGad && !(scrollGad->Flags & GFLG_SELECTED))
+    {
+	/* Update the scroller */
+	GT_SetGadgetAttrs (scrollGad, win, NULL,
+			   GTSC_Top, top,
+			   GTSC_Visible, visible,
+			   GTSC_Total, total,
+			   GA_Disabled, ((total == visible) ? TRUE : FALSE),
+			   TAG_DONE);
+    }
+
+    return tracks;
+}
+
+/*****************************************************************************/
+
+static void RefreshTime (LONG refresh)
+{
+    /* Lock the window's layer so that its size won't change */
+    LockLayer (NULL, win->WLayer);
+
+    /* Full window version */
+    if (gads[GID_LOOP] == NULL)
+    {
+	if (refresh != SID_NOCD)
+	{
+	    LONG tx = gads[GID_STOP]->LeftEdge + gads[GID_STOP]->Width + 4;
+	    UBYTE buffer[32];
+
+	    /* Set the appropriate pens */
+	    if (win->Flags & WFLG_WINDOWACTIVE)
+		SetABPenDrMd (rp, dri->dri_Pens[FILLTEXTPEN], dri->dri_Pens[FILLPEN], JAM2);
+	    else
+		SetABPenDrMd (rp, dri->dri_Pens[SHADOWPEN], dri->dri_Pens[BACKGROUNDPEN], JAM2);
+
+	    /* Show number of tracks */
+	    sprintf (buffer, "%02ld", (LONG)trak[0]);
+	    Move (rp, tx + spaceWidth, tf->tf_Baseline + 2);
+	    Text (rp, buffer, 2);
+
+	    /* Show time */
+	    sprintf (buffer, "%lc%02ld:%02ld", (LONG)sign, (LONG)time[0], (LONG)time[1]);
+	    Move (rp, tx + trackWidth, tf->tf_Baseline + 2);
+	    Text (rp, buffer, 6);
+	}
+    }
+    else if (refresh == TIME_ACTIVE)
+    {
+    }
+    else if (frameImage)
+    {
+	SetABPenDrMd (rp, backPen, backPen, JAM2);
+	if (refresh == TIME_RENDER)
+	{
+	    RectFill (rp, (LONG) frameRect.MinX, (LONG) frameRect.MinY, (LONG) frameRect.MaxX, (LONG) frameRect.MaxY);
+	    DrawImageState (rp, frameImage, timeX, timeY, IDS_NORMAL, dri);
+	}
+	if (state != SID_NOCD)
+	{
+	    DrawImageState (rp, trakImage, timeX + TRAK_OFFX, timeY + TRAK_OFFY, IDS_NORMAL, dri);
+	    DrawImageState (rp, timeImage, timeX + TIME_OFFX, timeY + TIME_OFFY, IDS_NORMAL, dri);
+	}
+    }
+
+    /* Unlock the layer */
+    UnlockLayer (win->WLayer);
+}
+
+/*****************************************************************************/
+
+static void SetTrack (LONG track, LONG index)
+{
+    static LONG previous = -100;
+
+    /* Update the field */
+    trak[0] = (WORD) track;
+
+    /* Update the image */
+    if (trakImage)
+	SetAttrs ((Object *) trakImage, LED_Values, (ULONG) trak, TAG_DONE);
+
+    if (gads[GID_ARRAY] && (index != previous))
+    {
+	LONG forePen, backPen;
+	struct Image *im;
+
+	/* Make sure we have a previous */
+	if (previous >= 0)
+	{
+	    im = imgs[previous - page];
+	    SetAttrs ((Object *) im, IA_FGPen, 1, IA_BGPen, 0, TAG_DONE);
+
+	    /* Restore the state of the previously selected */
+	    SetGadgetAttrs (gads[GID_ARRAY + previous - page], win, NULL,
+			    BUTTON_TextPen, -1,
+			    BUTTON_FillTextPen, -1,
+			    BUTTON_BackgroundPen, -1,
+			    BUTTON_FillPen, -1,
+			    TAG_DONE);
+	}
+
+	/* Make sure we have a current */
+	if (index >= 0)
+	{
+	    /* Colors */
+	    forePen = (bPen == -1) ? dri->dri_Pens[FILLPEN] : bPen;
+	    backPen = dri->dri_Pens[SHADOWPEN];
+
+	    /* Get a pointer to the image */
+	    im = imgs[index - page];
+	    SetAttrs ((Object *) im, IA_FGPen, forePen, IA_BGPen, backPen, TAG_DONE);
+
+	    /* Set the new gadget */
+	    SetGadgetAttrs (gads[GID_ARRAY + index - page], win, NULL,
+			    BUTTON_TextPen, forePen,
+			    BUTTON_FillTextPen, forePen,
+			    BUTTON_BackgroundPen, backPen,
+			    BUTTON_FillPen, backPen,
+			    TAG_DONE);
+	}
+
+	/* Remember this grand occasion */
+	previous = index;
+    }
+}
+
+/*****************************************************************************/
+
+static void SetTime (LONG minus, LONG minutes, LONG seconds)
+{
+    /* Update the field */
+    if (minus)
+	sign = '-';
+    else
+	sign = ' ';
+    time[0] = (WORD) minutes;
+    time[1] = (WORD) seconds;
+
+    /* Update the image */
+    if (timeImage)
+	SetAttrs ((Object *) timeImage, LED_Values, (ULONG) time, LED_Negative, minus, TAG_DONE);
+}
+
+/*****************************************************************************/
+
+static struct Gadget *CreateGadgetList (LONG which)
+{
+    LONG stopSelect, playWhich;
+    LONG border = FALSE;
+    LONG x, y, w, h;
+    LONG forePen;
+    char *title;
+    LONG space;
+    BOOL dis;
+
+    stopSelect = playWhich = 0;
+    if (state == SID_PLAY)
+	playWhich = 1;
+    else if (state == SID_PAUSE)
+	playWhich = 2;
+    else
+	stopSelect = 1;
+
+    /* Calculate the positions */
+    w = BUTTON_WIDTH;
+    if (which)
+    {
+	/* Set the title */
+	title = sTitle;
+
+	/* We are in the border */
+	border = TRUE;
+
+	/* Get the height */
+	h = win->BorderTop - 2;
+
+	/* Get the starting position and width */
+	y = 1;
+	space = 0;
+	x = clseEnd;
+	w = MAX (w, clseWidth);
+    }
+    else
+    {
+	/* Set the title */
+	title = bTitle;
+
+	space = 2;
+	x = win->BorderLeft + 4;
+	h = BUTTON_HEIGHT;
+	y = win->BorderTop + 4 + (BUTTON_HEIGHT * 2);
+    }
+
+    /* Determine disable state */
+    dis = (state == SID_NOCD) ? TRUE : FALSE;
+
+    /* Set the title */
+    SetWindowTitles (win, title, ((UBYTE *) ~ 0));
+
+    /* Refresh the window border */
+    RefreshWindowFrame (win);
+
+    /* Create the rewind button */
+    gads[GID_REWIND] = NewObject (NULL, buttonClassName,
+				  GA_Top, y,
+				  GA_Left, x,
+				  GA_Width, w,
+				  GA_Height, h,
+				  GA_TopBorder, border,
+				  GA_Immediate, TRUE,
+				  GA_RelVerify, TRUE,
+				  GA_Disabled, dis,
+				  GA_ID, GID_REWIND,
+				  BUTTON_Glyph, &im1,
+				  BUTTON_FillTextPen, gPen,
+				  TAG_DONE);
+
+    /* Create the play/pause button */
+    x += w + space;
+    gads[GID_PP] = NewObject (NULL, buttonClassName,
+			      GA_Previous, gads[GID_PP - 1],
+			      GA_Top, y,
+			      GA_Left, x,
+			      GA_Width, w,
+			      GA_Height, h,
+			      GA_TopBorder, border,
+			      GA_Immediate, TRUE,
+			      GA_RelVerify, TRUE,
+			      GA_Selected, playWhich,
+			      GA_Disabled, dis,
+			      BUTTON_PushButton, TRUE,
+			      GA_ID, GID_PP,
+			      BUTTON_Glyph, impp,
+			      BUTTON_Array, 3,
+			      BUTTON_FillTextPen, gPen,
+			      BUTTON_Current, playWhich,
+			      TAG_DONE);
+
+    /* Create the fast forward button */
+    x += w + space;
+    gads[GID_FFORWARD] = NewObject (NULL, buttonClassName,
+				    GA_Previous, gads[GID_FFORWARD - 1],
+				    GA_Top, y,
+				    GA_Left, x,
+				    GA_Width, w,
+				    GA_Height, h,
+				    GA_TopBorder, border,
+				    GA_Immediate, TRUE,
+				    GA_RelVerify, TRUE,
+				    GA_Disabled, dis,
+				    GA_ID, GID_FFORWARD,
+				    BUTTON_Glyph, &im4,
+				    BUTTON_FillTextPen, gPen,
+				    TAG_DONE);
+
+    /* Create the stop button */
+    x += w + space;
+    gads[GID_STOP] = NewObject (NULL, buttonClassName,
+				GA_Previous, gads[GID_STOP - 1],
+				GA_Top, y,
+				GA_Left, x,
+				GA_Width, w,
+				GA_Height, h,
+				GA_TopBorder, border,
+				GA_Immediate, TRUE,
+				GA_RelVerify, TRUE,
+				GA_Selected, stopSelect,
+				BUTTON_PushButton, TRUE,
+				GA_ID, GID_STOP,
+				BUTTON_Glyph, &im5,
+				BUTTON_FillTextPen, rPen,
+				TAG_DONE);
+
+    /* Create the full window version */
+    if (which == 0)
+    {
+	struct Image *im;
+	LONG i, j, k, l;
+	LONG selected;
+	LONG tracks;
+	WORD tmp[2];
+	LONG array;
+	LONG selt;
+	LONG togt;
+	LONG glyt;
+	LONG sel;
+
+	/* Create the second tier */
+	l = x + w + 8;
+	y += (h + 1);
+	w = BUTTON_WIDTH;
+	x = win->BorderLeft + 4;
+	for (i = 0; i < 4; i++, x += w + 2)
+	{
+	    if (i == 0)
+	    {
+		im = (struct Image *) imgt;
+		array = 4;
+		selt = togt = TAG_IGNORE;
+	    }
+	    else
+	    {
+		im = img2[i - 1];
+		array = 0;
+		selt = GA_Selected;
+		togt = GA_ToggleSelect;
+	    }
+	    selected = GetCDButtonState (GID_TIME + i);
+	    gads[GID_TIME + i] = NewObject (NULL, buttonClassName,
+					    GA_Previous, gads[GID_TIME + i - 1],
+					    GA_Top, y,
+					    GA_Left, x,
+					    GA_Width, w,
+					    GA_Height, h,
+					    GA_Immediate, TRUE,
+					    GA_RelVerify, TRUE,
+					    GA_Disabled, dis,
+					    selt, selected,
+					    togt, TRUE,
+					    GA_ID, GID_TIME + i,
+					    BUTTON_Glyph, im,
+					    BUTTON_Array, array,
+					    BUTTON_FillTextPen, gPen,
+					    BUTTON_Current, selected,
+					    TAG_DONE);
+	}
+
+	/* Time offset */
+	timeX = win->BorderLeft + 4;
+	timeY = win->BorderTop + 2;
+
+	/* Colors */
+	forePen = (bPen == -1) ? dri->dri_Pens[FILLPEN] : bPen;
+	backPen = dri->dri_Pens[SHADOWPEN];
+
+	/* Frame image around the time display */
+	frameImage = NewObject (NULL, FRAMEICLASS,
+				SYSIA_DrawInfo, dri,
+				IA_FrameType, FRAME_RIDGE,
+				IA_Recessed, TRUE,
+				IA_EdgesOnly, TRUE,
+				IA_Width, FRAME_WIDTH,
+				IA_Height, FRAME_HEIGHT,
+				TAG_DONE);
+
+	/* Compute our fill rectangle */
+	frameRect.MinX = timeX + 5;
+	frameRect.MinY = timeY + 3;
+	frameRect.MaxX = timeX + frameImage->Width - 1 - 5;
+	frameRect.MaxY = timeY + frameImage->Height - 1 - 3;
+
+	/* Create the LED time display image */
+	trakImage = NewObject (NULL, ledClassName,
+			       SYSIA_DrawInfo, dri,
+			       IA_FGPen, (ULONG) forePen,
+			       IA_BGPen, (ULONG) backPen,
+			       IA_Width, (ULONG) TRACK_WIDTH,
+			       IA_Height, (ULONG) TRACK_HEIGHT,
+			       LED_Pairs, 1,
+			       LED_Values, (ULONG) trak,
+			       TAG_DONE);
+
+	/* Create the LED time display image */
+	timeImage = NewObject (NULL, ledClassName,
+			       SYSIA_DrawInfo, dri,
+			       IA_FGPen, (ULONG) forePen,
+			       IA_BGPen, (ULONG) backPen,
+			       IA_Width, (ULONG) (frameImage->Width - TIME_MARGX),
+			       IA_Height, (ULONG) (frameImage->Height - TIME_MARGY),
+			       LED_Signed, TRUE,
+			       LED_Colon, TRUE,
+			       LED_Pairs, 2,
+			       LED_Values, (ULONG) time,
+			       TAG_DONE);
+
+	/* Get the number of tracks */
+	tracks = GetNumTracks ();
+
+	/* Create the track selection matrix */
+	w = TBUTTON_WIDTH;
+	for (i = k = 0, y = win->BorderTop + 2; i < MATRIX_ROWS; i++, y += (h + 1))
+	{
+	    x = l;
+	    for (j = 0; j < MATRIX_COLS; j++, x += (w + 2))
+	    {
+		/* Get the state for this slot */
+		sel = GetCDPlayEntryState (page + k);
+
+		/* Create the LED track display image */
+		tmp[0] = (WORD) GetCDTrackNum (page + k);
+		imgs[k] = NewObject (NULL, ledClassName,
+				     SYSIA_DrawInfo, dri,
+				     IA_FGPen, (ULONG) dri->dri_Pens[TEXTPEN],
+				     IA_BGPen, (ULONG) dri->dri_Pens[BACKGROUNDPEN],
+				     IA_Width, TRACK_WIDTH,
+				     IA_Height, TRACK_HEIGHT,
+				     LED_Pairs, 1,
+				     LED_Values, (ULONG) tmp,
+				     TAG_DONE);
+
+		glyt = (page + k < tracks) ? GA_Image : TAG_IGNORE;
+		gads[GID_ARRAY + k] = NewObject (NULL, buttonClassName,
+						 GA_Previous, gads[GID_ARRAY + k - 1],
+						 GA_Top, y,
+						 GA_Left, x,
+						 GA_Width, w,
+						 GA_Height, h,
+						 GA_TopBorder, border,
+						 GA_Immediate, TRUE,
+						 GA_RelVerify, TRUE,
+						 GA_ToggleSelect, TRUE,
+						 GA_Selected, sel,
+						 GA_Disabled, (page + k < tracks) ? FALSE : TRUE,
+						 GA_ID, GID_ARRAY + k,
+						 glyt, imgs[k],
+						 TAG_DONE);
+		k++;
+	    }
+	}
+
+	{
+	    struct NewGadget ng;
+	    struct Gadget *g;
+
+	    /* Create the GadTools context */
+	    cgad = NULL;
+	    g = CreateContext (&cgad);
+
+	    /* Create the page scroll gadget */
+	    memset (&ng, 0, sizeof (struct NewGadget));
+
+	    ng.ng_VisualInfo = vi;
+	    ng.ng_TextAttr = &ta;
+	    ng.ng_LeftEdge = win->Width - (win->BorderRight + 18 + 4);
+	    ng.ng_TopEdge = win->BorderTop + 2;
+	    ng.ng_Width = 18;
+	    ng.ng_Height = win->Height - (win->BorderTop + 4 + win->BorderBottom);
+	    ng.ng_GadgetID = GID_SCROLL;
+	    scrollGad = CreateGadget (SCROLLER_KIND, g, &ng,
+				      GA_RelVerify, TRUE,
+				      GA_Immediate, TRUE,
+				      GTSC_Arrows, 10,
+				      GTSC_Top, top,
+				      GTSC_Total, total,
+				      GTSC_Visible, visible,
+				      PGA_Freedom, LORIENT_VERT,
+				      TAG_DONE);
+
+	    /* Add the gadget and refresh it */
+	    AddGList (win, cgad, -1, -1, NULL);
+	    RefreshGList (cgad, win, NULL, -1);
+	    GT_RefreshWindow (win, NULL);
+	}
+    }
+
+    /* Remember which state we are in */
+    win->UserData = (char *) which;
+
+    /* Add the gadget list */
+    AddGList (win, gads[0], 0, -1, NULL);
+
+    /* Refresh the gadget list */
+    RefreshGList (gads[0], win, NULL, -1);
+
+    /* Refresh the time display */
+    RefreshTime (TIME_RENDER);
+
+    /* Return the gadget list */
+    return gads[0];
+}
+
+/*****************************************************************************/
+
+static void DeleteGadgetList (void)
+{
+    register LONG i;
+
+    for (i = 0; i < MAX_GADS; i++)
+    {
+	if (gads[i])
+	{
+	    RemoveGList (win, gads[i], 1);
+	    DisposeObject (gads[i]);
+	    gads[i] = NULL;
+	}
+    }
+
+    if (scrollGad)
+    {
+	RemoveGList (win, cgad, -1);
+	FreeGadgets (cgad);
+	cgad = scrollGad = NULL;
+    }
+
+    for (i = 0; i < MAX_MATRIX; i++)
+    {
+	DisposeObject ((Object *) imgs[i]);
+	imgs[i] = NULL;
+    }
+
+    DisposeObject ((Object *) trakImage);
+    DisposeObject ((Object *) timeImage);
+    trakImage = timeImage = NULL;
+}
+
+/*****************************************************************************/
+
+static void UpdateMatrix (LONG which, LONG mode)
+{
+    register LONG i, j, k;
+    LONG tracks, sel, max;
+    struct Image *im;
+    WORD pos, tmp[2];
+
+    if (which == 0)
+    {
+	/* Get the number of tracks */
+	tracks = GetNumTracks ();
+
+	/* Compute the max */
+	max = (mode) ? MAX_MATRIX + page : tracks;
+
+#if REMOVE
+	pos = RemoveGList (win, gads[GID_ARRAY], MAX_MATRIX);
+#endif
+
+	/* Set the state of the matrix */
+	for (i = 0, k = page; (i < MATRIX_ROWS) && (k < max); i++)
+	{
+	    for (j = 0; (j < MATRIX_COLS) && (k < max); j++)
+	    {
+		/* Get the track for this slot */
+		sel = GetCDPlayEntryState (k);
+
+		/* Get the image */
+		if (im = ((k < tracks) ? imgs[k - page] : NULL))
+		{
+		    tmp[0] = (WORD) GetCDTrackNum (k);
+		    SetAttrs (im, LED_Values, (ULONG) tmp, TAG_DONE);
+		}
+
+		/* Set the gadget attributes */
+#if REMOVE
+		SetAttrs ((Object *) gads[GID_ARRAY + k - page],
+#else
+		SetGadgetAttrs (gads[GID_ARRAY + k - page], win, NULL,
+#endif
+				GA_Selected, sel,
+				GA_Image, im,
+				GA_Disabled, ((k < tracks) ? FALSE : TRUE),
+				TAG_DONE);
+		k++;
+	    }
+	}
+
+#if REMOVE
+	AddGList (win, gads[GID_ARRAY], pos, MAX_MATRIX, NULL);
+	RefreshGList (gads[GID_ARRAY], win, NULL, MAX_MATRIX);
+#endif
+    }
+}
+
+/*****************************************************************************/
+
+static void SetPage (LONG code)
+{
+    /* Range check */
+    if (code < 0)
+	code = 0;
+    if (code > total)
+	code = total;
+
+    /* Calculate the current page */
+    top = code;
+    page = (top * MATRIX_COLS);
+
+    /* See if the page has changed */
+    if (page != ppage)
+    {
+	/* Update the matrix visuals */
+	UpdateMatrix ((LONG) win->UserData, 1);
+
+	/* Record the change */
+	ppage = page;
+    }
+}
+
+/*****************************************************************************/
+
+static void ChangeState (WORD istate, WORD code)
+{
+    BOOL update = FALSE;
+
+    switch (istate)
+    {
+	case GID_PP:
+	    SetGadgetAttrs (gads[GID_STOP], win, NULL, GA_Selected, FALSE, TAG_DONE);
+	    state = SID_PLAY + code - 1;
+	    if ((code == 1) && (numTracks == 0))
+	    {
+		SetCDPlaylistState (1);
+		update = TRUE;
+	    }
+	    break;
+
+	case GID_STOP:
+	    state = SID_STOP;
+	    SetGadgetAttrs (gads[GID_STOP], win, NULL, GA_Selected, TRUE, TAG_DONE);
+	    SetGadgetAttrs (gads[GID_PP], win, NULL, GA_Selected, FALSE, TAG_DONE);
+	    SetGadgetAttrs (gads[GID_INTRO], win, NULL, GA_Selected, FALSE, TAG_DONE);
+	    SetGadgetAttrs (gads[GID_RANDOM], win, NULL, GA_Selected, FALSE, TAG_DONE);
+	    SetCDPlaylist (0);
+	    SetCDButtonState ((LONG) GID_INTRO, 0, (LONG) 0);
+	    SetCDButtonState ((LONG) GID_RANDOM, 0, (LONG) 0);
+	    if (numTracks == 0)
+		SetCDPlaylistState (0);
+	    update = TRUE;
+	    break;
+    }
+
+    if (update)
+	UpdateMatrix ((LONG) win->UserData, 0);
+    SetCDButtonState ((LONG) istate, 0, (LONG) code);
+}
+
+/*****************************************************************************/
+
+static void ChangeGadgetState (LONG which)
+{
+    register LONG i, j, k;
+    struct Image *im;
+    WORD pos, tmp[2];
+    LONG tracks;
+    LONG dis;
+
+    /* Determine disable state */
+    dis = (state == SID_NOCD) ? TRUE : FALSE;
+
+    /* If we aren't stopped, then stop everything */
+    if (state != SID_STOP)
+	ChangeState (GID_STOP, 0);
+
+    /* Set the state of the main controls */
+    for (i = 0; i < GID_STOP; i++)
+	SetGadgetAttrs (gads[GID_REWIND + i], win, NULL, GA_Disabled, dis, TAG_DONE);
+
+    if (which == 0)
+    {
+	/* Set the state of the window */
+	for (i = GID_TIME; i < GID_ARRAY; i++)
+	    SetGadgetAttrs (gads[i], win, NULL, GA_Disabled, dis, TAG_DONE);
+
+	/* Get the number of tracks */
+	tracks = GetNumTracks ();
+
+#if REMOVE
+	/* Remove the gadget list because we are going to do mass changes */
+	pos = RemoveGList (win, gads[GID_ARRAY], MAX_MATRIX);
+#endif
+
+	/* Set the state of the matrix */
+	for (i = 0, k = page; i < MATRIX_ROWS; i++)
+	{
+	    for (j = 0; j < MATRIX_COLS; j++)
+	    {
+		im = (k < tracks) ? imgs[k - page] : NULL;
+		tmp[0] = (WORD) GetCDTrackNum (k);
+		SetAttrs (imgs[k - page], LED_Values, (ULONG) tmp, TAG_DONE);
+#if REMOVE
+		SetAttrs ((Object *) gads[GID_ARRAY + k - page],
+#else
+		SetGadgetAttrs (gads[GID_ARRAY + k - page], win, NULL,
+#endif
+				GA_Selected, FALSE,
+				GA_Disabled, ((k < tracks) ? dis : TRUE),
+				GA_Image, im,
+				TAG_DONE);
+		k++;
+	    }
+	}
+
+#if REMOVE
+	AddGList (win, gads[GID_ARRAY], pos, MAX_MATRIX, NULL);
+	RefreshGList (gads[GID_ARRAY], win, NULL, MAX_MATRIX);
+#endif
+    }
+
+    /* Refresh the time display */
+    RefreshTime (TIME_RENDER);
+}
+
+/*****************************************************************************/
+
+static struct Gadget *ChangeGadgetList (LONG which)
+{
+    /* Delete the old gadget list */
+    DeleteGadgetList ();
+
+    /* Toggle which */
+    if (which)
+	which = 0;
+    else
+	which = 1;
+
+    /* Create the new gadget list */
+    return CreateGadgetList (which);
+}
+
+/*****************************************************************************/
+
+void DoPlayer (int winTop, int winLeft, int small)
+{
+    struct IntuiMessage *imsg;
+    LONG width, height;
+    struct IBox zbox;
+    struct Gadget *g;
+    LONG sw, bw;
+    LONG sh, bh;
+    LONG cstate;
+    ULONG zoom;
+    ULONG sigr;
+    ULONG sigt;
+    ULONG sigi;
+    BOOL going;
+
+    /* Initialize the silly player library */
+    InitializeCD ();
+
+    /* Get the current state of affairs */
+    state = GetCDState ();
+
+#if FIRSTSCREEN
+    if (scr = ((struct IntuitionBase *) IntuitionBase)->FirstScreen)
+#else
+    /* Get a pointer to the screen that we are going to open on */
+    if (scr = LockPubScreen (NULL))
+#endif
+    {
+	/* Get the GadTools visual info */
+	vi = GetVisualInfoA (scr, NULL);
+
+	/* Obtain a few good colors */
+	rPen = ObtainBestPen (scr->ViewPort.ColorMap, 0xDDDDDDDD, 0, 0,
+			      OBP_FailIfBad, TRUE,
+			      TAG_DONE);
+	gPen = ObtainBestPen (scr->ViewPort.ColorMap, 0, 0xEEEEEEEE, 0,
+			      OBP_FailIfBad, TRUE,
+			      TAG_DONE);
+	bPen = ObtainBestPen (scr->ViewPort.ColorMap, 0, 0xAAAAAAAA, 0xDDDDDDDD,
+			      OBP_FailIfBad, TRUE,
+			      TAG_DONE);
+
+	/* Initialize a few good variables */
+	ta = *scr->Font;
+	tf = OpenFont (&ta);
+	dri = GetScreenDrawInfo (scr);
+
+	/* Compute the big size */
+	bw = scr->WBorLeft + 8 + (TBUTTON_WIDTH * MATRIX_COLS) + 6 + 8 + (5 * 30) + 4 + 18 + 8 + scr->WBorRight;
+	bh = scr->BarHeight + 4 + (BUTTON_HEIGHT * MATRIX_ROWS) + 4 + scr->WBorBottom;
+
+	/* Get the width of the system gadgets */
+	for (sh = 0, win = scr->FirstWindow; win && (sh < 2); win = win->NextWindow)
+	{
+	    for (sh = sw = 0, g = win->FirstGadget; g && (sh < 2); g = g->NextGadget)
+	    {
+		if (g->GadgetType & GTYP_SYSGADGET)
+		{
+		    if ((g->GadgetType & GTYP_SYSGADGET) == GTYP_CLOSE)
+		    {
+			clseWidth = g->Width;
+			clseEnd = g->LeftEdge + g->Width - 1;
+			sw += g->Width;
+			sh++;
+		    }
+		    else if ((g->GadgetType & GTYP_SYSGADGET) == GTYP_WDEPTH)
+		    {
+			sw += (g->Width * 2);
+			sh++;
+		    }
+		}
+	    }
+	}
+	win = NULL;
+	if (clseWidth == 0)
+	{
+	    clseWidth = clseEnd = 19;
+	    sw = clseWidth + 46 + 8;
+	}
+
+	/* Compute the small size */
+	spaceWidth = TextLength (&scr->RastPort, " ", 1);
+	trackWidth = spaceWidth + TextLength (&scr->RastPort, "00", 2) + spaceWidth;
+	sh = MAX (BUTTON_WIDTH, clseWidth);
+	sw = sw + (4 * sh) + trackWidth + TextLength (&scr->RastPort, "-00:00", 6) + spaceWidth;
+	sh = scr->BarHeight + 1;
+
+	/* Initialize size of zoom box and window */
+	zbox.Left = winLeft;
+	zbox.Top = winTop;
+	if (small)
+	{
+	    width = sw;
+	    zbox.Width = bw;
+	    height = sh;
+	    zbox.Height = bh;
+	}
+	else
+	{
+	    width = bw;
+	    zbox.Width = sw;
+	    height = bh;
+	    zbox.Height = sh;
+	}
+
+	/* Open the window */
+	if (win = OpenWindowTags (NULL,
+				  WA_Zoom, &zbox,
+				  WA_Left, winLeft,
+				  WA_Top, winTop,
+				  WA_Width, width,
+				  WA_Height, height,
+				  WA_PubScreen, scr,
+				  WA_IDCMP, NULL,
+				  WA_DragBar, TRUE,
+				  WA_DepthGadget, TRUE,
+				  WA_CloseGadget, TRUE,
+				  WA_SimpleRefresh, TRUE,
+				  WA_Activate, TRUE,
+				  TAG_DONE))
+	{
+	    /* Use the shared IDCMP port */
+	    win->UserPort = IPort;
+	    ModifyIDCMP (win, IDCMP_FLAGS);
+
+	    /* Set the window font to be the same as the screen font */
+	    rp = win->RPort;
+	    SetFont (rp, tf);
+
+	    /* Create the gadget list */
+	    CreateGadgetList (small);
+
+	    /* Remember the current zoom state */
+	    zoom = win->Flags & WFLG_ZOOMED;
+
+	    /* Find the signal bits that we are going to wait on */
+	    sigi = 1L << IPort->mp_SigBit;
+	    sigt = 1L << TPort->mp_SigBit;
+
+	    /* Start the timer */
+	    SendTimerRequest ();
+
+	    /* Stick around until something tells us to go away */
+	    g = NULL;
+	    going = TRUE;
+	    while (going)
+	    {
+		/* See if the information has changed */
+		if (cstate = FreshenCDInfo ())
+		{
+		    /* Set the current track */
+		    SetTrack ((LONG) PlayerState.Track,
+			      (LONG) ((PlayerState.PlayState >= PLS_SELECTED) ? PlayerState.ListIndex : -1));
+
+		    /* Set the current time */
+		    SetTime ((LONG) (PlayerOptions.TimeMode & 1),
+			     (LONG) PlayerState.Minute, (LONG) PlayerState.Second);
+
+		    /* See if we had a disk change */
+		    if (cstate == 2)
+		    {
+			/* Get the current state of affairs */
+			state = GetCDState ();
+
+			/* Update the gadgets and the display */
+			ChangeGadgetState ((LONG) win->UserData);
+		    }
+		    else
+		    {
+			/* Update the display */
+			RefreshTime (TIME_UPDATE);
+		    }
+		}
+
+		/* Wait for something to happen */
+		sigr = Wait (sigt | sigi | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+
+		/* Pull all the current Intuition messages */
+		while (imsg = GT_GetIMsg (IPort))
+		{
+		    /* Figure out what to do with it */
+		    switch (imsg->Class)
+		    {
+			case IDCMP_REFRESHWINDOW:
+			    /* Enter optimized refresh state */
+			    GT_BeginRefresh (win);
+
+			    /* Refresh the time display */
+			    RefreshTime (TIME_RENDER);
+
+			    /* Tell the system that we are done */
+			    GT_EndRefresh (win, TRUE);
+			    break;
+
+			case IDCMP_ACTIVEWINDOW:
+			case IDCMP_INACTIVEWINDOW:
+			    RefreshTime (TIME_ACTIVE);
+			    break;
+
+			case IDCMP_VANILLAKEY:
+			    switch (imsg->Code)
+			    {
+				case 3:
+				case 27:
+				case 'q':
+				case 'Q':
+				    going = FALSE;
+				    break;
+			    }
+			    break;
+
+			case IDCMP_CLOSEWINDOW:
+			    going = FALSE;
+			    break;
+
+			case IDCMP_CHANGEWINDOW:
+			    /* See if our zoom state has changed */
+			    if (zoom != (win->Flags & WFLG_ZOOMED))
+			    {
+				/* Save the current zoom state */
+				zoom = win->Flags & WFLG_ZOOMED;
+
+				/* Change the gadget list */
+				ChangeGadgetList ((LONG) win->UserData);
+#if 0
+				/* Update the matrix visuals */
+				UpdateMatrix ((LONG) win->UserData, 0);
+#endif
+			    }
+			    break;
+
+			case IDCMP_GADGETDOWN:
+			    g = (struct Gadget *) imsg->IAddress;
+			    SetCDButtonState ((LONG) g->GadgetID, 1, (LONG) imsg->Code);
+			    if ((g->GadgetID == GID_STOP) && (state == SID_STOP))
+			    {
+				LONG i, j, tracks;
+
+				/* Deselect all the selected gadgets */
+				for (i = j = 0, tracks = GetNumTracks (); i < tracks; i++)
+				{
+				    if (GetCDPlayEntryState (i))
+				    {
+					SetCDPlayEntryState (i, 0);
+					j++;
+				    }
+				}
+
+				/* Count the number of selected */
+				numTracks = GetCDNumEnabled ();
+
+				/* Update the matrix visuals */
+				if (j)
+				    UpdateMatrix ((LONG) win->UserData, 0);
+			    }
+			    break;
+
+			case IDCMP_MOUSEMOVE:
+			    if (g && (g->GadgetID == GID_SCROLL))
+				SetPage ((LONG) imsg->Code);
+			    break;
+
+			case IDCMP_GADGETUP:
+			    g = (struct Gadget *) imsg->IAddress;
+			    switch (g->GadgetID)
+			    {
+				case GID_SCROLL:
+				    SetPage ((LONG) imsg->Code);
+				    break;
+
+				case GID_PP:
+				case GID_STOP:
+				    ChangeState (g->GadgetID, imsg->Code);
+				    break;
+
+				case GID_RANDOM:
+				    SetCDPlaylist ((LONG) g->Flags & GFLG_SELECTED);
+				case GID_INTRO:
+				    SetCDButtonState ((LONG) g->GadgetID, 0, (LONG)imsg->Code);
+
+				    /* Are we selected? */
+				    if (g->Flags & GFLG_SELECTED)
+				    {
+					/* Set the state */
+					if (numTracks == 0)
+					    SetCDPlaylistState ((LONG) (g->Flags & GFLG_SELECTED));
+
+					/* If we were stopped, then start playing */
+					if (state != SID_PLAY)
+					{
+					    SetGadgetAttrs (gads[GID_STOP], win, NULL, GA_Selected, FALSE, TAG_DONE);
+					    SetGadgetAttrs (gads[GID_PP], win, NULL, GA_Selected, TRUE, TAG_DONE);
+					    state = SID_PLAY;
+					    SetCDButtonState ((LONG) GID_PP, 1, (LONG) imsg->Code);
+					    SetCDButtonState ((LONG) GID_PP, 0, (LONG) imsg->Code);
+					}
+				    }
+
+				    /* Update the matrix visuals */
+				    UpdateMatrix ((LONG) win->UserData, 0);
+				    break;
+
+				default:
+				    if (g->GadgetID >= GID_ARRAY)
+				    {
+					/* Set the state */
+					SetCDPlayEntryState ((LONG) (g->GadgetID - GID_ARRAY) + page,
+							     (LONG) (g->Flags & GFLG_SELECTED));
+
+					/* Count the number of selected */
+					numTracks = GetCDNumEnabled ();
+				    }
+				    SetCDButtonState ((LONG) g->GadgetID, 0, (LONG) imsg->Code);
+				    break;
+			    }
+			    g = NULL;
+			    break;
+		    }
+
+		    /* All done with the message now */
+		    GT_ReplyIMsg (imsg);
+		}
+
+		/* Timer event */
+		if (sigr & sigt)
+		{
+		    /* Pull the message from the port */
+		    GetMsg (TPort);
+
+		    /* Send it back out again */
+		    SendTimerRequest ();
+		}
+
+		/* Check for ^C */
+		if (sigr & SIGBREAKF_CTRL_C)
+		    going = FALSE;
+
+		/* Check for ^E */
+		if (sigr & SIGBREAKF_CTRL_E)
+		{
+		    /* Activate the CD player */
+		    if (gads[GID_LOOP] == NULL)
+			ZipWindow (win);
+		    WindowToFront (win);
+		    ScreenToFront (win->WScreen);
+		    ActivateWindow (win);
+		}
+	    }
+
+	    /* Delete the gadget list */
+	    DeleteGadgetList ();
+
+	    /* Delete the window */
+	    CloseWindowSafely (win);
+
+	    /* Pull the timer down */
+	    WaitPort (TPort);
+	    while (GetMsg (TPort));
+	}
+
+	/* Release our special pens */
+	ReleasePen (scr->ViewPort.ColorMap, bPen);
+	ReleasePen (scr->ViewPort.ColorMap, gPen);
+	ReleasePen (scr->ViewPort.ColorMap, rPen);
+
+	FreeScreenDrawInfo (scr, dri);
+	CloseFont (tf);
+
+	/* Release the GadTools visual info */
+	FreeVisualInfo (vi);
+
+#if FIRSTSCREEN
+#else
+	UnlockPubScreen (NULL, scr);
+#endif
+    }
+}
+@
+
+
+40.2
+log
+@*** empty log message ***
+@
+text
+@d117 1
+a117 1
+	    UBYTE buffer[16];
+d126 1
+a126 1
+	    sprintf (buffer, "%02d", trak[0]);
+d131 1
+a131 1
+	    sprintf (buffer, "%c%02d:%02d", sign, time[0], time[1]);
+d375 1
+d475 3
+d479 1
+a479 1
+		tmp[0] = (WORD) GetCDTrackNum (page | k);
+d501 1
+d1024 4
+d1034 21
+@
+
+
+40.1
+log
+@changed title.
+@
+text
+@a39 72
+#define	REMOVE		TRUE
+#define	FIRSTSCREEN	TRUE
+
+/*****************************************************************************/
+
+#define	MAX_GADS	32
+#define	MATRIX_ROWS	4
+#define	MATRIX_COLS	5
+#define	MAX_MATRIX	(MATRIX_ROWS*MATRIX_COLS)
+#define	TRACK_HEIGHT	12
+#define	TRACK_WIDTH	14
+#define	BUTTON_WIDTH	38
+#define	TBUTTON_WIDTH	((TRACK_WIDTH * 2) + 8)
+#define	BUTTON_HEIGHT	(TRACK_HEIGHT + 8)
+#define	TRAK_OFFX	10
+#define	TRAK_OFFY	6
+#define	TIME_OFFX	32
+#define	TIME_OFFY	6
+#define	TIME_MARGX	20
+#define	TIME_MARGY	12
+#define	FRAME_WIDTH	((BUTTON_WIDTH * 4) + 6)
+#define	FRAME_HEIGHT	(BUTTON_HEIGHT * (MATRIX_ROWS - 2) + (MATRIX_ROWS - 3))
+#define	IDCMP_FLAGS	IDCMP_CLOSEWINDOW | IDCMP_CHANGEWINDOW | IDCMP_GADGETDOWN | IDCMP_GADGETUP | \
+			IDCMP_REFRESHWINDOW | IDCMP_ACTIVEWINDOW | IDCMP_INACTIVEWINDOW | \
+			IDCMP_VANILLAKEY | IDCMP_INTUITICKS | IDCMP_MOUSEMOVE
+
+/*****************************************************************************/
+
+enum
+{
+    TIME_RENDER,
+    TIME_ACTIVE,
+    TIME_UPDATE,
+};
+
+/*****************************************************************************/
+
+/* file global variables */
+static char *sTitle = "";
+static char *bTitle = APP_TITLE;
+static char *buttonClassName = "button.gadget";
+static char *ledClassName = "led.image";
+static struct Screen *scr;
+static LONG rPen, gPen, bPen;
+static struct DrawInfo *dri;
+static struct TextFont *tf;
+static struct TextAttr ta;
+static struct Window *win;
+static struct RastPort *rp;
+static struct Gadget *gads[MAX_GADS];
+static struct Image *imgs[MAX_MATRIX];
+static struct Image *trakImage;
+static struct Image *timeImage;
+static struct Image *frameImage;
+static struct Rectangle frameRect;
+static UBYTE sign = ' ';
+static WORD time[2];
+static WORD trak[1];
+static UBYTE backPen;
+static LONG timeX, timeY;
+static WORD clseWidth, clseEnd;
+static struct Image *img2[3] = {&imscan, &imrnd, &imloop};
+static struct Image *imgt[4] = {&imt1, &imt2, &imt3, &imt4};
+static struct Image *impp[3] = {&impp1, &impp2, &impp3};
+static LONG spaceWidth, trackWidth;
+static LONG state, numTracks;
+static void *vi;
+static struct Gadget *cgad, *scrollGad;
+static LONG ppage = -1, page, top, total = MATRIX_ROWS, visible = MATRIX_ROWS;
+
+/*****************************************************************************/
+
+d1048 1
+a1048 1
+				    SetCDButtonState ((LONG) g->GadgetID, 0, (LONG) imsg->Code);
+@
+
+
+40.0
+log
+@initial RCS
+@
+text
+@d79 1
+a79 1
+static char *bTitle = "CD Player";
+@

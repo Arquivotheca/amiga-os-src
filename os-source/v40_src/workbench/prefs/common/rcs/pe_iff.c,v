@@ -1,0 +1,392 @@
+head     38.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.7
+date     92.07.08.13.52.16;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     91.09.23.12.01.44;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     91.09.19.13.16.22;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.07.01.11.52.10;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.06.25.09.45.50;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.06.24.13.24.56;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.06.21.13.30.53;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Prefs editor shell - IFF reader
+@
+
+
+38.7
+log
+@sources:paletteprefs
+@
+text
+@
+/* includes */
+#include <exec/types.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <libraries/iffparse.h>
+#include <prefs/prefhdr.h>
+
+/* prototypes */
+#include <clib/iffparse_protos.h>
+#include <clib/dos_protos.h>
+
+/* direct ROM interface */
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+
+/* application includes */
+#include "pe_iff.h"
+#include "pe_custom.h"
+#include "pe_utils.h"
+
+
+/*****************************************************************************/
+
+
+struct IFFHandle *GetIFF(EdDataPtr ed, STRPTR name, LONG mode, EdStatus *result)
+{
+struct IFFHandle *iff;
+LONG              error;
+
+    *result = ES_NO_MEMORY;
+
+    if (iff = AllocIFF())
+    {
+        if (iff->iff_Stream = (ULONG)Open(name,mode))
+        {
+            InitIFFasDOS(iff);
+
+            if (!(error = OpenIFF(iff, (mode == MODE_OLDFILE)? IFFF_READ : IFFF_WRITE)))
+	        return(iff);
+
+            ed->ed_SecondaryResult = error;
+
+            Close((BPTR)iff->iff_Stream);
+        }
+        else
+        {
+            *result = ES_DOSERROR;
+            ed->ed_SecondaryResult = IoErr();
+        }
+        FreeIFF(iff);
+    }
+    return(NULL);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ReturnIFF(EdDataPtr ed, struct IFFHandle *iff)
+{
+    CloseIFF(iff);
+    Close(iff->iff_Stream);
+    FreeIFF(iff);
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus ReadIFF(EdDataPtr ed, STRPTR name, ULONG *stopChunks, ULONG chunkCnt,
+                 IFFFunc readFunc)
+{
+struct IFFHandle   *iff;
+struct ContextNode *cn;
+EdStatus            result = ES_IFFERROR;
+BOOL                headerFlag = FALSE;
+struct PrefHeader   phead;
+LONG                error;
+ULONG              *sc;
+UWORD               i;
+
+    ed->ed_ErrorFileName = name;
+
+    if (iff = GetIFF(ed,name,MODE_OLDFILE,&result))
+    {
+        result = ES_IFFERROR;
+        if (!ParseIFF(iff,IFFPARSE_STEP))
+        {
+            cn = CurrentChunk(iff);
+
+            result = ES_IFF_UNKNOWNCHUNK;
+            if (cn->cn_ID == ID_FORM)
+            {
+                sc = stopChunks;
+                i  = 0;
+                while (i < chunkCnt)
+                {
+                    if (cn->cn_Type == *sc)
+                        break;
+
+                    sc++;
+                    sc++;
+                    i++;
+                }
+
+                if (i < chunkCnt)
+                {
+                    if (!StopChunks(iff,stopChunks,chunkCnt))
+                    {
+                        while (TRUE)
+                        {
+                            if (error = ParseIFF(iff,IFFPARSE_SCAN))
+                            {
+                                if (error == IFFERR_EOF)
+                                {
+                                    if (headerFlag)
+                                        result = ES_NORMAL;
+                                }
+                                break;
+                            }
+
+                            cn = CurrentChunk(iff);
+
+                            if (cn->cn_ID == ID_PRHD && cn->cn_Type == ID_PREF)
+                            {
+                                if (ReadChunkBytes(iff,&phead,sizeof(struct PrefHeader)) != sizeof(struct PrefHeader))
+                                {
+                                    break;
+                                }
+
+                                headerFlag = TRUE;
+                            }
+                            else
+                            {
+                                result = readFunc(ed,iff,cn);
+                                if ((result != ES_NORMAL) && (result != ES_IFF_UNKNOWNCHUNK))
+                                    break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        result = ES_IFFERROR;
+                    }
+                }
+            }
+        }
+        ReturnIFF(ed,iff);
+    }
+
+    return(result);
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus WriteIFF(EdDataPtr ed, STRPTR name, APTR hdr, IFFFunc writeFunc)
+{
+struct IFFHandle *iff;
+EdStatus          result;
+
+    ed->ed_ErrorFileName = name;
+
+    result = ES_IFFERROR;
+    if (iff = GetIFF(ed,name,MODE_NEWFILE,&result))
+    {
+        if (!PushChunk(iff,ID_PREF,ID_FORM,IFFSIZE_UNKNOWN))
+        {
+            if (!PushChunk(iff,0,ID_PRHD,sizeof(struct PrefHeader)))
+            {
+                if (WriteChunkBytes(iff,hdr,sizeof(struct PrefHeader)) == sizeof(struct PrefHeader))
+                {
+                    if (!PopChunk(iff))
+                    {
+                        if ((result = writeFunc(ed,iff,NULL)) == ES_NORMAL)
+                        {
+		            if (PopChunk(iff))
+		            {
+		                result = ES_IFFERROR;
+		            }
+                        }
+                    }
+                }
+            }
+        }
+        ReturnIFF(ed,iff);
+        SetProtection(name,FIBF_EXECUTE);
+    }
+
+    return(result);
+}
+@
+
+
+38.6
+log
+@No longer clears SecondaryResult
+@
+text
+@d80 2
+d91 3
+a93 1
+            if (cn->cn_ID == ID_FORM && cn->cn_Type == ID_PREF)
+d95 13
+a107 1
+                if (!StopChunks(iff,stopChunks,chunkCnt))
+d109 1
+a109 1
+                    while (TRUE)
+d111 1
+a111 1
+                        if (error = ParseIFF(iff,IFFPARSE_SCAN))
+d113 1
+a113 1
+                            if (error == IFFERR_EOF)
+d115 6
+a120 2
+                                if (headerFlag)
+                                    result = ES_NORMAL;
+d122 2
+a123 2
+                            break;
+                        }
+d125 6
+a130 1
+                        cn = CurrentChunk(iff);
+d132 3
+a134 3
+                        if (cn->cn_ID == ID_PRHD && cn->cn_Type == ID_PREF)
+                        {
+                            if (ReadChunkBytes(iff,&phead,sizeof(struct PrefHeader)) != sizeof(struct PrefHeader))
+d136 3
+a138 1
+                                break;
+a139 2
+
+                            headerFlag = TRUE;
+d141 4
+a144 6
+                        else
+                        {
+                            result = readFunc(ed,iff,cn);
+                            if ((result != ES_NORMAL) && (result != ES_IFF_UNKNOWNCHUNK))
+                                break;
+                        }
+a146 8
+                else
+                {
+                    result = ES_IFFERROR;
+                }
+            }
+            else
+            {
+                result = ES_IFF_UNKNOWNCHUNK;
+@
+
+
+38.5
+log
+@Now accepts global chunks as parameters
+@
+text
+@d29 1
+d39 1
+a39 1
+            if (!(ed->ed_SecondaryResult = OpenIFF(iff, (mode == MODE_OLDFILE)? IFFF_READ : IFFF_WRITE)))
+d41 2
+@
+
+
+38.4
+log
+@Correct handling of unknown chunks in prefs files
+@
+text
+@d68 2
+a69 1
+EdStatus ReadIFF(EdDataPtr ed, STRPTR name, IFFFunc readFunc)
+d88 1
+a88 1
+                if (!StopChunks(iff,IFFPrefChunks,IFFPrefChunkCnt))
+d141 1
+a141 1
+EdStatus WriteIFF(EdDataPtr ed, STRPTR name, IFFFunc writeFunc)
+d155 1
+a155 1
+                if (WriteChunkBytes(iff,&IFFPrefHeader,sizeof(struct PrefHeader)) == sizeof(struct PrefHeader))
+@
+
+
+38.3
+log
+@Now sets the protection bits of saved files to just RWD
+@
+text
+@d72 1
+a72 1
+EdStatus            result;
+a73 1
+BOOL                dataFlag = FALSE;
+d95 1
+a95 2
+                                if (headerFlag && dataFlag)
+                                {
+a96 1
+                                }
+d115 1
+a115 6
+                            if (result == ES_NORMAL)
+                            {
+                                dataFlag = TRUE;
+                            }
+                            else if (result != ES_IFF_UNKNOWNCHUNK)
+                            {
+a116 1
+                            }
+@
+
+
+38.2
+log
+@Added ed->ed_ErrorFileName support
+@
+text
+@d179 1
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d78 2
+d153 2
+@

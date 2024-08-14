@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'16.12.92'
+	ENDM
+VERS	MACRO
+		dc.b	'services 37.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'services 37.10 (16.12.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: services 37.10 (16.12.92)',0
+	ENDM

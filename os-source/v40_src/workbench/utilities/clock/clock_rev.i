@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'25.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'clock 40.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'clock 40.1 (25.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: clock 40.1 (25.8.93)',0
+	ENDM

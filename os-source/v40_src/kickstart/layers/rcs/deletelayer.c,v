@@ -1,0 +1,824 @@
+head     38.12;
+branch   ;
+access   ;
+symbols  V40_1:38.12 V39_62:38.12 V39_61:38.12 V39_60:38.12 V39_58:38.12 V39_56:38.12 V39_55:38.12 V39_54:38.12 V39_53:38.12 V39_52:38.12 V39_51:38.12 V39_50:38.12 V39_49:38.12 V39_48:38.12 V39_46:38.12 V39_45:38.12 V39_44:38.12 V39_42:38.12 V39_41:38.12 V39_40:38.12 V39_39:38.12 V39_38:38.12 V39_37:38.12 V39_36:38.12 V39_35:38.12 V39_34:38.12 V39_33:38.12 V39_32:38.12 V39_30:38.10 V39_28:38.8 V39_27:38.8 V39_26:38.8 V39_25:38.8 V39_24:38.8 V39_23:38.6 V39_22:38.6 V39_21:38.6 V39_20:38.6 V39_18:38.5 V39_16:38.5 V39_15:38.5 V39_14:38.5 V39_12:38.4 V39_10:38.4 V38_7:38.2 V38_6:38.2 First_Native_Build:38.2;
+locks    ; strict;
+comment  @ * @;
+
+
+38.12
+date     91.11.19.12.54.59;  author mks;  state Exp;
+branches ;
+next     38.11;
+
+38.11
+date     91.11.18.18.37.48;  author mks;  state Exp;
+branches ;
+next     38.10;
+
+38.10
+date     91.11.18.13.23.17;  author mks;  state Exp;
+branches ;
+next     38.9;
+
+38.9
+date     91.11.15.20.13.16;  author mks;  state Exp;
+branches ;
+next     38.8;
+
+38.8
+date     91.11.08.11.27.04;  author mks;  state Exp;
+branches ;
+next     38.7;
+
+38.7
+date     91.11.08.10.31.37;  author mks;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     91.11.01.09.52.36;  author mks;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     91.10.24.09.03.23;  author mks;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.09.20.17.17.35;  author Unknown;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.08.30.16.42.36;  author Unknown;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.08.02.10.19.55;  author mks;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.07.25.09.55.01;  author bart;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.12
+log
+@Display rendering had to be fixed a bit:  The genrect() of
+the layer's onscreen parts was a rather interesting problem.
+@
+text
+@/******************************************************************************
+*
+*	$Id: deletelayer.c,v 38.11 91/11/18 18:37:48 mks Exp Locker: mks $
+*
+******************************************************************************/
+
+#define	NEWCLIPRECTS_1_1
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/ports.h>
+#include <graphics/gfx.h>
+#include <graphics/clip.h>
+#include <graphics/rastport.h>
+#include <graphics/layers.h>
+#include <graphics/gfxbase.h>
+
+#include "layersbase.h"
+
+/****** layers.library/DeleteLayer *********************************************
+*
+*    NAME
+*	DeleteLayer -- delete layer from layer list.
+*
+*    SYNOPSIS
+*	result = DeleteLayer( dummy, l )
+*	d0                    a0,    a1
+*
+*	LONG DeleteLayer( LONG, struct Layer *);
+*
+*    FUNCTION
+*	Remove this layer from the list of layers.  Release memory
+*	associated with it.  Restore other layers that may have been
+*	obscured by it.  Trigger refresh in those that may need it.
+*	If this is a superbitmap layer make sure SuperBitMap is current.
+*	The SuperBitMap is not removed from the system but is available
+*	for program use even though the rest of the layer information has
+*	been deallocated.
+*
+*    INPUTS
+*	dummy - unused
+*	l - pointer to a layer
+*
+*    RESULTS
+*	result - TRUE if this layer successfully deleted from the system
+*	         FALSE if layer not deleted. (probably out of memory )
+*
+*    BUGS
+*
+*    SEE ALSO
+*	graphics/layers.h, graphics/clip.h
+*
+*******************************************************************************/
+
+BOOL __stdargs __asm deletelayer(register __a1 struct Layer *l)
+{
+	struct LayerInfo *li = l->LayerInfo;
+	if (fatten_lock(li))
+	{
+		deletelayer2(l, 0);
+		unlock_thin(li);
+		return(TRUE);
+	}
+	return(FALSE);
+}
+
+/*
+ * New DeleteLayer2 routine that uses the new movelayerinfrontof()
+ * routine to do a "delete in place" without all of the code...
+ */
+void __stdargs __asm deletelayer2(register __a0 struct Layer *l,register __d0 long error)
+{
+struct Layer_Info *li=l->LayerInfo;
+struct ClipRect *cr;
+
+	/*
+	 * The layer is going away so make its backfill hook that
+	 * of the blank area...
+	 */
+	l->BackFill=li->BlankHook;
+
+	if (!error) DisposeRegion(l->DamageList);
+
+	if (l->Flags & LAYERSUPER)
+	{
+		/* free off super save cliprects */
+		Freecrlist(l->SuperSaveClipRects);
+		SyncSBitMap(l);
+		/* now free rest of SuperClipRects */
+		Freecrlist(l->SuperClipRect);
+		l->SuperBitMap = 0;
+		l->SuperClipRect = 0;
+	}
+
+	/*
+	 * We need to free all of the obscured bitmaps...
+	 * This is to make things faster for tomiddle, etc.
+	 */
+	if (!error) Freecrlist(l->ClipRect);
+	l->ClipRect=NULL;
+
+	/*
+	 * now convert to LAYERSIMPLE before doing
+	 * the SetRast() and the movelayerinfrontof().
+	 * This will make sure that our display is
+	 */
+	l->Flags &= ~(LAYERSMART|LAYERSUPER);
+	l->Flags |= LAYERSIMPLE;
+
+	/*
+	 * Unobscure all of the layers below me.  (We move to the back
+	 * in the very simple operation here...)
+	 *
+	 * First, we strip the cliprects since they just get in the way
+	 * and make things slower (and we needed to do this anyway)
+	 */
+	strip_onscreen_cliprects(li);
+	movelayerinfrontof(l,NULL,FALSE);
+	if (!error) Freecrlist(l->ClipRect);
+	l->ClipRect=NULL;
+
+	/*
+	 * Ok, now clear the layer's bits that are left
+	 * and flush these cliprects and restore the old...
+	 * We need to save off the old FreeClipRects
+	 * in order to not trash the other layers...
+	 */
+	cr=li->FreeClipRects;
+	li->FreeClipRects=NULL;
+	genrect(l);
+	FullBackFill(l);
+	Freecrlist(l->ClipRect);
+	Freecrlist(li->FreeClipRects);
+	li->FreeClipRects=cr;
+
+	/*
+	 * We are now in the back, so remove us from the layer
+	 * list and remove our lock from the lock list...
+	 */
+	unlinklayer(l);
+	Remove(&(l->Lock));
+
+	/*
+	 * If we are not in ABORT state, lets free all of the
+	 * memory this layer was using...
+	 */
+	if (!error)
+	{
+		FreeMem(l->rp,sizeof(struct RastPort));
+		FreeMem(l,sizeof(struct Layer));
+
+		/*
+		 * On screen cliprect are already gone from above.
+		 * So, now optimize the cliprects.
+		 */
+		optimizeClipRects(li);
+	}
+	else WaitBlit(); /* Need to make sure to wait in error state... */
+
+	/*
+	 * generate new onscreen cliprects for our use...
+	 */
+	gen_onscreen_cliprects(li);
+}
+@
+
+
+38.11
+log
+@Simplified DeleteLayer2() a bit...  (And made it so that
+WaitBlit() will only be called on the error case or
+when there are bitmaps to free that need it...)
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.10 91/11/18 13:23:17 mks Exp Locker: mks $
+d75 1
+d126 2
+d129 2
+d134 2
+@
+
+
+38.10
+log
+@Cleaned up how the backfill hook is called.
+Also made sure that error recovery is done as best as possible.
+(one more thing to look at)
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.9 91/11/15 20:13:16 mks Exp Locker: mks $
+a73 1
+struct ClipRect *cr,*crtmp;
+a94 2
+	WaitBlit();	/* Darn... Wish I did not need this */
+
+d96 1
+a96 1
+	 * We need to free all of the cliprects...
+d99 2
+a100 13
+	crtmp=(struct ClipRect *)&(l->ClipRect);
+	while (cr=crtmp->Next)
+	{
+		/*
+		 * Unlink the cliprect...
+		 */
+		crtmp->Next=cr->Next;
+
+		/*
+		 * If not an ABORT, free the cliprect
+		 */
+		if (!error) Freecr(cr);
+	}
+d152 1
+@
+
+
+38.9
+log
+@Now uses the Layer_Info hook to do the clearing of the deleted layer
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.8 91/11/08 11:27:04 mks Exp Locker: mks $
+a75 1
+struct Hook *hook;
+d77 6
+d133 2
+d141 1
+a141 19
+
+	hook=li->BlankHook;
+	if (!hook) hook=&(LAYERSBASE->BackFillHook);
+	else if (hook==(struct Hook *)1) hook=NULL;
+
+	if (hook) for (cr=l->ClipRect;cr;cr=cr->Next) if (!(cr->lobs))
+	{
+		/*
+		 * Call the backfill hook for this
+		 * layer-info to clear the non-layer area
+		 */
+		CallBackFillHook(hook,
+				l->rp,
+				NULL,
+				cr->bounds,
+				cr->bounds.MinX,
+				cr->bounds.MinY);
+	}
+
+d159 6
+a165 6
+
+	/*
+	 * On screen cliprect are already gone from above.
+	 * So, now optimize the cliprects.
+	 */
+	optimizeClipRects(li);
+@
+
+
+38.8
+log
+@Faster/better deletelayer with no extra blits
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.7 91/11/08 10:31:37 mks Exp Locker: mks $
+d76 1
+d134 19
+a152 1
+	SetRast(l->rp,0);
+@
+
+
+38.7
+log
+@Changed deletelayer to do less blits.  This makes a big difference
+on high-bandwidth usage displays.  It also makes a better visual
+for Move/Size.  It does mean that gen_onscreen_cliprects needs to
+be updated since it now is a CPU hog.
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.6 91/11/01 09:52:36 mks Exp Locker: mks $
+a128 18
+	 * Now, remove the layer if it is not the last layer
+	 */
+	if (l->front) l->front->back=NULL;
+
+	/*
+	 * On screen cliprect are already gone from above.
+	 * So, now optimize the cliprects.
+	 */
+	optimizeClipRects(li);
+
+	/*
+	 * Ok, put the layer back into the list and then generate
+	 * new onscreen cliprects for our use...
+	 */
+	if (l->front) l->front->back=l;
+	gen_onscreen_cliprects(li);
+
+	/*
+d132 1
+d153 10
+@
+
+
+38.6
+log
+@New deletelayer that works with the new movelayerinfrontof()
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.5 91/10/24 09:03:23 mks Exp Locker: mks $
+d93 2
+a94 3
+	 * We need to free all of the obscured
+	 * cliprects here.  This is to make things faster
+	 * for the SetRast() call below...
+d99 9
+a107 13
+		if (cr->lobs)
+		{
+			/*
+			 * Unlink the cliprect...
+			 */
+			crtmp->Next=cr->Next;
+
+			/*
+			 * If not an ABORT, free the cliprect
+			 */
+			if (!error) Freecr(cr);
+		}
+		else crtmp=cr;
+d122 1
+a122 3
+	 * First we set our layer to 0 background colour...
+	 *
+	 * Second, we strip the cliprects since they just get in the way
+a124 1
+	SetRast(l->rp,0);
+d129 25
+a165 1
+		Freecrlist(l->ClipRect);
+a169 7
+	/*
+	 * On screen cliprect are already gone from above.
+	 * So, now optimize the cliprects and then generate
+	 * new onscreen cliprects for our use...
+	 */
+	optimizeClipRects(li);
+	gen_onscreen_cliprects(li);
+@
+
+
+38.5
+log
+@Updated the C version of the assembly newdeletelayer code to make
+sure that they match (for now)
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.4 91/09/20 17:17:35 Unknown Exp Locker: mks $
+d68 5
+a72 3
+#define DOWNCODE
+#ifndef DOWNCODE
+void deletelayer2(struct Layer *l,long error)
+d74 2
+a75 5
+	struct RastPort *rp;
+	struct ClipRect *cr, **crp;
+	struct ClipRect *cr2,**crp2;
+	struct ClipRect *cr3,**crp3;
+	struct Layer *l2;
+d77 1
+a77 5
+	if (!error)
+	{
+		/* dangerous if about to call abort() */
+		DisposeRegion(l->DamageList);
+	}
+d90 1
+a90 3
+	WaitBlit();
+
+	/* free all obscured cliprects */
+d92 7
+a98 1
+	for (crp = &l->ClipRect; cr = *crp; )
+a99 1
+
+d102 4
+a105 6
+			*crp = cr->Next;
+
+			if (!error)
+			{
+				Freecr(cr);	/* dangerous if about to call abort() */
+			}
+d107 4
+a110 1
+			continue;
+d112 1
+a112 2
+
+		crp = (struct ClipRect **)*crp;
+d115 5
+a119 2
+	/* now convert to LAYERSIMPLE before behinding */
+
+a121 2
+	rp = l->rp;
+	SetRast(rp,0);
+d123 12
+a134 8
+	/* this may cause temporary allocation of lots of memory */
+	if(error)
+	{
+		behindcode(l,0); 		/* ignore backdrop windows */
+	}
+	else
+	{
+		struct ClipRect *cr_found = NULL;
+d136 6
+a141 79
+		/* ok, instead of calling behindcode, let's process in place */
+
+		for (crp = &l->ClipRect; cr = *crp; )
+		{
+			for( l2 = l->back; l2; l2 = l2->back )
+			{
+				if( rectXrect( &cr->bounds, &l2->bounds))
+				for( crp2 = &l2->ClipRect; cr2 = *crp2; )
+				{
+					if( cr2->lobs == l )
+					{
+						if( rectXrect( &cr->bounds, &cr2->bounds ) )
+						{
+							struct Layer *newobs = NULL;
+
+							for( crp3 = &cr_found; cr3 = *crp3; )
+							{
+								if( cr2->bounds.MinX == cr3->bounds.MinX )
+								if( cr2->bounds.MinY == cr3->bounds.MinY )
+								if( cr2->bounds.MaxX == cr3->bounds.MaxX )
+								if( cr2->bounds.MaxY == cr3->bounds.MaxY )
+								{
+									newobs = (struct Layer *)cr3->reserved;
+									break;
+								}
+								crp3 = (struct ClipRect **)*crp3;
+							}
+
+							if( !newobs )
+							{
+								if( cr2->BitMap)
+								{
+								   crtoscreen( l2->rp, cr2 );
+								}
+								else
+								{
+								   struct Rectangle cr_bounds;
+
+								   CallBackFillHook(l2->BackFill,
+								   					l2->rp,
+													l2,
+													cr2->bounds,
+													cr2->bounds.MinX,
+													cr2->bounds.MinY);
+
+								   cr_bounds.MinX = cr_bounds.MaxX =
+								   l2->Scroll_X-l2->bounds.MinX;
+								   cr_bounds.MinY = cr_bounds.MaxY =
+								   l2->Scroll_Y-l2->bounds.MinY;
+
+								   cr_bounds.MinX += cr2->bounds.MinX;
+								   cr_bounds.MinY += cr2->bounds.MinY;
+								   cr_bounds.MaxX += cr2->bounds.MaxX;
+								   cr_bounds.MaxY += cr2->bounds.MaxY;
+
+								   OrRectRegion(l2->DamageList,&cr_bounds);
+								   l2->Flags |= LAYERREFRESH;
+								}
+
+								/* cliprect is newly onscreen... */
+
+								*crp2 = cr2->Next;
+								cr2->reserved = (LONG)l2;
+								cr2->Next = cr_found;
+								cr_found = cr2;
+								continue;
+							}
+							else
+							{
+								/* cliprect is obscured by new upper layer */
+								cr2->lobs = newobs;
+							}
+						}
+					}
+					crp2 = (struct ClipRect **)*crp2;
+				}
+			}
+			crp = (struct ClipRect **)*crp;
+		}
+d143 4
+a146 8
+		/* assure that last crtoscreen has finished... */
+
+		Freecrlist(cr_found);	/* Does waitblit if needed */
+	}
+
+
+	/*free rest of ClipRects */
+
+a148 1
+		/* dangerous if about to call abort() */
+d150 2
+a151 2
+		/* dangerous if about to call abort() */
+		FreeMem(rp,sizeof(struct RastPort));
+d154 7
+a160 13
+	unlinklayer(l);
+
+	Remove(&l->Lock);
+
+	strip_onscreen_cliprects(l->LayerInfo);
+	optimizeClipRects(l->LayerInfo);
+	gen_onscreen_cliprects(l->LayerInfo);
+
+	if (!error)
+	{
+		/* dangerous if about to call abort() */
+		FreeMem(l,sizeof(struct Layer));
+	}
+a161 1
+#endif
+@
+
+
+38.4
+log
+@downcoded deletelayer2 
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.3 91/08/30 16:42:36 Unknown Exp $
+d81 1
+a81 1
+		DisposeRegion(l->DamageList);	
+d125 1
+a125 1
+	if(error) 
+d178 1
+a178 1
+								   cr_bounds.MinX = cr_bounds.MaxX = 
+d180 1
+a180 1
+								   cr_bounds.MinY = cr_bounds.MaxY = 
+d215 1
+a215 9
+		WaitBlit(); 
+
+		/* free newly onscreen cliprects... */
+
+		for( crp3 = &cr_found; cr3 = *crp3; )
+		{
+			*crp3 = cr3->Next;
+			Freecr( cr3 );
+		}
+d224 1
+a224 1
+		Freecrlist(l->ClipRect);	
+d240 1
+a240 1
+		FreeMem(l,sizeof(struct Layer));	
+@
+
+
+38.3
+log
+@delete layers in place
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.2 91/08/02 10:19:55 mks Exp $
+d68 2
+d251 1
+@
+
+
+38.2
+log
+@Native build version checkin...
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 38.1 91/07/25 09:55:01 bart Exp $
+d70 5
+a74 2
+struct ClipRect *cr,*crtmp;
+struct RastPort *rp;
+d78 2
+a79 1
+		DisposeRegion(l->DamageList);	/* dangerous if about to call abort() */
+d81 1
+d92 1
+d94 1
+d96 2
+a97 1
+	for (cr = l->ClipRect; cr ; cr = crtmp)
+d99 1
+a99 1
+		crtmp = cr->Next;
+d102 2
+a103 1
+			unlinkcr(l,cr);
+d108 2
+d111 2
+d114 1
+d116 1
+d121 103
+a223 2
+	/* this may cause temporary allocation of lost of memory */
+	behindcode(l,0); /* ignore backdrop windows */
+d226 1
+d229 4
+a232 2
+		Freecrlist(l->ClipRect);	/* dangerous if about to call abort() */
+		FreeMem(rp,sizeof(struct RastPort));	/* dangerous if about to call abort() */
+d236 1
+d242 1
+a242 1
+	/*unlocklayerinfo(l->LayerInfo);*/
+d245 2
+a246 1
+		FreeMem(l,sizeof(struct Layer));	/* dangerous if about to call abort() */
+@
+
+
+38.1
+log
+@begin_v38_development
+@
+text
+@d3 1
+a3 1
+*	$Id: deletelayer.c,v 1.10 91/01/25 10:14:18 bart Exp $
+d7 2
+d19 1
+a19 2
+/*#define DEBUG*/
+#define TIMESTAMP(x)	/*if (*(short*)x);*/
+d25 1
+a25 1
+* 
+d56 1
+a56 2
+deletelayer(l)
+struct Layer *l;
+d68 1
+a68 3
+deletelayer2(l, error)
+struct Layer *l;
+int error;	/* true if about to call abort() */
+d70 2
+a71 3
+	struct ClipRect *cr,*crtmp;
+	struct RastPort *rp;
+	int i;
+a72 6
+#ifdef DEBUG
+	printf("DeleteLayer(%lx)li=%lx\n",l,l->LayerInfo);
+	Debug();
+#endif
+	/*locklayerinfo(l->LayerInfo);*/
+	TIMESTAMP(0x666612);
+d74 1
+a74 1
+		{
+d76 1
+a76 2
+		}
+	TIMESTAMP(0x666622);
+a86 1
+	TIMESTAMP(0x666632);
+d90 1
+a90 1
+		{
+d93 1
+a93 1
+			{
+d96 1
+a96 1
+				{
+a97 1
+				}
+d100 1
+a100 1
+	TIMESTAMP(0x666642);
+a105 4
+	TIMESTAMP(0x666652);
+#ifdef DEBUG
+	printf("call behind code\n");
+#endif
+a107 1
+	TIMESTAMP(0x666662);
+d111 1
+a111 1
+		{
+d114 1
+a114 1
+		}
+a119 1
+	TIMESTAMP(0x666672);
+a120 1
+	TIMESTAMP(0x666682);
+a121 1
+	TIMESTAMP(0x666692);
+d124 1
+a124 1
+		{
+d126 1
+a126 5
+		}
+#ifdef DEBUG
+	printf("return from deletelayer\n");
+	Debug();
+#endif
+@

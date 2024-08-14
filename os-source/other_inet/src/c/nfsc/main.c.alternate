@@ -1,0 +1,305 @@
+/* -----------------------------------------------------------------------
+ * main.c   nfsc  SAS
+ *
+ * $Locker:  $
+ *
+ * $Id: main.c.alternate,v 1.1 92/10/07 15:16:19 bj Exp $
+ *
+ * $Revision: 1.1 $
+ *
+ * $Header: AS225:src/c/nfsc/RCS/main.c.alternate,v 1.1 92/10/07 15:16:19 bj Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+
+//#define MONITOR
+
+/*
+** Main handler body
+*/
+
+#include "fs.h"
+#include <exec/ports.h>
+
+#include <sys/param.h>
+#include <sys/time.h>
+
+#include <stdio.h>
+
+#include "nfsc_rev.h"
+
+static char *nfscvers = VERSTAG ;
+
+struct mount_pt *nfs_mtlist;	/* list of mounted filesystems	*/
+BYTE nfs_signal=-1;		/* exported to CreateMyPort()	*/
+AUTH *cred;			/* credentials for this daemon 	*/
+static struct MsgPort *mp;	/* My NFS command port (AREXX?) */
+struct Library *SockBase ;
+int MAXSOCKS = 32;
+
+
+/* local functions */
+void main(void);
+static void cleanup(int code);
+static void nfs_mpx(register struct mount_pt *mt, register struct DosPacket *dp);
+static void nfs_cur_vol(struct mount_pt *mt, register struct DosPacket *dp);
+static void nfs_true(struct mount_pt *mt, register struct DosPacket *dp);
+static void nfs_def(struct mount_pt *mt, register struct DosPacket *dp);
+
+void (*nfs1[])() = { 
+	nfs_def,	/* 0 */
+	nfs_def,	/* 1 */
+        nfs_def,	/* 2 */
+        nfs_def,	/* 3 */
+        nfs_def,	/* 4 */
+        nfs_def,	/* 5 */
+        nfs_def,	/* 6 */
+        nfs_cur_vol,	/* 7 */
+        nfs_locate,	/* 8 */
+        nfs_rename_dsk,	/* 9 */
+        nfs_def,	/* 10 */
+        nfs_def,	/* 11 */
+        nfs_def,	/* 12 */
+        nfs_def,	/* 13 */
+        nfs_def,	/* 14 */
+        nfs_freelock,	/* 15 */
+        nfs_delete,	/* 16 */
+        nfs_rename,	/* 17 */
+        nfs_def,	/* 18 */
+        nfs_copydir,	/* 19 */
+        nfs_def,	/* 20 */
+        nfs_setprotect,	/* 21 */
+        nfs_createdir,	/* 22 */
+        nfs_examine,	/* 23 */
+        nfs_examine_next,	/* 24 */
+        nfs_dkinfo,	/* 25 */
+        nfs_dkinfo,	/* 26 */
+        nfs_true,	/* 27 */
+        nfs_true,	/* 28 */
+        nfs_parentdir,	/* 29 */
+        nfs_def,	/* 30 */
+        nfs_def,	/* 31 */
+        nfs_def,	/* 32 */
+        nfs_def,	/* 33 */
+        nfs_setdate	/* 34 */
+};
+
+void (*nfs2[])() = 
+	{ nfs_open,	/* 1004 */
+	nfs_open,	/* 1005 */
+	nfs_open,	/* 1006 */
+	nfs_close,	/* 1007 */
+	nfs_seek,	/* 1008 */
+	nfs_def,	/* 1009 */
+	nfs_def,	/* 1010 */
+	nfs_def,	/* 1011 */
+	nfs_def,	/* 1012 */
+	nfs_def,	/* 1013 */
+	nfs_def,	/* 1014 */
+	nfs_def,	/* 1015 */
+	nfs_def,	/* 1016 */
+	nfs_def,	/* 1017 */
+	nfs_def,	/* 1018 */
+	nfs_def,	/* 1019 */
+	nfs_def,	/* 1020 */
+	nfs_def,	/* 1021 */
+	nfs_makelink,	/* 1022 */
+	nfs_def,	/* 1023 */
+	nfs_readlink,	/* 1024 */
+	nfs_def,	/* 1025 */
+	nfs_fh_from_lk,	/* 1026 */
+	nfs_true,	/* 1027 */
+	nfs_def,	/* 1028 */
+	nfs_def,	/* 1029 */
+	nfs_copydir,	/* 1030 */
+	nfs_parentdir,	/* 1031 */
+	nfs_def,	/* 1032 */
+	nfs_def,	/* 1033 */
+	nfs_examine	/* 1034 */
+};
+
+struct Library *SockBase ;
+
+
+/*
+ * main loop -  setup command port, alloc DOS packet arrival int, and
+ *		loop waiting for something to do.
+ */
+void main(void)
+{
+	register struct mount_pt *here;
+	register long nfs, cmd, event;
+	register struct Message *msg;
+
+	if ((SockBase = OpenLibrary( "inet:libs/socket.library", 0L ))==NULL) {
+		(void)requester(0L," OK ","%s","Opening of socket library failed.");
+		exit(RETURN_FAIL);
+	}
+
+	/* initialize for MAXSOCKS sockets */
+	setup_sockets( MAXSOCKS, &errno );
+
+	mp = CreateMsgPort();
+	if(!mp){
+		cleanup(RETURN_FAIL);
+	}
+	mp->mp_Node.ln_Pri = 0L;
+	mp->mp_Node.ln_Name = CLIENT_COMMAND_PORT;
+	AddPort(mp);
+
+	if((nfs_signal = AllocSignal(-1L)) == -1){
+		cleanup(RETURN_FAIL);
+	}
+	if(!(cred = authunix_create_default())){
+		(void)requester(0L, " OK ", "%s\n%s\n%s\n",
+			"NFSc: can't create authentication",
+			"credentials.  Check that hostname,",
+			"user id, and group id are set");
+		cleanup(RETURN_FAIL);
+	}
+
+	nfs = 1L << nfs_signal;	cmd = 1L << mp->mp_SigBit;
+	while (1) {
+		event = Wait(nfs | cmd | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D);
+		if(event & nfs){
+			for(here = nfs_mtlist; here; here = here->mt_next){
+				if(here->mt_port->mp_MsgList.lh_Head->ln_Succ){
+					while(msg = GetMsg(here->mt_port)){
+						register struct	DosPacket *dp;
+
+						dp = (struct DosPacket *)msg->mn_Node.ln_Name;
+						msg->mn_ReplyPort = dp->dp_Port;
+						nfs_mpx(here, dp);
+						ReplyMsg(msg);
+					}
+				}
+			}
+		}
+
+		if(event & cmd){
+			while(msg = GetMsg(mp)){
+				nfs_command((struct nfs_req *)msg);
+			}
+		}
+
+		if(event & SIGBREAKF_CTRL_C){
+			cleanup(RETURN_OK);
+		}
+
+		if(event & SIGBREAKF_CTRL_D){
+			struct mount_pt *mt;
+			int busy;
+
+			busy = 0;
+			for(mt = nfs_mtlist; mt; mt = mt->mt_next){
+				busy += mt->mt_nlocks + mt->mt_nfiles;
+			}
+
+			if(!busy){
+				cleanup(RETURN_OK);
+			}
+		}
+	}
+}
+
+static void cleanup(int code)
+{
+	struct mount_pt *mt, *newmt;
+	struct nfs_req *msg;
+
+	if(mp){
+		Forbid();
+		while(msg = (struct nfs_req *)GetMsg(mp)){
+			msg->error = ECONFIGPROBLEM;
+			ReplyMsg((struct Message *)msg);
+		}
+		RemPort(mp);
+		DeleteMsgPort(mp);
+		Permit();
+	}
+
+	for(mt = nfs_mtlist; mt; mt = newmt){
+		newmt = mt->mt_next;
+		free_mt(mt, 0L);
+	}
+
+	if(cred){
+		auth_destroy(cred);
+	}
+
+	if(nfs_signal > 0){
+		FreeSignal(nfs_signal);
+	}
+
+	cleanup_sockets();
+	CloseLibrary(SockBase);
+	exit(code);
+}
+
+
+static void
+nfs_mpx(mt, dp)
+	register struct mount_pt *mt;
+	register struct DosPacket *dp;
+{
+	register UWORD type = (UWORD)dp->dp_Type;
+
+	dp->dp_Res1 = dp->dp_Res2 = 0L;
+
+	if( type < 512 ) {
+		if( type < 35 ) {
+			(*nfs1[type])(mt,dp);
+		} else { 
+			switch( type ) {
+			case ACTION_READ:  /* 82 */
+				nfs_rd(mt,dp);
+				break;
+			case ACTION_WRITE:  /* 87 */
+				nfs_wr(mt,dp);
+				break;
+			case ACTION_SAME_LOCK:  /* 40 */
+				nfs_same_lock(mt,dp);
+				break;
+			case ACTION_EX_NEXT:  /* 51 */
+                		nfs_examine_next(mt,dp);
+				break;
+			case ACTION_EX_OBJECT:  /* 50 */		
+			        nfs_examine(mt,dp);
+                        	break;
+			case ACTION_CHMOD:  /* 53 */
+				nfs_setprotect(mt, dp);
+                                break;
+			default:
+				dp->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
+			}
+		}
+	} else {
+		if( type>1003 && type<1035 )
+			(*nfs2[type-1004])(mt,dp);
+		else
+			dp->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
+	}
+}
+
+				
+
+static void nfs_cur_vol(mt, dp)
+	struct mount_pt *mt;
+	register struct DosPacket *dp;
+{
+	dp->dp_Res1 = dtob(mt->mt_vol);
+}
+
+static void nfs_true(mt, dp)
+	struct mount_pt *mt;
+	register struct DosPacket *dp;
+{
+	dp->dp_Res1 = DOSTRUE;
+}
+
+static void nfs_def(mt, dp)
+	struct mount_pt *mt;
+	register struct DosPacket *dp;
+{
+	dp->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
+}

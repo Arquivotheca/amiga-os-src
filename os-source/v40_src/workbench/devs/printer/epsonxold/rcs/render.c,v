@@ -1,0 +1,416 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  V38_13:1.3 L34_10:1.2 L35_8:1.2 L35_5:1.0 L35_4:1.0 L35_1:1.0;
+locks    ; strict;
+comment  @*   @;
+
+
+1.3
+date     91.07.10.16.40.12;  author darren;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     88.06.05.18.10.23;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     88.05.06.01.41.22;  author daveb;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     88.04.04.21.26.31;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to RCS
+V1.3 Gamma 10 release
+@
+
+
+1.3
+log
+@Obtain includes from standard includes directory.
+@
+text
+@/*
+	EpsonXOld (EX/FX/JX/LX/MX/RX) driver.
+	David Berezowski - October/87
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include <devices/printer.h>
+#include <devices/prtbase.h>
+
+#define NUMSTARTCMD	4	/* # of cmd bytes before binary data */
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD)	/* total of above */
+#define NUMLFCMD	5	/* # of cmd bytes for linefeed */
+
+#define LPI		2
+#define STARTLEN	3
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	static UWORD RowSize, BufSize, TotalBufSize;
+	static UWORD dataoffset, dpi_code;
+	/*
+		00-00	\015		carriage return
+		01-02	\0332		set lpi
+	*/
+	static UBYTE StartBuf[STARTLEN] = "\015\0332";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+			RowSize = x;
+			BufSize = RowSize + NUMTOTALCMD + NUMLFCMD;
+			TotalBufSize = BufSize * 2;
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY;
+			}
+			else {
+				dataoffset = NUMSTARTCMD;
+				/*
+					A carriage return is sent so that the
+					print head is at the leftmost position
+					as this printer starts printing from
+					the print head's position.
+				*/
+				err = (*(PD->pd_PWrite))(StartBuf, STARTLEN);
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row # (0 to Height - 1).
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset]);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+
+				Scan backwards through the buffer for the
+				first non-zero data byte, send only up to
+				this point only.
+			*/
+			i = RowSize;
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD];
+			ptr = ptrstart + i + NUMSTARTCMD - 1;
+			while (i > 0 && *ptr == 0) {
+				i--;
+				ptr--;
+			}
+			if (i != 0) { /* if data */
+				ptr++; /* advance past last valid data */
+				*ptrstart = 27;
+				*(ptrstart + 1) = dpi_code; /* density */
+				*(ptrstart + 2) = i & 0xff;
+				*(ptrstart + 3) = i >> 8; /* size */
+			}
+			else { /* no data */
+				ptr = ptrstart; /* reset ptr to buf start */
+			}
+			*ptr++ = 13; /* cr */
+			*ptr++ = 27;
+			*ptr++ = 'A';
+			*ptr++ = y;
+			*ptr++ = 10; /* y/72 lf */
+			err = (*(PD->pd_PWrite))(ptrstart, ptr - ptrstart);
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NUMSTARTCMD ?
+					BufSize : 0) + NUMSTARTCMD;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = BufSize - NUMTOTALCMD - NUMLFCMD;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			err = PDERR_NOERR;
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq struct.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel print */
+			if (ct != PDERR_CANCEL) {
+				/* restore preferences lpi */
+				StartBuf[LPI] = (PD->pd_Preferences.
+					PrintSpacing == SIX_LPI) ? '2' : '0';
+				err = (*(PD->pd_PWrite))(StartBuf, STARTLEN);
+			}
+			/* wait for both buffers to empty */
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq struct.
+				y	- 0.
+			*/
+			dpi_code = SetDensity(x & SPECIAL_DENSITYMASK);
+			err = PDERR_NOERR;
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.2
+log
+@V1.3 Gamma 15        
+@
+text
+@d10 2
+a11 2
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+@
+
+
+1.1
+log
+@removed bad commands (set uni-direc mode, set bi-direc mode)
+V1.3 Gamma 15
+@
+text
+@d13 2
+a14 2
+#define NUMSTARTCMD	7	/* # of cmd bytes before binary data */
+#define NUMENDCMD	1	/* # of cmd bytes after binary data */
+a16 1
+#define MAXCOLORBUFS	4	/* max # of color buffers */
+d18 3
+d29 1
+a29 1
+	static UWORD RowSize, ColorSize, BufSize, TotalBufSize;
+a30 3
+	static UWORD colors[MAXCOLORBUFS]; /* color ptrs */
+	static UWORD colorcodes[MAXCOLORBUFS]; /* printer color codes */
+	static UWORD NumColorBufs; /* actually number of color buffers req. */
+d32 2
+a33 1
+		00-01	\0332	set lpi
+d35 2
+a36 2
+	static UBYTE EndBuf[2] = "\0332";
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start;
+d42 1
+a42 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d47 1
+a47 18
+			ColorSize = RowSize + NUMTOTALCMD; /* size of each color buf */
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) { /* color */
+				NumColorBufs = MAXCOLORBUFS;
+				colors[0] = ColorSize * 3; /* Black */
+				colors[1] = ColorSize * 0; /* Yellow */
+				colors[2] = ColorSize * 1; /* Magenta */
+				colors[3] = ColorSize * 2; /* Cyan */
+				colorcodes[0] = 4; /* Yellow */
+				colorcodes[1] = 1; /* Magenta */
+				colorcodes[2] = 2; /* Cyan */
+				colorcodes[3] = 0; /* Black */
+			}
+			else { /* grey-scale or black&white */
+				NumColorBufs = 1;
+				colors[0] = ColorSize * 0; /* Black */
+				colorcodes[0] = 0; /* Black */
+			}
+			BufSize = ColorSize * NumColorBufs + NUMLFCMD;
+d55 7
+a61 2
+				/* cr */
+				err = (*(PD->pd_PWrite))("\015", 1);
+d68 2
+a69 2
+				x	- NA
+				y	- row.
+d71 1
+a71 1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors);
+d77 3
+a79 3
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+d81 3
+a83 3
+				For each color buf, scan backwards through the buffer
+				for the first non-zere data byte.  Compact up to this
+				point, then send the entire compacted buffer in one go.
+d85 6
+a90 34
+			ptrstart = &PD->pd_PrintBuf[dataoffset];	/* ptr to data */
+			ptr2start = ptr2 = ptrstart - NUMSTARTCMD;	/* ptr to buf start */
+			x = 0; /* flag no transfer required yet */
+			for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+				i = RowSize;
+				ptr = ptrstart + i - 1;
+				while (i > 0 && *ptr == 0) {
+					i--;
+					ptr--;
+				}
+				if (i != 0) { /* if data */
+					*(++ptr) = 13; /* <cr> */
+					ptr = ptrstart - NUMSTARTCMD;
+					*ptr++ = 27;
+					*ptr++ = 'r';
+					*ptr++ = colorcodes[ct]; /* color */
+					*ptr++ = 27;
+					*ptr++ = dpi_code; /* density */
+					*ptr++ = i & 0xff;
+					*ptr++ = i >> 8; /* size */
+					i += NUMTOTALCMD;
+					if (x != 0) { /* if must transfer data */
+						ptr = ptrstart - NUMSTARTCMD; /* get src start */
+						do { /* transfer and update dest ptr */
+							*ptr2++ = *ptr++;
+						} while (--i);
+					}
+					else { /* no transfer required */
+						ptr2 += i; /* update dest ptr */
+					}
+				}
+				if (i != RowSize + NUMTOTALCMD) { /* if compacted or 0 */
+					x = 1; /* flag that we need to transfer next time */
+				}
+d92 16
+a107 6
+			*ptr2++ = 13; /* cr */
+			*ptr2++ = 27;
+			*ptr2++ = 'A';
+			*ptr2++ = y;
+			*ptr2++ = 10; /* y/72 lf */
+			err = (*(PD->pd_PWrite))(ptr2start, ptr2 - ptr2start);
+d109 2
+a110 2
+				dataoffset = 
+					(dataoffset == NUMSTARTCMD ? BufSize : 0) + NUMSTARTCMD;
+d116 3
+a118 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d131 2
+a132 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d135 6
+a140 5
+			if (ct != PDERR_CANCEL) { /* if user did not cancel print */
+				/* set line spacing */
+				EndBuf[1] = (PD->pd_Preferences.PrintSpacing ==
+					SIX_LPI) ? '2' : '0';
+				err = (*(PD->pd_PWrite))(EndBuf, 2);
+d142 2
+a143 1
+			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+d145 1
+a145 1
+				FreeMem(PD->pd_PrintBuf, TotalBufSize); /* free memory */
+d151 3
+a153 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d2 1
+a2 1
+	EpsonX (EX/FX/JX/LX/MX/RX) driver.
+d13 2
+a14 2
+#define NUMSTARTCMD		7	/* # of cmd bytes before binary data */
+#define NUMENDCMD		1	/* # of cmd bytes after binary data */
+d16 1
+a16 1
+#define NUMLFCMD		5	/* # of cmd bytes for linefeed */
+d28 1
+a28 1
+	static UWORD dataoffset, spacing, dpi_code;
+d33 1
+a33 2
+		00-02	\033U0	bi-directional text
+		03-04	\0332	6 lpi
+d35 1
+a35 1
+	static UBYTE EndBuf[5] = "\033U0\0332";
+d72 2
+a73 2
+				/* cr, uni-directional mode on */
+				err = (*(PD->pd_PWrite))("\015\033U1", 4);
+d108 1
+a108 1
+					*(++ptr) = 13;				/* <cr> */
+d112 1
+a112 1
+					*ptr++ = colorcodes[ct];	/* color */
+d114 1
+a114 1
+					*ptr++ = dpi_code;			/* density */
+d116 1
+a116 1
+					*ptr++ = i >> 8;			/* size */
+d166 2
+a167 2
+				/* bi-directional mode on, set line spacing */
+				EndBuf[4] = (PD->pd_Preferences.PrintSpacing ==
+d169 1
+a169 1
+				err = (*(PD->pd_PWrite))(EndBuf, 5);
+a182 2
+			/* kludge for sloppy tractor mechanism */
+			spacing = PD->pd_Preferences.PaperType == SINGLE ? 1 : 0;
+@

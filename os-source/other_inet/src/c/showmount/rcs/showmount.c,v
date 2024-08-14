@@ -1,0 +1,440 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.3
+date     94.03.24.18.52.02;  author jesup;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.10.19.15.09.49;  author bj;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.07.13.44.24;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.3
+log
+@Checkin of BJ's changes.  template is different, better error handling.
+@
+text
+@/* -----------------------------------------------------------------------
+ * showmount.c   SAS 5.10
+ *
+ * $Locker:$
+ *
+ * $Id:$
+ *
+ * $Revision:$
+ *
+ * $Log:$
+ *
+ * $Header:$
+ *
+ *------------------------------------------------------------------------
+ */
+/*
+** showmount: print mount export list of specified host
+*/
+
+/* shared library stuff */
+#include <ss/socket.h>
+
+#include <dos/dos.h>
+#include <proto/all.h>
+
+#include <sys/types.h>
+#include <rpc/rpc.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <rpcsvc/mount.h>
+#include <netdb.h>
+
+#include <string.h>
+
+void list_exports( CLIENT *cl, struct timeval tout);
+void dump_all( CLIENT *cl, struct timeval tout);
+int main(void);
+int doit(char *host);
+xdr_mountlist( XDR *xdrs, int dummy);
+xdr_groups( XDR *xdrs, int glist);
+xdr_export_list ( XDR *xdrs, int elist);
+
+#include "showmount_rev.h"
+
+static char *showmvers = VERSTAG ;
+
+struct Library *SockBase ;
+
+int eopt;
+
+xdr_mountlist( xdrs, dummy)
+	XDR	*xdrs;
+	int	dummy;
+{
+	char	hostname [MNTNAMLEN];
+	char	dirpath [MNTPATHLEN];
+	char	*host = hostname, *path = dirpath, *s;
+	bool_t	more;
+
+	do {
+		if (!xdr_bool( xdrs, &more)){
+			return ( FALSE );
+		}
+
+		if (!more){
+			return( TRUE );
+		}
+
+		if (!xdr_string( xdrs, &host, sizeof(hostname))){
+			return( FALSE );
+		}
+
+		s = host;
+		while (*s != '\0'){
+			if (*s < ' ' || (int)*s > 127){
+				*s = '\0';
+			} else {
+				s++;
+			}
+		}
+
+		if (!xdr_string( xdrs, &path, sizeof(dirpath))){
+			return( FALSE );
+		}
+
+		Printf ("%s \t%s\n", hostname, dirpath);
+
+	} while (TRUE);
+}
+
+/*
+** Output group list separated by commas
+*/
+xdr_groups( xdrs, glist )
+	XDR	*xdrs;
+	int	glist;
+{
+	char group[MNTNAMLEN], *gp;
+	bool_t more;
+
+	for(gp = group; TRUE; ) {
+		if (!xdr_bool(xdrs, &more)){
+			return (FALSE);
+		}
+
+		if (!more) {
+			PutStr ("\n");
+			return (TRUE);
+		}
+		if (!xdr_string(xdrs, &gp, sizeof(group))){
+			return (FALSE);
+		}
+
+		if(group[0]){
+			Printf ("%s, ", group);
+		}
+	}
+}
+
+xdr_export_list ( xdrs, elist )
+	XDR	*xdrs;
+	int	elist;
+{
+	bool_t	more;
+	char	dirpath[MNTPATHLEN], *dp;
+
+	for(dp = dirpath; TRUE; ) {
+		if (!xdr_bool(xdrs, &more)){
+			return (FALSE);
+		}
+
+		if (!more){
+			return (TRUE);
+		}
+
+		if (!xdr_string(xdrs, &dp, sizeof(dirpath))){
+			return (FALSE);
+		}
+
+		Printf ("%s\t", dirpath);
+
+		if (!xdr_groups(xdrs, NULL)){
+			return (FALSE);
+		}
+	}
+}
+
+void
+list_exports( cl, tout )
+	CLIENT	*cl;
+	struct	timeval	tout;
+{
+	PutStr ("Filesystem\tGroups\n");
+	clnt_call(cl, MOUNTPROC_EXPORT, xdr_void, 	 (caddr_t)NULL,
+					xdr_export_list, (caddr_t)NULL, tout);
+}
+
+void
+dump_all( cl , tout)
+	CLIENT	*cl;
+	struct	timeval	tout;
+{
+	PutStr ("Host\tFilesystem\n");
+	clnt_call(cl, MOUNTPROC_DUMP, 	xdr_void, 	(caddr_t)NULL,
+					xdr_mountlist, 	(caddr_t)NULL, tout);
+}
+
+struct	timeval	totaltout = {10, 0}, period = {2, 0};
+
+int doit (char *host)
+{
+	CLIENT 	*cl;
+
+	cl = clnt_create(host, MOUNTPROG, MOUNTVERS, "udp");
+	if (cl == (CLIENT *)0){
+		clnt_spcreateerror("showmount");
+		Printf("Error connecting to host %s\n",host);
+		return(RETURN_ERROR);
+	}
+
+	clnt_control(cl, CLSET_TIMEOUT, &totaltout);
+	clnt_control(cl, CLSET_RETRY_TIMEOUT, &period);
+
+	if (eopt){
+		dump_all(cl, totaltout);
+	} else {
+		list_exports(cl, totaltout);
+	}
+
+	clnt_destroy(cl);
+	return(RETURN_OK) ;
+}
+
+#define CMDREV		"\0$VER: " VSTRING
+#define TEMPLATE	"-E=EXPORTS/S,HOST/A" CMDREV
+#define OPT_E		0
+#define OPT_HOST	1
+#define OPT_COUNT	2
+
+int MAXSOCKS = 5;
+struct RDargs *rdargs;
+
+int main(void)
+{
+	long opts[OPT_COUNT+1];
+	int error = RETURN_FAIL ;
+
+    if(SockBase = OpenLibrary( "inet:libs/socket.library", 1L )) 
+    {
+    	setup_sockets(MAXSOCKS,&errno) ;
+	    memset((char *)opts, 0, sizeof(opts));
+    	if(rdargs = ReadArgs(TEMPLATE, opts, NULL))
+		{
+			if(opts[OPT_E])
+			{
+				eopt++;
+			}
+
+			if(opts[OPT_HOST])
+			{
+				error = doit((char *)(opts[OPT_HOST]));
+			}
+			else
+			{
+				PutStr ("usage: showmount [-e] hostname\n");
+			}
+			FreeArgs(rdargs) ;
+		}
+		else
+		{
+			PrintFault(IoErr(), "showmount") ;
+		}
+    	cleanup_sockets() ;
+		CloseLibrary(SockBase);
+	}    		
+    else
+    {
+    	PutStr("Opening of socket library failed.\n");
+    }
+	return(error) ;
+}
+
+@
+
+
+1.2
+log
+@
+Binary 2.1
+
+Rewrite in SAS and 2.0 OS.  MH Oct-10-92
+@
+text
+@d38 1
+a38 2
+void doit(char *host);
+void cleanup(int code);
+d170 1
+a170 1
+void doit (char *host)
+d178 1
+a178 1
+		cleanup(RETURN_ERROR);
+d191 1
+d195 1
+a195 1
+#define TEMPLATE	"-E/S,HOST/A" CMDREV
+d206 1
+d208 31
+a238 3
+    if ((SockBase = OpenLibrary( "inet:libs/socket.library", 1L ))==NULL) {
+        PutStr("Opening of socket library failed.\n");
+        return(RETURN_FAIL);
+d240 2
+a241 4
+	setup_sockets(MAXSOCKS,&errno);
+
+    memset((char *)opts, 0, sizeof(opts));
+    rdargs = ReadArgs(TEMPLATE, opts, NULL);
+a242 20
+	if(opts[OPT_E])
+		eopt++;
+
+	if(opts[OPT_HOST])
+		doit((char *)(opts[OPT_HOST]));
+	else
+		PutStr ("usage: showmount [-e] hostname\n");
+
+	cleanup(RETURN_OK);
+
+}
+
+void cleanup(int code)
+{
+	FreeArgs(rdargs);
+	cleanup_sockets();
+	CloseLibrary(SockBase);
+
+	Exit(code);
+}
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 2
+a2 2
+/* ---------------------------------------------------------------------------------
+ * SHOWMOUNT.C    (Manx 36)
+d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 5
+ * $Id$
+ *
+ * $Revision$
+ *
+ * $Header$
+d8 7
+a14 3
+ *-----------------------------------------------------------------------------------
+ * 
+ *  showmount: print mount export list of specified host
+d16 3
+d20 2
+a21 1
+#include <libraries/dos.h> 
+d23 3
+d33 11
+d46 1
+a46 2
+static char *compiler = "MANX36 MANX36" ;
+static char *smvers = VERSTAG ;
+d48 1
+a48 4
+void list_exports();
+void dump_all();
+void usage();
+void doit();
+d87 1
+a87 1
+		printf ("%s \t%s\n", hostname, dirpath);
+d92 2
+a93 2
+/*	
+** Output group list separated by commas 
+d108 1
+a108 1
+			printf ("\n");
+d116 1
+a116 1
+			printf ("%s, ", group);
+d141 1
+a141 1
+		printf ("%s\t", dirpath);
+d154 1
+a154 1
+	printf ("Filesystem\tGroups\n");
+d164 1
+a164 1
+	printf ("Host\tFilesystem\n");
+d169 1
+a169 9
+void
+usage(code)
+int code;
+{
+	printf ("usage: showmount [-e] hostname\n");
+	exit(code);
+}
+
+struct	timeval	totaltout = {20, 0}, period = {2, 0};
+d171 1
+a171 3
+void
+doit(host)
+	char *host;
+d178 2
+a179 1
+		exit(1);
+d190 1
+a190 1
+		
+d194 41
+a234 17
+void
+main(argc, argv)
+	int	argc;
+	char	**argv;
+{
+	if (argc < 2 || argc > 3)
+		usage(RETURN_WARN);
+
+	argv++;
+	if( argv[0][0] == '-') {
+		if (argv[0][1]=='e') {
+			eopt++;
+			argv++;
+		} else
+			usage(RETURN_WARN);
+	} 
+	doit(*argv);
+@

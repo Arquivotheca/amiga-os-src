@@ -1,0 +1,857 @@
+head	40.22;
+access;
+symbols;
+locks; strict;
+comment	@ * @;
+
+
+40.22
+date	93.10.11.13.55.53;	author LPOMA;	state Exp;
+branches;
+next	40.18;
+
+40.18
+date	93.05.20.22.52.18;	author LPOMA;	state Exp;
+branches;
+next	38.16;
+
+38.16
+date	93.01.22.22.17.13;	author LPOMA;	state Exp;
+branches;
+next	38.15;
+
+38.15
+date	92.12.16.01.15.14;	author LPOMA;	state Exp;
+branches;
+next	38.14;
+
+38.14
+date	92.11.25.13.30.53;	author LPOMA;	state Exp;
+branches;
+next	38.13;
+
+38.13
+date	92.09.01.00.19.25;	author LPOMA;	state Exp;
+branches;
+next	38.10;
+
+38.10
+date	92.08.07.01.15.13;	author LPOMA;	state Exp;
+branches;
+next	38.5;
+
+38.5
+date	92.03.30.13.57.56;	author LPOMA;	state Exp;
+branches;
+next	38.3;
+
+38.3
+date	92.02.21.11.14.03;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.18.39;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.22
+log
+@Fixed  a small problem when formatting a high-density disk.  Some
+PC  systems  did  not recognize the format we placed on the disk.
+Many  other  PC  systems  accepted  the  disk with no complaints.
+@
+text
+@/* Format_MFS.c **************************************************************
+** Copyright 1992 CONSULTRON
+*
+*      DOS Formatting function (ACTION_FORMAT).
+*
+*************************************************************************/
+
+#include "FS:FS.h"
+
+extern struct ExecBase  *SysBase;
+extern struct DOSBase *DOSBase;
+extern struct FS         *fsys;
+extern int DOSerror;
+extern struct IOStdReq      *diskreq;
+
+#define DEFAULT_MIN_CLUSTER_SIZE   8
+
+/* Default parameters for floppy types */
+struct FS_parms mfmt[] = {
+{ 112, 1440,    0xF9, 2, 3, 9,  2 },  /* FMT_AUTO */
+{ 112, 1440,    0xF9, 2, 3, 9,  2 },  /* FMT_MSDOS_QD9 */
+{ 112,  720,    0xFD, 2, 2, 9,  2 },  /* FMT_MSDOS_D9  */
+{  64,  360,    0xFC, 2, 2, 9,  1 },  /* FMT_MSDOS_S9  */
+{ 112, 1440,    0xF9, 2, 5, 9,  2 },  /* FMT_ATARI_D9  */
+{ 112,  720,    0xF8, 2, 5, 9,  1 },  /* FMT_ATARI_S9  */
+{ 112*2,1440*2, 0xF0, 1, 9, 18, 2 },  /* FMT_MSDOS_QD18*/
+};
+
+static const UBYTE bootcode[] = { 
+0xEB,0x3C,0x90,                         /* boot jump address displacement */
+'C','D','P',' ',' ','5','.','0',        /* system ID not null terminated */
+0x00, 0x02,                             /* # bytes per sector (e.g. 512) */
+2,                                      /* # sectors per cluster (e.g. 01 or 02 */
+0x01, 0x00,                             /* # reserved sectors at beginning (e.g. 1) */
+2,                                      /* # copies of FAT (e.g. 2) */
+0x70, 0x00,                             /* # root directory entries (e.g. 64 or 112) */
+0xA0, 0x05,                             /* # sectors per disk (16 bit) */
+0xF9,                                   /* disk format ID # (e.g. F8, F9 or FC-FF) */
+0x03, 0x00,                             /* # sectors per FAT (e.g. 1 or 2) */
+0x09, 0x00,                             /* # sectors per track (e.g. 8 or 9) */
+0x02, 0x00,                             /* # sides (e.g. 1 or 2) */
+0x00, 0x00, 0x00, 0x00,                 /* # hidden (?) sectors (e.g. 0) */
+0x00, 0x00, 0x00, 0x00,                 /* # sectors per disk when fbb_sectors_disk > 65536 (MSDOS 4+) */
+0x00, 0x00, 0x29, 0xBC, 0x07, 0x4D, 0x37,  /* unknown (MSDOS 4+) & volume serial # (MSDOS 4+) */
+0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,   /* volume name (MSDOS 4+) */
+'F',  'A',  'T',  '1',  '2',  0x20, 0x20, 0x20,     /* FAT type string (MSDOS 4+) */
+0xFB, 0x31, 0xC0, 0x8E, 0xD0, 0x8E, 0xD8,           /* CrossDOS boot code */
+0xBC, 0x00, 0x7C, 0xBE, 0x59, 0x7C, 0xB4, 0x0E, 0xBB, 0x07,
+0x00, 0xAC, 0x84, 0xC0, 0x74, 0xFE, 0xCD, 0x10, 0xEB, 0xF7,
+};
+static const char bootstring[] = "CrossDOS(TM) non-bootable disk!";
+
+/*************
+*   FormatDisk()  --- Do a QUICK format of disk. If format = 0 then = FMT_AUTO
+*
+*   This format function ASSUMES that the user wishes to format with a
+*   1 SECTOR = 1 BLOCK
+*
+*   Return DOSTRUE if successful or DOSFALSE if error
+*************/
+int FormatDisk(UCHAR *diskname, ULONG format)
+/* diskname = BADDR(BSTR) */
+{
+    register struct FS           *fs = fsys;
+    register struct FS_boot_blk  *fs_bb;
+    register struct FS_dir_ent   *dirent;
+
+    register LONG endlw, i, SizeBlock;
+    register struct DosEnvec *fssm_env = (struct DosEnvec *)BADDR(fs->f_fssm->fssm_Environ);
+    ULONG clusters, lowblock;
+    register UBYTE *data=fs->f_scratch;
+    ULONG datasz;
+    int  error;
+    UBYTE fmt=FMT_AUTO;
+    UWORD blocks_sec = MP_blocks_sec, fat_mask=FAT12_MASK;
+    UWORD rootdir_ent=512;  /* Default for hard drives */
+    volatile UWORD temp0=0;
+    volatile ULONG temp1;
+    volatile UWORD sectorsz=((fssm_env->de_SizeBlock)<<2);
+    ULONG blocks_part, blks_disk, sectors_clust=2;
+
+    DOSerror = ERROR_DISK_NOT_VALIDATED;
+
+/** Check if proper name requirements */
+    if( (diskname == 0) || (diskname[0] == 0) )
+    {
+        DOSerror = ERROR_INVALID_COMPONENT_NAME;
+        return(DOSFALSE);
+    }
+
+/****
+    Check if disk installed and if write protected
+****/
+    if(Is_Disk_Out(FALSE))
+    {       /* no disk in drive */
+    /*  DOSerror = ERROR_NO_DISK already set by Is_Disk_Out() */
+        return(DOSFALSE);
+    }
+
+    /*  if DOSerror = ERROR_DISK_WRITE_PROTECTED it was set by Is_Disk_Out() */
+    if(DOSerror == ERROR_DISK_WRITE_PROTECTED)
+    {
+        return(DOSFALSE);
+    }
+
+/**********************************************************************
+*   MSDOS FS specific boot block setting
+**********************************************************************/
+/* Calculate BLOCKS per disk */
+    blocks_part = fssm_env->de_BlocksPerTrack * fssm_env->de_Surfaces
+        * ((fssm_env->de_HighCyl - fssm_env->de_LowCyl)+1);
+
+    if(!GetBootBlock((APTR)data, fssm_env))  /* Check if a boot record can be found */
+    {
+        return(DOSFALSE);
+    }
+
+    switch(format)
+    {
+    case ID_MSDOS_DISK_HD:
+        mfmt[FMT_AUTO].mp_sides = fs->f_surfaces;
+        mfmt[FMT_AUTO].mp_sectors_track = fs->f_blockspertrack;
+        sectors_clust = DEFAULT_MIN_CLUSTER_SIZE;
+        goto Format_partition;
+
+    case ID_MSDOS_DISK:
+    case ID_MSDOS_DISK_DS:
+    case FMT_AUTO:
+    case ID_DOS_DISK:
+
+/* Use Drive Geometry if:
+  1) de_DosType = ID_MSDOS_DISK or ID_MSDOS_DISK_DS    and
+  2) the boot block is to be located at sector 0    and
+  3) TD_GETGEOMETRY command supported otherwise use TD_GETDRIVETYPE if supported.
+*/
+        if(fssm_env->de_LowCyl == 0)
+        {
+        /****
+            Initialize disk physical params to default (if supported by the device code)
+        ****/
+            if(blks_disk = Get_Default_Drive_Geometry()) blocks_part = blks_disk;
+                /* use drive type */
+            if((fsys->f_FS_special_flags & MF_SP_DEVICE) && !DevCmd(TD_GETDRIVETYPE))
+            {
+                if(diskreq->io_Actual == DRIVE3_5) fmt = FMT_MSDOS_QD9;
+                else if(diskreq->io_Actual == DRIVE5_25)
+                {
+                    if(fssm_env->de_Surfaces == 1) fmt = FMT_MSDOS_S9;  /* if single-sided */
+                     else fmt = FMT_MSDOS_D9;     /* else double-sided */
+                }
+                 else if(diskreq->io_Actual == DRIVE3_5_150RPM) fmt = FMT_MSDOS_QD18;
+                if(fmt != FMT_AUTO) break;  /* if fmt != FMT_AUTO break out of switch() */
+            }
+            mfmt[fmt].mp_format_id = 0xF9;  /* set format ID to floppy-type */
+        }
+        blocks_sec = fssm_env->de_SectorPerBlock;   /* changed to BlocksPerSector for this file system */
+    /* Drop thru without break */
+    case FMT_FORCE:
+        mfmt[FMT_AUTO].mp_sides = fssm_env->de_Surfaces;
+        mfmt[FMT_AUTO].mp_sectors_track = max(1,fssm_env->de_BlocksPerTrack / blocks_sec);
+
+Format_partition:
+        sectorsz = sectorsz * blocks_sec;
+
+            /* Calc sectors per cluster (non-adjusted) */
+            /* Set the temp max sectors per cluster to DEFAULT_MIN_CLUSTER_SIZE */
+        sectors_clust = max(fssm_env->de_PreAlloc,sectors_clust);
+
+        mfmt[fmt].mp_sectors_part = blocks_part/blocks_sec;
+
+        if( fssm_env->de_DosType != ID_MSDOS_DISK_HD)
+        {       /* If not = ID_MSDOS_DISK_HD */
+            /* It appears that MSDOS does not like # of sectors over 64K on a floppy */
+            if(mfmt[fmt].mp_sectors_part >= 0x10000)
+            {
+                DOSerror = ERROR_UNKNOWN_DISK_FORMAT;
+                return(DOSFALSE);
+            }
+
+            fs->f_Diskflags &= ~FAT16_F;   /* # clusters < 12 bit FAT size. */
+/**************************************************************************
+This is older code that would try to promote a floppy disk format to use
+a 16 bit FAT if it could not be reasonably fit in a 12 bit FAT.
+Do to current limitations in CrossPC WRT incorrectly accessing floppy media with
+16 bit FAT, I chose, at this time, to always use a 12 bit FAT for floppies.
+This may change in the future. If so, I will use this code again.
+**************************************************************************
+            /* If DosType = ID_MSDOS_DISK_HD, then f_Diskflags already set to
+            proper value. If not ID_MSDOS_DISK_HD then autoadjust
+            to minimum FAT size */
+
+            if((mfmt[fmt].mp_sectors_part/sectors_clust) > (FAT_BAD & FAT12_MASK))
+            {   /* # clusters > 12 bit FAT size.  Try 16 bit FAT size */
+                fs->f_Diskflags |= FAT16_F;
+            }
+            else fs->f_Diskflags &= ~FAT16_F;   /* # clusters < 12 bit FAT size. */
+**************************************************************************/
+
+        /* Determine an efficient # of root directory entries. I believe that more than
+        512 root directory entries are wasteful of disk space */
+            if(blocks_part <= 720) rootdir_ent = 64;
+            else if(blocks_part < 2880) rootdir_ent = 112;
+            else if(blocks_part < 6000) rootdir_ent = 112*2;
+            else rootdir_ent = 240; /* For some reason, MSDOS does not like # of
+                                    root dir entries > than 256 for floppies */
+        }
+        else    /* If = ID_MSDOS_DISK_HD */
+            mfmt[fmt].mp_format_id = 0xF8;  /* set format ID to hard drive-type */
+
+    /* Load in the maximum of either the default root dir entries
+       or user-specified value in de_Control */
+        if(fssm_env->de_TableSize >= DE_CONTROL)
+            rootdir_ent = max(rootdir_ent, fssm_env->de_Control);
+
+    /* Normalize to the actual # of dir entries per block */
+        mfmt[FMT_AUTO].mp_root_dir_ent = rootdir_ent & ~((sectorsz / sizeof(struct FS_dir_ent))-1);
+
+        if(fs->f_Diskflags & FAT16_F)
+        {   /* 16 bit FAT table entry size */
+            temp0 = 2;
+            temp1 = 1;
+            fat_mask = FAT16_MASK;
+        }
+        else
+        {   /* 12 bit FAT table entry size */
+            temp0 = 12;
+            temp1 = 8;
+            fat_mask = FAT12_MASK;
+        }
+
+            /* Calc sectors per cluster (adjusted) */
+            /* For some strange reason, MSDOS (even through V5.0) does not like
+            a sectors per cluster value that are not an even multiple of 2 */
+           /* Make higher multiple of 2 */
+        sectors_clust = max(sectors_clust, (1+(mfmt[FMT_AUTO].mp_sectors_part/(FAT_BAD & fat_mask))));
+        for(i=1<<1; (i <= 256) && (sectors_clust > i); i <<= 1);
+        mfmt[FMT_AUTO].mp_sectors_clust = i;
+
+            /* Calc # of Clusters */
+        clusters = (mfmt[FMT_AUTO].mp_sectors_part)/mfmt[FMT_AUTO].mp_sectors_clust;
+
+        mfmt[FMT_AUTO].mp_sectors_fat = ((clusters * temp0)/(sectorsz * temp1))+1;
+        break;
+
+    case FMT_MQD18:
+        if(temp0 == DRIVE5_25) return(DOSFALSE); 
+        fmt = FMT_MSDOS_QD18;
+        break;
+    case FMT_MQD9:
+        if(temp0 == DRIVE5_25) return(DOSFALSE); 
+        fmt = FMT_MSDOS_QD9;
+        break;
+    case FMT_MD9 :
+        fmt = FMT_MSDOS_D9; 
+        break;
+    case FMT_MS9 :
+        fmt = FMT_MSDOS_S9; 
+        break;
+    case FMT_AD9 :
+        if(temp0 == DRIVE5_25) return(DOSFALSE); 
+        fmt = FMT_ATARI_D9; 
+        break;
+    case FMT_AS9 :
+        if(temp0 == DRIVE5_25) return(DOSFALSE); 
+        fmt = FMT_ATARI_S9; 
+        break;
+    default:
+        DOSerror = ERROR_UNKNOWN_DISK_FORMAT;
+        return(DOSFALSE);
+        break;
+    }
+
+/** Get boot block **/
+    if( !(data = AllocMem( datasz = sectorsz, (fssm_env->de_BufMemType)|MEMF_CLEAR )))
+    {
+        DOSerror = ERROR_NO_FREE_STORE;
+        return(DOSFALSE);
+    }
+
+/** Copy default boot block into block **/
+    CopyMem(&bootcode, data, sizeof(bootcode)+sizeof(bootstring));
+
+    fs_bb = (struct FS_boot_blk *)data;
+
+/** Modify boot block parameters **/
+    SWAPWORD(fs_bb->fbb_root_dir_ent,mfmt[fmt].mp_root_dir_ent);
+
+/* Alter the FAT type if 16 bit FAT only */
+    if(fs->f_Diskflags & FAT16_F)
+    {   /* 16 bit FAT table entry size */
+        fs_bb->fbb_FAT_type[4] = '6';       /* change the FAT type string to "FAT16" */
+    }
+/* Add volume name to boot block */
+    CopyMem(&diskname[1], fs_bb->fbb_volume_name, min(diskname[0], VOLNAME_SIZE));
+
+    if(mfmt[fmt].mp_sectors_part >= 0x10000)
+    {   /* Can't fit in 16 bit sectors_part field, use 32 bit field */
+        temp0 = 0;
+        temp1 = mfmt[fmt].mp_sectors_part;
+    }
+    else
+    {   /* Can fit in 16 bit sectors_part field */
+        temp0 = mfmt[fmt].mp_sectors_part;
+        temp1 = 0;
+    }
+    SWAPWORD(fs_bb->fbb_sectors_disk,temp0);
+    SWAPLONG(fs_bb->fbb_sectors_disk_32,temp1);
+
+    fs_bb->fbb_format_id = mfmt[fmt].mp_format_id;
+
+    SWAPWORD(fs_bb->fbb_sectors_fat,mfmt[fmt].mp_sectors_fat);
+
+    SWAPWORD(fs_bb->fbb_sectors_track,mfmt[fmt].mp_sectors_track);
+
+    SWAPWORD(fs_bb->fbb_sides,mfmt[fmt].mp_sides);
+
+    SWAPWORD(fs_bb->fbb_bytes_sector,sectorsz);
+
+    fs_bb->fbb_sectors_cluster = mfmt[fmt].mp_sectors_clust;
+
+/* Set the hidden sectors value by subtracting the current partition table
+  block from the beginning of the partition block */
+    temp1 = fs->f_beg_part - fs->f_curr_part_tbl;
+    SWAPLONG(fs_bb->fbb_hidden_sectors,temp1);
+
+    *((UWORD *)&(data[sectorsz-sizeof(UWORD)])) = (UWORD)0x55AA;
+
+    fs->f_bytes_block = (fssm_env->de_SizeBlock)<<2; /* set default block size */
+    for(i=1,SizeBlock=fssm_env->de_SizeBlock; SizeBlock!=0; i++, SizeBlock>>=1);
+    fs->f_bytes_block_sh = i; /* set block size shift value */
+
+    error = PutBlockMem((APTR)data, lowblock = fs->f_beg_part, MP_res_sectors_beg * blocks_sec);
+
+    FreeMem(data, datasz);
+
+    if(error) return(error);
+
+/** Initialize disk **/
+    fs->f_FSflags |= MF_FSDISK;   /* set FS DISK flag */
+    if(fs->f_VolumeNode)
+    {   /* If there was a current Volume before the format; Delete it NOW */
+        DeleteVolNode(fs->f_VolumeNode);
+        fs->f_VolumeNode = 0;
+        fs->f_LockList = 0;  /* If there were outstanding locks before
+                                TOUGH.  If it breaks, it is your fault */
+    }
+
+    if(InitDisk() != 0)
+    {
+        DOSerror = ERROR_DISK_NOT_VALIDATED;
+        return(DOSFALSE);
+    }
+
+/** Get root directory block **/
+/* clear (=0) first byte of all filenames in root directory entries */
+    dirent = (struct FS_dir_ent *)fs->f_rootdir_cache;
+    for(i=0; i<fs->f_root_dir_ent; i++,dirent++)
+    {
+        (dirent->fde_filename)[0] = '\0';
+    }
+
+    dirent = (struct FS_dir_ent *)fs->f_rootdir_cache;
+
+    fs->f_NumSoftErrors = 0;   /* set # of soft errors to 0 */
+
+/** Free all cluster entries in FAT table **/
+    endlw = fs->f_fat_copy_sz/sizeof(ULONG);
+    for(i=0; i<endlw; i++) ((ULONG *)fs->f_fat_copy)[i] = 0;
+
+/** Write Format ID in FAT table **/
+    if(fs->f_Diskflags & FAT16_F) i = 0xFFFFFF;
+      else i = 0xFFFF00;
+
+    *((ULONG *)&(fs->f_fat_copy[0])) = (ULONG)(mfmt[fmt].mp_format_id)<<24 | i;
+
+    fs->f_Diskflags |= FAT_MOD_F;   /* set FAT Modified flag */
+
+    fs->f_used_blocks = usedblocks();
+
+/**** Set Volume Label attribute in directory entry ****/
+    RenameDisk(diskname,DOSTRUE);
+
+    fs->f_Diskflags |= ROOTDIR_MOD_F;   /* set Root Directory Modified flag */
+
+    MakeVolNode();
+
+    Flush_Buffers();        /* Flush modified FAT and root dir */
+
+    Motor_Off();
+
+    DOSerror=0;     /* no error */
+    return(DOSTRUE);
+}
+@
+
+
+40.18
+log
+@Fixed a bug in formatting floptical disks (20M).
+@
+text
+@d1 2
+a2 2
+/* Format.c **************************************************************
+** Copyright 1991 CONSULTRON
+d16 1
+a16 1
+#define DEFAULT_MAX_CLUSTER_SIZE   8
+d20 7
+a26 7
+{ 112, 1440, 0xF9, 3, 9, 2, 2 },  /* FMT_AUTO */
+{ 112, 1440, 0xF9, 3, 9, 2, 2 },  /* FMT_MSDOS_QD9 */
+{ 112,  720, 0xFD, 2, 9, 2, 2 },  /* FMT_MSDOS_D9  */
+{  64,  360, 0xFC, 2, 9, 1, 2 },  /* FMT_MSDOS_S9  */
+{ 112, 1440, 0xF9, 5, 9, 2, 2 },  /* FMT_ATARI_D9  */
+{ 112,  720, 0xF8, 5, 9, 1, 2 },  /* FMT_ATARI_S9  */
+{ 112*2,1440*2, 0xF0, 5, 18, 2, 2 },  /* FMT_MSDOS_QD18*/
+a63 1
+F();
+a112 2
+DPRTF(KPrintF( "\n%s: %s=%lx  %s=%ld  %s=%lx",__FUNC__,s(format),s(blocks_part),s(fssm_env)));
+
+d123 1
+a123 2
+        mfmt[FMT_AUTO].mp_format_id = 0xF8;  /* set format ID to hard drive-type */
+        sectors_clust = DEFAULT_MAX_CLUSTER_SIZE;
+d143 1
+a143 1
+            else if( !DevCmd(TD_GETDRIVETYPE))
+a160 2
+DPRTF(KPrintF( "\n%s: %s=%ld  %s=%ld",
+    __FUNC__,s(mfmt[FMT_AUTO].mp_sides),s(mfmt[FMT_AUTO].mp_sectors_track)));
+d166 1
+a166 1
+            /* Set the temp max sectors per cluster to DEFAULT_MAX_CLUSTER_SIZE */
+d207 2
+d311 1
+a311 1
+    (fs_bb->fbb_sectors_fat)[0] = mfmt[fmt].mp_sectors_fat;
+d315 1
+a315 1
+    (fs_bb->fbb_sides)[0] = mfmt[fmt].mp_sides;
+@
+
+
+38.16
+log
+@Added code to make boot block more like MSDOS 4.0+.
+
+I now disallow floppy disks to be larger than 32M. This is mostly an
+MSDOS restriction. It does not have to be this way but go figure MSDOS.
+@
+text
+@d11 1
+d20 1
+a20 1
+{ 112, 1440, 0xF8, 3, 9, 2, 2 },  /* FMT_AUTO */
+d80 1
+a80 1
+    volatile UWORD sectorsz;
+a81 1
+    volatile ULONG sectors_part=0;
+d95 1
+a95 1
+    if(Is_Disk_Out())
+d97 1
+a97 1
+        DOSerror = ERROR_NO_DISK;
+d101 2
+a102 2
+    if(DevCmd(TD_PROTSTATUS)
+        || diskreq->io_Actual)
+a103 1
+        DOSerror = ERROR_DISK_WRITE_PROTECTED;
+d114 1
+a114 1
+DPRTF(KPrintF( "\nFormat: format=%lx",format));
+d126 1
+d130 2
+a133 2
+    case ID_MSDOS_DISK:
+    case ID_MSDOS_DISK_DS:
+d165 2
+d169 1
+a169 1
+        sectorsz = ((fssm_env->de_SizeBlock)<<2) * blocks_sec;
+d175 1
+a175 1
+        sectors_part = blocks_part/blocks_sec;
+d180 1
+a180 1
+            if(sectors_part >= 0x10000)
+d198 1
+a198 1
+            if((sectors_part/sectors_clust) > (FAT_BAD & FAT12_MASK))
+d220 1
+a220 1
+        mfmt[FMT_AUTO].mp_root_dir_ent = rootdir_ent & (1 - (sectorsz / sizeof(struct FS_dir_ent)));
+d239 1
+a239 1
+        sectors_clust = max(sectors_clust, (1+(sectors_part/(FAT_BAD & fat_mask))));
+d244 1
+a244 1
+        clusters = (sectors_part)/mfmt[FMT_AUTO].mp_sectors_clust;
+d300 1
+a300 1
+    if(sectors_part >= 0x10000)
+d303 1
+a303 1
+        temp1 = sectors_part;
+d307 1
+a307 1
+        temp0 = sectors_part;
+a311 2
+DPRTF(KPrintF("\nsectors_part=%ld  blocks_part=%ld  temp0=%ld  temp1=%ld",
+    sectors_part,blocks_part,temp0,temp1));
+d395 1
+@
+
+
+38.15
+log
+@Make nonexternal functions and strings static for future inlining under SAS C 6.1.
+@
+text
+@d15 1
+d28 21
+a48 15
+static const struct FS_boot_blk M_bb =
+{
+0xEB,0x3C,0x90,
+'C','D','P',' ',' ','3','.','3',
+0x00, 0x02,
+2,
+0x01, 0x00,
+2,
+0x70, 0x00,
+0xA0, 0x05,
+0xF9,
+0x03, 0x00,
+0x09, 0x00,
+0x02, 0x00,
+0x00, 0x00,
+d50 1
+a50 5
+
+static const UBYTE bootcode[] = { 0xFB, 0x31, 0xC0, 0x8E, 0xD0, 0x8E, 0xD8,
+ 0xBC, 0x00, 0x7C, 0xBE, 0x59, 0x7C, 0xB4, 0x0E, 0xBB, 0x07,
+ 0x00, 0xAC, 0x84, 0xC0, 0x74, 0xFE, 0xCD, 0x10, 0xEB, 0xF7,};
+static const char bootstring[] = "CrossDOS non-bootable disk!";
+d60 2
+a61 3
+int FormatDisk(diskname, format)
+UCHAR *diskname;     /* BADDR(BSTR) */
+ULONG format;
+d63 1
+d76 4
+a79 2
+    UBYTE temp0=0, temp1;
+    UWORD volatile sectorsz=(fssm_env->de_SizeBlock)<<2;
+d81 1
+a81 1
+    volatile ULONG sectors_disk=0;
+a113 1
+    blocks_sec = fssm_env->de_SectorPerBlock;   /* changed to BlocksPerSector for this file system */
+d127 1
+a127 1
+        sectors_clust = 8;
+d158 1
+a158 3
+    /* If BLOCKS per disk larger than 64K, increase blocks per sector until < 64K */
+        blocks_sec = max(fssm_env->de_SectorPerBlock,(1+(blocks_part/0x10000)) );
+        mfmt[fmt].mp_format_id = 0xF9;  /* set format ID to floppy-type */
+d160 1
+d167 5
+a171 2
+        if((sectors_disk = blocks_part/blocks_sec) >= 0x10000) mfmt[FMT_AUTO].mp_sectors_disk = 0;
+        else mfmt[FMT_AUTO].mp_sectors_disk = sectors_disk;
+d173 1
+a173 6
+    /* Determine an efficient # of root directory entries. I believe that more than
+    512 root directory entries are wasteful of disk space */
+        if(blocks_part <= 720) mfmt[FMT_AUTO].mp_root_dir_ent = 64;
+        else if(blocks_part < 2880) mfmt[FMT_AUTO].mp_root_dir_ent = 112;
+        else if(blocks_part < 6000) mfmt[FMT_AUTO].mp_root_dir_ent = 112*2;
+        else mfmt[FMT_AUTO].mp_root_dir_ent = 512;
+d175 8
+a182 6
+            /* Calc sectors per cluster (non-adjusted) */
+            /* For some strange reason, MSDOS (even through V5.0) does not like
+            a sectors per cluster value that are not an even multiple of 2 */
+           /* Make higher multiple of 2 */
+        sectors_clust = max( max(fssm_env->de_PreAlloc,sectors_clust),
+            (1+(sectors_disk/(FAT_BAD & fat_mask))) );
+d184 8
+d195 2
+a196 3
+        if( fssm_env->de_DosType != ID_MSDOS_DISK_HD)
+        {       /* If not = ID_MSDOS_DISK_HD */
+            if((sectors_disk/sectors_clust) > (FAT_BAD & FAT12_MASK))
+d201 9
+d212 8
+d237 1
+a237 1
+        sectors_clust = max(sectors_clust, (1+(sectors_disk/(FAT_BAD & fat_mask))));
+d242 1
+a242 1
+        clusters = (sectors_disk)/mfmt[FMT_AUTO].mp_sectors_clust;
+d283 1
+a283 2
+    CopyMem((UBYTE *)(&M_bb), data, sizeof(struct FS_boot_blk));
+    CopyMem(&bootcode, &(data[62]), sizeof(bootcode)+sizeof(bootstring));
+d290 22
+a311 3
+    SWAPWORD(fs_bb->fbb_sectors_disk,mfmt[fmt].mp_sectors_disk);
+    if(0 != mfmt[fmt].mp_sectors_disk) sectors_disk=0;
+    SWAPLONG(fs_bb->fbb_sectors_disk_32,sectors_disk);
+d324 5
+@
+
+
+38.14
+log
+@Changed the minimum number of blocks per cluster allocated for MSDOS_HD
+devices.  Changed number of root dir entries for MSDOS_HD devices.
+
+Made other changes to allow for better partition formatting of pre-
+formatted MSDOS-HD devices.
+@
+text
+@d10 1
+d47 1
+a47 1
+char const bootstring[] = "CrossDOS non-bootable disk!";
+@
+
+
+38.13
+log
+@Added actual stub boot code to keep CrossPC from crashing if someone tried
+to boot of a CrossDOS formatted disk.  (Ie. the original boot code is bogus
+because it was just NULLs.
+
+Fixed a problem related to the one mentioned above.  If the user configured
+a MSDOS hard disk and it was not preformatted with FDISK, then he proceeded
+to do a format of the Amiga-side.  This caused a problem when the user
+subsequently tries to do a FDISK from the PC.  The FDISK appears to work
+successfully but in actuality the hard disk partition table gets placed but
+the boot code that allows the hard drive to be booted from does not get
+installed.  This is cause FDISK already senses boot code which in reality
+is the bogus code mentioned above.
+@
+text
+@a10 3
+extern struct FS_dir_ent *GetNextDirEnt();
+extern struct MLock         *GetLock();
+extern struct MLock         *MakeLock();
+d26 1
+a26 1
+struct FS_boot_blk  const M_bb =
+d43 1
+a43 1
+UBYTE const bootcode[] = { 0xFB, 0x31, 0xC0, 0x8E, 0xD0, 0x8E, 0xD8,
+d74 1
+a74 1
+    ULONG blocks_part, blks_disk, sectors_clust;
+d95 2
+a96 2
+    DevCmd(TD_PROTSTATUS);
+    if(diskreq->io_Actual)
+d112 5
+d120 3
+a122 4
+        if(!GetBootBlock((APTR)data, fssm_env))  /* Check if a boot record can be found */
+        {
+            return(DOSFALSE);
+        }
+a158 1
+Format_partition:
+d160 1
+d162 1
+a165 2
+        mfmt[FMT_AUTO].mp_sectors_track = max(1,fssm_env->de_BlocksPerTrack / blocks_sec);
+
+d170 1
+a170 1
+        else if(blocks_part < 20000) mfmt[FMT_AUTO].mp_root_dir_ent = 112*2;
+d177 1
+a177 1
+        sectors_clust = max( max(fssm_env->de_PreAlloc,MP_sectors_cluster),
+d285 1
+a285 3
+    error = PutBlockMem((APTR)data, lowblock = fssm_env->de_LowCyl
+        * mfmt[fmt].mp_sectors_track * blocks_sec * mfmt[fmt].mp_sides,
+        MP_res_sectors_beg * blocks_sec);
+@
+
+
+38.10
+log
+@Added a dummy format ID to 'force' a disk format.
+@
+text
+@d29 1
+a29 1
+struct FS_boot_blk  M_bb =
+d31 2
+a32 2
+0xEB,0x34,0x90,
+'C','D','M',' ',' ','3','.','3',
+d46 4
+d70 1
+a70 1
+    register UBYTE *data;
+d117 7
+d158 1
+a158 1
+    case ID_MSDOS_DISK_HD:
+d256 1
+@
+
+
+38.5
+log
+@Maintenance and fix of FMT_MSDOS_QD18 format_id value.
+@
+text
+@d73 2
+a74 1
+    ULONG blocks_part, blks_disk, sectors_disk,sectors_clust;
+d146 1
+a167 1
+DPRTF(KPrintF( "\nFormat: sectors_disk=%ld  sectors_clust=%ld",sectors_disk,sectors_clust));
+a203 1
+DPRTF(KPrintF( "\nFormat: sectors_clust=%ld",mfmt[FMT_AUTO].mp_sectors_clust));
+d252 2
+@
+
+
+38.3
+log
+@Fixed problem when formatting a MSDOS hard partition once the partition table
+is already created.
+@
+text
+@d73 1
+a73 1
+    ULONG blocks_disk, blks_disk, sectors_disk,sectors_clust;
+d104 1
+a104 1
+    blocks_disk = fssm_env->de_BlocksPerTrack * fssm_env->de_Surfaces
+d127 1
+a127 1
+            if(blks_disk = Get_Default_Drive_Geometry()) blocks_disk = blks_disk;
+d141 1
+a141 1
+        blocks_sec = max(fssm_env->de_SectorPerBlock,(1+(blocks_disk/0x10000)) );
+d148 1
+a148 1
+        if((sectors_disk = blocks_disk/blocks_sec) >= 0x10000) mfmt[FMT_AUTO].mp_sectors_disk = 0;
+d155 3
+a157 3
+        if(blocks_disk <= 720) mfmt[FMT_AUTO].mp_root_dir_ent = 64;
+        else if(blocks_disk < 2880) mfmt[FMT_AUTO].mp_root_dir_ent = 112;
+        else if(blocks_disk < 20000) mfmt[FMT_AUTO].mp_root_dir_ent = 112*2;
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d63 1
+a63 1
+    register LONG endlw, i;
+d69 1
+a69 1
+    UBYTE fmt;
+a115 1
+        fmt = FMT_AUTO;
+d237 1
+a237 2
+    if( !(data = AllocMem( datasz = sectorsz,
+        (1 << ((fssm_env->de_BufMemType)>>1))|MEMF_CLEAR)) )
+d268 2
+@

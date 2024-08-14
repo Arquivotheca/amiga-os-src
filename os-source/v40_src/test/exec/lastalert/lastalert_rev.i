@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'25.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'LastAlert 1.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'LastAlert 1.1 (25.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: LastAlert 1.1 (25.5.93)',0
+	ENDM

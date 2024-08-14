@@ -1,0 +1,454 @@
+head     36.13;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.13
+date     92.07.31.20.02.28;  author jesup;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     92.04.09.00.06.15;  author jesup;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     91.01.22.19.48.08;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.12.07.04.02.50;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.12.02.07.12.25;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.09.13.14.33.07;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.05.30.18.03.29;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.05.29.05.24.42;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     90.04.05.05.21.37;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     90.02.20.20.18.13;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.12.14.04.20.21;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.10.18.14.08.59;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.31.55;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.13
+log
+@ifdefed out softlink support
+@
+text
+@/* delete.c */
+
+#include "ram_includes.h"
+#include "ram.h"
+
+/* note: may be called from create to remove an old entry! */
+
+LONG
+delete (dptr,string,notify)
+	struct node *dptr;
+	char *string;
+	long notify;		/* whether to notify about deletion */
+{
+	struct node *node;
+	struct lock *lock = NULL;
+
+	/* can't follow links here if we want to delete them! */
+	node = findnode(dptr,string,FALSE);	/* don't follow links! */
+	if (!node)
+		return FALSE;
+
+	/* check if dir empty */
+	/* don't do the check unless this is the last link on the file */
+	/* FIX! change this if we make links equivalent */
+	if (node->type == ST_USERDIR && node->list != NULL)
+	{
+		fileerr = ERROR_DIRECTORY_NOT_EMPTY;
+		return FALSE;
+	}
+
+	/* check write protection */
+	if (node->prot & FIBF_DELETE)
+	{
+		fileerr = ERROR_DELETE_PROTECTED;
+		return FALSE;
+	}
+
+#ifdef SOFTLINKS_SUPPORTED
+	if (node->type != ST_SOFTLINK)
+#endif
+	{
+		/* fail if there are any other locks on it */
+		lock = getlock(node,EXCLUSIVE_LOCK);
+		if (lock == NULL)
+			return FALSE;	/* in use (error set by getlock) */
+
+		/* deal with notify nodes */
+		/* deleting a hardlink file may cause extra notifies */
+		rem_notifies(node,notify);
+
+		/* is it hardlinked? */
+		if (node->firstlink &&
+		    (node->type == ST_FILE || node->type == ST_USERDIR))
+		{
+			/* ok, move it to the next link in line */
+			/* copies type,list,size,prot,date, and comment */
+			node->firstlink->type = node->type;
+			node->firstlink->list = node->list;
+			node->firstlink->size = node->size;
+			node->firstlink->prot = node->prot;
+			copydate(node->firstlink->date,node->date);
+			node->firstlink->comment = node->comment;
+
+			/* make sure we don't deallocate them */
+			node->comment = (void *) node->list = NULL;
+
+			/* revise link ptrs of any chained hardlinks */
+			/* also reattach notifies on these files (you get */
+			/* one extra notify, sorry).  */
+			{
+				struct node *n;
+
+				/* don't cause yet another notify */
+				find_notifies(node->firstlink,FALSE);
+
+				for (n = node->firstlink->firstlink;
+				     n;
+				     n = n->firstlink)
+				{
+					/* make them point at the new master */
+					n->list = node->firstlink;
+
+					/* cause notifies to re-attach */
+					find_notifies(n,FALSE);
+				}
+			}
+
+			/* detach this from the nodes that were linked to it */
+			node->firstlink = NULL;
+		}
+	} /* else softlink - never has notifies on it! */
+
+/*    // Update count of blocks used
+ *       spaceused := spaceused - ((node!node.size-1)/min.blksize + 1)
+ *    // Fix "info lies about ram" bug without screwing up directory deletes - bart
+ * //     UNLESS (node!node.type = st.userdir) DO spaceused := spaceused - 1
+ * // This line handles all 0 length files and the directories, too - Andy
+ *      UNLESS (node!node.size = 0) DO spaceused := spaceused - 1
+ */
+
+	/* free the data blocks */
+	/* don't free if hard link - FIX if we change links */
+	if (node->type != ST_LINKFILE && node->type != ST_LINKDIR)
+	{
+		/* freelist(0) is safe */
+		spaceused -= freelist(node->list);	/* was unloadseg! */
+	}
+
+	spaceused -= 1;	/* for the fileheader */
+
+	/* update the change time of the directory it's being removed from */
+	/* if we shouldn't notify, don't datestamp - we're being called */
+	/* internally. */
+	if (notify)
+		DateStamp((struct DateStamp *) node->back->date);
+
+	/* remove from structure */
+	remove_node(node);
+
+	if (node->comment)
+		freevec(node->comment);
+
+	DBUG1("Freeing node at 0x%lx",(LONG)node);
+	freevec(node);
+
+	freelock(lock);					/* may be NULL */
+
+	return DOS_TRUE;
+}
+
+/* remove a node from it's parent */
+
+void
+remove_node (node)
+	struct node *node;
+{
+	struct node *n;
+
+	/* remember we removed something from this directory */
+	node->back->delcount++;
+
+	/* evil, but works - counts on next being first field */
+	n = (struct node *) &(node->back->list);
+	while (n)
+	{
+		if (n->next == node)
+		{
+			n->next = node->next;
+			break;
+		}
+		n = n->next;
+	}
+
+	if (node->type == ST_LINKFILE || node->type == ST_LINKDIR)
+	{
+		/* unlink from hardlink list */
+		/* node->list points to the thing linked to */
+		for (n = node->list; n; n = n->firstlink)
+		{
+			if (n->firstlink == node)
+			{
+				n->firstlink = node->firstlink;
+				break;
+			}
+		}
+	}
+}
+@
+
+
+36.12
+log
+@Fixed the "delete during exall causing crash" bug!!!!!!!!!!!!!!!!!
+Yeah!
+@
+text
+@d38 1
+d40 1
+@
+
+
+36.11
+log
+@DateStamp cast
+@
+text
+@d136 3
+@
+
+
+36.10
+log
+@Free comment when file is deleted
+FreeVec->freevec
+@
+text
+@d113 1
+a113 1
+		DateStamp(node->back->date);
+@
+
+
+36.9
+log
+@remove uneeded set of error code
+@
+text
+@d118 3
+d122 1
+a122 1
+	FreeVec((char *) node);
+@
+
+
+36.8
+log
+@If called by packet (not from create), datestamp the parent
+@
+text
+@d43 1
+a43 4
+		{
+			fileerr = ERROR_OBJECT_IN_USE;
+			return FALSE;	/* in use */
+		}
+@
+
+
+36.7
+log
+@optimization: don't use findentry, etc directly.
+@
+text
+@d6 2
+d111 6
+@
+
+
+36.6
+log
+@Changes for polymorph links (almost all of them are here, nasty!)
+@
+text
+@a13 1
+	char name[MAX_FILENAME+1];
+a14 4
+	dptr = finddir(dptr,string,name);
+	if (!dptr)
+		return FALSE;
+
+d16 2
+a17 1
+	if (!findentry(dptr,name,FALSE))	/* don't follow links! */
+a19 2
+	node = current_node;
+
+d116 1
+a116 1
+	freelock(lock);
+@
+
+
+36.5
+log
+@for rcs 4.x header change
+@
+text
+@d20 1
+d42 1
+a42 1
+	if (node->type == ST_FILE || node->type == ST_USERDIR)
+a43 8
+		/* it's not a link - check for users, hard links */
+		/* FIX! change if we change links */
+		if (node->links)
+		{
+			fileerr = ERROR_OBJECT_LINKED;
+			return FALSE;
+		}
+
+d52 3
+a54 1
+	} else if (node->type != ST_SOFTLINK) {
+d56 12
+a67 4
+		/* it's a hard link, decrement link count of object */
+		/* FIX if we change links */
+		node->list->links--;
+	}
+d69 2
+d72 26
+d110 2
+a111 2
+		DBUG1("Freeing list at 0x%lx",(LONG)node->list);
+		spaceused -= freelist(node->list) + 1;	/* was unloadseg! */
+d114 1
+a114 2
+	/* deal with notify nodes */
+	rem_notifies(node,notify);
+d121 1
+d142 1
+a142 1
+			return;
+d145 14
+@
+
+
+36.4
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+36.3
+log
+@Fixed delete of hard links, was badly broken.  Works good now.
+@
+text
+@d90 1
+a90 1
+	freevec((char *) node);
+@
+
+
+36.2
+log
+@added hard/soft link support, added check for finddir failure.
+Use routine remove_node to unlink.
+@
+text
+@d26 2
+d44 1
+d51 1
+d61 2
+a62 1
+		/* it's a hard link */
+d76 6
+a81 2
+	DBUG1("Freeing list at 0x%lx",(LONG)node->list);
+	spaceused -= freelist(node->list) + 1;		/* was unloadseg! */
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d13 1
+a13 1
+	struct lock *lock;
+d17 2
+d20 1
+a20 1
+	if (!findentry(dptr,name))
+d39 1
+a39 2
+	lock = getlock(node,EXCLUSIVE_LOCK);
+	if (lock == NULL)
+d41 18
+a58 2
+		fileerr = ERROR_OBJECT_IN_USE;
+		return FALSE;	/* in use */
+d61 1
+d78 2
+a79 1
+	prev_node->next = node->next;
+d85 21
+@

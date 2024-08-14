@@ -1,0 +1,274 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  r37-9:1.5 v37r4:1.5 Distillery:1.5;
+locks    ; strict;
+comment  @ * @;
+
+
+1.5
+date     91.01.06.20.51.26;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.28.04.30.23;  author Doug;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.11.19.02.04.34;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.18.00.23.23;  author Doug;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.38.31;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@volume mount/dismount routines
+@
+
+
+1.5
+log
+@Revise debugging messages
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987, 1988 The Software Distillery.  All Rights  */
+/* |. o.| || Reserved.  This program may not be distributed without the    */
+/* | .  | || permission of the authors:                            BBS:    */
+/* | o  | ||   John Toebes     Doug Walker    Dave Baker                   */
+/* |  . |//                                                                */
+/* ======                                                                  */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* Volume Manipulation */
+/* mount */
+
+#include "handler.h"
+
+/* Define a BCPL volume name as a default */
+#if TESTING
+#define NETNAME "\7TestNet"
+#else
+#define NETNAME "\3Net"
+#endif
+
+void
+DisMount(global)
+GLOBAL global;
+{
+   struct DeviceList *volume;
+   struct DosInfo *info;
+   struct RootNode *root;
+
+   OBUG(("Dismount: Entry\n"));
+
+   /* start at the root of the device list */
+   root   = (struct RootNode   *)DOSBase->dl_Root;
+   info   = (struct DosInfo    *)BADDR(root->rn_Info);
+   volume = (struct DeviceList *)BADDR(info->di_DevInfo);
+
+   /* See if we have a current volume that we have to get rid of ? */
+   /* Make sure there are no outstanding locks for the volume */
+
+   if ((global->volume != NULL) && (global->volume->dl_Lock == NULL)) 
+   {
+      /* This volume needs to be removed from the list */
+      /* First locate it on the list */
+      Forbid();
+
+      /* is it at the head of the list? */
+      if (volume == global->volume) 
+      {
+         /* sure enough, just get rid of it */
+         info->di_DevInfo = volume->dl_Next;
+      } 
+      else 
+      {
+         /* Find it in the list */
+         while (volume != NULL && 
+            (struct DeviceList *)(BADDR(volume->dl_Next)) != global->volume)
+         {
+            volume = (struct DeviceList *)BADDR(volume->dl_Next);
+         }
+
+         /* if we found it then take it out of the chain */
+         if (volume != NULL)
+         volume->dl_Next = global->volume->dl_Next;
+      }
+      Permit();
+
+      if (global->volume) 
+      {
+         DosFreeMem((char *)global->volume);
+      }
+   }
+   global->volume = NULL;
+}
+
+void
+Mount(global, name)
+GLOBAL global;
+char *name;
+{
+   struct DeviceList *volume;
+   struct DosInfo *info;
+   struct RootNode *root;
+   short newlen; /* Cause memcmp to use the most efficient code */
+
+   BUGP("Mount: Entry")
+   OBUG(("Mount: Entry\n"));
+
+   global->n.ErrorCount = 0;
+
+   if (name == NULL)
+      name = NETNAME;
+   newlen = *name + 1;
+
+   /* Now find it on the device list. */
+   /* First start at the root of the device list */
+   root   = (struct RootNode   *)DOSBase->dl_Root;
+   info   = (struct DosInfo    *)BADDR(root->rn_Info);
+   volume = (struct DeviceList *)BADDR(info->di_DevInfo);
+
+   OBUGBSTR("Volume name is : ", name);
+
+   /* Can't let the system change the list underneath us...        */
+   Forbid();
+
+   /* Now run through the list until we come up empty OR we find it */
+   while (volume != NULL) 
+   {
+      if(volume->dl_Type == DLT_VOLUME                           &&
+         !memcmp(name, (char *)BADDR(volume->dl_Name), newlen)   &&
+         volume->dl_VolumeDate.ds_Days   == 0L                   &&
+         volume->dl_VolumeDate.ds_Minute == 0L                   &&
+         volume->dl_VolumeDate.ds_Tick   == 0L)
+      {
+         break;
+      }
+      volume = (struct DeviceList *)BADDR(volume->dl_Next);
+   }
+
+   Permit();
+
+   OBUG(("mount: Volume is %08lx\n", volume));
+
+   /* OK, now did we find it? */
+   if (volume != NULL) 
+   {
+      BUGP("Got volume")
+      OBUG(("Got a matching node\n"));
+
+      /* Sure did, We probably need to check to see if another handler has */
+      /* it to work with, but for now we assume only onw such volume can   */
+      /* exist.  This was a problem with all but the latest version of 1.2 */
+      /* If we have write access, we should probably nudge the ticks by one*/
+      /* just to make it unique                                      */
+   } 
+   else 
+   {
+      /* No such volume is known to the system.  So we will just have to   */
+      /* allocate a node to put everything on.                             */
+      BUGP("No volume")
+      volume = (struct DeviceList *)
+         DosAllocMem(global, sizeof(struct DeviceList)+newlen+1);
+
+      OBUG(("Created new node at %08lx\n", volume));
+
+      /* Note that volume+1 gets us to the extra memory we allocated.  */
+      /* Just a lot simpler to write that in C than ...+sizeof(...)    */
+      MQ(name, (char *)(volume + 1), newlen+1);
+      volume->dl_VolumeDate.ds_Days   = 3800L;
+      volume->dl_VolumeDate.ds_Minute =
+      volume->dl_VolumeDate.ds_Tick   = 0L;
+      volume->dl_Name = (BSTR)MKBADDR((volume + 1));
+      volume->dl_Lock = NULL;
+      volume->dl_Type = DLT_VOLUME;
+
+      /* Also we need to link it into the list */
+      Forbid();
+      volume->dl_Next = info->di_DevInfo;
+      info->di_DevInfo = MKBADDR(volume);
+      Permit();
+   }
+
+   /* Now we can own the volume by giving it our task id */
+   volume->dl_Task = global->n.port;
+   volume->dl_DiskType = ID_DOS_DISK;
+
+   /* all set up, remember what our base volume is */
+   global->volume = volume;
+
+   BUGP("Mount: Exit")
+}@
+
+
+1.4
+log
+@*** empty log message ***
+@
+text
+@d29 1
+a29 1
+   BUG(("Dismount: Entry\n"));
+d85 1
+a85 1
+   BUG(("Mount: Entry\n"));
+d99 1
+a99 1
+   BUGBSTR("Volume name is : ", name);
+d120 1
+a120 1
+   BUG(("mount: Volume is %08lx\n", volume));
+d126 1
+a126 1
+      BUG(("Got a matching node\n"));
+d142 1
+a142 1
+      BUG(("Created new node at %08lx\n", volume));
+@
+
+
+1.3
+log
+@Fix obvious errors with previous rewrite
+@
+text
+@d15 1
+d17 3
+@
+
+
+1.2
+log
+@Add null terminator to device list name
+@
+text
+@d15 1
+a15 1
+#define NETNAME "\7Network"
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d136 1
+a136 1
+         DosAllocMem(global, sizeof(struct DeviceList)+newlen);
+d142 1
+a142 1
+      MQ(name, (char *)(volume + 1), newlen);
+@

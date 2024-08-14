@@ -1,0 +1,1212 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  Release1:1.3 R1:1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.6
+date     92.10.07.14.03.50;  author bj;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.08.06.15.50.17;  author martin;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.05.22.13.18.11;  author martin;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.11.13.13.01.47;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.11.12.16.44.57;  author bj;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.12.15.52.08;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.6
+log
+@binary version 37.9
+
+1. Added DOS packets :
+
+     ACTION_FH_FROM_LOCK
+     ACTION_SAME_LOCK
+     ACTION_COPY_DIR_FH
+     ACTION_PARENT_FH
+     ACTION_EXAMINE_FH
+     ACTION_SET_FILE_SIZE
+
+2. Upped maximum mount count from 10 to 25.
+
+@
+text
+@/* -----------------------------------------------------------------------
+ * main.c   nfsc  SAS
+ *
+ * $Locker:  $
+ *
+ * $Id: main.c,v 1.3 92/08/17 23:11:16 Martin Exp $
+ *
+ * $Revision: 1.3 $
+ *
+ * $Header: work:a/c/nfsc/RCS/main.c,v 1.3 92/08/17 23:11:16 Martin Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+
+//#define MONITOR
+
+/*
+** Main handler body
+*/
+
+#include "fs.h"
+#include <exec/ports.h>
+
+#include <sys/param.h>
+#include <sys/time.h>
+
+#include <stdio.h>
+
+#include "nfsc_rev.h"
+
+static char *nfscvers = VERSTAG ;
+
+struct mount_pt *nfs_mtlist;	/* list of mounted filesystems	*/
+BYTE nfs_signal=-1;		/* exported to CreateMyPort()	*/
+AUTH *cred;			/* credentials for this daemon 	*/
+static struct MsgPort *mp;	/* My NFS command port (AREXX?) */
+struct Library *SockBase ;
+int MAXSOCKS = 25;    /* MAXSOCKS-1 is the max number of volumes that */
+                      /* can be mounted by the client */
+
+
+/* local functions */
+void main(void);
+static void cleanup(int code);
+static void nfs_mpx(register struct mount_pt *mt, register struct DosPacket *dp);
+
+struct Library *SockBase ;
+
+
+/*
+ * main loop -  setup command port, alloc DOS packet arrival int, and
+ *		loop waiting for something to do.
+ */
+void main(void)
+{
+	register struct mount_pt *here;
+	register long nfs, cmd, event;
+	register struct Message *msg;
+
+	if ((SockBase = OpenLibrary( "inet:libs/socket.library", 0L ))==NULL) {
+		(void)requester(0L," OK ","%s","Opening of socket library failed.");
+		exit(RETURN_FAIL);
+	}
+
+	/* initialize for MAXSOCKS sockets */
+	setup_sockets( MAXSOCKS, &errno );
+
+	mp = CreateMsgPort();
+	if(!mp){
+		cleanup(RETURN_FAIL);
+	}
+	mp->mp_Node.ln_Pri = 0L;
+	mp->mp_Node.ln_Name = CLIENT_COMMAND_PORT;
+	AddPort(mp);
+
+	if((nfs_signal = AllocSignal(-1L)) == -1){
+		cleanup(RETURN_FAIL);
+	}
+	if(!(cred = authunix_create_default())){
+		(void)requester(0L, " OK ", "%s\n%s\n%s\n",
+			"NFSc: can't create authentication",
+			"credentials.  Check that hostname,",
+			"user id, and group id are set");
+		cleanup(RETURN_FAIL);
+	}
+
+	nfs = 1L << nfs_signal;	cmd = 1L << mp->mp_SigBit;
+	while (1) {
+		event = Wait(nfs | cmd | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D);
+		if(event & nfs){
+			for(here = nfs_mtlist; here; here = here->mt_next){
+				if(here->mt_port->mp_MsgList.lh_Head->ln_Succ){
+					while(msg = GetMsg(here->mt_port)){
+						register struct	DosPacket *dp;
+
+						dp = (struct DosPacket *)msg->mn_Node.ln_Name;
+						msg->mn_ReplyPort = dp->dp_Port;
+						nfs_mpx(here, dp);
+						ReplyMsg(msg);
+					}
+				}
+			}
+		}
+
+		if(event & cmd){
+			while(msg = GetMsg(mp)){
+				nfs_command((struct nfs_req *)msg);
+			}
+		}
+
+		if(event & SIGBREAKF_CTRL_C){
+			cleanup(RETURN_OK);
+		}
+
+		if(event & SIGBREAKF_CTRL_D){
+			struct mount_pt *mt;
+			int busy;
+
+			busy = 0;
+			for(mt = nfs_mtlist; mt; mt = mt->mt_next){
+				busy += mt->mt_nlocks + mt->mt_nfiles;
+			}
+
+			if(!busy){
+				cleanup(RETURN_OK);
+			}
+		}
+	}
+}
+
+static void cleanup(int code)
+{
+	struct mount_pt *mt, *newmt;
+	struct nfs_req *msg;
+
+	if(mp){
+		Forbid();
+		while(msg = (struct nfs_req *)GetMsg(mp)){
+			msg->error = ECONFIGPROBLEM;
+			ReplyMsg((struct Message *)msg);
+		}
+		RemPort(mp);
+		DeleteMsgPort(mp);
+		Permit();
+	}
+
+	for(mt = nfs_mtlist; mt; mt = newmt){
+		newmt = mt->mt_next;
+		free_mt(mt, 0L);
+	}
+
+	if(cred){
+		auth_destroy(cred);
+	}
+
+	if(nfs_signal > 0){
+		FreeSignal(nfs_signal);
+	}
+
+	cleanup_sockets();
+	CloseLibrary(SockBase);
+	exit(code);
+}
+
+
+static void
+nfs_mpx(mt, dp)
+	register struct mount_pt *mt;
+	register struct DosPacket *dp;
+{
+#ifdef MONITOR
+	char buff[255];
+	struct FileInfoBlock *fib;
+#endif
+	dp->dp_Res1 = dp->dp_Res2 = 0L;
+
+	switch (dp->dp_Type) {
+	case ACTION_READ:
+		#ifdef MONITOR
+		KPrintF("ACTION_READ  fh=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_read++;
+		nfs_rd(mt,dp);
+		break;
+
+	case ACTION_WRITE:
+		#ifdef MONITOR
+		KPrintF("ACTION_WRITE  fh=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_write++;
+		nfs_wr(mt,dp);
+		break;
+
+	case ACTION_LOCATE_OBJECT:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg2,buff);
+		KPrintF("ACTION_LOCATE_OBJECT  lock=%ld  name=%s\n",dp->dp_Arg1,buff);
+		#endif
+		mt->mt_astat.action_locate_object++;
+		nfs_locate(mt, dp);
+		#ifdef MONITOR
+		if(dp->dp_Res1)
+			KPrintF("\tLock=%ld\n",dp->dp_Res1);
+		else
+			KPrintF("\tFAILED\n");
+		#endif
+		break;
+
+	case ACTION_EXAMINE_NEXT:
+		#ifdef MONITOR
+		KPrintF("ACTION_EXAMINE_NEXT  dir=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_examine_next++;
+		goto examine;
+
+	case ACTION_EXAMINE_OBJECT:
+		#ifdef MONITOR
+		KPrintF("ACTION_EXAMINE_OBJECT   obj=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_examine_object++;
+		goto exnext;
+
+	case ACTION_FINDUPDATE:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg3,buff);
+		KPrintF("ACTION_UPDATE  lock=%ld  name=%s\n",dp->dp_Arg2,buff);
+		#endif
+		mt->mt_astat.action_rw++;
+		goto openit;
+
+	case ACTION_FINDOUTPUT:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg3,buff);
+		KPrintF("ACTION_FINDOUTPUT  lock=%ld  name=%s\n",dp->dp_Arg2,buff);
+		#endif
+		mt->mt_astat.mode_newfile++;
+		goto openit;
+
+	case ACTION_FINDINPUT:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg3,buff);
+		KPrintF("ACTION_FINDINPUT  lock=%ld  name=%s\n",dp->dp_Arg2,buff);
+		#endif
+		mt->mt_astat.mode_oldfile++;
+openit:		nfs_open(mt,dp);
+		#ifdef MONITOR
+		KPrintF("\tfh=%ld\n",btod(dp->dp_Arg1,struct FileHandle *)->fh_Arg1);
+		#endif
+		break;
+
+
+	case ACTION_FREE_LOCK:
+		#ifdef MONITOR
+		KPrintF("ACTION_FREE_LOCK  lock=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_free_lock++;
+		nfs_freelock(mt, dp);
+		break;
+
+	case ACTION_DELETE_OBJECT:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg2,buff);
+		KPrintF("ACTION_DELETE_OBJECT  lock=%ld  name=%s\n",dp->dp_Arg1,buff);
+		#endif
+		mt->mt_astat.action_delete_object++;
+		nfs_delete(mt, dp);
+		break;
+
+	case ACTION_COPY_DIR:
+		mt->mt_astat.action_copy_dir++;
+		nfs_copydir(mt, dp);
+		#ifdef MONITOR
+		KPrintF("ACTION_COPY_DIR   lock=%ld   lock=%ld\n",dp->dp_Arg1, dp->dp_Res1);
+		#endif
+		break;
+
+
+	case ACTION_CREATE_DIR:
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg2,buff);
+		KPrintF("ACTION_CREATE_DIR  lock=%ld  name=%s\n",dp->dp_Arg1,buff);
+		#endif
+		mt->mt_astat.action_create_dir++;
+		nfs_createdir(mt, dp);
+		#ifdef MONITOR
+		if(dp->dp_Res1==DOSFALSE)
+			KPrintF("CREATE_DIR failed\n");
+		#endif
+		break;
+
+	case ACTION_INFO:
+		#ifdef MONITOR
+		KPrintF("ACTION_INFO  lock=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_info++;
+		goto info;
+
+	case ACTION_SEEK:
+		#ifdef MONITOR
+		KPrintF("ACTION_SEEK  fh=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_seek++;
+		nfs_seek(mt,dp);
+		break;
+
+	case ACTION_EX_NEXT:
+		#ifdef MONITOR
+		KPrintF("ACTION_EX_NEXT  dir=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_ex_next++;
+examine:	nfs_examine_next(mt, dp);
+		#ifdef MONITOR
+		if (dp->dp_Res1==DOSTRUE) {
+			fib = btod(dp->dp_Arg2,struct FileInfoBlock *);
+			KPrintF("Name = %s  DirEntryType=%ld\n",fib->fib_FileName+1, fib->fib_DirEntryType);
+		} else
+			KPrintF("Examine failed\n");
+		#endif
+		break;
+
+
+	case ACTION_EX_OBJECT:
+		#ifdef MONITOR
+		KPrintF("ACTION_EX_OBJECT   obj=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_ex_object++;
+exnext:		nfs_examine(mt, dp);
+		#ifdef MONITOR
+		if (dp->dp_Res1==DOSTRUE) {
+			fib = btod(dp->dp_Arg2,struct FileInfoBlock *);
+			KPrintF("Name = %s  DirEntryType=%ld\n",fib->fib_FileName+1, fib->fib_DirEntryType);
+		} else
+			KPrintF("Examine failed\n");
+		#endif
+		break;
+
+	case ACTION_PARENT:
+		#ifdef MONITOR
+		KPrintF("ACTION_PARENT of lock %ld",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_parent++;
+		nfs_parentdir(mt, dp);
+		#ifdef MONITOR
+		KPrintF("  returned %ld\n",dp->dp_Res1);
+		#endif
+		break;
+
+	case ACTION_CURRENT_VOLUME:
+		#ifdef MONITOR
+		KPrintF("ACTION_CURRENT_VOLUME\n");
+		#endif
+		mt->mt_astat.action_current_volume++;
+		dp->dp_Res1 = dtob(mt->mt_vol);
+		dp->dp_Res2 = 0;
+		break;
+
+	case ACTION_END:
+		#ifdef MONITOR
+		KPrintF("ACTION_END  fh=%ld\n",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_end++;
+		nfs_close(mt,dp);
+		break;
+
+	case ACTION_RENAME_OBJECT:
+		#ifdef MONITOR
+		KPrintF("ACTION_RENAME_OBJECT\n");
+		#endif
+		mt->mt_astat.action_rename_object++;
+		nfs_rename(mt, dp);
+		break;
+
+	case ACTION_SET_PROTECT:
+		#ifdef MONITOR
+		KPrintF("ACTION_SET_PROTECT\n");
+		#endif
+		mt->mt_astat.action_set_protect++;
+		goto prot;
+
+	case ACTION_CHMOD:
+		#ifdef MONITOR
+		KPrintF("ACTION_CHMOD\n");
+		#endif
+		mt->mt_astat.action_chmod++;
+prot:		nfs_setprotect(mt, dp);
+		break;
+
+	case ACTION_SET_DATE:
+		#ifdef MONITOR
+		KPrintF("ACTION_SETDATE\n");
+		#endif
+		mt->mt_astat.action_setdate++;
+		nfs_setdate(mt, dp);
+		break;
+
+
+	case ACTION_IS_FILESYSTEM:
+		#ifdef MONITOR
+		KPrintF("ACTION_IS_FILESYSTEM\n");
+		#endif
+		dp->dp_Res1 = -1;
+		dp->dp_Res2 = 0;
+		break;
+
+	case ACTION_FH_FROM_LOCK:
+		#ifdef MONITOR
+		KPrintF("ACTION_FH_FROM_LOCK lk=%ld\n",dp->dp_Arg1);
+		#endif
+		nfs_fh_from_lk(mt,dp);
+		break;
+
+	case ACTION_SAME_LOCK:
+		#ifdef MONITOR
+		KPrintF("ACTION_SAME_LOCK  %ld  %ld\n",dp->dp_Arg1,dp->dp_Arg2);
+		#endif
+		nfs_same_lock(mt,dp);
+		#ifdef MONITOR
+		KPrintF("\tresult=%ld\n",dp->dp_Res1);
+		if(dp->dp_Res1==DOSFALSE)
+			KPrintF("\tFAILED\n");
+		#endif		
+		break;
+
+	case ACTION_COPY_DIR_FH:
+		nfs_copydir(mt, dp);
+		#ifdef MONITOR
+		KPrintF("ACTION_COPY_DIR_FH   fh=%ld   lock=%ld\n",dp->dp_Arg1, dp->dp_Res1);
+		#endif
+		break;
+	
+	case ACTION_PARENT_FH:
+		#ifdef MONITOR
+		KPrintF("ACTION_PARENT_FH of fh %ld",dp->dp_Arg1);
+		#endif
+		mt->mt_astat.action_parent++;
+		nfs_parentdir(mt, dp);
+		#ifdef MONITOR
+		KPrintF("  returned %ld\n",dp->dp_Res1);
+		#endif
+		break;
+
+	case ACTION_EXAMINE_FH:
+		#ifdef MONITOR
+		KPrintF("ACTION_EXAMINE_FH  %ld\n",dp->dp_Arg1);
+		#endif
+		nfs_examine(mt, dp);
+		break;
+
+	case ACTION_SET_FILE_SIZE:
+		#ifdef MONITOR
+		KPrintF("ACTION_SET_FILE_SIZE  %ld to %ld (%ld)\n",
+		dp->dp_Arg1,dp->dp_Arg2,dp->dp_Arg3);
+		#endif
+		nfs_setsize(mt, dp);
+		break;
+
+	case ACTION_DISK_INFO:
+		#ifdef MONITOR
+		KPrintF("ACTION_DISK_INFO\n");
+		#endif
+		mt->mt_astat.action_disk_info++;
+info:		nfs_dkinfo(mt, dp);
+		#ifdef MONITOR
+		if(dp->dp_Res1==DOSFALSE)
+			KPrintF("\tFAILED\n");
+		#endif
+		break;
+
+	case ACTION_RENAME_DISK:
+		#ifdef MONITOR
+		KPrintF("ACTION_RENAME_DISK\n");
+		#endif
+		mt->mt_astat.action_rename_disk++;
+		nfs_rename_dsk(mt, dp);
+		break;
+
+	case ACTION_READ_LINK:
+		nfs_readlink(mt,dp);
+		#ifdef MONITOR
+		KPrintF("ACTION_READ_LINK   lock=%ld  name=%s\n",dp->dp_Arg1,dp->dp_Arg2);
+		if(dp->dp_Res1 >=0)
+			KPrintF("new path=%s\n",dp->dp_Arg3);
+		else
+			KPrintF("Failed. Code=%ld\n",dp->dp_Res2);
+		#endif
+		break;
+
+	case ACTION_MAKE_LINK:
+		nfs_makelink(mt,dp);
+		#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg2,buff);
+		KPrintF("ACTION_MAKE_LINK   lock=%ld name=%s\n",dp->dp_Arg1,buff);
+                KPrintF("Mode:%ld   Target: %s\n",dp->dp_Arg4, dp->dp_Arg3);
+		if(dp->dp_Res1 == DOSTRUE)
+			KPrintF("Link succeeded\n");
+		else
+			KPrintF("Link failed code=%ld\n",dp->dp_Res2);
+		#endif
+		break;
+
+	case ACTION_SET_COMMENT:
+		#ifdef MONITOR
+		KPrintF("ACTION_SET_COMMENT\n");
+		#endif
+		dp->dp_Res1 = DOSTRUE;
+		dp->dp_Res2 = 0;
+		break;
+
+	case ACTION_FLUSH:
+		#ifdef MONITOR
+		KPrintF("ACTION_FLUSH\n");
+		#endif
+		mt->mt_astat.action_flush++;
+		dp->dp_Res1 = DOS_TRUE;
+		break;
+
+	case ACTION_MORE_CACHE:
+		#ifdef MONITOR
+		KPrintF("ACTION_MORECACHE\n");
+		#endif
+		mt->mt_astat.action_morecache++;
+		dp->dp_Res2 = ERROR_NOT_IMPLEMENTED;
+		break;
+
+
+	default:
+		#ifdef MONITOR
+		KPrintF("Unknown packet %ld\n",dp->dp_Type);
+		#endif
+		mt->mt_astat.action_unknown++;
+		dp->dp_Res1 = 0;
+		dp->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
+		break;
+	}
+}
+
+@
+
+
+1.5
+log
+@socket.library version
+fixed minor bugs
+cleaned up code
+@
+text
+@d4 1
+a4 1
+ * $Locker: martin $
+d6 1
+a6 1
+ * $Id: main.c,v 1.4 91/05/22 13:18:11 martin Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 1.4 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/main.c,v 1.4 91/05/22 13:18:11 martin Exp Locker: martin $
+d15 1
+a15 1
+// #define MONITOR
+d38 2
+a39 1
+int MAXSOCKS = 10;
+d60 4
+a63 4
+    if ((SockBase = OpenLibrary( "inet:libs/socket.library", 0L ))==NULL) {
+        (void)requester(0L," OK ","%s","Opening of socket library failed.");
+        exit(RETURN_FAIL);
+    }
+d65 2
+a66 2
+    /* initialize for MAXSOCKS sockets */
+    setup_sockets( MAXSOCKS, &errno );
+a161 1
+
+d165 1
+d175 1
+a175 43
+	dp->dp_Res1 = dp->dp_Res2 = 0l;
+	switch(dp->dp_Type){
+	case ACTION_FINDUPDATE:
+
+#ifdef MONITOR
+KPrintF("ACTION_FINDUPDATE\n");
+#endif
+		mt->mt_astat.action_rw++;
+		goto openit;
+
+	case ACTION_FINDOUTPUT:
+#ifdef MONITOR
+KPrintF("ACTION_FINDOUTPUT\n");
+#endif
+		mt->mt_astat.mode_newfile++;
+		goto openit;
+
+	case ACTION_FINDINPUT:
+#ifdef MONITOR
+		bst_to_comm(dp->dp_Arg3,buff);
+		KPrintF("ACTION_FINDINPUT  lock=%ld  name=%s\n",dp->dp_Arg2,buff);
+#endif
+		mt->mt_astat.mode_oldfile++;
+openit:		nfs_open(mt,dp);
+		break;
+
+	case ACTION_END:
+#ifdef MONITOR
+KPrintF("ACTION_END\n");
+#endif
+
+		mt->mt_astat.action_end++;
+		nfs_close(mt,dp);
+		break;
+
+	case ACTION_SEEK:
+#ifdef MONITOR
+KPrintF("ACTION_SEEK\n");
+#endif
+
+		mt->mt_astat.action_seek++;
+		nfs_seek(mt,dp);
+		break;
+d177 1
+d179 3
+a181 4
+#ifdef MONITOR
+KPrintF("ACTION_READ\n");
+#endif
+
+d187 3
+a189 4
+#ifdef MONITOR
+KPrintF("ACTION_WRITE\n");
+#endif
+
+a193 17
+	case ACTION_INFO:
+#ifdef MONITOR
+KPrintF("ACTION_INFO\n");
+#endif
+
+		mt->mt_astat.action_info++;
+		goto info;
+
+	case ACTION_DISK_INFO:
+#ifdef MONITOR
+KPrintF("ACTION_DISK_INFO\n");
+#endif
+
+		mt->mt_astat.action_disk_info++;
+info:		nfs_dkinfo(mt, dp);
+		break;
+
+d195 1
+a195 1
+#ifdef MONITOR
+d198 1
+a198 2
+#endif
+
+d201 6
+d209 29
+a237 4
+	case ACTION_RENAME_DISK:
+#ifdef MONITOR
+KPrintF("ACTION_RENAME_DISK\n");
+#endif
+d239 10
+a248 2
+		mt->mt_astat.action_rename_disk++;
+		nfs_rename_dsk(mt, dp);
+d251 1
+d253 3
+a255 4
+#ifdef MONITOR
+KPrintF("ACTION_FREE_LOCK  lock=%ld\n",dp->dp_Arg1);
+#endif
+
+d261 1
+a261 1
+#ifdef MONITOR
+d264 1
+a264 2
+#endif
+
+a269 1
+
+d272 1
+a272 1
+#ifdef MONITOR
+d274 1
+a274 2
+#endif
+
+a276 16
+	case ACTION_SET_PROTECT:
+#ifdef MONITOR
+KPrintF("ACTION_SET_PROTECT\n");
+#endif
+
+		mt->mt_astat.action_set_protect++;
+		goto prot;
+
+	case ACTION_CHMOD:
+#ifdef MONITOR
+KPrintF("ACTION_CHMOD\n");
+#endif
+
+		mt->mt_astat.action_chmod++;
+prot:		nfs_setprotect(mt, dp);
+		break;
+d279 1
+a279 1
+#ifdef MONITOR
+d282 1
+a282 3
+
+#endif
+
+d285 1
+a285 1
+#ifdef MONITOR
+d288 1
+a288 2
+#endif
+
+d291 6
+a296 4
+	case ACTION_EXAMINE_NEXT:
+#ifdef MONITOR
+		KPrintF("ACTION_EXAMINE_NEXT  dir=%ld\n",dp->dp_Arg1);
+#endif
+d298 7
+a304 2
+		mt->mt_astat.action_examine_next++;
+		goto examine;
+d307 1
+a307 1
+#ifdef MONITOR
+d309 1
+a309 2
+#endif
+
+d312 1
+a312 1
+#ifdef MONITOR
+d318 1
+a318 1
+#endif
+a320 7
+	case ACTION_EXAMINE_OBJECT:
+#ifdef MONITOR
+		KPrintF("ACTION_EXAMINE_OBJECT   obj=%ld\n",dp->dp_Arg1);
+#endif
+
+		mt->mt_astat.action_examine_object++;
+		goto exnext;
+d323 1
+a323 1
+#ifdef MONITOR
+d325 1
+a325 2
+#endif
+
+d328 1
+a328 1
+#ifdef MONITOR
+d334 62
+a395 1
+#endif
+d397 6
+d405 18
+a422 1
+	case ACTION_PARENT:
+d424 11
+a434 3
+#ifdef MONITOR
+		KPrintF("ACTION_PARENT of lock %ld",dp->dp_Arg1);
+#endif
+d437 1
+a437 1
+#ifdef MONITOR
+d439 29
+a467 1
+#endif
+d469 6
+d479 1
+a479 1
+#ifdef MONITOR
+d485 1
+a485 1
+#endif
+d490 1
+a490 1
+#ifdef MONITOR
+d492 1
+a492 1
+		KPrintF("ACTION_MAKE_LINK   lock      nam    \n",dp->dp_Arg1,buff);
+d498 1
+a498 1
+#endif
+d501 6
+a506 16
+	case ACTION_RENAME_OBJECT:
+#ifdef MONITOR
+KPrintF("ACTION_RENAME_OBJECT\n");
+#endif
+
+		mt->mt_astat.action_rename_object++;
+		nfs_rename(mt, dp);
+		break;
+
+	case ACTION_MORE_CACHE:
+#ifdef MONITOR
+		KPrintF("ACTION_MORECACHE\n");
+#endif
+
+		mt->mt_astat.action_morecache++;
+		dp->dp_Res2 = ERROR_NOT_IMPLEMENTED;
+d510 1
+a510 1
+#ifdef MONITOR
+d512 1
+a512 2
+#endif
+
+d517 6
+a522 26
+	case ACTION_SET_DATE:
+#ifdef MONITOR
+		KPrintF("ACTION_SETDATE\n");
+#endif
+
+		mt->mt_astat.action_setdate++;
+		nfs_setdate(mt, dp);
+		break;
+
+	case ACTION_CURRENT_VOLUME:
+#ifdef MONITOR
+		KPrintF("ACTION_CURRENT_VOLUME\n");
+#endif
+
+		mt->mt_astat.action_current_volume++;
+		dp->dp_Res1 = dtob(mt->mt_vol);
+		dp->dp_Res2 = 0;
+		break;
+
+	case ACTION_IS_FILESYSTEM:
+#ifdef MONITOR
+		KPrintF("ACTION_IS_FILESYSTEM\n");
+#endif
+
+		dp->dp_Res1 = -1;
+		dp->dp_Res2 = 0;
+a524 8
+	case ACTION_SET_COMMENT:
+#ifdef MONITOR
+		KPrintF("ACTION_SET_COMMENT\n");
+#endif
+
+		dp->dp_Res1 = DOSTRUE;
+		dp->dp_Res2 = 0;
+		break;
+d527 1
+a527 1
+#ifdef MONITOR
+d529 1
+a529 2
+#endif
+
+@
+
+
+1.4
+log
+@added support for symlinks
+compiling with -dMONITOR now produces a debugging version
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: main.c,v 1.3 90/11/13 13:01:47 martin Exp $
+d8 1
+a8 1
+ * $Revision: 1.3 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/main.c,v 1.3 90/11/13 13:01:47 martin Exp $
+d20 2
+a21 1
+#include <exec/types.h>
+a22 1
+#include <dos/dosextens.h>
+a23 1
+#include <sys/types.h>
+a25 7
+#include <rpc/rpc.h>
+#include <nfs/nfs.h>
+#include <nfs/clmsg.h>
+#include <errno.h>
+
+#include <action.h>
+#include "fs.h"
+a30 4
+#include <clib/exec_protos.h>
+#include <clib/alib_protos.h>
+
+
+d34 1
+a34 1
+int nfs_signal = -1;		/* exported to CreateMyPort()	*/
+d37 2
+d42 1
+d46 1
+a47 2
+/* external functions */
+BOOL requester(UBYTE *positive, UBYTE *negative, char *fmt, ...);
+a48 1
+
+d53 1
+a53 1
+main()
+d59 9
+a67 13
+#ifdef AZTEC_C
+	extern int Enable_Abort;
+#endif
+	/*
+	 * Manx _main opens "*" which leaves a lock on current CLI.  This
+	 * means the user can never close the CLI which is a real bummer.
+	 * Closing stderr should rid us of this problem.
+	 */
+	fclose(stderr);
+#ifdef AZTEC_C
+	Enable_Abort = 0;
+#endif
+	mp = CreatePort(CLIENT_COMMAND_PORT, 0L);
+d71 4
+d80 1
+a80 1
+			"NFSc: can't create authentication", 
+d101 1
+a101 1
+			} 
+d106 1
+a106 1
+				nfs_command(msg);
+d127 1
+a127 1
+	} 
+d130 1
+a130 2
+static void
+cleanup(int code)
+d141 2
+a142 1
+		DeletePort(mp);
+a143 1
+		mp = 0;
+a152 1
+		cred = 0;
+d155 1
+a155 1
+	if(nfs_signal < 0){
+a156 1
+		nfs_signal = -1;
+d159 3
+d352 1
+a352 1
+			KPrintF("Name = %s  DirEntryType=%ld\n",fib->fib_FileName+1, fib->fib_DirEntryType);  
+d376 1
+a376 1
+			KPrintF("Name = %s  DirEntryType=%ld\n",fib->fib_FileName+1, fib->fib_DirEntryType);  
+d391 1
+a391 1
+		KPrintF("  returned %ld\n",dp->dp_Res1);		
+d400 1
+a400 1
+		if(dp->dp_Res1 >=0) 
+d403 1
+a403 1
+			KPrintF("Failed code=%ld\n",dp->dp_Res2);
+d411 1
+a411 1
+		KPrintF("ACTION_MAKE_LINK   lock=%ld  name=%s\n",dp->dp_Arg1,buff);
+d413 1
+a413 1
+		if(dp->dp_Res1 == DOSTRUE) 
+d435 1
+a435 1
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+d462 1
+a462 1
+		dp->dp_Res1 = mt->mt_vol;
+d475 9
+d490 1
+a490 1
+		dp->dp_Res1 = 0; 
+@
+
+
+1.3
+log
+@added ACTION_IS_FILESYSTEM packet type
+@
+text
+@d2 1
+a2 1
+ * main.c   nfsc  Manx36
+d4 1
+a4 1
+ * $Locker: martin $
+d6 1
+a6 1
+ * $Id: main.c,v 1.2 90/11/12 16:44:57 bj Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 1.2 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/main.c,v 1.2 90/11/12 16:44:57 bj Exp Locker: martin $
+d15 1
+a16 1
+
+d22 1
+a22 1
+#include <libraries/dosextens.h>
+a33 1
+#include "nfs_defs.h"
+d39 2
+a40 3
+#ifdef LATTICE
+#include <proto/exec.h>
+#endif
+a41 2
+/* define because I don't want to include all the 2.0 stuff yet */
+#define ACTION_IS_FILESYSTEM 1027
+a42 1
+static char *compiler = "manx36" ;
+d50 10
+a65 1
+	extern struct MsgPort *CreatePort();
+d69 1
+a69 1
+	struct Message *GetMsg();
+d82 1
+a82 1
+	mp = CreatePort(CLIENT_COMMAND_PORT, 0);
+d90 1
+a90 1
+		requester(0L, " OK ", "%s\n%s\n%s\n",
+d141 2
+a142 1
+cleanup(code)
+d151 1
+a151 1
+			ReplyMsg(msg);
+d176 1
+d181 4
+d187 5
+a191 1
+	case ACTION_RW:
+d195 4
+a198 1
+	case MODE_NEWFILE:
+d202 5
+a206 1
+	case MODE_OLDFILE:
+d212 4
+d221 4
+d230 4
+d239 4
+d248 4
+d256 4
+d265 5
+d275 4
+d284 4
+d293 5
+d303 1
+d306 4
+d313 4
+d321 4
+d330 6
+d338 5
+d346 4
+d354 4
+d360 7
+d370 4
+d378 4
+d384 8
+d395 4
+d401 4
+d407 24
+d432 4
+d440 5
+a444 1
+	case ACTION_MORECACHE:
+d450 4
+d458 5
+a462 1
+	case ACTION_SETDATE:
+d468 4
+d478 4
+d487 4
+@
+
+
+1.2
+log
+@version string addition.
+@
+text
+@d4 1
+a4 1
+ * $Locker: bj $
+d6 1
+a6 1
+ * $Id: main.c,v 1.1 90/11/12 15:52:08 bj Exp Locker: bj $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: HOG:Other/inet/src/c/nfsc/RCS/main.c,v 1.1 90/11/12 15:52:08 bj Exp Locker: bj $
+d44 3
+d304 5
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d38 2
+d43 3
+@

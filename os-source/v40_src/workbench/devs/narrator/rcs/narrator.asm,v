@@ -1,0 +1,859 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.6
+date     91.03.07.15.07.04;  author eric;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.03.06.16.02.07;  author eric;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.08.21.16.36.34;  author eric;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.06.04.20.36.13;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.03.12.06.42;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.04.02.16.39.51;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.6
+log
+@Update from Joe Katz 6 Mar 91
+@
+text
+@
+	TTL	'NARRATOR.ASM'
+
+
+*************************************************************************	
+*                                                                    	*
+*   Copyright 1990, 1991 Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted, or stored   *
+*   in any language or computer system, in any form, whatsoever,	*
+*   without the prior written permission of the authors.   		*
+*   									*
+*   Modification History                                               	*
+*   									*
+*	3/4/91	JK --	Added new subroutine FormSentence to break the	*
+*			input into sentences.  Less pause before	*
+*			speaking and smaller buffers need be allocated.	*
+*************************************************************************
+
+
+		SECTION speech
+_AbsExecBase	EQU	4
+
+
+	INCLUDE 'assembly.i'
+ 	INCLUDE 'exec/types.i'
+	INCLUDE 'exec/nodes.i'
+	INCLUDE 'exec/lists.i'
+	INCLUDE 'exec/strings.i'
+	INCLUDE 'exec/initializers.i'
+	INCLUDE 'exec/memory.i'
+	INCLUDE 'exec/interrupts.i'
+	INCLUDE 'exec/ports.i'
+	INCLUDE 'exec/libraries.i'
+	INCLUDE 'exec/devices.i'
+	INCLUDE 'exec/io.i'
+	INCLUDE 'exec/tasks.i'
+	INCLUDE 'exec/resident.i'
+	INCLUDE 'hardware/custom.i'
+	INCLUDE 'hardware/dmabits.i'
+	INCLUDE 'exec/execbase.i'
+	INCLUDE 'exec/ables.i'
+	INCLUDE 'exec/errors.i'
+
+io_Size	EQU	IO_SIZE
+        INCLUDE	'featequ.i'
+        INCLUDE	'gloequs.i'
+	INCLUDE	'devices/audio.i'
+	INCLUDE	'narrator.i'
+	INCLUDE	'private.i'
+
+
+******* Imported Functions *******************************************
+
+	EXTERN_SYS AllocMem
+	EXTERN_SYS FreeMem
+	EXTERN_SYS PutMsg
+	EXTERN_SYS ReplyMsg
+	EXTERN_SYS Signal
+	EXTERN_SYS Wait
+	EXTERN_SYS DoIO
+	EXTERN_SYS FindTask
+	EXTERN_SYS SetTaskPri
+
+	XREF	PARSE,STRMARK,PHONOL,SYLLABLE,PROSOD,CONVERT
+	XREF	F0INIT,F0HLS,F0LLS,COMPCOEF,FEAT,FormSentence
+ 	XREF	SYNTH,TermIO,AllocMultChan,FreeMultChan
+	XREF	_Phonet,F0INTERP,F0ENTHUS,NARDBG_DebugMode,NARDBG_FreeCoef
+
+	XDEF	Narrator
+
+NUMCENTPHONS	EQU	11			;Size of allowed cent phons list
+
+
+Narrator	JSR	  NARDBG_DebugMode		;Run in DEBUG mode?
+
+	  	MOVEM.L   A1-A6/D2-D7,-(SP)		;Save registers
+	  	MOVE.L    A1,A2            		;Copy IORequest ptr
+	  	MOVE.L    ND_GLOBALS(A3),A5		;Get ptr to globals area
+*	  	MOVE.L    ND_AUDIOLIB(A3),AudLib(A5) 	;Save ptr to Audio lib
+	  	MOVE.L	  A2,USERIORB(A5)		;Save ptr to user's IORB
+
+	 	MOVE.L    _AbsExecBase,A6		;SysLib pointer
+
+
+*	  	;------ Allocate the audio channels and build the DMA IORBs
+
+		JSR	  AllocMultChan
+	  	MOVE.W	  D0,D3				;Check return code
+	  	BNE	  MAINRTN			;Branch if error
+		
+
+*	  	;------ Copy mouth flag to globals
+
+	  	MOVE.B	  NDI_MOUTHS(A2),Mouth(A5)
+
+
+*	  	;------ Validate speaking rate against bounds
+
+		MOVE.W    NDI_RATE(A2),D1		;Get rate from IORB
+          	CMP.W     #MINRATE,D1
+       	  	BGE.S     PAR1
+PAR2	  	MOVEQ	  #ND_RateErr,D3
+	  	BRA       MAINRTN                
+PAR1      	CMP.W     #MAXRATE,D1
+          	BGT.S     PAR2
+          	MOVE.W    D1,RATE(A5)
+
+
+*		;------ Validate pitch against bounds 
+
+		MOVE.W	  NDI_PITCH(A2),D1		;Get pitch from IORB
+	  	CMP.W     #MINPITCH,D1               
+          	BGE.S     PAR3
+PAR4		MOVEQ     #ND_PitchErr,D3
+		BRA	  MAINRTN 
+PAR3          	CMP.W     #MAXPITCH,D1
+          	BGT.S     PAR4
+		LSR.W	  #1,D1				;Convert to 2Hz steps
+          	MOVE.W    D1,FREQ(A5)
+
+
+*		;------ Validate F0 mode (Natural, Robotic, or Manual)
+
+		MOVE.W	  NDI_MODE(A2),D1		;Get F0 mode from IORB
+		CMP.W     #NATURALF0,D1
+          	BEQ.S     PAR5
+          	CMP.W     #ROBOTICF0,D1
+          	BEQ.S     PAR5
+		CMP.W	  #MANUALF0,D1
+		BEQ.S	  PAR5
+                MOVEQ	  #ND_ModeErr,D3
+		BRA       MAINRTN
+PAR5       	MOVE.W    D1,F0MODE(A5)
+
+
+*		;------ Validate sex
+
+		MOVE.W	  NDI_SEX(A2),D1
+ 		CMP.W     #MALE,D1
+          	BEQ.S     PAR6
+		CMP.W     #FEMALE,D1
+		BEQ.S     PAR6
+                MOVEQ	  #ND_SexErr,D3
+		BRA	  MAINRTN
+PAR6		MOVE.W    D1,SEX(A5)
+
+
+*		;------ Validate sampling frequency
+
+		MOVE.W	  NDI_SAMPFREQ(A2),D1
+		CMP.W	  #MINFREQ,D1
+		BGE.S     PAR7
+PAR8		MOVEQ	  #ND_FreqErr,D3
+		BRA       MAINRTN
+PAR7		CMP.W     #MAXFREQ,D1
+		BGT.S     PAR8
+		MOVE.W	  D1,SampFreq(A5)
+
+
+*		;------ Validate volume
+
+		MOVE.W    NDI_VOLUME(A2),D1
+		CMP.W     #MINVOL,D1
+                BGE.S     PAR9
+PAR10		MOVEQ     #ND_VolErr,D3
+		BRA       MAINRTN
+PAR9		CMP.W     #MAXVOL,D1
+		BGT.S	  PAR10
+		MOVE.B    D1,Volume(A5)
+
+
+*		;------ Validate degree of centralization.
+
+		BTST	  #NDB_NEWIORB,NDI_FLAGS(A2)	;New IORB?
+		BEQ.S	  NarrCont			;No, skip central checks
+		MOVEQ	  #0,D1
+		MOVE.B    NDI_CENTRALIZE(A2),D1
+		CMP.W     #MINCENT,D1
+                BGE.S     ValCentPct
+InvalCentPct	MOVEQ     #ND_DCentErr,D3
+		BRA       MAINRTN
+ValCentPct	CMP.W     #MAXCENT,D1
+		BGT.S	  InvalCentPct
+		MOVE.L    D1,CentralPct(A5)
+		BEQ.S	  NarrCont
+
+
+*		;------	Validate centralization phoneme (if any)
+
+		TST.L	  NDI_CENTPHON(A2)		;Central phon ptr NULL?
+		BEQ.S	  InvalCentPhon			;  Yes, return an error
+		MOVE.L	  NDI_CENTPHON(A2),A0		;Central phon string ptr
+		MOVE.W	  (A0),D0			;Get central phon
+		LEA	  AllowedCentPhons,A0
+		MOVEQ	  #NUMCENTPHONS-1,D1
+Cent1		CMP.W	  (A0)+,D0			;Comp with allowed phons
+		ADDQ.L	  #2,A0				;Bump past phon code
+		DBEQ	  D1,Cent1			;Loop
+		TST.W	  D1				;If D1 neg, not an 
+		BPL.S	  Cent2				;  allowed cent phon
+InvalCentPhon	MOVEQ	  #ND_CentPhonErr,D3
+		BRA	  MAINRTN
+Cent2		MOVEQ	  #0,D0
+		MOVE.W	  -2(A0),D0
+		MOVE.L	  D0,CentralPC(A5)		;Store p.c. in globals
+
+
+
+NarrCont  CLR.L	    PARLENTH(A5)		;Initialize length to 0
+	  MOVE.L    IO_DATA(A2),PARSTART(A5) 	;Initialize starting position
+	  MOVE.L    IO_LENGTH(A2),LFT2PARS(A5)	;Initialize amount left to parse
+
+
+*		;------- Main synthesizer loop
+
+MAINLOOP  JSR	    FormSentence		;Find sentence and alloc bfrs
+	  BEQ	    MAINRTN			;D3=0, nothing more to say
+	  BMI	    MAINRTN			;Error (D3 has code)
+	  JSR       PARSE
+          BEQ       MAINRTN             	;Nothing more to say
+          BMI       MAINRTN             	;PARSE error
+          JSR       STRMARK
+          JSR       PHONOL
+          JSR       SYLLABLE
+          JSR       F0INIT
+	  BMI	    MAINRTN			;No memory for F0 arrays
+F0LOOP    JSR       F0HLS
+          BEQ.S     F0ADJ               	;Sentence completed
+          JSR       F0LLS
+          BRA.S     F0LOOP
+F0ADJ     JSR	    F0ENTHUS			;Enthusiasm adjust
+	  JSR       PROSOD
+          JSR       COMPCOEF
+	  BMI	    ReturnCOEF			;COMPCOEF cannot get memory
+	  MOVE.L    CentralPct(A5),-(SP)	;Degree of centralization
+	  MOVE.L    CentralPC(A5),-(SP)		;Centralize phoneme code
+	  MOVE.L    USERIORB(A5),-(SP)		;Address of user IORB
+	  MOVE.L    MOTHPTR(A5),-(SP)		;Address of mouth array
+	  MOVE.L    CRBRK(A5),-(SP)		;F0 CRBRK array
+	  MOVE.L    FEND(A5),-(SP)		;F0 END array
+	  MOVE.L    PEAK(A5),-(SP)		;F0 PEAK array
+	  MOVE.L    START(A5),-(SP)		;F0 START array
+	  MOVE.L    COEFPTR(A5),-(SP)		;Coef buffer
+	  MOVE.L    DUR(A5),-(SP)		;Duration
+	  MOVE.L    STRESS(A5),-(SP)		;Stress
+	  MOVE.L    PHON(A5),-(SP)		;Phon  
+	  JSR	    _Phonet
+	  LEA	    48(SP),SP			;Fix stack
+	  JSR	    F0INTERP			;F0 interpolation
+	  JSR	    CONVERT			;Convert step sizes to indeces
+
+
+*	;------	Set the task priority high
+	MOVE.L	_AbsExecBase,A6
+	SUB.L	A1,A1
+	CALLSYS	FindTask
+	MOVE.L	D0,A1
+	MOVEQ	#100,D0				;Old style IORB uses pri=100
+	MOVE.L	USERIORB(A5),A0			;Get user IORB
+	BTST	#NDB_NEWIORB,NDI_FLAGS(A0)	;New style IORB?
+	BEQ.S	SetPri				;No, use default priority of 100
+	MOVE.B	NDI_PRIORITY(A0),D0		;Get speaking priority from IORB
+SetPri	CALLSYS	SetTaskPri
+
+
+*	;------	Call the synthesizer
+        JSR       SYNTH
+
+
+*	;------	Set the task priority low
+	MOVE.L	_AbsExecBase,A6
+	SUB.L	A1,A1
+	CALLSYS	FindTask
+	MOVE.L	D0,A1
+	MOVEQ	#0,D0
+	CALLSYS	SetTaskPri
+
+
+*	;------ Release coef bfr if KEEPCOEF bit not set in flags field and
+	;       if we were actually able to allocate it.
+
+ReturnCOEF:
+	JSR	  NARDBG_FreeCoef		;Free up the coef mem
+
+
+*	;------	Release the Mouth shape buffer.
+
+Check_Mouth:
+	  TST.B	    Mouth(A5)
+	  BEQ.S	    MAINRTN
+	  MOVE.L    MOTHPTR(A5),A1
+	  MOVE.L    MOTHSIZE(A5),D0
+	  BEQ.S	    MAINRTN		;Nothing to return
+	  CALLSYS   FreeMem
+
+
+MAINRTN	  MOVE.L   _AbsExecBase,A6	;Restore SysBase
+	  MOVE.L   PSDLEN(A5),D0	;Return PHON, STRESS, and DUR memory
+	  BEQ.S	   MAINRTN1		;Nothing to return
+	  MOVE.L   PHON(A5),A1		;Address of memory to return
+	  CALLSYS  FreeMem		;Back it goes
+	  MOVE.L   #0,PSDLEN(A5)	;Reset length of alloc'd P,S,D arrays
+
+MAINRTN1  MOVEQ	   #0,D0
+	  MOVE.W   F0TOTSYL(A5),D0	;Return F0 arrays
+	  BEQ.S	   MAINRTN2		;Nothing to return
+	  MOVE.L   START(A5),A1		;Address of memory to return
+	  SUBQ.L   #2,A1		;F0 buffers actually start 2 to the left
+	  CALLSYS  FreeMem		;Back it goes
+	  MOVE.W   #0,F0TOTSYL(A5)	;Reset length of alloc'd F0 arrays
+
+MAINRTN2  TST.W     D3			;Check return code
+          BNE.S     MAINRTN3		;If error code
+	  TST.L	    LFT2PARS(A5)	;Anything left to say?
+	  BNE	    MAINLOOP		;Yep, keep going
+
+
+MAINRTN3  MOVE.W    D3,D0			;Transfer return code to D0
+	  MOVEM.L   (SP)+,A1-A6/D2-D7		;Restore important registers
+
+	  JSR	    FreeMultChan		;Preserves all registers
+
+	  CLR.L	    ND_USERIORB(A3)		;Clear the current user IORB
+
+	  MOVE.L    IO_LENGTH(A1),IO_ACTUAL(A1)	;Assume everything worked ok
+	  MOVE.B    D0,IO_ERROR(A1)		;Store return code in IORB
+	  BEQ.S	    MainDone			;Everything ok, return
+
+
+*	  ;-------- An error occured during processing.  If phoneme code
+	  ;	    error, set IO_ACTUAL to -ive position of error in the
+	  ;	    ASCII string (should just be position of error, but this
+	  ;	    is a holdover from previous days).  If any other error,
+	  ;	    zero IO_ACTUAL.
+
+	  MOVE.L    #0,IO_ACTUAL(A1)		;Clear IO_ACTUAL
+	  CMP.B	    #ND_PhonErr,D0		;Phoneme code error?
+	  BNE.S     MainDone			;   No, just return
+	  MOVE.L    ND_GLOBALS(A3),A0		;   Yes, Get ptr to globals area
+	  MOVE.W    PHONLEN(A0),D0		;   	 Get position of error
+	  EXT.L	    D0				;        Extend to longword
+	  MOVE.L    D0,IO_ACTUAL(A1)		;        Put in user's IORB
+
+MainDone  BSR	  TermIO			;Return msg to user
+	  RTS
+
+AllowedCentPhons:
+	DC.B	"IY",0,9
+	DC.B	"IH",0,11
+	DC.B	"EH",0,13
+	DC.B	"AE",0,15
+	DC.B	"AA",0,17
+	DC.B	"AH",0,18
+	DC.B	"AO",0,19
+	DC.B	"OW",0,39
+	DC.B	"UH",0,21
+	DC.B	"ER",0,25
+	DC.B	"UW",0,41
+
+	DC.B      'COPYRIGHT 1990, 1991  JOSEPH KATZ / MARK BARTON'
+	CNOP 0,2
+
+	END
+@
+
+
+1.5
+log
+@Update from Joe Katz 5 Mar 91
+@
+text
+@d217 1
+@
+
+
+1.4
+log
+@New version: 36.10
+@
+text
+@d7 1
+a7 1
+*   Copyright 1990, Joseph Katz/Mark Barton.  All rights reserved.	*
+d11 6
+a16 1
+*                                                                    	*
+d65 1
+a65 2
+	XREF	F0INIT,F0HLS,F0LLS
+	XREF	COMPCOEF,FEAT
+d67 1
+a67 1
+	XREF	_Phonet,F0INTERP,F0ENTHUS
+d74 3
+a76 1
+Narrator  	MOVEM.L   A1-A6/D2-D7,-(SP)		;Save registers
+a207 7
+*		;------ Allocate memory for PHON, STRESS, and DUR arrays and
+		;	store pointers in globals area.  The length of the
+		;	arrays is computed as twice the length of the input 
+		;	string plus 10 (for the blanks and QX's inserted by
+		;	PARSE).  This should insure that no overflow can 
+		;	occur, either in PARSE or in PHONOL.  The memory is
+		;	cleared during allocation to make life easier in PARSE.
+d209 3
+a211 22
+NarrCont	CLR.L	  PSDLEN(A5)		;Clear alloc length in globals
+		CLR.L	  D0			;Initialize alloc length
+		CLR.L	  D2			;Initialize offset
+		MOVE.W	  IO_LENGTH+2(A2),D0	;Get length of ASCII phon string
+		ADD.L	  D0,D0			;Each output array is 2*input +
+		ADD.L	  #10,D0		; 		10 bytes long
+		MOVE.W	  D0,D2			;Save for later
+		ADD.L	  D0,D0
+		ADD.L	  D2,D0			;D0 is now 6*input size+30 long
+		MOVE.L	  D0,D3			;Copy alloc length
+		MOVE.L	  #MEMF_PUBLIC+MEMF_CLEAR,D1
+		CALLSYS	  AllocMem
+		TST.L	  D0
+		BNE.S	  PAR11
+		MOVEQ	  #ND_NoMem,D3
+		BRA	  MAINRTN
+PAR11		MOVE.L	  D0,PHON(A5)		;Save start of PHON array
+		ADD.L	  D2,D0			;Add in offset
+		MOVE.L	  D0,STRESS(A5)		;Save start of STRESS array
+		ADD.L	  D2,D0			;Add in offset
+		MOVE.L	  D0,DUR(A5)		;Save start of DUR array
+		MOVE.L	  D3,PSDLEN(A5)		;Save alloc length
+a212 1
+*		;------ Setup and call the synthesizer
+a213 6
+		MOVE.L	  IO_DATA(A2),PARSTART(A5)
+		MOVE.L	  IO_DATA(A2),PARVERYB(A5)
+		MOVE.W 	  IO_LENGTH+2(A2),LFT2PARS(A5)
+	        CLR.L     PARLENTH(A5)        
+
+
+d216 2
+a217 7
+MAINLOOP  MOVE.L    PARSTART(A5),A0            	;Current pos in ASCII string
+          MOVE.L    PARLENTH(A5),D0            	;Amount previously parsed
+          ADD.L     D0,A0                      	;Add in previous length
+          MOVE.L    A0,PARSTART(A5)            	;Save back
+*          SUB.W     D0,LFT2PARS(A5)            ;REDUCE TOTAL INPUT LENGTH
+*         MOVE.W    LFT2PARS(A5),MAX2PARS(A5)  ;SET MAX TO PARSE TO REMAINING LEN
+
+d278 3
+a280 1
+*	;------ Release coef bfr if we were actually able to allocate it.
+d282 1
+a282 6
+        MOVE.L    COEFPTR(A5),A1
+        MOVE.L    COEFSIZE(A5),D0
+   	BEQ.S	  Check_Mouth			;Nothing to return, check mouths
+	MOVE.L	  USERIORB(A5),A0
+	CALLSYS   FreeMem
+	BRA.S	  Check_Mouth
+d285 2
+d289 1
+a289 1
+	  BEQ.S	    Write_nomouth
+d292 1
+a292 1
+	  BEQ.S	    Write_nomouth		;Nothing to return
+a294 3
+Write_nomouth:
+	  TST.W     D3
+          BEQ       MAINLOOP            ;CONTINUE LOOP UNTIL END OF INPUT
+d296 1
+a296 3
+
+
+MAINRTN	  MOVE.L   _AbsExecBase,A6	;Setup Execbase
+d311 7
+a317 1
+MAINRTN2  MOVE.W    D3,D0			;Transfer return code to D0
+d359 2
+a360 2
+          DC.B      'COPYRIGHT 1990  JOSEPH KATZ / MARK BARTON'
+	  CNOP 0,2
+@
+
+
+1.3
+log
+@removed debugging info
+@
+text
+@@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@d4 2
+a5 1
+*************************************************************************
+d7 4
+a10 7
+*   Copyright 1986, 1989 Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted,          	*
+*   transcribed, stored in retrieval system, or translated into      	*
+*   any language or computer language, in any form or by any         	*
+*   means, electronic, mechanical, magnetic, optical, chemical,      	*
+*   manual or otherwise, without the prior written permission of     	*
+*   the authors.							*
+d67 1
+a68 2
+Narrator	BTST	  #NDB_DEBUG,NDI_FLAGS(A1)     	;Run in DEBUG mode?
+	  	BEQ.S	  NoDebug			;No
+d70 1
+a70 6
+DebugLoop 	NOP				    	;Yes, loop forever
+*	  	BRA.S	  DebugLoop
+
+
+
+NoDebug	  	MOVEM.L   A1-A6/D2-D7,-(SP)		;Save registers
+d166 36
+d210 1
+a210 1
+		CLR.L	  PSDLEN(A5)		;Clear alloc length in globals
+d266 2
+d279 1
+a279 1
+	  LEA	    40(SP),SP			;Fix stack
+d310 1
+a310 2
+*	;------ Release coef bfr if KEEPCOEF bit not set in flags field and
+	;       if we were actually able to allocate it.
+a315 2
+	BTST	  #NDB_KEEPCOEF,NDI_FLAGS(A0)
+	BNE.S	  SAVCOEF
+a317 2
+SAVCOEF	MOVE.L	  A1,NDI_COEFBFR(A0)
+	MOVE.L	  D0,NDI_COEFSIZ(A0)
+d378 12
+d391 1
+a391 2
+
+          DC.B      'COPYRIGHT 1984, 1989  JOSEPH KATZ / MARK BARTON'
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 16
+a16 24
+	TTL	'$Header: narrator.asm,v 32.1 86/01/22 00:24:12 sam Exp $'
+**********************************************************************
+*                                                                    *
+*   Copyright 1986, Commodore-Amiga Inc.   All rights reserved.      *
+*   No part of this program may be reproduced, transmitted,          *
+*   transcribed, stored in retrieval system, or translated into      *
+*   any language or computer language, in any form or by any         *
+*   means, electronic, mechanical, magnetic, optical, chemical,      *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030                                     *
+*                                                                    *
+**********************************************************************
+*
+* $Header: narrator.asm,v 32.1 86/01/22 00:24:12 sam Exp $
+*
+* $Locker:  $
+*
+* $Log:	narrator.asm,v $
+* Revision 32.1  86/01/22  00:24:12  sam
+* placed under source control
+* 
+*
+**********************************************************************
+d61 1
+a61 1
+	XREF	PARSE,STRMARK,PHONOL,SYLLABLE,PROSOD
+d63 1
+a63 1
+	XREF	PHONET,TAG,INTERP,FEAT
+d65 1
+d70 2
+a71 2
+Narrator:
+		MOVEM.L	  A1-A6/D2-D7,-(SP)	;Save all important registers
+d73 2
+a74 4
+		MOVE.L	  A1,A2            	;Copy ptr to IORequest block to A2
+		MOVE.L    ND_GLOBALS(A3),A5	;Get ptr to globals area ptr
+*		MOVE.L	  ND_AUDIOLIB(A3),AudLib(A5) ;Save ptr to Audio lib
+		MOVE.L	  A2,USERIORB(A5)	;Save ptr to user's IORB
+a75 1
+		MOVE.L	_AbsExecBase,A6		;SysLib pointer
+d78 5
+a82 2
+*		;------ Allocate the audio channels and
+*		;	build the DMA IORBs
+d84 8
+a91 3
+		JSR	AllocMultChan
+		MOVE.W	D0,D3			;Check return code
+		BNE	MAINRTN			;Error
+d94 1
+a94 1
+*		;------ Copy mouth flag to globals
+d96 1
+a96 1
+		MOVE.B	  NDI_MOUTHS(A2),Mouth(A5)
+d99 1
+a99 1
+*		;------ Check the speaking rate for bounds
+d101 7
+a107 8
+		MOVE.W    NDI_RATE(A2),D1	;Get rate from user
+*	        CMP.W     #MINRATE,D1
+                CMP.W     #1,D1 
+         	BGE.S     PAR1
+PAR2		MOVEQ	  #ND_RateErr,D3
+		BRA       MAINRTN                
+PAR1          	CMP.W     #MAXRATE,D1
+          	BGT       PAR2
+d111 1
+a111 1
+*		;------ Check the pitch for bounds 
+d113 1
+a113 1
+		MOVE.W	  NDI_PITCH(A2),D1
+d119 2
+a120 1
+          	BGT       PAR4
+d124 1
+d126 1
+a126 3
+*		;------ Check and set the F0 mode
+
+		MOVE.W	  NDI_MODE(A2),D1
+d131 2
+d138 1
+a138 1
+*		;------ Check and set the sex of the voice
+d150 1
+a150 1
+*		;------ Check and set the sampling frequency
+d158 1
+a158 1
+		BGT       PAR8
+d162 1
+a162 1
+*		;------ Check and set the volume
+d170 1
+a170 1
+		BGT	  PAR10
+d174 31
+d208 1
+a208 1
+       		MOVE.L	  IO_DATA(A2),PARVERYB(A5)
+d210 1
+a210 1
+          	CLR.L     PARLENTH(A5)        
+d215 6
+a220 6
+MAINLOOP  MOVE.L    PARSTART(A5),A0            ;CURRENT POSITION IN PHONEME STRING
+          MOVE.L    PARLENTH(A5),D0            ;AMOUNT PREVIOUSLY PARSED
+          ADD.L     D0,A0                      ;ADD IN PREVIOUS LENGTH
+          MOVE.L    A0,PARSTART(A5)            ;SAVE BACK
+          SUB.W     D0,LFT2PARS(A5)            ;REDUCE TOTAL INPUT LENGTH
+          MOVE.W    LFT2PARS(A5),MAX2PARS(A5)  ;SET MAX TO PARSE TO REMAINING LEN
+d222 3
+a224 4
+REPARSE   JSR       PARSE
+          BEQ       MAINRTN             ;IF =0, WE'RE DONE
+          BVS       OVERFLOW            ;OVERFLOW IN PARSE
+          BPL       MAINRTN             ;IF RC +IVE, INPUT ERROR (D3 HAS POS)
+a225 1
+          LEA       PHRULES1,A6
+a226 1
+          BVS       OVERFLOW            ;OVERFLOW IN PHONOL
+d229 1
+d231 1
+a231 2
+          BEQ.S     DOPROSOD            ;RC = 0 ==> SENTENCE COMPLETED
+          BVS       OVERFLOW            ;RC -IVE ==> OVERFLOWED SOME ARRAY
+d234 18
+a251 8
+DOPROSOD  JSR       PROSOD
+          LEA       PHRULES2,A6
+          JSR       PHONOL
+          BVS       OVERFLOW
+          JSR       PHONET
+          BVS       OVERFLOW
+          JSR       TAG
+          JSR       INTERP
+d259 6
+a264 2
+	MOVEQ	#100,D0
+	CALLSYS	SetTaskPri
+d268 1
+a268 1
+          JSR       SYNTH
+d280 13
+a293 3
+          MOVE.L    COEFPTR(A5),A1
+          MOVE.L    COEFSIZE(A5),D0
+          CALLSYS   FreeMem
+d295 1
+d300 1
+d309 6
+a314 3
+MAINRTN:
+	MOVE.W	  D3,D0			;Transfer return code to D0
+	MOVEM.L   (SP)+,A1-A6/D2-D7	;Restore important registers
+d316 7
+a322 1
+	JSR	  FreeMultChan
+d324 2
+a325 5
+	CLR.L	  ND_USERIORB(A3)	;Clear the current user IORB
+		
+	TST.W	  D0
+	BEQ.S	  Write_Good
+	BMI.S	  Write_Bad
+d327 1
+d329 1
+d331 3
+a333 16
+Write_PCErr:
+*		;------ Found a phoneme code error in input string
+		AND.L	  #$0000FFFF,D0		;Isolate pos of error
+		MOVE.L    D0,IO_ACTUAL(A1)	;Put in user's IORB
+		MOVE.B    #ND_PhonErr,D0	;Specify a return code
+		BRA.S     Write_End		;Go away	
+Write_Good:
+		MOVE.L    IO_LENGTH(A1),IO_ACTUAL(A1)	;Set length to entire input string
+		BRA.S     Write_End			;Go away
+Write_Bad:
+		MOVE.L    #0,IO_ACTUAL(A1)		;Clear length actually processed
+		
+Write_End:
+		MOVE.B    D0,IO_ERROR(A1)
+		BSR	  TermIO
+		RTS
+d336 5
+a340 10
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*                                                                             ;
+*                                                                             ;
+*                         OVERFLOW PROCESSING                                 ;
+*                                                                             ;
+*         FIRST, BACK UP TO PREVIOUS - OR ,                                   ;
+*           IF NO PAUSE, FIND A BLANK ABOUT 75% OF THE WAY INTO THE STRING    ;
+*             IF NO BLANK, JUST CHOP THE STRING IN HALF                       ;
+*                                                                             ;
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+d342 7
+a348 3
+OVERFLOW  MOVE.L    PARSTART(A5),A0
+          MOVE.L    PARLENTH(A5),D0     ;GET LENGTH OF STRING PARSED SO FAR
+          SUBQ.W    #2,D0               ;ADJUST TO START WITH 2ND TO LAST CHAR
+d350 2
+a352 1
+*-------- Check backwards from the end for a '-' or ','
+a353 8
+OVERFLO1  MOVE.B    0(A0,D0),D1
+          CMP.B     #',',D1
+          BEQ.S     OVERFLO2
+          CMP.B     #'-',D1
+          BEQ.S     OVERFLO2
+          DBEQ      D0,OVERFLO1
+          TST.W     D0
+          BMI.S     OVERFLO3            ;NO PUNCTUATION FOUND
+d355 1
+a355 35
+OVERFLO2  ADDQ.W    #1,D0
+          MOVE.W    D0,MAX2PARS(A5)     ;SAVE MAX LEN FOR PARSE TO DEAL WITH
+          CLR.L     PARLENTH(A5)        ;CLEAR CURRENT LENGTH
+          BRA       REPARSE             ;  AND TRY TO REPARSE
+
+
+*-------- No punctuation found, try for a space
+
+OVERFLO3  MOVE.L    PARLENTH(A5),D0
+          MOVE.W    D0,D1
+          LSR.W     #2,D1
+          SUB.W     D1,D0               ;START SEARCH 75% OF THE WAY IN
+          MOVE.B    #' ',D1
+OVERFLO4  CMP.B     0(A0,D0),D1
+          DBEQ      D0,OVERFLO4
+
+          TST.W     D0
+          BMI.S     OVERFLO5            ;IF -IVE, NO SPACE.
+          MOVE.W    D0,MAX2PARS(A5)     ;SAVE MAX LEN FOR PARSE TO DEAL WITH
+          CLR.L     PARLENTH(A5)        ;CLEAR CURRENT LENGTH
+          BRA       REPARSE             ;   AND REPARSE
+
+
+*-------- No punctuation or space, just chop in half
+
+OVERFLO5  MOVE.L    PARLENTH(A5),D0
+          LSR.W     #1,D0               ;LENGTH/2
+          MOVE.W    D0,MAX2PARS(A5)
+          CLR.L     PARLENTH(A5)
+          BRA       REPARSE
+
+         INCLUDE   'pcequs.i'
+         INCLUDE   'phonrules.i'
+
+          DC.B      'COPYRIGHT 1984, JOSEPH KATZ / MARK BARTON'
+@

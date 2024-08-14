@@ -1,0 +1,1118 @@
+head	40.18;
+access;
+symbols;
+locks; strict;
+comment	@ * @;
+
+
+40.18
+date	93.05.20.22.52.18;	author LPOMA;	state Exp;
+branches;
+next	38.15;
+
+38.15
+date	92.12.16.01.15.14;	author LPOMA;	state Exp;
+branches;
+next	38.14;
+
+38.14
+date	92.11.25.13.30.53;	author LPOMA;	state Exp;
+branches;
+next	38.10;
+
+38.10
+date	92.08.07.01.15.13;	author LPOMA;	state Exp;
+branches;
+next	38.9;
+
+38.9
+date	92.06.23.00.29.42;	author LPOMA;	state Exp;
+branches;
+next	38.5;
+
+38.5
+date	92.03.30.13.48.12;	author LPOMA;	state Exp;
+branches;
+next	38.4;
+
+38.4
+date	92.03.06.10.59.26;	author LPOMA;	state Exp;
+branches;
+next	38.3;
+
+38.3
+date	92.02.21.11.13.10;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.17.46;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.18
+log
+@Modified Is_Disk_Out() to allow for a arg to specify if a setting of
+a disk's default physical parameters is called for.
+
+I do not perform a TD_SEEK before a TD_CHANGESTATE if the device driver
+is the mfm.device. All others, the TD_SEEK precedes TD_CHANGESTATE.
+@
+text
+@/* DeviceIO.c **************************************************************
+** Copyright 1991 CONSULTRON
+*
+*      Device IO related functions.
+*
+*************************************************************************/
+
+#include "FS:FS.h"
+#include "intuition/intuition.h"
+#include "FS:Fault_txt.h"
+
+extern struct ExecBase  *SysBase;
+extern struct FS     *fsys;
+extern struct IOStdReq  *diskreq;
+extern int  DOSerror;
+extern char DeviceName[];
+extern struct IntuitionBase *IntuitionBase;
+extern struct DosLibrary *DOSBase;
+
+static void Send_DiskChange_Event(BOOL diskstate);
+static UBYTE DETS_Req(void);
+static UBYTE WP_Req(void);
+static UBYTE RWE_Req(LONG RWE, LONG error, char *errortype, ULONG block, LONG length);
+
+
+/********
+    DevCmd() -- Issue a simple command to the device.
+        return = 0 or error from IOReq
+********/
+BYTE DevCmd(command)
+UWORD command;
+{
+    if(diskreq && diskreq->io_Device)  /* check if successful OpenDevice() */
+    {
+        diskreq->io_Command = command;
+        return(DoIO((struct IORequest *)diskreq));
+    }
+}
+
+
+/********
+    Motor_Off()
+********/
+void Motor_Off()
+{
+    ULONG length;
+
+    if(diskreq->io_Device)  /* check if successful OpenDevice() */
+    {
+        length = diskreq->io_Length;        /* preserve io_Length */
+          diskreq->io_Length = MOTOR_OFF;
+        DevCmd(TD_MOTOR);
+          diskreq->io_Length = length;      /* restore io_Length */
+    }
+}
+
+
+/******************
+* EasyRequest() -- Calls exec.library EasyRequestArgs().  Also checks for
+*                   which window to put it on.
+******************/
+LONG EasyRequest( window, es, ip, arg1 )
+struct Window   *window;
+struct EasyStruct *es;
+ULONG  *ip;
+APTR  arg1;
+{
+    if((struct Window *)(-1L) == window)
+    {       /* no requesters allowed */
+        return(FALSE);
+    }
+    return ( EasyRequestArgs( window, es, ip, &arg1 ) );
+}
+
+static const char *RWE_header_crc = "Header CRC error";
+static const char *RWE_data_crc = "Data CRC error";
+static const char *RWE_unspecified = "Device Error";
+static const char *RWE_block_n_found = "Block not found";
+static const char *RWE_index_miss = "Index signal missing";
+static const char *RWE_track_n_mfm = "Track not MFM formatted";
+static const char *disk_error= "Disk Error!!!";
+
+extern struct EasyStruct ERS;
+extern char *disk_warn;
+
+
+/**********************************************************************
+*   FixStringBuff()   -- Fix the string buffer to change all ':' to '\n'
+**********************************************************************/
+char *FixStringBuff(buffer)
+char *buffer;
+{
+    ULONG i;
+
+    for(i=0; buffer[i]!='\0'; i++)
+    {
+        if(buffer[i] == ':') buffer[i]='\n';    /* if ':' change to '\n' */
+    }    
+    return(buffer);
+}
+
+/**********************************************************************
+*   Get_Default_Drive_Geometry() -- if supported
+**********************************************************************/
+ULONG Get_Default_Drive_Geometry()
+{
+    register ULONG blocks_part=0;
+    register struct DosEnvec *fssm_env = (struct DosEnvec *)BADDR(fsys->f_fssm->fssm_Environ);
+    struct DriveGeometry dg;
+
+/* Use Drive Geometry if:
+  1) de_DosType = ID_MSDOS_DISK or ID_MSDOS_DISK_DS    and
+  2) the boot block is to be located at sector 0    and
+  3) TD_GETGEOMETRY command supported.
+*/
+    if( ((fssm_env->de_DosType == ID_MSDOS_DISK) || (fssm_env->de_DosType == ID_MSDOS_DISK_DS))
+        && (fssm_env->de_LowCyl == 0))
+    {
+    /* Reset mfm.device physical drive parameters to default */
+        if(fsys->f_FS_special_flags & MF_SP_DEVICE)
+        {
+              diskreq->io_Data = (APTR) 0;
+              diskreq->io_Command = MDCMD_SETPARMS;
+            DoIO((struct IORequest *)diskreq);
+        }
+        if(fsys->f_FS_special_flags & MF_GG_DEVICE)
+        {
+              diskreq->io_Data = (APTR)&dg;
+            if(!DevCmd(TD_GETGEOMETRY))
+            {
+                fssm_env->de_HighCyl        = (dg.dg_Cylinders)-1;
+                fssm_env->de_BlocksPerTrack = dg.dg_TrackSectors;
+                fssm_env->de_Surfaces       = dg.dg_Heads;
+                fssm_env->de_BufMemType     = dg.dg_BufMemType;
+                blocks_part                 = dg.dg_TotalSectors;
+            }
+else DPRTF(KPrintF("\nGet_Default_Drive_Geometry: 5  TD_GETGEOMETRY no got it"));
+        }
+    }
+    return(blocks_part);
+}
+
+
+/***************************************************************************
+*   Flush_Buffers() -- Flush buffers, caches and update FAT
+***************************************************************************/
+void Flush_Buffers()
+{
+    register UWORD i, numbuffs;
+    register UBYTE fsysdisk;
+
+    fsysdisk = fsys->f_FSflags & MF_FSDISK;
+
+    if(fsys->f_Diskflags & CACHE_MOD_F)    /* if cache modified flag set */
+    {
+        if(fsysdisk) FlushCache();         /* if an FS disk -- Flush cache */
+          else                      /* if not an FS disk -- clear cache MOD flags*/
+        {
+    /* Load cache buffer block # */
+            numbuffs=fsys->f_num_buffs;
+            for(i=0; i<numbuffs; i++)
+            {
+                fsys->f_cache[i].cache_block &= ~C_BLOCK_MOD;  /* clear block mod flag */
+            }
+        }
+    }
+    if(fsys->f_Diskflags & ROOTDIR_MOD_F)      /* if Root Directory modified flag set */
+    {
+        if(fsysdisk)
+        {
+            PutBlockMem((APTR)fsys->f_rootdir_cache,fsys->f_beg_root_dir,fsys->f_root_blocks);
+        }
+    }
+    if(fsys->f_Diskflags & FAT_MOD_F)      /* if FAT modified flag set */
+    {
+        if(fsysdisk)
+        {
+            PutBlockMem((APTR)fsys->f_fat_copy,fsys->f_beg_fat1,fsys->f_blocks_fat);
+            PutBlockMem((APTR)fsys->f_fat_copy,fsys->f_beg_fat2,fsys->f_blocks_fat);
+        }
+    }
+    if(fsys->f_Diskflags & DISK_MOD_F)     /* if disk modified flag set */
+    {
+        if(fsysdisk) DevCmd(CMD_UPDATE);
+          else DevCmd(CMD_CLEAR);
+        Motor_Off();
+    }
+
+    fsys->f_Diskflags &= ~(CACHE_MOD_F|ROOTDIR_MOD_F|FAT_MOD_F|DISK_MOD_F); /* clear ALL flags */
+}
+
+
+#include "devices/input.h"
+#include "devices/inputevent.h"
+/**********************************************************************
+*   Send_DiskChange_Event() -- Open input.device and send IECLASS_DISKINSERTED
+*       or IECLASS_DISKREMOVED input event to those applications waiting for it.
+**********************************************************************/
+static void Send_DiskChange_Event(BOOL diskstate)
+/* if = 0 = disk in drive;  != 0 = disk out of drive */
+{
+    struct MsgPort *iport;
+    struct IOStdReq *ireq;
+    struct InputEvent ievent;
+
+    if( iport = CreateMsgPort())
+    {
+        if(ireq = (struct IOStdReq *)CreateIORequest(iport,sizeof(struct IOStdReq )))
+        {
+            if(!OpenDevice("input.device",0,(struct IORequest *)ireq,0)) 
+            {
+                  ireq->io_Command = IND_WRITEEVENT;
+                  ireq->io_Data = (APTR)&ievent;
+                if(diskstate == 0) ievent.ie_Class = IECLASS_DISKINSERTED;
+                 else  ievent.ie_Class = IECLASS_DISKREMOVED;
+                DoIO((struct IORequest *)ireq);
+                CloseDevice((struct IORequest *)ireq);
+            }
+            DeleteIORequest(ireq);
+        }
+        DeleteMsgPort(iport);
+    }
+}
+
+
+/**********************************************************************
+*   Is_Disk_Out() -- Is disk out of drive?
+*
+*   This routine also does a TD_GETGEOMETRY on floppies and sets the DosEnvec.
+*   It also does a check for write protect of the disk.
+*
+*   This routine is created to fix a deficiency of the scsi.device (37.19)
+*   when using removable media.  Return = 0 for no; !=0 for disk out.
+**********************************************************************/
+UBYTE Is_Disk_Out(BOOL geometry)
+{
+    UBYTE disk_out;
+
+
+/* Some SCSI device drivers do not update the Change state on 
+removable media until a command is issued that actually accesses the media.
+Somtimes the Change state is updated based on only the previous command
+results.  This appears to be the case with CBM's scsi.device (37.19).
+The "fix" is to do a TD_SEEK first then the TD_CHANGESTATE cmd.
+In my opinion this is a kludge.*/
+    if(!(fsys->f_FS_special_flags & MF_SP_DEVICE))
+    {
+          diskreq->io_Offset = 0;    /* Seek to block 0 */
+        DevCmd(TD_SEEK);
+          fsys->f_timer_start = DISK_TIME_OUT;   /* set timer count to disk time-out */
+    }
+    DevCmd(TD_CHANGESTATE);
+    if(disk_out = diskreq->io_Actual)
+    {       /* no disk in drive */
+DPRTF(KPrintF("\nIs_Disk_Out: No Disk"));
+        fsys->f_FSflags |= MF_NODISK;      /* set flag */
+        DOSerror = ERROR_NO_DISK;
+        fsys->f_NumSoftErrors = 0;
+        fsys->f_Diskflags &= ~(WRITE_PROT_F);  /* clear flag */
+    }
+    else
+    {
+        fsys->f_FSflags &= ~MF_NODISK;  /* clear flag */
+
+        if(geometry) Get_Default_Drive_Geometry();
+
+        DevCmd(TD_PROTSTATUS);
+        if(diskreq->io_Actual)
+        {
+            fsys->f_Diskflags |= WRITE_PROT_F;  /* set flag */
+            DOSerror = ERROR_DISK_WRITE_PROTECTED;
+        }
+        else fsys->f_Diskflags &= ~WRITE_PROT_F;  /* clear flag */
+
+    }
+
+/* This code is here to support the ACTION_WRITE_PROTECT function */
+    if(fsys->f_FSflags & MF_WP_DEVICE)
+    {
+        fsys->f_Diskflags |= WRITE_PROT_F;  /* set flag */
+        DOSerror = ERROR_DISK_WRITE_PROTECTED;
+    }
+
+    return(disk_out);
+}
+
+
+/******************
+* DETS_Req() -- Make a simple requester for "Disk Ejected Too Soon!"
+******************/
+static UBYTE DETS_Req(void)
+{
+    UBYTE bool;
+    char tempbuff[TSTRG_BUFF_SZ];
+    char tempbuff1[TSTRG1_BUFF_SZ];
+
+    ERS.es_TextFormat   = &tempbuff[1];
+    ERS.es_Title        = disk_warn;
+
+    Motor_Off();
+    Fault(DISK_CORRUPT,"",tempbuff,TSTRG_BUFF_SZ);          /* Fault() = Disk corrupt - task stopped */
+    Fault(YOU_MUST_REPLACE,tempbuff,tempbuff,TSTRG_BUFF_SZ);/* Fault() = You MUST replace volume */
+    strcat(tempbuff,"\n %b");                               /* "insert volume name" */
+    Fault(IN_DEVICE,tempbuff,tempbuff,TSTRG_BUFF_SZ);       /* Fault() = in device %s%s */
+    FixStringBuff(&tempbuff[1]);
+    Fault(RETRY_CANCEL, 0, tempbuff1,TSTRG1_BUFF_SZ);       /* Fault() = Retry/Cancel */
+    bool = EasyRequest(PKT_WINDOW, &ERS, 0,
+        (APTR)fsys->f_VolumeNode->dol_Name, DeviceName,"",tempbuff1);
+    return(bool);
+}
+
+
+/******************
+* WP_Req() -- Make a simple requester for "Write Protected"
+******************/
+static UBYTE WP_Req(void)
+{
+    UBYTE bool;
+    char tempbuff[TSTRG_BUFF_SZ];
+    char tempbuff1[TSTRG1_BUFF_SZ];
+
+    ERS.es_TextFormat   = &tempbuff[1];
+    ERS.es_Title        = disk_warn;
+
+    Motor_Off();
+    Fault(DISK_CORRUPT,"",tempbuff,TSTRG_BUFF_SZ);          /* Fault() = Disk corrupt - task stopped */
+    Fault(VOLUME,tempbuff,tempbuff,TSTRG_BUFF_SZ);          /* Fault() = Volume */
+    Fault(IS_PROTECTED,tempbuff,tempbuff,TSTRG_BUFF_SZ);    /* Fault() = is write protected */
+    FixStringBuff(&tempbuff[1]);
+    Fault(RETRY_CANCEL, 0, tempbuff1,TSTRG1_BUFF_SZ);       /* Fault() = Retry/Cancel */
+    bool = EasyRequest(PKT_WINDOW, &ERS, 0, tempbuff1);
+    return(bool);
+}
+
+
+/**********************************************************************
+*   DiskChange() -- Diskchange; Remove disk then re-validate disk
+*                   Return !=0 if NOT_FS_DISK or =0 if FS_DISK
+**********************************************************************/
+UBYTE DiskChange()
+{
+    register UBYTE disk_out;
+    register UBYTE bool = FALSE;
+
+DPRTF(KPrintF("\nDiskChange:"));
+
+/****
+    Check if disk installed and if write protected
+****/
+    disk_out = Is_Disk_Out(TRUE);
+    if( !(fsys->f_inhibit_cnt) )     /* only if FS not INHIBITED */
+    {
+        fsys->f_FSflags &= ~MF_VALIDATED;      /* clear flag -- disk not validated */
+
+    /* if something modified on old disk and no disk in drive
+      -- put up "Disk Ejected Too Soon" requestor */
+        if(fsys->f_Diskflags & (CACHE_MOD_F|ROOTDIR_MOD_F|FAT_MOD_F|DISK_MOD_F))
+        {   /* buffers or disk modified */
+            do
+            {
+                if(disk_out)
+                {       /* no disk in drive */
+                    if((bool = DETS_Req()) == TRUE)
+                    {   /* "Retry" */
+                        if((disk_out = Is_Disk_Out(TRUE)) == FALSE)
+                        {   /* disk back in drive */
+                            bool = FALSE;
+                        }
+                    }
+                     else
+                    {   /* "Cancel".  Clear buffers and do not write to the disk */
+                        fsys->f_FSflags &= ~MF_FSDISK;  /* make NOT an FS DISK */
+                    }
+                }
+                if(fsys->f_Diskflags & WRITE_PROT_F)
+                {   /* check if write protected */
+                    if((bool = WP_Req()) == TRUE)
+                    {   /* "Retry" */
+                        if((disk_out = Is_Disk_Out(TRUE)) == TRUE)
+                        {   /* disk out of drive */
+                            bool = TRUE;
+                        }
+                         else if(!(fsys->f_Diskflags & WRITE_PROT_F))
+                        {   /* disk not write-protected any more */
+                            bool = FALSE;
+                        }
+                    }
+                     else
+                    {   /* "Cancel".  Clear buffers and do not write to the disk */
+                        fsys->f_FSflags &= ~MF_FSDISK;  /* make NOT an FS DISK */
+                    }
+                }
+            } while(bool == TRUE);  /* Retry requested */
+        }
+
+        RemDisk();      /* Remove disk logically and Flush_Buffers() if necessary */
+        if(!disk_out) bool = ValidateDisk();   /* Try to validate disk */
+
+#ifdef DEBUG
+if(disk_out)
+{
+  DPRTF(KPrintF("\n\tNO Disk in drive  DOS = %lx",disk_out));
+}
+   else
+{
+  DPRTF(KPrintF("\n\tDisk in drive  DOS = %lx",disk_out));
+}
+#endif
+    }
+    Send_DiskChange_Event(disk_out);
+
+    return(bool);
+}
+
+
+/******************
+* RWE_Req() -- Make a simple requester for "Read Error!" or "Write Error!"
+******************/
+static UBYTE RWE_Req(LONG RWE, LONG error, char *errortype, ULONG block, LONG length)
+{
+
+    UBYTE bool=FALSE;
+    ULONG phys_block;
+    char tempbuff[TSTRG_BUFF_SZ];
+    char tempbuff1[TSTRG1_BUFF_SZ];
+    UBYTE *volname;
+
+    fsys->f_NumSoftErrors++;
+
+    if(fsys->f_FSflags & MF_FSDISK)
+    {
+        if(fsys->f_VolumeNode == 0) volname = DeviceName;
+        else  volname = &(((UBYTE *)BADDR(fsys->f_VolumeNode->dol_Name))[1]);
+
+        if(RWE == READ_ERROR)       /* == Read Error! */
+        {
+            DevCmd(CMD_UPDATE);     /* Update the current track */
+            DevCmd(CMD_CLEAR);     /* Clear the current track */
+        }
+
+        ERS.es_TextFormat   = tempbuff;
+        ERS.es_Title        = disk_error;
+
+        Motor_Off();
+        phys_block = block+(length>>fsys->f_bytes_block_sh);    /* calc block where error occurred */
+
+        Fault(RWE," %s",tempbuff,TSTRG_BUFF_SZ);                /* Fault() = has a read error */
+        Fault(ON_DISK_BLOCK,tempbuff,tempbuff,TSTRG_BUFF_SZ);   /* Fault() = on disk block %ld */
+        Fault(ERROR,tempbuff,tempbuff,TSTRG_BUFF_SZ);           /* Fault() = Error */
+        strcat(tempbuff,"= %ld");                               /* = %ld */
+        strcat(tempbuff,"\n %s");                               /* "ErrorType" */
+        FixStringBuff(tempbuff);
+        Fault(RETRY_CANCEL, 0, tempbuff1,TSTRG1_BUFF_SZ);       /* Fault() = Retry/Cancel */
+        bool = EasyRequest(PKT_WINDOW, &ERS, 0,
+            (APTR)volname, phys_block, error, errortype,tempbuff1);
+    }
+    return(bool);
+}
+
+
+
+/********
+*   GetBlockMem() -- Get blocks from disk and insert into memory specified
+*       (usually cache).
+********/
+BYTE GetBlockMem(memory, block, num_blocks)
+UBYTE *memory;
+ULONG num_blocks;
+ULONG block;
+{
+    BYTE error;
+    UBYTE bool;
+    char tempbuff1[TSTRG1_BUFF_SZ];
+    register struct FS *fs = fsys;
+    register bytes_block_sh = fs->f_bytes_block_sh;
+    ULONG minnumblocks;
+
+    fs->f_timer_start = DISK_TIME_OUT;   /* set timer count to disk time-out */
+
+      diskreq->io_Length = 0;
+      diskreq->io_Offset = block<<bytes_block_sh;
+      diskreq->io_Data = memory;
+    do
+    {
+          diskreq->io_Data   = (APTR)(memory += diskreq->io_Length);
+          diskreq->io_Offset += diskreq->io_Length;
+          minnumblocks = min(fs->f_maxblocks_transfer, num_blocks);
+          diskreq->io_Length = minnumblocks<<bytes_block_sh;
+        do
+        {
+            bool = FALSE;
+              diskreq->io_Command = CMD_READ;
+            if( (error = DoIO((struct IORequest *)diskreq)))
+            {
+                switch(error)
+                {   /* handle error and put up requester if necessary */
+                case TDERR_DiskChanged:
+                    bool = DiskChange();
+                    break;
+                case TDERR_BadHdrSum:
+                    if((bool = RWE_Req(READ_ERROR, error, RWE_header_crc,
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        diskreq->io_Error = error;
+                        error = 0;
+                    }
+                    break;
+                case TDERR_BadSecSum:
+                    if((bool = RWE_Req(READ_ERROR, error, RWE_data_crc,
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        diskreq->io_Error = error;
+                        error = 0;
+                    }
+                    break;
+                case TDERR_BadSecID:
+                    bool = RWE_Req(READ_ERROR, error, RWE_block_n_found,
+                        block, diskreq->io_Actual);
+                    break;
+                case MDERR_IndexNotSync:
+                    bool = RWE_Req(READ_ERROR, error, RWE_index_miss,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_NoSecHdr:
+                    bool = RWE_Req(READ_ERROR, error, RWE_track_n_mfm,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_NoMem:
+                    if((bool = RWE_Req(READ_ERROR, error,
+                            /* Fault() = not enough memory available */
+                        (Fault(ERROR_NO_FREE_STORE, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        diskreq->io_Error = error;
+                        error = 0;
+                    }
+                    break;
+                default:
+                    bool = RWE_Req(READ_ERROR, error, RWE_unspecified,
+                        block, diskreq->io_Actual);
+                    break;
+                }
+            }
+        } while(bool == TRUE);  /* If TRUE, try again */
+    } while((num_blocks -= minnumblocks) != 0);  /* If more blocks to be transfered, do more */
+
+    return(error);
+}
+
+
+
+
+/********
+*   PutBlockMem() -- Put specified memory (usually cache) into blocks of disk.
+********/
+BYTE PutBlockMem(memory, block, num_blocks)
+UBYTE *memory;
+ULONG num_blocks;
+ULONG block;
+{
+    BYTE error;
+    UBYTE bool;
+    char tempbuff1[TSTRG1_BUFF_SZ];
+    register struct FS *fs = fsys;
+    register bytes_block_sh = fs->f_bytes_block_sh;
+    ULONG minnumblocks;
+
+      fsys->f_timer_start = DISK_TIME_OUT;   /* set timer count to disk time-out */
+
+      diskreq->io_Command = CMD_WRITE;
+      diskreq->io_Length = 0;
+      diskreq->io_Offset = block<<bytes_block_sh;
+      diskreq->io_Data = memory;
+    do
+    {
+          diskreq->io_Data   = (APTR)(memory += diskreq->io_Length);
+          diskreq->io_Offset += diskreq->io_Length;
+          minnumblocks = min(fs->f_maxblocks_transfer, num_blocks);
+          diskreq->io_Length = minnumblocks<<bytes_block_sh;
+        do
+        {
+            bool = FALSE;
+            if( (error = DoIO((struct IORequest *)diskreq)))
+            {
+                switch(error)
+                {   /* handle error and put up requester if necessary */
+                case TDERR_DiskChanged:
+                    bool = DiskChange();
+                    break;
+                case TDERR_BadHdrSum:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_header_crc,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_BadSecID:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_block_n_found,
+                        block, diskreq->io_Actual);
+                    break;
+                case MDERR_IndexNotSync:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_index_miss,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_NoSecHdr:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_track_n_mfm,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_WriteProt:
+/* Some SCSI device drivers do not update the Write Protect state on 
+removable media until a command is issued that actually accesses the media.
+This appears to be the case with CBM's scsi.device (37.19). */
+                    if((bool = RWE_Req(WRITE_ERROR, error,
+                            /* Fault() = disk is write protected */
+                        (Fault(ERROR_DISK_WRITE_PROTECTED, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        fsys->f_Diskflags |= WRITE_PROT_F;  /* set flag */
+                        fsys->f_Diskflags &= ~(CACHE_MOD_F|ROOTDIR_MOD_F|FAT_MOD_F|DISK_MOD_F); /* clear ALL flags */
+                    }
+                    break;
+                default:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_unspecified,
+                        block, diskreq->io_Actual);
+                    break;
+                }
+            }
+        } while(bool == TRUE);  /* If TRUE, try again */
+    } while((num_blocks -= minnumblocks) != 0);  /* If more blocks to be transfered, do more */
+
+    if(error == 0) fsys->f_Diskflags |= DISK_MOD_F;   /* disk modified flag set */
+
+    return(error);
+}
+@
+
+
+38.15
+log
+@Make nonexternal functions and strings static for future inlining under SAS C 6.1.
+@
+text
+@d235 1
+a235 1
+UBYTE Is_Disk_Out()
+d246 6
+a251 3
+     diskreq->io_Offset = 0;    /* Seek to block 0 */
+    DevCmd(TD_SEEK);
+      fsys->f_timer_start = DISK_TIME_OUT;   /* set timer count to disk time-out */
+d265 1
+a265 1
+        Get_Default_Drive_Geometry();
+d350 1
+a350 1
+    disk_out = Is_Disk_Out();
+d365 1
+a365 1
+                        if((disk_out = Is_Disk_Out()) == FALSE)
+d379 1
+a379 1
+                        if((disk_out = Is_Disk_Out()) == TRUE)
+@
+
+
+38.14
+log
+@Added text strings from FS_text.c to allow for them to be assigned as
+constants in the code hunk instead of data hunk.
+@
+text
+@d12 1
+d20 4
+d25 1
+d199 2
+a200 2
+void Send_DiskChange_Event(diskstate)
+BOOL diskstate; /* if = 0 = disk in drive;  != 0 = disk out of drive */
+d210 1
+a210 1
+            if(!OpenDevice("input.device",0,ireq,0)) 
+d216 2
+a217 2
+                DoIO(ireq);
+                CloseDevice(ireq);
+d288 1
+a288 1
+UBYTE DETS_Req()
+d313 1
+a313 1
+UBYTE WP_Req()
+d410 1
+a410 1
+}        
+d416 1
+a416 5
+UBYTE RWE_Req(RWE, error, errortype, block, length)
+LONG RWE;
+char *errortype;
+ULONG block;
+LONG  error, length;
+@
+
+
+38.10
+log
+@Now checking if diskreq is nonzero first.
+@
+text
+@d69 8
+a76 6
+extern char *RWE_header_crc;
+extern char *RWE_data_crc;
+extern char *RWE_unspecified;
+extern char *RWE_block_n_found;
+extern char *RWE_index_miss;
+extern char *RWE_track_n_mfm;
+a78 4
+extern char *disk_error;
+
+
+
+d131 1
+@
+
+
+38.9
+log
+@Fix problem with Retry on disk IO errors being ignored.
+@
+text
+@d27 1
+a27 1
+    if(diskreq->io_Device)  /* check if successful OpenDevice() */
+d243 1
+@
+
+
+38.5
+log
+@Fixed DiskChange().
+@
+text
+@d10 1
+d40 2
+d44 1
+d47 1
+a80 2
+#define FAULT_M131  -131L   /* Fault() error = has a read error */
+#define FAULT_M132  -132L   /* Fault() error = has a write error */
+d116 1
+a116 1
+        if(fsys->f_FSflags & MF_SP_DEVICE)
+d122 1
+a122 1
+        if(fsys->f_FSflags & MF_GG_DEVICE)
+d234 1
+d250 1
+d264 1
+d266 1
+a266 1
+          else fsys->f_Diskflags &= ~WRITE_PROT_F;  /* clear flag */
+d268 5
+d274 1
+d292 4
+a295 4
+    Fault(-115,"",tempbuff,TSTRG_BUFF_SZ);        /* Fault() = Disk corrupt - task stopped */
+    Fault(-110,tempbuff,tempbuff,TSTRG_BUFF_SZ);  /* Fault() = You MUST replace volume */
+    strcat(tempbuff,"\n %b");                     /* "insert volume name" */
+    Fault(-112,tempbuff,tempbuff,TSTRG_BUFF_SZ);  /* Fault() = in device %s%s */
+d297 1
+a297 1
+    Fault(-126, 0, tempbuff1,TSTRG1_BUFF_SZ);     /* Fault() = Retry/Cancel */
+d317 3
+a319 3
+    Fault(-115,"",tempbuff,TSTRG_BUFF_SZ);        /* Fault() = Disk corrupt - task stopped */
+    Fault(-100,tempbuff,tempbuff,TSTRG_BUFF_SZ);  /* Fault() = Volume */
+    Fault(-102,tempbuff,tempbuff,TSTRG_BUFF_SZ);  /* Fault() = is write protected */
+d321 1
+a321 1
+    Fault(-126, 0, tempbuff1,TSTRG1_BUFF_SZ);     /* Fault() = Retry/Cancel */
+d430 1
+a430 1
+        if(RWE == FAULT_M131)       /* == Read Error! */
+d442 5
+a446 5
+        Fault(RWE," %s",tempbuff,TSTRG_BUFF_SZ);         /* Fault() = has a read error */
+        Fault(-134,tempbuff,tempbuff,TSTRG_BUFF_SZ);    /* Fault() = on disk block %ld */
+        Fault(-117,tempbuff,tempbuff,TSTRG_BUFF_SZ);    /* Fault() = Error */
+        strcat(tempbuff,"= %ld");                       /* = %ld */
+        strcat(tempbuff,"\n %s");                       /* "ErrorType" */
+d448 1
+a448 1
+        Fault(-126, 0, tempbuff1,TSTRG1_BUFF_SZ);       /* Fault() = Retry/Cancel */
+a455 1
+#define READ_ERROR  FAULT_M131
+a474 1
+      diskreq->io_Command = CMD_READ;
+d487 1
+d526 1
+a526 1
+                        (Fault(103, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+a538 1
+DPRTF(KPrintF("\n\tDisk out of drive  bool = %ld  error = %ld",bool,error));
+a546 2
+#define WRITE_ERROR  FAULT_M132
+
+d607 1
+a607 1
+                        (Fault(214, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+@
+
+
+38.4
+log
+@Changed TD_GETGEOMETRY check unless it is trackdisk.device, mfm.device,
+filedisk.device or carddisk.device.
+@
+text
+@d100 1
+a100 1
+    register ULONG blocks_disk=0;
+d128 1
+a128 1
+                blocks_disk                 = dg.dg_TotalSectors;
+d132 1
+a132 1
+    return(blocks_disk);
+d322 1
+a322 1
+    register UBYTE bool;
+d528 1
+@
+
+
+38.3
+log
+@Added de_MaxTransfer to GetBlockMem() and PutBlockMem().
+@
+text
+@d113 1
+a113 1
+        if(fsys->f_FSflags & MF_MFM_DEVICE)
+d119 1
+a119 2
+          diskreq->io_Data = (APTR)&dg;
+        if(!DevCmd(TD_GETGEOMETRY))
+d121 9
+a129 5
+            fssm_env->de_HighCyl        = (dg.dg_Cylinders)-1;
+            fssm_env->de_BlocksPerTrack = dg.dg_TrackSectors;
+            fssm_env->de_Surfaces       = dg.dg_Heads;
+            fssm_env->de_BufMemType     = dg.dg_BufMemType;
+            blocks_disk                 = dg.dg_TotalSectors;
+d457 1
+d481 45
+a525 35
+                    case TDERR_DiskChanged:
+                        bool = DiskChange();
+                        break;
+                    case TDERR_BadHdrSum:
+                        if((bool = RWE_Req(READ_ERROR, error, RWE_header_crc,
+                            block, diskreq->io_Actual)) == FALSE)
+                        {
+                            diskreq->io_Error = error;
+                            error = 0;
+                        }
+                        break;
+                    case TDERR_BadSecSum:
+                        if((bool = RWE_Req(READ_ERROR, error, RWE_data_crc,
+                            block, diskreq->io_Actual)) == FALSE)
+                        {
+                            diskreq->io_Error = error;
+                            error = 0;
+                        }
+                        break;
+                    case TDERR_BadSecID:
+                        bool = RWE_Req(READ_ERROR, error, RWE_block_n_found,
+                            block, diskreq->io_Actual);
+                        break;
+                    case MDERR_IndexNotSync:
+                        bool = RWE_Req(READ_ERROR, error, RWE_index_miss,
+                            block, diskreq->io_Actual);
+                        break;
+                    case TDERR_NoSecHdr:
+                        bool = RWE_Req(READ_ERROR, error, RWE_track_n_mfm,
+                            block, diskreq->io_Actual);
+                        break;
+                    default:
+                        bool = RWE_Req(READ_ERROR, error, RWE_unspecified,
+                            block, diskreq->io_Actual);
+                        break;
+d573 19
+a591 19
+                    case TDERR_DiskChanged:
+                        bool = DiskChange();
+                        break;
+                    case TDERR_BadHdrSum:
+                        bool = RWE_Req(WRITE_ERROR, error, RWE_header_crc,
+                            block, diskreq->io_Actual);
+                        break;
+                    case TDERR_BadSecID:
+                        bool = RWE_Req(WRITE_ERROR, error, RWE_block_n_found,
+                            block, diskreq->io_Actual);
+                        break;
+                    case MDERR_IndexNotSync:
+                        bool = RWE_Req(WRITE_ERROR, error, RWE_index_miss,
+                            block, diskreq->io_Actual);
+                        break;
+                    case TDERR_NoSecHdr:
+                        bool = RWE_Req(WRITE_ERROR, error, RWE_track_n_mfm,
+                            block, diskreq->io_Actual);
+                        break;
+d596 13
+a608 13
+                        if((bool = RWE_Req(WRITE_ERROR, error,
+                                /* Fault() = disk is write protected */
+                            (Fault(214, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+                            block, diskreq->io_Actual)) == FALSE)
+                        {
+                            fsys->f_Diskflags |= WRITE_PROT_F;  /* set flag */
+                            fsys->f_Diskflags &= ~(CACHE_MOD_F|ROOTDIR_MOD_F|FAT_MOD_F|DISK_MOD_F); /* clear ALL flags */
+                        }
+                        break;
+                    default:
+                        bool = RWE_Req(WRITE_ERROR, error, RWE_unspecified,
+                            block, diskreq->io_Actual);
+                        break;
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d425 1
+a425 1
+        phys_block = block+(length/fsys->f_bytes_block);    /* calc block where error occurred */
+d448 1
+a448 1
+APTR memory;
+d454 3
+d458 1
+a458 1
+    fsys->f_timer_start = DISK_TIME_OUT;   /* set timer count to disk time-out */
+d460 4
+d466 5
+a470 6
+        bool = FALSE;
+          diskreq->io_Data = memory;
+          diskreq->io_Command = CMD_READ;
+          diskreq->io_Length = fsys->f_bytes_block * num_blocks;
+          diskreq->io_Offset = fsys->f_bytes_block * block;
+        if( (error = DoIO((struct IORequest *)diskreq)))
+d472 41
+a512 37
+            switch(error)
+            {   /* handle error and put up requester if necessary */
+                case TDERR_DiskChanged:
+                    bool = DiskChange();
+                    break;
+                case TDERR_BadHdrSum:
+                    if((bool = RWE_Req(READ_ERROR, error, RWE_header_crc,
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        diskreq->io_Error = error;
+                        error = 0;
+                    }
+                    break;
+                case TDERR_BadSecSum:
+                    if((bool = RWE_Req(READ_ERROR, error, RWE_data_crc,
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        diskreq->io_Error = error;
+                        error = 0;
+                    }
+                    break;
+                case TDERR_BadSecID:
+                    bool = RWE_Req(READ_ERROR, error, RWE_block_n_found,
+                        block, diskreq->io_Actual);
+                    break;
+                case MDERR_IndexNotSync:
+                    bool = RWE_Req(READ_ERROR, error, RWE_index_miss,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_NoSecHdr:
+                    bool = RWE_Req(READ_ERROR, error, RWE_track_n_mfm,
+                        block, diskreq->io_Actual);
+                    break;
+                default:
+                    bool = RWE_Req(READ_ERROR, error, RWE_unspecified,
+                        block, diskreq->io_Actual);
+                    break;
+d514 2
+a515 2
+        }
+    } while(bool == TRUE);  /* If TRUE, try again */
+d529 1
+a529 1
+APTR memory;
+d536 3
+d542 4
+d548 5
+a552 6
+        bool = FALSE;
+          diskreq->io_Data = memory;
+          diskreq->io_Command = CMD_WRITE;
+          diskreq->io_Length = fsys->f_bytes_block * num_blocks;
+          diskreq->io_Offset = fsys->f_bytes_block * block;
+        if( (error = DoIO((struct IORequest *)diskreq)))
+d554 24
+a577 21
+            switch(error)
+            {   /* handle error and put up requester if necessary */
+                case TDERR_DiskChanged:
+                    bool = DiskChange();
+                    break;
+                case TDERR_BadHdrSum:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_header_crc,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_BadSecID:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_block_n_found,
+                        block, diskreq->io_Actual);
+                    break;
+                case MDERR_IndexNotSync:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_index_miss,
+                        block, diskreq->io_Actual);
+                    break;
+                case TDERR_NoSecHdr:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_track_n_mfm,
+                        block, diskreq->io_Actual);
+                    break;
+d582 14
+a595 13
+                    if((bool = RWE_Req(WRITE_ERROR, error,
+                            /* Fault() = disk is write protected */
+                        (Fault(214, 0, tempbuff1,TSTRG1_BUFF_SZ),tempbuff1),
+                        block, diskreq->io_Actual)) == FALSE)
+                    {
+                        fsys->f_Diskflags |= WRITE_PROT_F;  /* set flag */
+                        fsys->f_Diskflags &= ~(CACHE_MOD_F|ROOTDIR_MOD_F|FAT_MOD_F|DISK_MOD_F); /* clear ALL flags */
+                    }
+                    break;
+                default:
+                    bool = RWE_Req(WRITE_ERROR, error, RWE_unspecified,
+                        block, diskreq->io_Actual);
+                    break;
+d597 3
+a599 2
+        }
+    } while(bool == TRUE);  /* If TRUE, try again */
+@

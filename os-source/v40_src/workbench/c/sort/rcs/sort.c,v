@@ -1,0 +1,1400 @@
+head     1.9;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.9
+date     91.06.06.10.53.37;  author vertex;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.04.05.04.30.23;  author J_Toebes;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.09.08.56.00;  author Doug;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.10.14.07.28.28;  author Mike_Whitcher;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.09.06.19.20.40;  author eric;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.09.06.19.20.35;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.06.19.03.04.19;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.06.19.01.22.09;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.03.01.19.54.11;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.39.08;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Sort command for cdos
+@
+
+
+1.9
+log
+@Fixed enforcer hit when sorting a one-line file
+@
+text
+@; /*
+lc -d -j73 -o/obj/Sort.o -i/include -v -csf Sort
+blink /obj/Sort.o to /bin/Sort sc sd nd
+protect /bin/Sort +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .	| || the authors:			      BBS: (919) 460-7430    */
+/* | o	| ||   Dave Baker      Alan Beale	  Jim Cooper		     */
+/* |  . |//    Jay Denebeim    Bruce Drake	  Gordon Keener 	     */
+/* ======      John Mainwaring Andy Mercier	  Jack Rouse		     */
+/*	       John Toebes     Mary Ellen Toebes  Doug Walker	Mike Witcher */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+**/
+
+/*---------------------------------------------------------------------------*/
+/* Command: Sort							     */
+/* Author:  Mike Whitcher						     */
+/* Change History:							     */
+/*  Date    Person	  Action					     */
+/* -------  ------------- -----------------				     */
+/* 19MAR89  John Toebes   Initial Creation				     */
+/* 31AUG90  Jim Cooper	  Fixed!  It no longer crashes, and it frees all     */
+/*			  memory on exit!!				     */
+/* 06Dec90  Mike Whitcher Made OPT_CASE 1.3 compatable; Added OPT_DESC	     */
+/* 01Apr91  Mike Whitcher Bug fix for freeing up some memory twice.	     */
+/*                                Only occured in error condition.	     */
+/* 05Apr91  John Toebes   #ifdefed out the DESCENDING 			     */
+/*									     */
+/* Notes:   This algorithm differs from the standard quick sort in the	     */
+/*          following ways.						     */
+/*  1: This routine is non-recursive.  It instead uses its own stack to      */
+/*     keep track of the sublists.					     */
+/*  2: There is no penalty for having an already completely or partially     */
+/*     sorted data file.						     */
+/*  3: This routine uses linked lists to keep track of the data instead      */
+/*     of arrays.							     */
+/*---------------------------------------------------------------------------*/
+
+#include "internal/commands.h"
+#include "sort_rev.h"
+#define MSG_CANTOPEN  "Can't open %s\n"
+#define MSG_NOMEM     "Out of Memory\n"
+#define MSG_EMPTY     "Input file is empty\n"
+#define MSG_WRITERR   "Error writing to output file\n"
+
+#ifdef NEW_DESCEND
+#define TEMPLATE    "FROM/A,TO/A,COLSTART/K,CASE/S,NUMERIC/S,DESCENDING/s" CMDREV
+#else
+#define TEMPLATE    "FROM/A,TO/A,COLSTART/K,CASE/S,NUMERIC/S" CMDREV
+#endif
+#define OPT_FROM     0	     /* input file name 			 */
+#define OPT_TO	     1	     /* output file name			 */
+#define OPT_COLSTART 2	     /* column compare start position		 */
+#define OPT_CASE     3       /* case insensitive                         */
+#define OPT_NUMERIC  4       /* sort numerically                         */
+#ifdef NEW_DESCEND
+#define OPT_DESC     5       /* sort in descending order                 */
+#define OPT_COUNT    6
+#else
+#define OPT_COUNT    5
+#endif
+
+#define OPTNBLKS 1
+#define OPTSCOL  2
+#define OPTCASE  4
+#define OPTNUM	 8
+#define OPTDESC 16
+
+/* these are my favorite macros to allocate and free memory */
+#define GETMEM(sz)   AllocVec((long)sz, MEMF_PUBLIC)
+#define FREEMEM(ptr) FreeVec(ptr)
+#define Toupper(c)   ( ((c >= 97) && (c <= 122))? c-32: c)
+
+/* These are a couple of my favorite return codes */
+#define OK	0
+#define OKOK	1
+#define ERROR  -1
+
+#define min __builtin_min
+
+/* struct that will hold all of the data */
+/* the data immediately follows this	 */
+/* pointer and is NULL terminated.	 */
+struct llnode {
+   struct llnode *next;
+   char *data;
+   };
+
+/* this is the format for a sublist on the stack */
+struct llist  {
+   struct llist  *next;
+   struct llnode *head;
+   struct llnode *tail;
+   };
+
+#define NODESZ	sizeof(struct llnode)
+#define LISTSZ	sizeof(struct llist )
+#define BUFSZ	1024
+
+/* global control information */
+struct srtglob {
+   int options;
+   int startcol;
+   char *data;
+   char *dpos;
+   int	dlen;
+   char *item;
+   int	itemlen;
+   struct DosLibrary *dosbase;
+   };
+
+int getnxlin(BPTR, struct srtglob *, struct lnode **);
+int compare(char *, char *, struct srtglob *);
+
+#define DOSBase sgcb.dosbase
+
+int cmd_sort(void)
+{
+struct Library *SysBase = (*((struct Library **) 4));
+int rc;
+long opts[OPT_COUNT];
+struct RDargs *rdargs;
+
+BPTR fh;	       /* input and output file handles       */
+ int endlist;  /* true when at end of a sublist       */
+int i;
+
+struct llist *stack;   /* stack for the sublists	      */
+struct llist *s;       /* current stack sublist in use	      */
+struct llist *cur;     /* next/current sublist going on stack */
+char   *msg;	       /* holds an error message	      */
+
+struct llnode *data;   /* linked list of data to sort	      */
+register struct llnode *ptr; /* generic pointer to use as needed*/
+
+struct llnode *div;    /* sublist divider		                 */
+struct llnode *modiv;  /* sublist divider minus one	      */
+
+/* sort command gcb */
+struct srtglob sgcb;
+
+msg = (char *)NULL;
+rc  = RETURN_FAIL;
+memset((char *)&sgcb, 0, sizeof(struct srtglob));
+
+if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)))
+   {
+   memset((char *)opts, 0, sizeof(opts));
+   rdargs = ReadArgs(TEMPLATE, opts, NULL);
+
+
+   if (rdargs == NULL)
+      PrintFault(IoErr(), NULL);
+   else {
+      /* from here on out it anything bad happens it's an error */
+      rc = RETURN_ERROR;
+      endlist = 0;
+
+      if (opts[OPT_COLSTART])
+         {
+         StrToLong((char *)opts[OPT_COLSTART], &sgcb.startcol);
+         if (sgcb.startcol > 0L)
+            {
+            sgcb.startcol--;
+            endlist |= OPTSCOL;
+	         }
+         if (sgcb.startcol < 0L)
+            {
+            sgcb.startcol = 0L;
+            }
+         }
+      if (opts[OPT_CASE])
+	      endlist |= OPTCASE;
+      if (opts[OPT_NUMERIC])
+	      endlist |= OPTNUM;
+#ifdef NEW_DESCEND
+      if (opts[OPT_DESC])
+         endlist |= OPTDESC;
+#endif
+      sgcb.options = endlist;
+
+      /* open the input file */
+      if (!(fh = Open((char *)opts[OPT_FROM], MODE_OLDFILE)))
+         {
+         msg = MSG_CANTOPEN;
+         goto sortclose;
+         }
+
+      if (!(sgcb.data = GETMEM(BUFSZ)) )
+         {
+         msg  = MSG_NOMEM;
+         goto fileclose;
+         }
+
+    /* read in the input file */
+    modiv = data = (struct llnode *)NULL;
+    endlist = 1;
+    while ((i = getnxlin(fh, &sgcb, &div)) == OKOK) {
+	 /* I alternate putting the data on the head and tail	*/
+	 /* because the quick sort works best when the data is	*/
+	 /* completly random.					                         */
+    ptr = div;
+	 if (endlist & 1)
+	    {
+	    if (!ptr) ptr=data;
+	    ptr->next = data;
+	    data = ptr;
+	    }
+	   else
+	    {
+	    if (!modiv) modiv = data;
+	    modiv->next = ptr;
+	    modiv	= ptr;
+	    }
+	 endlist++;
+	 }
+
+      Close(fh);
+      FREEMEM(sgcb.data);
+
+      fh=0;
+      if (!data && i == OK) msg = MSG_EMPTY;
+
+      else if (i== ERROR)
+      {
+         if (modiv)
+	    modiv->next = (struct llnode *)NULL;
+	 goto dataclose;
+      }
+      else {
+	 if (modiv)
+    	     modiv->next = (struct llnode *)NULL;
+
+	 /* open the output file to make sure we can */
+	 /* before we go to the trouble to sort data */
+	 opts[0] = opts[OPT_TO];
+	 if (!(fh = Open((char *)opts[OPT_TO], MODE_NEWFILE)))
+	    msg = MSG_CANTOPEN;
+
+	  /* allocate initial stack space */
+	 if (!msg && !(stack = (struct llist *)GETMEM(LISTSZ))) {
+	    msg = MSG_NOMEM;
+	    goto dataclose;
+	    }
+	 if (!msg) {
+	    /* initialize the stack */
+	    stack->next = (struct llist *)NULL;
+	    stack->head = data;
+	    stack->tail = modiv;
+	    /* sort the list */
+	    while (stack) {
+	       /* check for those <cntl>C's */
+	       if (CheckSignal(SIGBREAKF_CTRL_C)) {
+		  PrintFault(ERROR_BREAK, NULL);
+		  rc = RETURN_WARN;
+		  goto stckclose;
+		  }
+
+	       /* get next sublist off the stack */
+	       s = stack;
+	       stack = stack->next;
+	       /* places everyone; its curtain time */
+	       modiv = div = s->head;
+	       ptr = s->head->next;
+	       endlist = 0;
+
+	       /* process this sublist */
+	       while (ptr && !endlist) {
+		  if (ptr == s->tail) endlist++;
+
+		  if (compare(s->head->data, ptr->data, &sgcb)) {
+		     /* swap these two data pointers */
+		     modiv = div;
+		     div = div->next;
+		     sgcb.dpos = div->data;
+		     div->data = ptr->data;
+		     ptr->data = sgcb.dpos;
+		     }
+		  /* increment ptr */
+		  ptr = ptr->next;
+		  }
+
+	       /* swap the comparer and the divider */
+	       sgcb.dpos = div->data;
+	       div->data = s->head->data;
+	       s->head->data = sgcb.dpos;
+	       /* adjust the stack */
+	       if (s->head != modiv) {
+		  if (!(cur = (struct llist *)GETMEM(LISTSZ))) {
+		     msg = MSG_NOMEM;
+		     FREEMEM(s);
+		     goto stckclose;
+		     }
+		  else {
+		     cur->head = s->head;
+		     cur->tail = modiv;
+		     cur->next = stack;
+		     stack     = cur;
+		     }
+		  }
+
+	       div = div->next;
+
+	       if (div && (div != s->tail) && (s->tail->next != div)) {
+		  if (!(cur = (struct llist *)GETMEM(LISTSZ))) {
+		     msg = MSG_NOMEM;
+		     FREEMEM(s);
+		     goto stckclose;
+		     }
+		  else
+		     {
+		     cur->head = div;
+		     cur->tail = s->tail;
+		     cur->next = stack;
+		     stack     = cur;
+		     }
+		  }
+
+	       /* free up the current sublist stack frame */
+	       FREEMEM(s);
+	       }  /* while stack */
+	    if (!msg)
+	       {
+	       /* print out the data */
+	       for (ptr = data; ptr; ptr = ptr->next)
+		  {
+		  /* check for those <cntl>C's */
+		  if (CheckSignal(SIGBREAKF_CTRL_C))
+		     {
+		     PrintFault(ERROR_BREAK, NULL);
+		     rc = RETURN_WARN;
+		     ptr = NULL;
+		     continue;
+		     }
+		  /* change the newline back from a null to a newline */
+		  i = strlen(ptr->data);
+		  (ptr->data)[i] = '\n';
+		  if (Write(fh, ptr->data, i+1) < (i+1) ) {
+		     msg = MSG_WRITERR;
+		     ptr = NULL;
+		     }
+		  }
+stckclose:     /* make sure our stack is empty */
+	       while ((s = stack) != NULL)
+		  {
+		  stack = stack->next;
+		  FREEMEM(s);
+		  }
+
+dataclose:     /* make sure data list is empty */
+	       while (data)
+		  {
+		  ptr = data->next;
+		  FREEMEM(data);
+		  data = ptr;
+		  }
+	       }
+fileclose:
+	    if(fh) {
+		Close(fh);
+		if (!msg)rc = RETURN_OK;
+	    }
+	    if (sgcb.item)
+	       {
+	       FREEMEM(sgcb.item);
+	       }
+	 }
+      }
+sortclose:
+      if (msg)VPrintf(msg, opts);
+      FreeArgs(rdargs);
+      }
+   CloseLibrary((struct Library *)DOSBase);
+   }
+else
+{
+   OPENFAIL;
+}
+return(rc);
+}
+
+
+#undef	DOSBase
+#define DOSBase sgcb->dosbase
+
+
+/*-----------------------------------------------------------------*/
+/* compare -- compare two strings to see which one should come	   */
+/*	      first. Return 0 if string one should come first;	   */
+/*	      otherwise return a 1 indicating that they should be       */
+/*       swapped.                                                  */
+/*-----------------------------------------------------------------*/
+static int compare(sl1, sl2, sgcb)
+  char *sl1, *sl2;
+  struct srtglob *sgcb;
+{
+long l1, l2;
+register long i1, i2, i3;
+register char *s1, *s2;
+
+s1 = sl1;
+s2 = sl2;
+i3 = sgcb->options;
+
+if (i3 & OPTSCOL)
+   {
+   i2 = i1 = sgcb->startcol;
+   while (*s1 && i1--) s1++;
+   while (*s2 && i2--) s2++;
+   }
+
+if (i3 & OPTNUM)
+   {
+   /* do a numeric compare */
+   StrToLong(s1, &l1);
+   StrToLong(s2, &l2);
+   i1 = l1;
+   i2 = l2;
+   }
+else
+   {
+   if (i3 & OPTCASE)
+      {
+      i1 = strcmp(s1, s2);
+      }
+   else
+      {
+      i1 = stricmp(s1, s2);
+      }
+
+   i2 = 0;
+   }
+
+/* if we had the peepholer to the compiler working */
+/* the code for these lines would be much nicer.   */
+#ifdef NEW_DESCEND
+if (i3 & OPTDESC)
+   return i1 < i2;
+else
+#endif
+   return i1 > i2;
+}
+
+
+
+/*-----------------------------------------------------------------*/
+/* getnxlin -- returns the line from the input file f		   */
+/*-----------------------------------------------------------------*/
+#define ITEMLEN 80	/* Item buffering size*/
+
+static int getnxlin(f, sgcb, node)
+   BPTR f;
+   struct srtglob *sgcb;
+   struct llnode **node;
+{
+struct Library *SysBase = (*((struct Library **) 4));
+int len;
+int rc;
+char *p;
+int  gotline;
+register int dlen;   /* optimization */
+
+rc = OKOK;
+len =0;
+gotline=0;
+dlen = sgcb->dlen;
+
+while (!gotline)
+   {
+   if (dlen <= 0)
+      {
+      dlen = Read(f, sgcb->data, (long)BUFSZ);
+      if (dlen < 0)
+         {
+         p = "Error reading input file.\n";
+         rc = ERROR;
+         gotline++;
+         dlen = 0;
+         }
+      else if (dlen == 0)
+         {
+         gotline++;
+         if (len)
+            {
+            /* go fill in the structure */
+            sgcb->item[len++] = '\0';
+            }
+         else
+            rc = OK;
+         }
+     else
+        sgcb->dpos = sgcb->data;
+      }
+
+   /* scan the data looking for a newline */
+   while (dlen && !gotline)
+      {
+      if (len >= sgcb->itemlen)
+         {
+         /* not enough space in item; reallocate */
+         if (!(p = GETMEM(ITEMLEN + sgcb->itemlen)))
+            {
+            p = "Out of Memory.\n";
+            rc = ERROR;
+            gotline++;
+            continue;
+            }
+         if (len)
+            {
+            memcpy(p, sgcb->item, len);
+            FREEMEM(sgcb->item);
+            }
+         sgcb->item = p;
+         sgcb->itemlen += ITEMLEN;
+         }
+
+      if (*(sgcb->dpos) == '\n')
+         {
+         gotline++;
+         *(sgcb->dpos) = '\0';
+         }
+     sgcb->item[len++] = *(sgcb->dpos);
+     sgcb->dpos++;
+     dlen--;
+     }
+   }
+
+sgcb->dlen = dlen;
+
+switch(rc)
+   {
+   case OKOK:
+   if ( !(*node = (struct llnode *)GETMEM(NODESZ + len)))
+      {
+      p  = "Out of Memory.\n";
+      rc = ERROR;
+      goto read_error;
+      }
+   else
+      {
+      (*node)->data = ((char *)(*node))+ NODESZ;
+      memcpy((*node)->data, sgcb->item, len);
+      }
+   break;
+
+   case ERROR:
+read_error:
+   VPrintf(p, NULL);
+   if (sgcb->item) FREEMEM(sgcb->item);
+   sgcb->item = NULL;
+   break;
+   }
+return(rc);
+}
+@
+
+
+1.8
+log
+@Merged into proper RCS file, ifdefed out new descending code.
+@
+text
+@d165 1
+a165 1
+      
+d188 1
+a188 1
+      
+d238 3
+a240 1
+	 modiv->next = (struct llnode *)NULL;
+d552 1
+a552 1
+   
+d554 1
+a554 1
+read_error:   
+@
+
+
+1.7
+log
+@Case insensitivity on by default
+@
+text
+@d31 5
+d37 1
+a37 1
+/*     following ways.							     */
+d53 3
+d57 1
+d61 6
+a66 2
+#define OPT_CASE     3
+#define OPT_NUMERIC  4
+d68 1
+d74 1
+d183 4
+d231 4
+a234 2
+      else if (i== ERROR) {
+	 modiv->next = (struct llnode *)NULL;
+d403 1
+a403 1
+register int i1, i2, i3;
+d422 2
+a423 1
+   return(l1 > l2);
+a429 1
+      return(i1 > 0 );
+a433 1
+      return( i1 > 0 );
+d435 2
+d438 9
+d540 1
+a540 1
+      VPrintf("Out of Memory.\n", NULL);
+d542 1
+a542 1
+      FREEMEM(sgcb->item);
+d552 1
+d555 1
+@
+
+
+1.6
+log
+@New version to fix performance problems associated with last fix by Jim Cooper.
+@
+text
+@d29 2
+a38 2
+/* 31AUG90  Jim Cooper	  Fixed!  It no longer crashes, and it frees all     */
+/*			  memory on exit!!				     */
+d407 1
+a407 1
+      i1 = stricmp(s1, s2);
+d412 1
+a412 1
+      i1 = strcmp(s1, s2);
+@
+
+
+1.5
+log
+@New version from John Toebes.
+@
+text
+@a106 5
+
+
+
+
+
+d117 1
+a117 1
+int endlist;	       /* true when at end of a sublist       */
+d126 1
+a126 1
+struct llnode *ptr;    /* generic pointer to use as needed    */
+d128 1
+a128 1
+struct llnode *div;    /* sublist divider		      */
+d149 2
+a150 1
+
+d152 12
+a163 11
+	 {
+	 StrToLong((char *)opts[OPT_COLSTART], &sgcb.startcol);
+	 if (sgcb.startcol > 0L)
+	    {
+	    sgcb.startcol--;
+	    }
+	 if (sgcb.startcol < 0L)
+	    {
+	    sgcb.startcol = 0L;
+	    }
+	 }
+d165 1
+a165 1
+	 sgcb.options |= OPTCASE;
+d167 3
+a169 2
+	 sgcb.options |= OPTNUM;
+
+d172 4
+a175 4
+	 {
+	 msg = MSG_CANTOPEN;
+	 goto sortclose;
+	 }
+d178 4
+a181 4
+	 {
+	 msg  = MSG_NOMEM;
+	 goto fileclose;
+	 }
+d183 4
+a186 4
+      /* read in the input file */
+      modiv = data = (struct llnode *)NULL;
+      endlist= 1;
+      while ((i = getnxlin(fh, &sgcb, &ptr)) == OKOK) {
+d189 2
+a190 1
+	 /* completly random.					*/
+d204 1
+a205 1
+	 }
+a305 1
+
+d374 2
+a375 1
+/*	      otherwise return a 1.				   */
+d377 2
+a378 2
+static int compare(st1, st2, sgcb)
+  char *st1, *st2;
+d382 6
+a387 1
+char *s1, *s2;
+d389 6
+a394 2
+s1 = &st1[min(sgcb->startcol, strlen(st1))];
+s2 = &st2[min(sgcb->startcol, strlen(st2))];
+d396 1
+a396 1
+if (sgcb->options & OPTNUM)
+d401 1
+a401 1
+   return((l1 <= l2)? 0:1);
+d405 1
+a405 1
+   if (sgcb->options & OPTCASE)
+d407 2
+a408 1
+      return((stricmp(s1, s2) <= 0) ? 0:1);
+d412 2
+a413 1
+      return((strcmp(s1, s2) <= 0) ? 0:1);
+d435 1
+d440 1
+d444 1
+a444 1
+   if (sgcb->dlen <= 0)
+d446 21
+a466 21
+      sgcb->dlen = Read(f, sgcb->data, (long)BUFSZ);
+      if (sgcb->dlen < 0)
+	 {
+	 p = "Error reading input file.\n";
+	 rc = ERROR;
+	 gotline++;
+	 sgcb->dlen = 0;
+	 }
+      else if (sgcb->dlen == 0)
+	 {
+	 gotline++;
+	 if (len)
+	    {
+	    /* go fill in the structure */
+	    sgcb->item[len++] = '\0';
+	    }
+	 else
+	    rc = OK;
+	 }
+      else
+	 sgcb->dpos = sgcb->data;
+d470 1
+a470 1
+   while (sgcb->dlen && !gotline)
+d473 17
+a489 17
+	 {
+	 /* not enough space in item; reallocate */
+	 if (!(p = GETMEM(ITEMLEN + sgcb->itemlen)))
+	    {
+	    p = "Out of Memory.\n";
+	    rc = ERROR;
+	    gotline++;
+	    continue;
+	    }
+	 if (len)
+	    {
+	    memcpy(p, sgcb->item, len);
+	    FREEMEM(sgcb->item);
+	    }
+	 sgcb->item = p;
+	 sgcb->itemlen += ITEMLEN;
+	 }
+d492 8
+a499 8
+	 {
+	 gotline++;
+	 *(sgcb->dpos) = '\0';
+	 }
+      sgcb->item[len++] = *(sgcb->dpos);
+      (sgcb->dpos)++;
+      (sgcb->dlen)--;
+      }
+d502 3
+a504 1
+switch (rc)
+d507 13
+a519 14
+
+      if ( !(*node = (struct llnode *)GETMEM(NODESZ + len)))
+	 {
+	 VPrintf("Out of Memory.\n", NULL);
+	 rc = ERROR;
+	 FREEMEM(sgcb->item);
+	 }
+      else
+	 {
+	 (*node)->data = ((char *)(*node))+ NODESZ;
+	 memcpy((*node)->data, sgcb->item, len);
+	 }
+      break;
+
+d521 3
+a523 2
+      VPrintf(p, NULL);
+      if (sgcb->item) FREEMEM(sgcb->item);
+@
+
+
+1.4
+log
+@no change
+@
+text
+@d3 1
+a3 1
+blink /obj/Sort.o to /bin/Sort sc sd nd 
+d11 5
+a15 5
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker   Mike Witcher */
+d23 8
+a30 8
+/* Command: Sort                                                             */
+/* Author:  Mike Whitcher                                                    */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 19MAR89  John Toebes   Initial Creation                                   */
+/* Notes:   This algorithm differs from the standard quick sort in the       */
+/*     following ways.                                                       */
+d32 1
+a32 1
+/*     keep track of the sublists.                                           */
+d34 1
+a34 1
+/*     sorted data file.                                                     */
+d36 3
+a38 1
+/*     of arrays.                                                            */
+d49 3
+a51 3
+#define OPT_FROM     0       /* input file name                          */
+#define OPT_TO       1       /* output file name                         */
+#define OPT_COLSTART 2       /* column compare start position            */
+d59 1
+a59 1
+#define OPTNUM   8
+d62 1
+a62 1
+#define GETMEM(sz)   AllocVec((long)sz, 0)
+d71 2
+d98 1
+a98 1
+   int  dlen;
+d100 1
+a100 1
+   int  itemlen;
+d121 1
+a121 1
+BPTR fh;               /* input and output file handles       */
+d156 11
+a166 4
+         {
+         StrToLong((char *)opts[OPT_COLSTART], &sgcb.startcol);
+         sgcb.startcol--;
+         }
+d168 1
+a168 1
+         sgcb.options |= OPTCASE;
+d170 2
+a171 2
+         sgcb.options |= OPTNUM;
+   
+d174 4
+a177 4
+         {
+         msg = MSG_CANTOPEN;
+         goto sortclose;
+         }
+d180 4
+a183 4
+         {
+         msg  = MSG_NOMEM;
+         goto fileclose;
+         }
+d189 16
+a204 16
+         /* I alternate putting the data on the head and tail   */
+         /* because the quick sort works best when the data is  */
+         /* completly random.                                   */
+         if (endlist & 1)
+            {
+	    if(!ptr)ptr=data;
+            ptr->next = data;
+            data = ptr;
+            }
+           else
+            {
+            if (!modiv) modiv = data;
+            modiv->next = ptr;
+            modiv       = ptr;
+            }
+         endlist++;
+d206 1
+a206 1
+         }
+d211 1
+a211 1
+      if (!data && i == OK)msg = MSG_EMPTY; 
+d214 1
+a214 1
+         modiv->next = (struct llnode *)NULL;
+d218 21
+a238 21
+         modiv->next = (struct llnode *)NULL;
+         /* open the output file to make sure we can */
+         /* before we go to the trouble to sort data */
+         opts[0] = opts[OPT_TO];
+         if (!(fh = Open((char *)opts[OPT_TO], MODE_NEWFILE)))
+            msg = MSG_CANTOPEN;
+            
+          /* allocate initial stack space */
+         if (!msg && !(stack = (struct llist *)GETMEM(LISTSZ))) {
+            msg = MSG_NOMEM;
+            goto dataclose;
+            }
+         if (!msg) {
+            /* initialize the stack */
+            stack->next = (struct llist *)NULL;
+            stack->head = data;
+            stack->tail = modiv;
+            /* sort the list */
+            while (stack) {
+               /* check for those <cntl>C's */
+               if (CheckSignal(SIGBREAKF_CTRL_C)) {
+d240 95
+a334 3
+                  rc = RETURN_WARN;
+                  goto stckclose;
+                  }
+a335 90
+               /* get next sublist off the stack */
+               s = stack;
+               stack = stack->next;
+               /* places everyone; its curtain time */
+               modiv = div = s->head;
+               ptr = s->head->next;
+               endlist = 0;
+
+               /* process this sublist */
+               while (ptr && !endlist) {
+                  if (ptr == s->tail) endlist++;
+ 
+                  if (compare(s->head->data, ptr->data, &sgcb)) {
+                     /* swap these two data pointers */
+                     modiv = div;
+                     div = div->next;
+                     sgcb.dpos = div->data;
+                     div->data = ptr->data;
+                     ptr->data = sgcb.dpos;
+                     }
+                  /* increment ptr */
+                  ptr = ptr->next;
+                  }
+
+               /* swap the comparer and the divider */
+               sgcb.dpos = div->data;
+               div->data = s->head->data;
+               s->head->data = sgcb.dpos;
+               /* adjust the stack */
+               if (s->head != modiv) {
+                  if (!(cur = (struct llist *)GETMEM(LISTSZ))) {
+                     msg = MSG_NOMEM;
+                     goto stckclose;
+                     }
+                  else {
+                     cur->head = s->head;
+                     cur->tail = modiv;
+                     cur->next = stack;
+                     stack     = cur;
+                     }
+                  }
+
+               div = div->next;
+
+               if (div && (div != s->tail) && (s->tail->next != div)) {
+                  if (!(cur = (struct llist *)GETMEM(LISTSZ))) {
+                     msg = MSG_NOMEM;
+                     goto stckclose;
+                     }
+                  else
+                     {
+                     cur->head = div;
+                     cur->tail = s->tail;
+                     cur->next = stack;
+                     stack     = cur;
+                     }
+                  }
+
+               /* free up the current sublist stack frame */
+               FREEMEM(s);
+               }  /* while stack */
+
+            if (!msg)
+               {
+               /* print out the data */
+               for (ptr = data; ptr; ptr = ptr->next)
+                  {    
+                  /* check for those <cntl>C's */
+                  if (CheckSignal(SIGBREAKF_CTRL_C))
+                     {
+                     PrintFault(ERROR_BREAK, NULL);
+                     rc = RETURN_WARN;
+
+                     }
+                  /* change the newline back from a null to a newline */
+                  i = strlen(ptr->data);
+                  (ptr->data)[i] = '\n';
+                  if (Write(fh, ptr->data, i+1) < (i+1) ) {
+                     msg = MSG_WRITERR;
+                     goto stckclose;
+/*                     goto dataclose; */
+                     }
+                  }
+stckclose:     /* make sure our stack is empty */   
+               while ((s = stack) != NULL)
+                  {
+                  stack = stack->next;
+                  FREEMEM(s);
+                  }
+                     
+d337 7
+a343 8
+               do 
+                  {
+                  ptr = data;
+                  data = data->next;
+                  FREEMEM(ptr);
+                  }
+               while (data);
+               }
+d345 1
+a345 1
+            if(fh) {
+d347 1
+a347 1
+            	if (!msg)rc = RETURN_OK;
+d349 4
+d368 2
+a369 1
+#undef  DOSBase
+a381 1
+int i;
+a383 5
+char c1, c2, c;
+
+s1 = st1;
+s2 = st2;
+c = 0;
+d385 2
+a386 7
+if (sgcb->startcol)
+   {
+   i = sgcb->startcol;
+   while (i-- && *s1++);
+   i = sgcb->startcol;
+   while (i-- && *s2++);
+   }
+d393 1
+a393 1
+   i = (l1 <= l2)? 0:1;
+d395 1
+a395 1
+else 
+d397 1
+a397 2
+   i = 0; 
+   while(i!=1)
+d399 5
+a403 38
+      if (sgcb->options & OPTCASE)
+         {
+         c1 = Toupper(*s1);
+         c2 = Toupper(*s2);
+         }
+      else
+         {
+         c1 = *s1;
+         c2 = *s2;
+         }
+      s1++;
+      s2++;      
+      if ((c1 == '\0') && (c2 == '\0'))
+         {
+         if (i == 2)
+            {
+            i = 1;
+            st1[sgcb->startcol] = st2[sgcb->startcol] = c;
+            }
+         else if (sgcb->startcol)
+            {
+            c  = st1[sgcb->startcol];
+            st1[sgcb->startcol] = st2[sgcb->startcol] = '\0';
+            s1 = st1;
+            s2 = st2;
+            i  = 2;
+            }
+         else 
+            i = 1;
+         }
+      else if (c1 != c2)
+         {
+         if (i == 2)
+            {
+            st1[sgcb->startcol] = st2[sgcb->startcol] = c;
+            }
+         i = 1;
+         }
+a404 1
+   i = (c1 <= c2)? 0: 1;
+a405 1
+return(i);
+a429 1
+
+d436 1
+a436 1
+         {
+d472 1
+a472 1
+            memcpy(p, sgcb->item, len);
+d480 2
+a481 2
+         {
+         gotline++;
+d483 1
+a483 1
+         }
+d495 1
+a495 1
+         {
+d503 1
+a503 1
+         memcpy((*node)->data, sgcb->item, len);
+d505 1
+a506 1
+      break;
+d509 1
+a509 1
+      if (sgcb->item)FREEMEM(sgcb->item);
+a512 20
+
+
+
+
+#if 0
+
+#undef DOSBase
+#define DOSBase DOSBase
+
+int aprintf( fmt, args )
+char *fmt, *args;
+{
+struct Library *SysBase = (*((struct Library **) 4));
+   struct Library *DOSBase; 
+   DOSBase=OpenLibrary("dos.library",36);
+   VFPrintf( Output(), fmt, (LONG *)&args );
+   CloseLibrary(DOSBase);
+   return(0);
+}
+#endif
+@
+
+
+1.3
+log
+@checkin, but still losing a line
+@
+text
+@@
+
+
+1.2
+log
+@fixed out of memory error to free up data buffers
+@
+text
+@d147 1
+a147 2
+   else
+      {
+d183 1
+d187 1
+a187 1
+         else
+d194 1
+d198 1
+d310 1
+a310 2
+                  if (Write(fh, ptr->data, i+1) == ERROR)
+                     {
+a315 1
+
+d340 1
+a340 2
+      if (msg)
+         VPrintf(msg, opts);
+d524 1
+@
+
+
+1.1
+log
+@version number update
+@
+text
+@d103 5
+d112 1
+d144 1
+d178 1
+a178 2
+      while ((i = getnxlin(fh, &sgcb, &ptr)) == OKOK)
+         {
+d197 8
+a204 4
+      if (!data && i == OK)
+         msg = MSG_EMPTY; 
+      else if (i != ERROR)
+         {
+d213 1
+a213 2
+         if (!msg && !(stack = (struct llist *)GETMEM(LISTSZ)))
+            {
+d217 1
+a217 2
+         if (!msg)
+            {
+d223 1
+a223 2
+            while (stack)
+               {
+d225 1
+a225 2
+               if (CheckSignal(SIGBREAKF_CTRL_C))
+                  {
+d240 1
+a240 2
+               while (ptr && !endlist)
+                  {
+d243 1
+a243 2
+                  if (compare(s->head->data, ptr->data, &sgcb))
+                     {
+d260 2
+a261 4
+               if (s->head != modiv)
+                  {
+                  if (!(cur = (struct llist *)GETMEM(LISTSZ)))
+                     {
+d265 1
+a265 2
+                  else
+                     {
+d275 2
+a276 4
+               if (div && (div != s->tail) && (s->tail->next != div))
+                  {
+                  if (!(cur = (struct llist *)GETMEM(LISTSZ)))
+                     {
+d303 1
+a303 1
+                     goto stckclose;
+d311 2
+a312 1
+                     goto dataclose;
+d315 1
+d333 6
+a338 6
+            Close(fh);
+
+            if (!msg)
+               rc = RETURN_OK;
+            }  
+         }
+d439 2
+d442 1
+a442 1
+/* getnxln -- returns the line from the input file f		   */
+d451 1
+d540 1
+a540 2
+      if (sgcb->item)
+	 FREEMEM(sgcb->item);
+d545 19
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@@

@@ -1,0 +1,563 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.6
+date     92.12.07.16.58.11;  author bj;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.12.04.14.16.29;  author bj;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.10.07.15.23.49;  author bj;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.08.06.16.24.29;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.05.22.13.33.48;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.12.15.47.02;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.6
+log
+@binary 3.11
+
+When unmounting an NFS volume, the compare function (in voltomt()) was using the
+wrong string length. The result was that if you had a mounted volume called
+'BOBS_VOLUME' and another called 'BOB', unmounting 'BOB' could cause 'BOBS_VOLUME'
+to be unmounted instead. 'Could' because it depended upon the order of the mounts
+in the internal list.  Fixed.  This also takes into consideration any user-entered
+trailing colons.
+@
+text
+@/* -----------------------------------------------------------------------
+ * VOLUME.c (NFSC)  SAS
+ *
+ * $Locker:  $
+ *
+ * $Id: volume.c,v 1.5 92/12/04 14:16:29 bj Exp $
+ *
+ * $Revision: 1.5 $
+ *
+ * $Header: AS225:src/c/nfsc/RCS/volume.c,v 1.5 92/12/04 14:16:29 bj Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+
+//#define DEBUG 1
+
+/*
+ * Amiga volume handling
+ */
+#include "fs.h"
+
+#include <exec/ports.h>
+
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <string.h>
+
+extern struct mount_pt *nfs_mtlist;
+
+/*
+ * voltomt - convert given volume name to mount point.
+ */
+struct mount_pt *
+voltomt(char *volume)
+{
+	register struct mount_pt *mt;
+	int len, mt_len ;
+
+	len = strlen(volume);
+	if(len == 0)
+	{
+		return 0;
+	}
+
+	if( *(volume + (len - 1)) == ':' )
+	{
+		len-- ;
+	}
+	for(mt = nfs_mtlist; mt; mt = mt->mt_next)
+	{
+		mt_len = (int)(*(btod(mt->mt_vol->dol_Name, UBYTE *))) ;
+#ifdef DEBUG
+		kprintf("len = %ld  mtlen = %ld\n", len, (long)(*(btod(mt->mt_vol->dol_Name, UBYTE *)))) ;
+		kprintf("nfsc: voltomt: list name = %s  volume = %s\n", btod(mt->mt_vol->dol_Name,char *)+1, volume) ;
+#endif
+		if( mt_len == len )
+		{
+			if(strnicmp(btod(mt->mt_vol->dol_Name, char *)+1, volume, mt_len) == 0)
+			{
+				break;
+			}
+		}
+	}
+	
+	return mt;
+}
+
+
+/*
+ * Delete specified volume from DOS info chain.
+ */
+void deletevol(struct DosList *dl)
+{
+	LockDosList(LDF_VOLUMES|LDF_WRITE);
+	RemDosEntry(dl);
+	UnLockDosList(LDF_VOLUMES|LDF_WRITE);
+	FreeDosEntry(dl);
+}
+
+/*
+ * volname is considered valid iff it contains no slashes, is of non zero
+ * length and is not in use.
+ */
+int validvol(char *volname)
+{
+	struct Process *pr;
+	char vname[MAXVOL];
+	APTR Old;
+	int len;
+
+	if((len = strlen(volname)) > MAXVOL-2){
+		len = MAXVOL-2;
+	}
+	if(len == 0 || strchr(volname, '/') != NULL){
+		return EBADVOL;
+	}
+
+	strncpy(vname, volname, len);
+	vname[len] = 0;
+	strcat(vname, ":");
+	pr = (struct Process *)FindTask(0L);
+	Old = pr->pr_WindowPtr;
+
+	pr->pr_WindowPtr = (APTR)-1L;
+	if(DeviceProc(vname)){
+		pr->pr_WindowPtr = Old;
+		return EBUSY;
+	}
+	pr->pr_WindowPtr = Old;
+
+	return 0;
+}
+
+/*
+ * Insert volume name into DOS volume list
+ */
+
+struct mount_pt *insert_vname(char *volname)
+{
+	struct mount_pt	*mt;
+	struct DosList *dl;
+
+	dl = MakeDosEntry(volname,DLT_VOLUME);
+
+	mt = (struct mount_pt *)AllocMem(sizeof(*mt),MEMF_PUBLIC|MEMF_CLEAR);
+	if(!mt){
+		return (NULL);
+	}
+
+	mt->mt_port = CreateMyPort();
+	dl->dol_Task = mt->mt_lock.fd_lock.fl_Task = mt->mt_port;
+	dl->dol_Lock = dtob(&mt->mt_lock);
+	mt->mt_vol = dl;
+
+	if (!AddDosEntry(dl)) {
+		FreeDosEntry(dl);
+		FreeMem(mt,sizeof(*mt));
+		return (NULL);
+	}
+
+	return (mt);
+}
+
+/*
+ * Rename disk volume to dp->dp_Arg1
+ */
+void nfs_rename_dsk (mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	u_char	*p, *newname;
+	u_int	len;
+
+	p = btod(dp->dp_Arg1, u_char *);
+	len = *p++;
+
+	newname = (u_char *)AllocMem(len + 2, MEMF_PUBLIC);
+	if(!newname){
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+		return;
+	}
+
+	Forbid();
+
+	bcopy(p, newname + 1, len);
+	newname[len + 1] = 0;		/* just to be safe */
+
+/*	if(p = (u_char *)index(newname+1, ':')){
+		*p = 0;
+		len--;
+	}
+*/
+
+	newname[0] = len;
+	p = btod(mt->mt_vol->dol_Name, unsigned char *);
+	mt->mt_vol->dol_Name = (BSTR)dtob(newname);
+
+	FreeMem(p,p[0]+2);
+
+	Permit();
+
+	dp->dp_Res1 = DOS_TRUE;
+}
+
+@
+
+
+1.5
+log
+@Binary 3.10
+
+Added code to fix the problem where when mounting a volume you could
+specify a standard Amiga volume name (with trailing colon) but if you
+specified the trailing colon when UNmounting the volume, the compare
+would fail.
+
+Nfsc's stored list of mounted volumes does not have the ':'.  The fix
+tests if the _last_ character specified by the user in the unmount command
+is a ':' and, if so, drops the length of the compare (stricmp()) by one.
+
+@
+text
+@d6 1
+a6 1
+ * $Id: volume.c,v 1.4 92/10/07 15:23:49 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.4 $
+d10 1
+a10 1
+ * $Header: AS225:src/c/nfsc/RCS/volume.c,v 1.4 92/10/07 15:23:49 bj Exp $
+d39 1
+a39 1
+	int len;
+d53 1
+d55 1
+d58 1
+a58 1
+		if(strnicmp(btod(mt->mt_vol->dol_Name, char *)+1, volume, len) == 0)
+d60 4
+a63 1
+			break;
+@
+
+
+1.4
+log
+@binary 37.9
+
+header changes
+@
+text
+@d6 1
+a6 1
+ * $Id: volume.c,v 1.3 91/08/06 16:24:29 martin Exp $
+d8 1
+a8 1
+ * $Revision: 1.3 $
+d10 1
+a10 1
+ * $Header: as225:src/c/nfsc/RCS/volume.c,v 1.3 91/08/06 16:24:29 martin Exp $
+d15 1
+a16 1
+
+d42 2
+a43 1
+	if(len == 0){
+d47 11
+a57 2
+	for(mt = nfs_mtlist; mt; mt = mt->mt_next){
+		if(strnicmp(btod(mt->mt_vol->dol_Name, char *)+1, volume, len) == 0){
+d61 1
+a61 1
+
+@
+
+
+1.3
+log
+@added 2.0 support
+@
+text
+@d4 1
+a4 1
+ * $Locker: martin $
+d6 1
+a6 1
+ * $Id: volume.c,v 1.2 91/05/22 13:33:48 martin Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 1.2 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/volume.c,v 1.2 91/05/22 13:33:48 martin Exp Locker: martin $
+@
+
+
+1.2
+log
+@cleaned up for SAS compile
+replaced index() with strchr()
+commented out some redundant code
+needs review
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: volume.c,v 1.1 90/11/12 15:47:02 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/volume.c,v 1.1 90/11/12 15:47:02 bj Exp $
+d20 1
+a21 1
+#include <exec/types.h>
+a22 2
+#include <exec/memory.h>
+#include <dos/dosextens.h>
+d28 1
+a28 6
+
+#include <rpc/rpc.h>
+#include <nfs/nfs.h>
+#include <errno.h>
+
+#include "fs.h"
+a29 6
+#ifdef LATTICE
+#include <proto/dos.h>
+#include <proto/exec.h>
+#endif
+
+extern struct DosLibrary *DOSBase;
+a31 12
+/* global functions */
+struct mount_pt *voltomt(char *volume);
+struct DeviceList *makevol(char *p, long b);
+void deletevol(BPTR b);
+int validvol(char *volname);
+struct mount_pt *insert_vname(char *volname);
+void  nfs_rename_dsk (struct mount_pt *mt, register struct DosPacket *dp); 
+
+/* external functions */
+BSTR sttobs(char *p);
+struct MsgPort *CreateMyPort (void);
+
+d36 1
+a36 2
+voltomt(volume)
+	char 	*volume;
+a44 7
+		
+/*	if(p = index(volume, ':')){
+		len = p - volume;
+		if(len){
+			len--;
+		}
+	}
+a45 1
+*/
+d47 1
+a47 4
+		struct DeviceList *dl;
+
+		dl = btod(mt->mt_vol, struct DeviceList *);
+		if(strncasecmp(btod(dl->dl_Name, char *)+1, volume, len) == 0){
+a54 26
+/*
+ * Construct a volume node of name with name <p>.
+ */
+struct DeviceList *
+makevol(p, b)
+	char	*p;
+	long	b;
+{
+      	register struct  DosInfo *dosinfo;
+	register struct DeviceList *dl;
+
+	dosinfo = (struct DosInfo *)
+  		    BADDR(((struct RootNode *) DOSBase->dl_Root)->rn_Info);
+	dl = btod(b, struct DeviceList *);
+	    
+	dl->dl_Type = DLT_VOLUME;
+	dl->dl_DiskType = ID_DOS_DISK;
+	dl->dl_Name = sttobs(p);
+
+	Forbid();
+	dl->dl_Next = dosinfo->di_DevInfo;
+	dosinfo->di_DevInfo = dtob(dl);
+	Permit();
+
+	return dl;
+}
+d59 1
+a59 3
+void
+deletevol(b)
+	BPTR b;
+d61 4
+a64 15
+      	register struct  DosInfo *dosinfo;
+	BPTR *bp;
+
+	dosinfo = (struct DosInfo *)
+  		    BADDR(((struct RootNode *) DOSBase->dl_Root)->rn_Info);
+	Forbid();
+	for(bp = &dosinfo->di_DevInfo; *bp  &&  *bp != b; 
+			bp = &btod(*bp, struct DeviceList *)->dl_Next){
+	}
+
+	if(*bp == b){
+		*bp = btod(*bp, struct DeviceList *)->dl_Next;
+	}
+
+	Permit();
+d71 1
+a71 2
+int validvol(volname)
+	char	*volname;
+d92 1
+a92 1
+	if(DeviceProc(vname)){ 
+d104 3
+a106 5
+struct mount_pt * 
+insert_vname(volname)
+	char	*volname;
+{ 
+	struct DeviceList *vl;
+d108 1
+d110 5
+a114 3
+	vl = (struct DeviceList *)calloc(1, sizeof(*mt) + sizeof(*vl));
+	if(!vl){
+		return 0;
+a116 1
+	mt = (struct mount_pt *)(vl + 1);
+d118 3
+a120 4
+	vl->dl_Task = mt->mt_lock.fd_lock.fl_Task = mt->mt_port;
+	vl->dl_Lock = dtob(&mt->mt_lock);
+	mt->mt_vol = dtob(vl);
+	makevol(volname, mt->mt_vol);
+d122 7
+a128 1
+	return mt;
+d134 3
+a136 4
+void 
+nfs_rename_dsk (mt, dp)
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+a137 1
+	struct DeviceList *dl;
+d143 1
+a143 1
+	
+d162 2
+a163 3
+	dl = btod(mt->mt_vol, struct DeviceList *);
+	p = btod(dl->dl_Name, unsigned char *);
+	dl->dl_Name = (BSTR)dtob(newname);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+ * VOLUME.c (NFSC)  Manx 36
+d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d24 1
+a24 1
+#include <libraries/dosextens.h>
+a42 1
+extern struct Task *FindTask();
+d45 12
+a64 1
+	char *p, *index();
+d72 1
+a72 1
+	if(p = index(volume, ':')){
+d79 1
+a101 1
+	extern BSTR *sttobs();
+d122 1
+d147 1
+a147 1
+validvol(volname)
+d158 1
+a158 1
+	if(len == 0 || index(volname, '/') != NULL){
+a184 2
+	struct	MsgPort	*CreateMyPort();
+	extern void *calloc();
+d218 1
+a218 1
+	newname = (u_char *)malloc(len + 2);
+d228 2
+a229 1
+	if(p = (u_char *)index(newname+1, ':')){
+d233 2
+d238 3
+a240 2
+	free(p);
+	dl->dl_Name = (BSTR *)dtob(newname);
+@

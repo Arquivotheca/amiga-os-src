@@ -1,0 +1,285 @@
+; This is the SlowPoke server. Does not loop back. Very slow, good only with
+; <5000 byte per second printers.
+
+	INCLUDE	"exec/types.i"
+	INCLUDE "exec/devices.i"
+	INCLUDE "resources/misc.i"
+	INCLUDE "libraries/dos.i"	
+	INCLUDE "devices/parallel.i"
+	INCLUDE "devices/timer.i"
+	INCLUDE "hardware/cia.i"
+	INCLUDE "asmsupp.i"
+	INCLUDE "pardev.i"
+
+_AbsExecBase	EQU	4
+
+JSRLIB	macro	*
+	XREF	_LVO\1
+	jsr	_LVO\1(a6)
+	endm
+
+	XREF	_ciaa
+	XREF	_ciab
+	XREF	_Cia
+	XREF	_NextRequest
+
+	XDEF	_SlowPokeServer
+	XDEF	_SoftwareInterrupt
+	XDEF	Sleep
+
+;	csect	text,0,,0,4
+
+	section	firstsection
+
+subSysName:
+	dc.b	"parallel",0
+	ds.w	0			; Force word alignement
+
+
+;==========================================================================
+;
+;	This interrupt server is almost identical to the old parallel
+;	device. It is particularly efficient with slow printers where this
+;	interrupt server has plenty of time falling back to the Exec,
+;	processing some other task, and then getting an *ACK interrupt
+;	back from the printer. The EOL and EOF modes are not supported.
+;	Use with < 5000 char/sec printers. 
+;
+;	The Exec is really nice to us, it saves d0, d1, a0, a1, a5 and a6.
+;	And furthermore, a1 will already hold ParDev, while a5 holds
+;	this server's entry point. (big deal)
+;
+;==========================================================================
+
+	CNOP	0,4
+
+_SlowPokeServer:
+
+	PUTMSG	5,<'%s/SlowPokeServer called'>
+
+	move.l	PAR_request(a1),a1		; Load pointer to IO request
+	move.l	a1,d0				; Test if zero
+	bne	cont				; Branch if not aborted
+	rts
+cont:
+	move.l	IO_DATA(a1),a0			; Get data base address
+	move.l	IO_ACTUAL(a1),d1		; Get index
+	adda.l	d1,a0				; Add index to base address
+
+	cmpi.w	#CMD_WRITE,IO_COMMAND(a1)	; Is this a CMD_READ? (same # of cycles as btst)
+	beq.s	Write				; Branch if so
+Read:
+	move.b	_ciaa+ciaprb,d0			; Read in data
+	move.b	d0,(a0)				; Store into data buffer
+	bra.s	here
+Write:
+	move.b	_ciab+ciapra,d0			; Load control register stat
+						; It's faster to cache reg
+	btst	#CIAB_PRTRSEL,d0		; Is the printer SELected?
+	beq	Sleeping			; Branch if not
+	btst	#CIAB_PRTRBUSY,d0		; Is the printer BUSY?
+	bne	Sleeping			; Branch if so
+
+	move.b	(a0),d0
+	move.b	d0,_ciaa+ciaprb			; Get data from buffer
+here:
+	addq.l	#1,d1				; Post-increment index
+	move.l	d1,IO_ACTUAL(a1)		; Store index
+	tst.b	d0				; Is the data byte a NULL?
+	beq.s	EOLtest
+there:
+	btst.b	#PARB_EOFMODE,IO_PARFLAGS(a1)	; Do we use the EOF mode?
+	bne	EOFmode				; Brach if so
+length:
+	cmp.l	IO_LENGTH(a1),d1		; Is the IO request finished?
+	beq	next				; Branch if so
+
+	PUTMSG	5,<'%s/SlowPoke: IO_LENGTH not finished'>
+
+	rts
+next:
+	move.l	IO_DEVICE(a1),-(sp)
+	bsr	_NextRequest
+	addq.l	#4,sp
+	rts
+
+
+;==========================================================================
+;
+;	Aha! The the byte transferred is a NULL. If the IO_LENGTH = -1 then
+;	that means that the IO request has just completed.
+;
+;==========================================================================
+
+EOLtest:
+	cmpi.l	#-1,IO_LENGTH(a1)		; Is EOL mode being used?
+	bne	there				; Branch if not
+	bra.s	next
+
+
+;==========================================================================
+;
+;	Oooh, the stupid EOF mode is being used. What a bummer! Well, let's
+;	see whether the current character matches one of the eight in the
+;	PTermArray.
+;
+;==========================================================================
+
+EOFmode:
+	PUTMSG	5,<'%s/EOFmode called'>
+
+	lea.l	IO_PTERMARRAY(a1),a0	; Get PTermArray base
+	moveq.l	#PTERMARRAY_SIZE-1,d1	; Load length of PTermArray minus 1
+0$
+	cmp.b	(a0)+,d0		; Do we have an EOF character?
+	dbcc	d1,0$			; Branch if not, or if result=-1
+	beq	next			; This request is finished
+
+	PUTMSG	5,<'%s/EOFmode not succeeded'>
+
+	bra	length			; See if enough characters were spit
+
+
+;=========================================================================
+;
+;	Going to sleep is never easy, but for slowpokes it is! Just load
+;	A5 with the device pointer and branch to sleep!
+;
+;=========================================================================
+
+Sleeping:
+	PUTMSG	5,<'%s/Calling Sleep'>
+	move.l	IO_DEVICE(a1),a5
+;	bra	Sleep
+
+	;--- fall through
+
+;==========================================================================
+;
+;	Since the interrupt server has determined that the printer is busy,
+;	we shall now schedule the timer.device to generate a software
+;	interrupt a little later.
+;
+;	There is a small kludge here. Because some printers send an
+;	artificial *ACK when not busy anymore, we have to disable the *ACK
+;	interrupt and let only the software interrupt generate one when it
+;	finds out the printer is not busy anymore.
+;
+;	If printers behaved properly, the software interrupt would have
+;	pointed to the same code as the harware interrupt, and the *ACK
+;	interrupt would not have been disabled here.
+;
+;==========================================================================
+
+Sleep:
+	move.b	ICRmask(a5),d0			; Load mask to be written
+	or.b	#CIAICRB_SETCLR,d0		; Make sure we *write*
+	move.l	Cia(a5),a6			; Load resource base
+	JSRLIB	SetICR
+
+	PUTMSG	5,<'%s/Sleep'>
+
+	move.l	#$10,d0				;\
+	move.l	Cia(a5),a6			; - DisableICR()
+	JSRLIB	AbleICR				;/
+
+	move.w	#1,TimerUsed(a5)		; Yes, the Timer_Req is used
+	move.l	md_SysLib(a5),a6		; Load pointer to ExecBase
+	move.l	Timer_Req(a5),a1		; Load pointer to Timer request
+	move.w	#TR_ADDREQUEST,IO_COMMAND(a1)	; Command is AddRequest
+	clr.l	TV_SECS+IOTV_TIME(a1)		; Wait    0 seconds
+	move.l	#500,TV_MICRO+IOTV_TIME(a1)	;       500 microseconds
+
+	PUTMSG	5,<'%s/Server: about to BeginIO'>
+
+	JSRLIB	SendIO
+
+	PUTMSG	3,<'%s/Server: sleep command sent'>
+	rts
+
+
+;=========================================================================
+;
+;	The Exec manual as well as Carl's Guru's Guide say that software
+;	interrupts execute in an environment similar to hardware interrupts.
+;	That appears to be false. A1 does indeed contain the data pointer,
+;	but a5 and a6 are not automatically saved for us by the Exec, so we
+;	have to save them ourselves.
+;
+;	Oh well. Sleeping does not have to be fast anyway. At 3 AM though,
+;	you might disagree.  :-)
+;
+;=========================================================================
+
+	CNOP	0,4
+
+_SoftwareInterrupt:
+	
+; BUG FIX:
+	tst.l	PAR_request(a1)			; Was the IO request aborted?
+	bne	si_cont				; Branch if not
+	rts
+
+si_cont:
+	movem.l	a5/a6,-(sp)
+
+	PUTMSG	5,<'%s/Software Interrupt: started'>
+
+	move.l	a1,a5				; Put device base here
+	move.l	Timer_Port(a1),a0		; Put timer reply port here
+
+	move.l	md_SysLib(a5),a6		; Load address of ExecBase
+
+   	JSRLIB	GetMsg				; Remove ReplyMsg from port
+
+	move.b	_ciab+ciapra,d0			; Load control register stat
+	btst	#CIAB_PRTRSEL,d0		; Is the printer SELected?
+	beq	Reschedule			; Branch if not
+	btst	#CIAB_PRTRBUSY,d0		; Is the printer BUSY?
+	bne	Reschedule			; Branch if so
+
+
+	PUTMSG	5,<'%s/Software Interrupt: about to SetACK()'>
+
+	move.l	#$90,d0				; SetACK()
+	move.l	Cia(a5),a6			; Load resource base
+	JSRLIB	SetICR
+
+	;
+	; if (!PAR_stopped)
+	;	EnableACK();
+	;
+
+	tst.w	PAR_stopped(a5)			; Is the device stopped?
+	bne	si_else				; Branch if so
+
+	PUTMSG	5,<'%s/Software Interrupt: about to EnableACK()'>
+
+	move.l	#$90,d0				; \
+	move.l	Cia(a5),a6			;  - EnableACK()
+	JSRLIB	AbleICR				; /
+	bra.s	si_end
+
+si_else:
+	move.w	#1,ACKwasON(a5)
+si_end:
+	PUTMSG	5,<'%s/Software Interrupt: ended.'>
+	movem.l	(sp)+,a5/a6
+	rts
+
+Reschedule:
+	PUTMSG	5,<'%s/Software Interrupt: Rescheduling...'>
+
+	move.l	Timer_Req(a5),a1		; Load timer request
+	move.w	#TR_ADDREQUEST,IO_COMMAND(a1)	; Command is AddRequest
+	clr.l	TV_SECS+IOTV_TIME(a1)		; Wait    0 seconds
+	move.l	#10000,TV_MICRO+IOTV_TIME(a1)	;      10000 microseconds
+	move.l	md_SysLib(a5),a6		; Load address of ExecBase
+	JSRLIB	SendIO
+
+	PUTMSG	5,<'%s/Software Interrupt: sleep command sent'>
+	movem.l	(sp)+,a5/a6
+	rts
+
+	END
+

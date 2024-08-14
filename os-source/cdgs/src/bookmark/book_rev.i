@@ -1,0 +1,14 @@
+VERSION		EQU	6
+REVISION	EQU	7
+DATE	MACRO
+		dc.b	'14.5.92'
+	ENDM
+VERS	MACRO
+		dc.b	'book 6.7'
+	ENDM
+VSTRING	MACRO
+		dc.b	'book 6.7 (14.5.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: book 6.7 (14.5.92)',0
+	ENDM

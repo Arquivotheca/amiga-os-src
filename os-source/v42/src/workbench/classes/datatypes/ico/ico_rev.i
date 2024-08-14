@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'30.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ico 42.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ico 42.1 (30.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ico 42.1 (30.7.93)',0
+	ENDM

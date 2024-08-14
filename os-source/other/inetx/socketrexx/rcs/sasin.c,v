@@ -1,0 +1,297 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     91.02.07.10.41.26;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*
+ * mapping routines from stem variables <-> sockaddr structs
+ *
+ * NOTE:
+ * One quirk of GetRexxVar is that it is doesn't upcase before
+ * searching the sym table.  So we must be careful to use
+ * capitalized stem names here.
+ */
+
+#include <rexxinet.h>
+
+static int satorvi_notsup(), rvitosa_notsup(), sintorvi(), rvitosin();
+static int hdwtorvi(), rvitohdw();
+
+/*
+ * mapping table between address family and translation functions, one
+ * for each possible family supported by inet.library
+ */
+struct {
+	char	*family;
+	int	(*satorvi)();
+	int	(*rvitosa)();
+} afnames[AF_MAX] = {
+	{"unspec", 	hdwtorvi,	rvitohdw},
+	{"unix", 	satorvi_notsup, rvitosa_notsup},
+	{"inet", 	sintorvi, 	rvitosin},
+	{"implink", 	satorvi_notsup, rvitosa_notsup},
+	{"pup", 	satorvi_notsup, rvitosa_notsup},
+	{"chaos", 	satorvi_notsup, rvitosa_notsup},
+	{"ns", 		satorvi_notsup, rvitosa_notsup},
+	{"nbs",		satorvi_notsup, rvitosa_notsup},
+	{"ecma", 	satorvi_notsup, rvitosa_notsup},
+	{"datakit", 	satorvi_notsup, rvitosa_notsup},
+	{"ccitt", 	satorvi_notsup, rvitosa_notsup},
+	{"sna", 	satorvi_notsup, rvitosa_notsup},
+	{"decnet", 	satorvi_notsup, rvitosa_notsup},
+	{"dli", 	satorvi_notsup, rvitosa_notsup},
+	{"lat", 	satorvi_notsup, rvitosa_notsup},
+	{"hylink",	satorvi_notsup, rvitosa_notsup},
+	{"appletalk",	satorvi_notsup, rvitosa_notsup},
+};
+
+/*
+ * stub to return error for not supported address families
+ */
+static int rvitosa_notsup(rm, vname, sap, salen)
+	struct RexxMsg *rm;
+{
+	errno = EAFNOSUPPORT;
+	return -1;
+}
+
+/*
+ * stub to return error for not supported address families
+ */
+static int satorvi_notsup(sap, salen, rm, vname)
+	struct sockaddr *sap;
+	int salen;
+	struct RexxMsg *rm;
+	char *vname;
+{
+	errno = EAFNOSUPPORT;
+	return -1;
+}
+
+/*
+ * top level dispatch routine used to translate between a local socket
+ * address structure and the standard stem variable format.
+ *
+ * sockaddr structure:			===>	REXX:
+ *	sin.sin_family = AF_INET		addr.family = "inet"
+ *	sin.sin_addr.s_addr = 0xffffffff	addr.sin_addr= "255.255.255.255"
+ *	sin.sin_port = 25			addr.sin_port = "25"
+ */
+satorvi(sap, salen, rm, vname)
+	struct sockaddr *sap;
+	int salen;
+	struct RexxMsg *rm;
+	char *vname;
+{
+	char famstem[128], *name;
+
+	if(sap->sa_family < 0 || sap->sa_family >= AF_MAX){
+		errno = EAFNOSUPPORT;
+		return -1;
+	}
+
+	strcpy(famstem, vname);  strcat(famstem, ".DOMAIN");
+	name = afnames[sap->sa_family].family;
+	if(setvar(rm, famstem, name, strlen(name)) < 0){
+		return -1;
+	}
+
+	return (*afnames[sap->sa_family].satorvi)(sap, salen, rm, vname);
+}
+
+/*
+ * top level dispatch routine used to translate between standard stem variable
+ * format -> sockaddr structure:
+ *
+ * REXX:			===>	sockaddr:
+ *	addr.family = "inet"			sin.sin_family = AF_INET
+ *	addr.sin_addr = "127.1"			sin.sin_addr.s_addr = 0x7e000001
+ *	addr.sin_port = 10			sin.sin_port = 0x0a
+ */
+rvitosa(rm, vname, sap, salen)
+	struct RexxMsg *rm;
+	char *vname;
+	struct sockaddr *sap;
+	int salen;
+{
+	char famstem[128];
+	STRPTR *fam;
+
+	bzero(sap, salen);
+	strcpy(famstem, vname);  strcat(famstem,  ".DOMAIN");
+	if(GetRexxVar(rm, famstem, &fam) != 0 || fam == 0){
+		errno = EINVAL;
+		return -1;
+	}
+
+	for(sap->sa_family = 0; sap->sa_family < AF_MAX; sap->sa_family++){
+		if(strcasecmp(fam, afnames[sap->sa_family].family) == 0){
+			break;
+		}
+	}
+	if(sap->sa_family == AF_MAX){
+		errno = EAFNOSUPPORT;
+		return -1;
+	}
+
+	return (*afnames[sap->sa_family].rvitosa)(rm, vname,sap,salen);
+}
+
+/*
+ * Convert socket address from internal representation into RVI stem
+ * format variable.  The basename of the variable is in <vname>.
+ * The resulting address looks like this:
+ *
+ * vname.domain     = address_family;	"inet" for now
+ * vname.sin_addr   = "a.b.c.d";	dot formatted inet address
+ * vname.sin_port   = port;		port number
+ */
+static int sintorvi(sinp, sinlen, rm, vname)
+	struct sockaddr_in *sinp;
+	int sinlen;
+	struct RexxMsg *rm;
+	char *vname;
+{
+	char portstem[128], addrstem[128];
+	char addr[16], port[16];
+
+	strcpy(portstem, vname); strcat(portstem, ".SIN_PORT");
+	strcpy(addrstem, vname); strcat(addrstem, ".SIN_ADDR");
+
+	CVi2a(port, sinp->sin_port, 8);
+	if(setvar(rm, portstem, port, strlen(port)) < 0){
+		return -1;
+	}
+
+	strcpy(addr, inet_ntoa(sinp->sin_addr.s_addr));	/* net order */
+	if(setvar(rm, addrstem, addr, strlen(addr)) < 0){
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * Convert rvi format address into internal sin structure
+ */
+static int rvitosin(rm, vname, sinp, sinlen)
+	struct RexxMsg *rm;
+	char *vname;
+	struct sockaddr_in *sinp;
+	int sinlen;
+{
+	char portstem[128], addrstem[128];
+	STRPTR *addr, *port;
+	int err;
+
+	strcpy(portstem, vname); strcat(portstem, ".SIN_PORT");
+	strcpy(addrstem, vname); strcat(addrstem, ".SIN_ADDR");
+
+	port = addr = 0; err = 0;
+ 	if(GetRexxVar(rm, portstem, &port) != 0 || port == 0){
+		err++;
+	}
+   	if(GetRexxVar(rm, addrstem, &addr) != 0 || addr == 0){
+		err++;
+	}
+	if(err){
+		errno = EINVAL;
+		return -1;
+	}
+
+	sinp->sin_addr.s_addr = inet_addr(addr);
+	sinp->sin_port = atoi(port);
+	return 0;
+}
+
+static int rvitohdw(rm, vname, sap, saplen)
+	struct RexxMsg *rm;
+	char *vname;
+	struct sockaddr *sap;
+	int saplen;
+{
+	unsigned char addrstem[128], *addr;
+	register unsigned char *p;
+	unsigned int i, val;
+	
+	strcpy(addrstem, vname); strcat(addrstem, ".SA_DATA");
+ 	if(GetRexxVar(rm, addrstem, &addr) != 0 || addr == 0){
+		errno = EINVAL;
+		return -1;
+	}
+
+	p = addr;
+	for(val = i = 0; i < sizeof(sap->sa_data); p++){
+		if(*p >= 'a' && *p <= 'f'){
+			val = (val << 4) + (*p - 'a' + 10);
+		} else if(*p >= 'A' && *p <= 'F'){
+			val = (val << 4) + (*p - 'A' + 10);
+		} else if(*p >= '0' && *p <= '9'){
+			val = (val << 4) + (*p - '0');
+		} else if(*p == '.' || *p == ':' || *p == 0){
+			if(val > 255){
+				return -1;
+			}
+			sap->sa_data[i++] = val; val = 0;
+			if(*p == 0){
+				break;
+			}
+		} else {
+			errno = EINVAL;
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * output the ethernet address in hex dot format
+ */
+static int hdwtorvi(sap, salen, rm, vname)
+	struct sockaddr *sap;
+	int salen;
+	struct RexxMsg *rm;
+	char *vname;
+{
+	static char *hex = "0123456789abcdef";
+	register unsigned int i, val;
+	char datastem[128], addr[64];
+	register char *p;
+
+	p = addr;
+	for(i = 0; i < 6; i++){
+		val = sap->sa_data[i];
+		*p++ = hex[(val >> 4) & 0xf];
+		*p++ = hex[val & 0xf];
+		*p++ = '.';
+	}
+	p[-1] = 0;
+
+	strcpy(datastem, vname); strcat(datastem, ".SA_DATA");
+	if(setvar(rm, datastem, addr, strlen(addr)) < 0){
+		return -1;
+	}
+
+	return 0;
+}
+@

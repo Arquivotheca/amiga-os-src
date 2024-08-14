@@ -1,0 +1,88 @@
+**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       close.a  -- device close code
+*
+**************************************************************************
+        section ,CODE
+        include "mfm.i"
+        include "mfm_ext.i"
+
+        XDEF    _Close
+        XREF    ExpungeUnit
+        XREF    ExpungeDev
+
+;--------------------------------------------------------------------------
+; CloseDevice Section
+;
+; This section of code is called by the CloseDevice() function.  
+; Close() will decrement the LIB open count for the DEVICE and the UNIT specified.
+;
+; If the LIB open count is decremented to zero for the UNIT, all UNIT 
+; resources will be deallocated.  The same can be said about the DEVICE if
+; there is a delayed expunge requested.
+;
+; Inputs:
+; =======
+; a1 = IORequest structure pointer
+; a6 = device pointer
+;
+; Results:
+; ========
+; d0 = 0 = device instance closed but not removed.  Device still open by 
+;          other tasks.
+;    = segment list ptr = device instance closed and device removed. Seglist
+;      of device code.
+;--------------------------------------------------------------------------
+MM_Close        reg     a2/a3/a5
+
+_Close:
+        movem.l MM_Close,-(sp)
+
+        move.l  a6,Device                       ; store devptr in new reg
+		move.l  md_AbsExecBase(Device),AbsExecBase  ; retrieve ExecBase addr
+
+        move.l  IORequest,IOReq                 ; store ioReq ptr in 2nd reg
+
+        move.l  IO_UNIT(IOReq),Unit             ; store unit ptr in reg
+
+        ;------- make sure the ioReq is not used again
+        moveq.l #-1,d0
+        move.l  d0,IO_UNIT(IOReq)
+        move.l  d0,IO_DEVICE(IOReq)
+
+******** see if the unit allocated at all
+        tst.w   UNIT_OPENCNT(Unit)
+        beq.s   Close_Device                    ; UNIT_OPENCNT = 0
+
+******** check if the unit is in use. Decrement LIB open count.
+        subq.w  #1,UNIT_OPENCNT(Unit)
+        bne.s   Close_Device                    ; UNIT_OPENCNT > 0
+
+******** Deallocate all resources, structures and mem for the unit.
+        jsr     ExpungeUnit
+
+Close_Device:
+        CLEAR   d0
+        
+******** see if device allocated at all
+        tst.w   LIB_OPENCNT(Device)
+        beq.s   Close_End                       ; LIB_OPENCNT = 0
+
+******** decrement LIB open count
+        subq.w  #1,LIB_OPENCNT(Device)
+        ;------- see if there is anyone left with us open
+        bne.s   Close_End                       ; LIB_OPENCNT > 0
+
+        ;------- see if we have a delayed expunge pending
+        btst    #LIBB_DELEXP,md_Flags(Device)
+        beq.s   Close_End                       ; LIBB_DELEXP flag set
+
+******** Deallocate all resources, structures and mem for the device.
+        jsr     ExpungeDev                      ; return d0 = seglist ptr
+
+Close_End:
+        movem.l (sp)+,MM_Close
+        rts
+
+        end

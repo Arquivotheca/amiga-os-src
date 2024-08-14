@@ -1,0 +1,141 @@
+see patch 5 for a version that works with a real pc keyboard
+
+
+
+original:
+;FARADAY AT 8X42 KEYBOARD CONTROLLER
+;VERSION 1.5
+
+patch 1:
+;attempt #1 to make it work with a PC keyboard.
+;
+;	- fixes bug in the timer interrupt handler
+;	- forces DATA low after receiving a key
+
+00dc : af               MOV     R7,A		;preserve A...
+00dd : 54 78            CALL    0278H		;...before calling
+
+01b4 : 9a 7f            ANL     P2,#7fH ;127	;force P27 (data) low
+
+patch 2:
+;
+;attempt #2 to make it work with a PC keyboard.
+;	- force P27 (data) low all the time (unless we're reading a key)
+;	- no toggling of P27 when sending to 286
+;	- teach "read P2" and "write P2" commands to lie about P27 & P26
+;	- "keyboard disable" and "pc keyboard mode" commands don't touch P27/6
+
+0041 : 23 03            MOV     A,#03H ;3	;data low, clock high
+
+00d5 : 23 3f            MOV     A,#3fH ;63	;data low, clock high
+
+02b1 : 9a ff            ANL     P2,#ffH ;255	;don't toggle when sending...
+02b3 : 9a ff            ANL     P2,#ffH ;255	;...to the 286
+
+047e : c4 13            JMP     0613H		;read P2, fake 7&6 as 1
+
+0488 : c4 17            JMP     0617H		;write P2, force 7&6 to 0...
+048a : 00               NOP			;...(placeholder)
+
+04cb : 8a 00            ORL     P2,#00H ;0	;kb disable fix
+
+04e7 : 8a 00            ORL     P2,#00H ;0	;pc kbd mode fix
+04e9 : 8a 00            ORL     P2,#00H ;0	;pc kbd mode fix
+
+04ed : 9a ff            ANL     P2,#ffH ;255	;pc kbd mode fix
+04ef : 9a ff            ANL     P2,#ffH ;255	;pc kbd mode fix
+
+0613 : 43 c0            ORL     A,#c0H ;192	;force P27/6 to 1 on read
+0615 : 84 10            JMP     0410H		;back to normal place
+
+0617 : 53 3f            ANL     A,#3fH ;63	;force P27/6 to 0 on write
+0619 : 3a               OUTL    P2,A		;write it
+061a : 84 5b            JMP     045bH		;back to normal place
+
+patch 3:
+;attempt #3 to make it work with a PC keyboard.
+;
+;	- replace DLYKL with a timeout that makes sure the kb doesn't try to
+;	  send after we tell it not to.
+
+0198 : c4 1c            JMP     061cH		;replace DLYKL with patch
+019a : 00               NOP			;(placeholder)
+019b : 00               NOP			;(placeholder)
+
+061c : 9a 7f            ANL     P2,#7fH ;127	;force P27 (data) low
+061e : 23 17            MOV     A,#17H ;23	;wait 2 9600 baud bit times
+0620 : 26 27            JNT0    0627H		;check for kb trying to clk
+0622 : 07               DEC     A		;dec counter
+0623 : 96 20            JNZ     0620H		;if not done, wait some more
+0625 : 24 00            JMP     0100H		;back to MAINLP
+0627 : 24 8c            JMP     018cH		;got a clk, get data
+
+patch 4:
+;attempt #4 to make it work with a PC keyboard.
+;
+;	- remove DLYKL from timer routine
+
+00dd : 9a 7f            ANL     P2,#7fH ;127	;no DLYKL, just force P27 low
+01b2 : 00               NOP			;(placeholder)
+01b3 : 00               NOP			;(placeholder)
+
+patch 5:	<<<<  this is the one that works with a real pc kbd  >>>
+;attempt #4 to make it work with a PC keyboard.  finally works, but only
+;with real pc keyboards, not the ABT.
+;
+;	- increase time delay (patch 3) to a full byte time
+
+061e : 23 7f            MOV     A,#7fH ;127
+
+patch 6:
+;attempt #4 to make it work with the ABT (hey, if a long delay is good,
+;a *really* long delay must be great, right?  wrong.
+;
+;	- increase time delay (patch 3) to 1.5 byte time
+
+061e : 23 c0            MOV     A,#c0H ;192
+
+patch 7:
+;start of support for the ABT buffer chip kludge.
+;
+;P27 is now a CLEAR signal (clears buffer on rising edge).
+;P26 is now a CLOCK signal (keep it low to prevent the ABT from
+;    shifting stuff in.  keep it high otherwise.  make low, then high
+;    to shift next bit out of buffer).
+;T0 is now a DATA AVAILABLE signal (low = nothing in buffer, high = start
+;   shifting data out of buffer).
+;T1 is now a DATA SENSE signal (low = data bit is 0, high = data bit is 1).
+;
+
+0041 : 23 83            MOV     A,#83H		;reset shifter, disable clock
+
+00d5 : 23 7f            MOV     A,#7fH		;no reset, allow clock
+
+018c : c4 29		JMP	0629H		;read the kludge
+
+01b4 : 00		NOP			;don't clear P27
+01b5 : 00		NOP			;don't clear P27
+
+0488 : c4 42            JMP     0642H		;write P2, force 7&6 to 0&1
+
+056e : a4 a0		JMP	05a0H		;skip IFTEST stuff.
+
+0629 : 36 2f		JT0	062fH		;got a key!
+062b : d6 29		JNIBF	0629H		;no cmd from 286
+062d : 24 00		JMP	0100H		;got 286 cmd, go do it.
+062f : be 08		MOV	R6,#08H		;8 bits to clock in
+0631 : 97		CLR	C		;assume 0
+0632 : 46 35		JNT1	0635H		;got a 0, let's shift it in
+0634 : a7		CPL	C		;got a 1, so flip carry
+0635 : 67		RRC	A		;shift the bit in
+0636 : 9a bf		ANL	P2,#bfH		;drop CLOCK
+0638 : 8a 40		ORL	P2,#40H		;raise CLOCK, getting next bit
+063a : ee 31		DJNZ	R6,0631H	;get more bits
+063c : 8a 80		ORL	P2,#80H		;raise RESET, clearing buf
+063e : 9a 7f		ANL	P2,#7fH		;drop RESET
+0640 : 24 a2		JMP	01a2H		;back to normal error chk
+
+0642 : 53 7f            ANL     A,#7fH		;force P27 (CLEAR) to 0
+0644 : 43 40		ORL	A,#40H		;force P26 (CLOCK) to 1
+0646 : 3a               OUTL    P2,A		;write it
+0647 : 84 5b            JMP     045bH		;back to normal place

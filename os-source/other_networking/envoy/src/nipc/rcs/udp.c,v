@@ -1,0 +1,695 @@
+head     1.15;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.15
+date     92.12.16.14.39.14;  author kcd;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.07.13.17.00.31;  author kcd;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.06.18.12.27.29;  author kcd;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.05.05.17.33.37;  author kcd;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     92.04.21.16.18.30;  author kcd;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     92.04.10.00.39.44;  author kcd;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.04.05.15.38.10;  author kcd;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.03.27.10.32.50;  author gregm;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.03.23.10.24.17;  author gregm;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.03.06.21.07.46;  author kcd;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.03.06.19.08.59;  author kcd;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.03.04.16.58.42;  author gregm;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.29.20.33.38;  author kcd;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.02.27.22.28.36;  author kcd;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.02.27.21.05.26;  author kcd;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@NIPC library UDP Module.
+@
+
+
+1.15
+log
+@Added a typecast to avoid a compiler warning.
+@
+text
+@/**************************************************************************
+**
+** udp.c        - UDP Protocol routines for nipc.library
+**
+** Copyright 1992, Commodore-Amiga, Inc.
+**
+** $Id: udp.c,v 1.14 92/07/13 17:00:31 kcd Exp Locker: kcd $
+**
+***************************************************************************
+
+/*------------------------------------------------------------------------*/
+
+#include "nipcinternal.h"
+#include "externs.h"
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include "nipcinternal_protos.h"
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+
+/*------------------------------------------------------------------------*/
+
+BOOL UDP_Init(void)
+{
+    register struct NBase *nb = gb;
+
+    InitSemaphore(&nb->UDPCLSemaphore);
+    NewList((struct List *)&gb->UDPConnectionList);
+
+    gb->UDPProto.ipproto_ProtocolNumber = 17;
+    gb->UDPProto.ipproto_Input = &UDP_Input;
+    gb->UDPProto.ipproto_Deinit = &UDP_Deinit;
+    gb->UDPProto.ipproto_Timeout = &UDP_Timeout;
+    AddHead((struct List *)&nb->ProtocolList,(struct Node *)&nb->UDPProto);
+    gb->UDPPorts = 1024;
+
+    return(TRUE);
+}
+
+/*------------------------------------------------------------------------*/
+
+void UDP_Deinit(void)
+{
+    register struct NBase *nb = gb;
+    Remove((struct Node *)&nb->UDPProto);
+}
+
+/*------------------------------------------------------------------------*/
+
+void UDP_Timeout(void)
+{
+    return;
+}
+
+/*------------------------------------------------------------------------*/
+
+void UDP_Input(buff, length, dev)
+struct Buffer *buff;
+ULONG length;
+struct sanadev *dev;
+{
+    register struct NBase *nb = gb;
+    struct BuffEntry *be;
+    struct udphdr *udp;
+    struct iphdr *ip;
+    struct UDPConnection *conn;
+
+    be = (struct BuffEntry *) buff->buff_list.mlh_Head;
+    ip = (struct iphdr *) ( (ULONG) be->be_data + (ULONG) be->be_offset);
+    udp = (struct udphdr *) ( (ULONG) ip + (ULONG) sizeof(struct iphdr));
+
+    ObtainSemaphore(&nb->UDPCLSemaphore);
+
+    conn = (struct UDPConnection *) gb->UDPConnectionList.mlh_Head;
+    while(conn->conn_link.mln_Succ)
+    {
+        if(conn->conn_OurPort == udp->udp_DestPort)
+        {
+            ULONG length;
+
+            length = ip->iph_Length - (ip->iph_IHL << 2) - sizeof(struct udphdr);
+            if(length)
+            {
+                if(conn->conn_DataIn)
+                {
+                    (*conn->conn_DataIn)(conn,buff,dev);
+                    break;
+                }
+            }
+        }
+        conn = (struct UDPConnection *) conn->conn_link.mln_Succ;
+    }
+    if (!conn->conn_link.mln_Succ)
+    {
+        FreeBuffer(buff);
+    }
+    ReleaseSemaphore(&nb->UDPCLSemaphore);
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL __asm UDP_Output(register __a0 UBYTE *dataptr, register __d0 UWORD length,
+                               register __d1 ULONG srcip, register __d2 ULONG destip,
+                               register __d3 UWORD srcport, register __d4 UWORD destport)
+{
+    struct Buffer *b;
+    struct BuffEntry *be;
+    struct udphdr *udp;
+    UBYTE *data;
+
+    if(b = AllocBuffer(length + sizeof(struct udphdr)))
+    {
+        be = (struct BuffEntry *) b->buff_list.mlh_Head;
+        be->be_length = (length + (sizeof(struct udphdr)));
+        udp = (struct udphdr *) be->be_data;
+        data = (UBYTE *) ( (ULONG) udp + (ULONG) sizeof(struct udphdr));
+
+        CopyMem(dataptr,data,length);
+        udp->udp_SrcPort = srcport;
+        udp->udp_DestPort = destport;
+        udp->udp_Length = length + sizeof(struct udphdr);
+        udp->udp_Checksum = 0;
+        ip_sendsrc(b,srcip,destip,17);
+        return TRUE;
+    }
+    else
+        return FALSE;
+}
+
+/*------------------------------------------------------------------------*/
+
+struct UDPConnection *__asm OpenUDPPort(register __d0 UWORD localport,
+                                                  register __a0 void (*datain)())
+{
+    register struct NBase *nb = gb;
+    struct UDPConnection *conn;
+
+    if(localport == -1)
+    {
+        Forbid();
+        localport = gb->UDPPorts++;
+        if (gb->UDPPorts == 0)
+            gb->UDPPorts = 1024;
+        Permit();
+    }
+
+    if(conn = AllocMem(sizeof(struct UDPConnection),MEMF_CLEAR|MEMF_PUBLIC))
+    {
+        conn->conn_OurPort = localport;
+        conn->conn_DataIn = (UDP_DATA) datain;
+        ObtainSemaphore(&nb->UDPCLSemaphore);
+        AddTail((struct List *)&nb->UDPConnectionList,(struct Node *)conn);
+        ReleaseSemaphore(&nb->UDPCLSemaphore);
+    }
+    return conn;
+}
+
+/*------------------------------------------------------------------------*/
+
+void __asm CloseUDPPort(register __a0 struct UDPConnection *conn)
+{
+    if(conn)
+    {
+        Forbid();
+        Remove((struct Node *)conn);
+        Permit();
+        FreeMem(conn,sizeof(struct UDPConnection));
+    }
+}
+
+/*------------------------------------------------------------------------*/
+@
+
+
+1.14
+log
+@Changes made to save space.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.13 92/06/18 12:27:29 kcd Exp Locker: kcd $
+d152 1
+a152 1
+        conn->conn_DataIn = datain;
+@
+
+
+1.13
+log
+@Minor stylistic changes.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.12 92/05/05 17:33:37 kcd Exp Locker: kcd $
+d75 3
+a77 1
+    if(!IsListEmpty( (struct List *) &gb->UDPConnectionList))
+d79 1
+a79 2
+        conn = (struct UDPConnection *) gb->UDPConnectionList.mlh_Head;
+        while(conn->conn_link.mln_Succ)
+d81 4
+a84 1
+            if(conn->conn_OurPort == udp->udp_DestPort)
+d86 1
+a86 13
+                ULONG length;
+
+                length = ip->iph_Length - (ip->iph_IHL << 2) - sizeof(struct udphdr);
+                if(length)
+                {
+                    if(conn->conn_DataIn)
+                        (*conn->conn_DataIn)(conn,buff,dev);
+                    else
+                    {
+                        FreeBuffer(buff);
+                    }
+                }
+                else
+d88 2
+a89 1
+                    FreeBuffer(buff);
+a90 1
+                break;
+a91 5
+            conn = (struct UDPConnection *) conn->conn_link.mln_Succ;
+        }
+        if (!conn->conn_link.mln_Succ)
+        {
+            FreeBuffer(buff);
+d93 1
+d95 1
+a95 1
+    else
+@
+
+
+1.12
+log
+@Init now returns a BOOL.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.11 92/04/21 16:18:30 kcd Exp Locker: kcd $
+d90 1
+d92 1
+d103 1
+d105 1
+d108 1
+d110 1
+a110 1
+
+@
+
+
+1.11
+log
+@Reworked low-level packet routing again. Now much cleaner than before.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.10 92/04/10 00:39:44 kcd Exp Locker: kcd $
+d25 1
+a25 1
+void UDP_Init(void)
+d38 2
+@
+
+
+1.10
+log
+@Removed Dependencies on old exec_pragmas.h file.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.9 92/04/05 15:38:10 kcd Exp Locker: kcd $
+d27 1
+a27 1
+	register struct NBase *nb = gb;
+d44 1
+a44 1
+	register struct NBase *nb = gb;
+d62 1
+a62 1
+	register struct NBase *nb = gb;
+d81 1
+d91 1
+d93 1
+d110 1
+a110 1
+							   register __d1 ULONG srcip, register __d2 ULONG destip,
+d142 1
+a142 1
+	register struct NBase *nb = gb;
+@
+
+
+1.9
+log
+@Added srcIP parameter to UDP_Output() call.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.8 92/03/27 10:32:50 gregm Exp Locker: kcd $
+d27 1
+d29 1
+a29 1
+    InitSemaphore(&gb->UDPCLSemaphore);
+d36 1
+a36 1
+    AddHead((struct List *)&gb->ProtocolList,(struct Node *)&gb->UDPProto);
+d44 2
+a45 1
+    Remove((struct Node *)&gb->UDPProto);
+d62 1
+a65 1
+    ULONG src_ip, dest_ip;
+a67 1
+//    kprintf("UDP: Packet received.\n");
+d72 1
+a72 7
+    src_ip = ip->iph_SrcAddr;
+    dest_ip = ip->iph_DestAddr;
+
+//    kprintf("UDP: Source %lx, Dest %lx, Dest Port %ld\n",src_ip,dest_ip,(ULONG)udp->udp_DestPort);
+//    kprintf("UDP: Source Port %ld, UDP Length %ld\n",(ULONG)udp->udp_SrcPort,(ULONG)udp->udp_Length);
+
+    ObtainSemaphore(&gb->UDPCLSemaphore);
+a84 2
+                    {
+//                        kprintf("UDP:Sending packet up.\n");
+a85 2
+//                        kprintf("UDP:Data sent.\n");
+                    }
+a86 1
+                    {
+a87 2
+//                        kprintf("UDP:Dropping packet due do conn_DataIn == NULL.\n");
+                    }
+a95 2
+        {
+//            kprintf("UDP:Dropping packet due to no matching connection found.\n");
+a96 1
+        }
+a98 2
+    {
+//        kprintf("UDP:Dropping packet due to no connections in list.\n");
+d100 2
+a101 2
+    }
+    ReleaseSemaphore(&gb->UDPCLSemaphore);
+a114 4
+//    kprintf("UDP_Output called.\n");
+//    kprintf("Dest IP: %lx, Length: %ld\n",destip,(ULONG)length);
+//    kprintf("Src Port: %ld, Dest Port: %ld\n",(ULONG) srcport, (ULONG) destport);
+
+a116 1
+//        kprintf("Got a buffer for UDP packet.\n");
+d139 1
+a141 1
+//    kprintf("UDPOpen() called.\n");
+d155 3
+a157 3
+        ObtainSemaphore(&gb->UDPCLSemaphore);
+        AddTail((struct List *)&gb->UDPConnectionList,(struct Node *)conn);
+        ReleaseSemaphore(&gb->UDPCLSemaphore);
+@
+
+
+1.8
+log
+@Fixed a misplaced '*'.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.7 92/03/23 10:24:17 gregm Exp Locker: gregm $
+d92 1
+a92 1
+                        (*conn->conn_DataIn)(conn,buff);
+d124 2
+a125 2
+                               register __d1 ULONG destip, register __d2 UWORD srcport,
+                               register __d3 UWORD destport)
+d149 1
+a149 1
+        ip_send(b,destip,17);
+@
+
+
+1.7
+log
+@The_voodoo_stuff_is_GONE!
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.6 92/03/06 21:07:46 kcd Exp $
+d17 1
+d21 1
+d27 1
+d32 1
+a32 1
+    gb->UDPProto.ipproto_Input = *UDP_Input;
+@
+
+
+1.6
+log
+@Removed kprintf's
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.5 92/03/06 19:08:59 kcd Exp Locker: kcd $
+d25 2
+a26 2
+    InitSemaphore(&UDPCLSemaphore);
+    NewList((struct List *)&UDPConnectionList);
+d28 6
+a33 6
+    UDPProto.ipproto_ProtocolNumber = 17;
+    UDPProto.ipproto_Input = *UDP_Input;
+    UDPProto.ipproto_Deinit = &UDP_Deinit;
+    UDPProto.ipproto_Timeout = &UDP_Timeout;
+    AddHead((struct List *)&ProtocolList,(struct Node *)&UDPProto);
+    UDPPorts = 1024;
+d40 1
+a40 1
+    Remove((struct Node *)&UDPProto);
+d74 2
+a75 2
+    ObtainSemaphore(&UDPCLSemaphore);
+    if(!IsListEmpty( (struct List *) &UDPConnectionList))
+d77 1
+a77 1
+        conn = (struct UDPConnection *) UDPConnectionList.mlh_Head;
+d115 1
+a115 1
+    ReleaseSemaphore(&UDPCLSemaphore);
+d120 1
+a120 1
+BOOL __saveds __asm UDP_Output(register __a0 UBYTE *dataptr, register __d0 UWORD length,
+d155 1
+a155 1
+struct UDPConnection * __saveds __asm OpenUDPPort(register __d0 UWORD localport,
+d164 3
+a166 3
+        localport = UDPPorts++;
+        if (UDPPorts == 0)
+            UDPPorts = 1024;
+d174 3
+a176 3
+        ObtainSemaphore(&UDPCLSemaphore);
+        AddTail((struct List *)&UDPConnectionList,(struct Node *)conn);
+        ReleaseSemaphore(&UDPCLSemaphore);
+d183 1
+a183 1
+void __saveds __asm CloseUDPPort(register __a0 struct UDPConnection *conn)
+@
+
+
+1.5
+log
+@Added more support for DNS.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.4 92/03/04 16:58:42 gregm Exp Locker: kcd $
+d129 3
+a131 3
+    kprintf("UDP_Output called.\n");
+    kprintf("Dest IP: %lx, Length: %ld\n",destip,(ULONG)length);
+    kprintf("Src Port: %ld, Dest Port: %ld\n",(ULONG) srcport, (ULONG) destport);
+d135 1
+a135 1
+        kprintf("Got a buffer for UDP packet.\n");
+d160 1
+a160 1
+    kprintf("UDPOpen() called.\n");
+@
+
+
+1.4
+log
+@Moved globals to globals.c; externs for these in externs.h.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.3 92/02/29 20:33:38 kcd Exp Locker: gregm $
+d120 3
+a122 6
+BOOL UDP_Output(dataptr, length, destip, srcport, destport)
+UBYTE *dataptr;
+UWORD length;
+ULONG destip;
+UWORD srcport;
+UWORD destport;
+d129 4
+d135 1
+d155 2
+a156 3
+struct UDPConnection *OpenUDPPort(localport,datain)
+UWORD localport;
+void (*datain)();
+d160 1
+d183 1
+a183 2
+void CloseUDPPort(conn)
+struct UDPConnection *conn;
+@
+
+
+1.3
+log
+@Fixed numer bugs not found until the simple name resolver was completed.
+Still considered not totally reliable by me.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.2 92/02/27 22:28:36 kcd Exp $
+d14 1
+a19 11
+
+/*------------------------------------------------------------------------*/
+
+/* Globals */
+
+struct ipproto UDPProto;
+struct MinList UDPConnectionList;
+struct SignalSemaphore UDPCLSemaphore;
+extern struct MinList ProtocolList;
+extern struct MinList DeviceList;
+UWORD UDPPorts;
+@
+
+
+1.2
+log
+@Fixed memory loss problem when there weren't any udp connections.
+@
+text
+@d7 1
+a7 1
+** $Id: udp.c,v 1.1 92/02/27 21:05:26 kcd Exp Locker: kcd $
+d73 1
+d76 1
+a76 1
+    udp = (struct udphdr *) ( (ULONG) ip + (ULONG) ip->iph_IHL << 2);
+d81 3
+d97 2
+d100 2
+d103 1
+d105 2
+d115 2
+d118 1
+d121 2
+d124 1
+a124 1
+
+d130 1
+a130 2
+BOOL UDP_Output(conn,dataptr, length, destip, destport)
+struct UDPConnection *conn;
+d134 1
+d150 1
+a150 1
+        udp->udp_SrcPort = conn->conn_OurPort;
+d152 1
+a152 1
+        udp->udp_Length = length;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d7 1
+a7 1
+** $Id$
+d91 1
+d96 1
+d103 2
+d106 3
+a109 2
+    if (!conn->conn_link.mln_Succ)
+        FreeBuffer(buff);
+@

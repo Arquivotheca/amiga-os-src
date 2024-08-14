@@ -1,0 +1,14 @@
+VERSION		EQU	2
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'23.10.92'
+	ENDM
+VERS	MACRO
+		dc.b	'route 2.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'route 2.5 (23.10.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: route 2.5 (23.10.92)',0
+	ENDM

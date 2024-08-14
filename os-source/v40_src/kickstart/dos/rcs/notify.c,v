@@ -1,0 +1,445 @@
+head     36.13;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.13
+date     91.04.29.18.11.37;  author jesup;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     91.02.19.02.10.25;  author jesup;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     91.02.15.04.37.09;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.12.17.22.28.42;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.12.16.03.18.10;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.04.03.04.44.53;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.03.17.23.57.03;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.02.16.22.20.12;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     90.01.17.21.49.04;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     89.12.09.01.51.10;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.10.18.04.19.55;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.10.03.18.16.37;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.07.30;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.13
+log
+@Fixed strchr (would dereference location 1).  Now handles strings without
+colons.
+@
+text
+@/* notify.c */
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include "dos/dos.h"
+#include "dos/dosextens.h"
+#include <string.h>
+
+#include "libhdr.h"
+#include "dos/notify.h"
+
+#include <clib/exec_protos.h>
+#include <pragmas/exec_old_pragmas.h>
+#include "notify_protos.h"
+#include "path_protos.h"
+#include "klib_protos.h"
+#include "blib_protos.h"
+
+#define AllocNew(x) ((struct x *) AllocMem(sizeof(struct x),\
+					   MEMF_PUBLIC|MEMF_CLEAR));
+
+
+/* FIX! how do we handle assigns?????????!!!!!!!! */
+/* FIX!!!!! */
+/*
+ * possible solution: give it a pathname, have it expand them as needed and
+ * split the name.  It should be expanded via NameFromLock on any lock returned
+ * by GetDevProc.
+ * We should also move to a Tags interface, and have StartNotify allocate the
+ * notifyrequest and return it to you.  The application should never modify or
+ * allocate a notifyrequest structure.
+ * This should make simple use of notify easier, while making it easier to
+ * expand in the future.
+ * As for multi-directory assigns, either only use the first, or look for a
+ * file in any and use it if it exists, otherwise set it on the first.
+ *
+ * Currently expands, but not in a way I like.  Discuss with Steve.  FIX!
+ * Handlers must use nr_Private instead of nr_DirName.
+ */
+
+LONG ASM
+StartNotify (REG(d1) struct NotifyRequest *nreq)
+{
+	struct DevProc *dp = NULL;
+	LONG rc;
+	char temp[256], *name, *ptr;	/* FIX?  DANGER - path length */
+
+	while (1) {
+		dp = getdevproc(nreq->nr_Name,dp);
+		if (dp == NULL)
+			return 0;
+
+		nreq->nr_Handler  = dp->dvp_Port;
+		nreq->nr_FullName = nreq->nr_Name;
+		name = NULL;
+
+		/* FIX! expand path for others as well! */
+		/* handle assigns - expand */
+		if (dp->dvp_Lock)
+		{
+			/* assign - Use NameFromLock() to get real path */
+			if (!NameFromLock(dp->dvp_Lock,temp,256))
+				goto error;
+
+			/* add rest of name to end */
+			rc = strlen(temp);
+			if (temp[rc-1] != ':')
+				temp[rc++] = '/';
+
+			/* pointer to rest of string - handle no ':'! */
+			ptr = strchr(nreq->nr_Name,':');
+			if (ptr)
+				ptr++;
+			else
+				ptr = nreq->nr_Name;
+
+			/* only allocate as much as we need */
+			name = AllocVecPub(rc + 1 + strlen(ptr));
+			if (!name)
+				goto error;
+
+			/* Use copymem - temp may not be terminated! */
+			copyMem(temp,name,rc);
+			strcpy(&name[rc],ptr);
+
+			nreq->nr_FullName = name;
+		}
+
+		rc = sendpkt1(dp->dvp_Port,ACTION_ADD_NOTIFY,(LONG) nreq);
+
+		if (rc || err_report(REPORT_LOCK,NULL,dp->dvp_Port))
+		{
+			if (!rc)
+			{
+error:				rc = 0;		/* other errors come here */
+				if (name)
+					freeVec(name);
+				nreq->nr_FullName = NULL;
+			}
+			freedevproc(dp);
+			return rc;
+		}
+		if (name)
+			freeVec(name);
+		freedevproc(dp);
+		dp = NULL;
+	}
+}
+
+LONG ASM
+EndNotify (REG(d1) struct NotifyRequest *nreq)
+{
+	LONG rc;
+	struct NotifyMessage *msg,*nextmsg;
+
+	while (1) {
+		rc = sendpkt1(nreq->nr_Handler,ACTION_REMOVE_NOTIFY,
+			      (LONG) nreq);
+		if (rc || err_report(REPORT_LOCK,NULL,nreq->nr_Handler))
+		{
+			if (nreq->nr_FullName &&
+			    nreq->nr_FullName != nreq->nr_Name)
+			{
+				freeVec(nreq->nr_FullName);
+				nreq->nr_FullName = NULL;
+			}
+
+			/* now, remove all messages from the port is needed */
+			if (nreq->nr_Flags & NRF_SEND_MESSAGE)
+			{
+				if (nreq->nr_Flags &
+				    (NRF_WAIT_REPLY /*| NRF_COPY_DATA*/))
+				{
+					if (nreq->nr_MsgCount == 0)
+						goto done;
+				}
+
+				/* remove modified flag */
+				nreq->nr_Flags &= ~NRF_MAGIC;
+
+				/* must disable to scan msg list */
+				/* downcode to assembler! FIX! */
+				Disable();
+				for (msg = (struct NotifyMessage *)
+					   nreq->nr_stuff.nr_Msg.nr_Port->
+							    mp_MsgList.lh_Head;
+				     msg->nm_ExecMessage.mn_Node.ln_Succ &&
+				      nreq->nr_MsgCount > 0;
+				     msg = nextmsg)
+				{
+					nextmsg = (struct NotifyMessage *)
+					    msg->nm_ExecMessage.mn_Node.ln_Succ;
+
+					if (msg->nm_Class == NOTIFY_CLASS &&
+					    msg->nm_Code == NOTIFY_CODE &&
+					    msg->nm_NReq == nreq)
+					{
+					  Remove(&msg->nm_ExecMessage.mn_Node);
+					  ReplyMsg(&msg->nm_ExecMessage);
+					  nreq->nr_MsgCount--;
+					}
+				}
+				Enable();
+			}
+done:
+			return rc;
+		}
+	}
+	/*NOTREACHED*/
+}
+@
+
+
+36.12
+log
+@Use copyMem instead of CopyMem
+@
+text
+@d70 6
+a75 2
+			/* pointer to rest of string */
+			ptr = strchr(nreq->nr_Name,':')+1;
+@
+
+
+36.11
+log
+@No longer requires 256 bytes/notify req
+@
+text
+@d79 1
+a79 1
+			CopyMem(temp,name,rc);
+@
+
+
+36.10
+log
+@FreeVec->freeVec (space saving)
+@
+text
+@d46 1
+a46 1
+	char *name;
+d62 1
+a62 4
+			name = AllocVecPub(256);
+			if (!name || !NameFromLock(dp->dvp_Lock,name,256))
+			{
+				rc = 0;
+a63 1
+			}
+d66 16
+a81 4
+			rc = strlen(name);
+			if (name[rc-1] != ':')
+				name[rc++] = '/';
+			strcpy(&name[rc],strchr(nreq->nr_Name,':')+1);
+d91 2
+a92 1
+error:				if (name)
+@
+
+
+36.9
+log
+@exec_old_pragmas.h
+@
+text
+@d84 1
+a84 1
+					FreeVec(name);
+d91 1
+a91 1
+			FreeVec(name);
+d111 1
+a111 1
+				FreeVec(nreq->nr_FullName);
+@
+
+
+36.8
+log
+@for rcs 4.x header change
+@
+text
+@d13 1
+a13 1
+#include <pragmas/exec_pragmas.h>
+@
+
+
+36.7
+log
+@Removed COPY_DATA reference
+@
+text
+@@
+
+
+36.6
+log
+@getvec->AllocVec, etc
+@
+text
+@d119 1
+a119 1
+				    (NRF_WAIT_REPLY | NRF_COPY_DATA))
+@
+
+
+36.5
+log
+@*** empty log message ***
+@
+text
+@d12 2
+a13 2
+#ifdef LATTICE
+#include "proto/exec.h"
+a17 1
+#endif
+d62 2
+a63 2
+			name = getvec(64);	/* FIX! */
+			if (!name || !NameFromLock(dp->dvp_Lock,name,64*4))
+d84 1
+a84 1
+					freevec(name);
+d91 1
+a91 1
+			freevec(name);
+d111 1
+a111 1
+				freevec(nreq->nr_FullName);
+@
+
+
+36.4
+log
+@*** empty log message ***
+@
+text
+@d58 1
+@
+
+
+36.3
+log
+@changed structure, added removal of messages to EndNotify.
+@
+text
+@d5 2
+a6 2
+#include "libraries/dos.h"
+#include "libraries/dosextens.h"
+d10 1
+a10 1
+#include "libraries/notify.h"
+@
+
+
+36.2
+log
+@Fixed Startnotify on assigns to root directories.
+@
+text
+@d54 2
+a55 2
+		nreq->nr_Handler = dp->dvp_Port;
+		nreq->nr_Private = (LONG) nreq->nr_Name;
+d74 1
+a74 1
+			nreq->nr_Private = (LONG) name;
+d85 1
+a85 1
+				nreq->nr_Private = NULL;
+d101 1
+d108 2
+a109 2
+			if (nreq->nr_Private &&
+			    nreq->nr_Private != (LONG) nreq->nr_Name)
+d111 2
+a112 2
+				freevec((char *) nreq->nr_Private);
+				nreq->nr_Private = NULL;
+d114 39
+d156 1
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d70 4
+a73 2
+			strcat(name,"/");	/* FIX! broken! */
+			strcat(name,strchr(nreq->nr_Name,':')+1); /* FIX! */
+@

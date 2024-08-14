@@ -1,0 +1,1 @@
+€Œ<proto/mathffp.h>Œ<proto/mathtrans.h>€acos(f) SPAcos(f)€asin(f) SPAsin(f)€atan(f) SPAtan(f)€cos(f) SPCos(f)€cosh(f) SPCosh(f)€exp(f) SPExp(f)€fabs(f) SPAbs(f)€floor(f) SPFloor(f)€log(f) SPLog(f)€log10(f) SPLog10(f)€sin(f) SPSin(f)€sinh(f) SPSinh(f)€sqrt(f) SPSqrt(f)€tan(f) SPTan(f)€tanh(f) SPTanh(f)€ceil(f) SPFceil(f)€sincos(f,fp) SPSincos(f,fp)€pow(f1,f) SPPow(f,f1)

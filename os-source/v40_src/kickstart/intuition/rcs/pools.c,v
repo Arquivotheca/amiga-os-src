@@ -1,0 +1,186 @@
+head     38.0;
+branch   ;
+access   ;
+symbols  V40_85:38.0 V40_71:38.0 V40_68:38.0 V40_65:38.0 V40_47:38.0 V40_45:38.0 V40_37:38.0 V40_34:38.0 V40_29:38.0 V39_2415:38.0 V39_2369:38.0 V39_2339:38.0 V39_2332:38.0 V39_2275:38.0 V39_2256:38.0 V39_2210:38.0 V39_2192:38.0 V39_2084:38.0 V39_2082:38.0 V39_2076:38.0 V39_2073:38.0 V39_2058:38.0 V39_2051:38.0 V39_2031:38.0 V39_2017:38.0 V39_2012:38.0 V39_1985:38.0 V39_1933:38.0 V39_1819:38.0 V39_1805:38.0 V39_1783:38.0 V39_1695:38.0 V39_1621:38.0 V39_1620:38.0 V39_1508:38.0 V39_1485:38.0 V39_1461:38.0 V39_1458:38.0 V39_1456:38.0 V39_1405:38.0 V39_1368:38.0 V39_1360:38.0 V39_1324:38.0 V39_1147:38.0 V39_1143:38.0 V39_1141:38.0 V39_1120:38.0 V39_1116:38.0 V39_1104:38.0 V39_1100:38.0 V39_1078:38.0 V39_1073:38.0 V39_757:38.0 V39_702:38.0 V39_557:38.0 V39_553:38.0 V39_551:38.0 V39_510:38.0 V39_495:38.0 V39_416:38.0 V39_383:38.0 V39_371:38.0 V39_336:38.0 V39_323:38.0 V39_295:38.0 V39_277:38.0 V39_254:38.0 V39_222:38.0 V39_185:38.0 V39_171:38.0 V39_161:38.0 V38_159:38.0 V38_116:38.0 V38_59:38.0;
+locks    ; strict;
+comment  @*   @;
+
+
+38.0
+date     91.06.12.14.28.05;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.0
+log
+@Initial V38 check-in (matches V37 release).
+@
+text
+@/*** pools.c *****************************************************************
+ *
+ * pools.c -- simple pool allocation scheme with pre-alloc
+ *
+ *  $Id: pools.c,v 1.6 90/04/19 15:50:23 jimm Exp $
+ *
+ *  Confidential Information: Commodore-Amiga, Inc.
+ *  Copyright (C) 1989, Commodore-Amiga, Inc.
+ *  All Rights Reserved
+ *
+ ****************************************************************************/
+
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+
+#define printf kprintf
+#define D(x)	;
+
+/*
+ * allocates things that begin with a Node, which it uses
+ * to manage a free list.  You supply the free list and
+ * specify how big the nodes will be and how many you want
+ * preallocated during init.
+ *
+ * FUNCTIONS:
+ * poolInit( list, nodesize, initalloc );
+ *	set up the list as a free list for data of size 'nodesize'
+ *	and pre-allocate 'initalloc' nodes which will stick around.
+ * poolGet( list )
+ *	check the free list for a node, alloc a new one if needed
+ * poolReturn( node )
+ *	return node to free list or freemem, depending on ln_Pri
+ *
+ * Special uses:
+ * - the free list lh_Type and l_pad fields are used together
+ *	to hold the size of the member chunks
+ * - the node ln_Pri field is used to hold whether the
+ *	node is to be free'd when it is returned or kept
+ *	in the free list.  If pri > 0, the node is kept around.
+ * - the name field of the node is used to point back to its
+ *	free list, so you can't change it.
+ *
+ * So, if you have uses for some nodes, and you don't need the 
+ * name field and can live with the use of the pri field,
+ * this is for you.
+ */
+
+struct Node	*RemHead();
+
+/* same size as list, just using last word for something of my own */
+struct PoolList { 
+   struct  Node *lh_Head;
+   struct  Node *lh_Tail;
+   struct  Node *lh_TailPred;
+#if 1
+   UWORD	pl_MemberSize;		/* my interpretation */
+#else
+   UBYTE   lh_Type;
+   UBYTE   l_pad;
+#endif
+};
+
+/* additional size of members is stashed in list header */
+#define LH_NODESIZE( list )	(((struct PoolList *)(list))->pl_MemberSize)
+
+/* free list back pointer in ln_Name */
+#define LN_FREELIST( ln )	( (struct List *)ln->ln_Name)
+
+/*
+ * allocate a node, size gotten from list header
+ */
+STATIC struct Node	*
+createPoolNode( lh )
+struct List	*lh;
+{
+    struct Node	*ln;
+
+    /* use size stashed in lh_Type */
+    if ( ln = (struct Node *) AllocMem( LH_NODESIZE( lh ) , MEMF_CLEAR))
+    {
+	LN_FREELIST( ln ) = lh;	/* back link */
+	/* ln->ln_Pri = 0; means will be freed  */
+    }
+    return ( ln );
+}
+
+/*
+ * a pool is a free list of data chunks preceded by a header,
+ * with size of chunks stored in the header.
+ *
+ * 'initnum' elements will be allocated and kept around.
+ */
+poolInit( lh, size, initnum )
+struct List	*lh;
+int		size;
+{
+    struct Node	*ln;
+
+    D( printf("poolInit: %lx, size %ld, initnum %ld\n", lh, size, initnum ) );
+
+    /* init the list	*/
+    NewList( lh );
+
+
+    LH_NODESIZE( lh ) = size;
+
+    while ( initnum-- )
+    {
+	/* alloc a few guys, stick 'em on the list */
+	if ( ln = createPoolNode( lh ) )
+	{
+	    ln->ln_Pri = 1;	/* we'll keep these >0 guys around */
+	    AddTail( lh, ln );
+	}
+    }
+}
+
+struct Node	*
+poolGet( lh )
+struct List	*lh;
+{
+    struct Node	*ln;
+
+    D( printf("poolGet: list at %lx\n", lh ) );
+
+    if ( ! ( ln = RemHead( lh ) ) )
+    {
+	D( printf("poolGet: go get\n") );
+	ln = createPoolNode();
+    }
+
+    D( printf("pG: returning %lx\n") );
+
+    return ( ln );
+}
+
+poolReturn( ln )
+struct Node	*ln;
+{
+    struct List	*lh;
+
+    if ( ln )	/* feeling generous: check for stupid callers */
+    {
+	lh = LN_FREELIST( ln );
+
+	D( printf("pR: list: %lx\n", lh ) );
+
+	if ( ln->ln_Pri <= 0 )
+	{
+	    FreeMem( ln, LH_NODESIZE( lh ) );
+	}
+	else
+	{
+	    AddTail( lh, ln );
+	}
+    }
+    D( else {kprintf("poolReturn NULL passed\n");Debug();} )
+}
+
+@

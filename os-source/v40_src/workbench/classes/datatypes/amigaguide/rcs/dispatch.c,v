@@ -1,0 +1,1931 @@
+head     39.15;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.15; strict;
+comment  @ * @;
+
+
+39.15
+date     93.09.22.15.48.43;  author davidj;  state Exp;
+branches ;
+next     39.14;
+
+39.14
+date     93.06.17.14.17.29;  author davidj;  state Exp;
+branches ;
+next     39.13;
+
+39.13
+date     93.05.13.13.54.10;  author davidj;  state Exp;
+branches ;
+next     39.12;
+
+39.12
+date     93.04.30.16.12.29;  author davidj;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     93.03.22.16.30.08;  author davidj;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     92.12.04.17.14.17;  author davidj;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     92.08.13.13.40.27;  author davidj;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     92.08.10.16.34.57;  author davidj;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     92.08.03.17.06.24;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.07.15.22.34.04;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.06.26.02.54.30;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.06.23.03.47.40;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.06.22.10.51.23;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.19.04.05.35;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.05.04.20.06;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.30.58;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.15
+log
+@can now turn off the control panel
+@
+text
+@/* dispatch.c
+ *
+ */
+
+#include "amigaguidebase.h"
+
+//#define PROF
+#include <internal/prof.h>
+
+/*****************************************************************************/
+
+/* This used to be -1, but then that was before the days of DTA_Sync */
+#define	DEF_TOP		0
+
+/*****************************************************************************/
+
+/* These are attributes that we want to pass to the embedded object */
+Tag embed_attrs[] =
+{
+    DTA_TopVert,
+    DTA_TopHoriz,
+    TAG_END,
+};
+
+/* These are attributes that CAN NOT be passed to embedded objects */
+Tag nembed_attrs[] =
+{
+    DTA_Domain,
+
+    ICA_TARGET,
+    ICA_MAP,
+    TAG_END,
+};
+
+/*****************************************************************************/
+
+/* Trigger methods we support */
+struct DTMethod tm[] =
+{
+    {"Contents",	"CONTENTS",	STM_CONTENTS},
+    {"Index",		"INDEX",	STM_INDEX},
+    {"Retrace",		"RETRACE",	STM_RETRACE},
+    {"Browse <",	"PREVIOUS",	STM_BROWSE_PREV},
+    {"Browse >",	"NEXT",		STM_BROWSE_NEXT},
+
+    {NULL,},
+};
+
+/*****************************************************************************/
+
+/* Methods we support */
+ULONG m[] =
+{
+    OM_NEW,
+    OM_GET,
+    OM_SET,
+    OM_UPDATE,
+    OM_DISPOSE,
+
+    GM_LAYOUT,
+    GM_HITTEST,
+    GM_GOACTIVE,
+    GM_HANDLEINPUT,
+    GM_RENDER,
+
+    DTM_CLEARSELECTED,
+
+    DTM_PRINT,
+    DTM_COPY,
+    DTM_WRITE,
+
+    DTM_GOTO,
+    DTM_TRIGGER,
+    DTM_REMOVEDTOBJECT,
+    DTM_FRAMEBOX,
+
+    ~0,
+};
+
+/*****************************************************************************/
+
+/* TAB, SPACE, COMMA, ... */
+UBYTE delimArray[] = "	 *-,<>()[];\"";
+
+/*****************************************************************************/
+
+BOOL initializeAG (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);	/* Object data */
+    LONG line, column;
+    BPTR lock = NULL;				/* Lock on directory */
+    STRPTR name;				/* Where are we going? */
+    UWORD i;
+    BPTR fh;
+
+    /* Initialize the variables */
+    NewList ((struct List *) &cd->cd_HistoryList);
+    NewList ((struct List *) &cd->cd_LineList);
+    NewList ((struct List *) &cd->cd_XRefList);
+
+    /* Establish defaults */
+    cd->cd_WordDelim = delimArray;
+
+    if (LocaleBase)
+	cd->cd_Locale = OpenLocale (NULL);
+
+    /* Get the help group */
+    cd->cd_HelpGroup  = GetTagData (AGA_HelpGroup,GetUniqueID (), msg->ops_AttrList);
+
+    /* Initialize the active number */
+    cd->cd_ActiveNum = 1;
+
+    /* Get the name of the database */
+    name   = (STRPTR) GetTagData (DTA_Name, NULL, msg->ops_AttrList);
+
+    /* Get the current position information */
+    line   = GetTagData (DTA_TopVert,  DEF_TOP, msg->ops_AttrList);
+    column = GetTagData (DTA_TopHoriz, DEF_TOP, msg->ops_AttrList);
+
+    /* Disable all the buttons */
+    for (i = 0; i < MAX_CONTROLS; i++)
+	cd->cd_Controls[i].c_Flags |= CF_DISABLED;
+
+    /* This is only to be used to obtain attributes from the embedded objects and
+     * nothing else! */
+    if (cd->cd_Glue = newobject (ag, ag->ag_ModelClass, NULL,
+				 DBA_Class,		(ULONG) cl,
+				 DBA_Object,		(ULONG) o,
+				 DBA_ClientData,	(ULONG) cd,
+				 TAG_DONE))
+    {
+	/* This frame is use for the control buttons */
+	if (cd->cd_Frame = newobject (ag, NULL, FRAMEICLASS,
+				      IA_EdgesOnly, FALSE,
+				      IA_FrameType, FRAME_BUTTON,
+				      TAG_DONE))
+	{
+	    /* Every database is an object */
+	    if (cd->cd_Database = cd->cd_CurrentDatabase = newobject (ag, ag->ag_DatabaseClass, NULL,
+								      DBA_Name,		name,
+								      DBA_ClientData,	cd,
+								      TAG_DONE))
+	    {
+		/* Where are we going? */
+		name = (STRPTR) GetTagData (DTA_NodeName, NULL, msg->ops_AttrList);
+		name = (name) ? name : "Main";
+
+		GetAttr (DTA_Handle, o, (ULONG *) & fh);
+		if (fh)
+		{
+		    lock = ParentOfFH (fh);
+		}
+
+		/* Set the current node */
+		if (cd->cd_CurrentNode = ObtainNode (ag, cl, o, name, line, column))
+		{
+		    /* Set all the attributes */
+		    setAGAttrs (ag, cl, o, (struct opSet *) msg);
+
+		    /* Create a process to monitor this object */
+		    if (cd->cd_Process = createnewproc (ag,
+							NP_Output, Output (),
+							NP_CloseOutput, FALSE,
+							NP_Input, Input (),
+							NP_CloseInput, FALSE,
+							NP_Cli, TRUE,
+							NP_Name, PROC_NAME,
+							NP_CommandName, PROC_NAME,
+							NP_StackSize, 8096L,
+							NP_Entry, ObjectHandler,
+							NP_Priority, 0L,
+							NP_CurrentDir, lock,
+							TAG_DONE))
+		    {
+			/* Initialize the message */
+			cd->cd_Message.sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+			cd->cd_Message.sm_Message.mn_Length = sizeof (struct StartupMsg);
+			cd->cd_Message.sm_Message.mn_ReplyPort = &((struct Process *)FindTask(NULL))->pr_MsgPort;
+			cd->cd_Message.sm_AG     = ag;
+			cd->cd_Message.sm_Class  = cl;
+			cd->cd_Message.sm_Object = o;
+
+			/* Show that we are operational */
+			cd->cd_Going = TRUE;
+
+			/* Send the information to the process */
+			PutMsg (&(cd->cd_Process->pr_MsgPort), &cd->cd_Message);
+
+			/* Wait until the new process starts */
+			WaitPort (cd->cd_Message.sm_Message.mn_ReplyPort);
+
+			/* Pull the message */
+			GetMsg (cd->cd_Message.sm_Message.mn_ReplyPort);
+
+			/* No error return value */
+			if (cd->cd_Message.sm_Return == 0)
+			    return (TRUE);
+
+			/* Set the error return value */
+			SetIoErr (cd->cd_Message.sm_Return);
+		    }
+		}
+	    }
+	}
+	else
+	    SetIoErr (ERROR_NO_FREE_STORE);
+    }
+    else
+	SetIoErr (ERROR_NO_FREE_STORE);
+
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+/* Inquire attribute of an object */
+ULONG getAGAttr (struct AGLib * ag, Class * cl, Object * o, struct opGet * msg)
+{
+    extern struct MsgPort *ARexxPort (struct AGLib *ag, struct ARexxContext * rc);
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct NodeData *nd;
+
+    /* See if we should be trying to get the attribute from an embedded object */
+    if (cd->cd_CurrentNode && TagInArray (msg->opg_AttrID, embed_attrs))
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+	if (nd->nd_Object)
+	    return DoMethodA (nd->nd_Object, msg);
+    }
+
+    switch (msg->opg_AttrID)
+    {
+	case AGA_Reserved3:
+	    *msg->opg_Storage = (ULONG) cd->cd_SIPCPort;
+	    break;
+
+	case AGA_ARexxPort:
+	    *msg->opg_Storage = (ULONG) ARexxPort (ag, cd->cd_ARexxContext);
+	    break;
+
+	case DTA_TriggerMethods:
+	    *msg->opg_Storage = (ULONG) tm;
+	    break;
+
+	case DTA_Methods:
+	    *msg->opg_Storage = (ULONG) m;
+	    break;
+
+	case DTA_TextAttr:
+	    *msg->opg_Storage = (ULONG) cd->cd_TextAttr;
+	    break;
+
+	default:
+	    return (DoSuperMethodA (cl, o, msg));
+    }
+
+    return (1L);
+}
+
+/*****************************************************************************/
+
+/* Set attributes of an object */
+ULONG setAGAttrs (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct TagItem *tags = msg->ops_AttrList;
+    struct TagItem *origtags;
+    struct TagItem *tstate;
+    struct TagItem *tag;
+    struct NodeData *nd;
+    ULONG refresh = 0L;
+    ULONG tidata;
+
+    nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+    if (nd->nd_Object)
+    {
+	/* Set aside the tags so that we can properly send them out */
+	origtags = msg->ops_AttrList;
+	msg->ops_AttrList = CloneTagItems (origtags);
+
+	/* See if we have anything to send to the embedded object */
+	if (FilterTagItems (msg->ops_AttrList, embed_attrs, TAGFILTER_AND))
+	    DoMethodA (nd->nd_Object, msg);
+
+	/* Free clone and restore original */
+	FreeTagItems (msg->ops_AttrList);
+	msg->ops_AttrList = origtags;
+    }
+
+    /* process rest */
+    tstate = tags;
+    while (tag = NextTagItem (&tstate))
+    {
+	tidata = tag->ti_Data;
+	switch (tag->ti_Tag)
+	{
+	    /* This attribute is just here for debugging.  Take it out soon */
+	    case TDTA_WordSelect:
+		break;
+
+	    case TDTA_WordDelim:
+		cd->cd_WordDelim = (UBYTE *) tidata;
+		break;
+
+	    case DTA_TextAttr:
+		cd->cd_TextAttr = (struct TextAttr *) tidata;
+		if (cd->cd_Font)
+		    CloseFont (cd->cd_Font);
+		cd->cd_Font = OpenFont (cd->cd_TextAttr);
+
+	    case DTA_VisibleVert:
+	    case DTA_TotalVert:
+	    case DTA_VisibleHoriz:
+	    case DTA_TotalHoriz:
+		refresh = 1L;
+		break;
+
+	    case DTA_Sync:
+		if (tidata)
+		    refresh = 1L;
+		break;
+
+	    case DTA_ARexxPortName:
+		cd->cd_ARexxPortName = (STRPTR) tidata;
+		break;
+
+	    case DTA_ControlPanel:
+		if (tidata)
+		    cd->cd_Flags |= AGF_CONTROLS;
+		else
+		    cd->cd_Flags &= ~AGF_CONTROLS;
+		break;
+	}
+    }
+    return (refresh);
+}
+
+/*****************************************************************************/
+
+ULONG frameMethod (struct AGLib * ag, Class * cl, Object * o, struct dtFrameBox * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct TextFont *tfont = NULL;
+    struct DTSpecialInfo *si;
+    struct TextFont *font;
+    struct FrameInfo *fri;
+    struct NodeData *nd;
+    ULONG retval = 1L;
+
+    if (cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+	if (nd->nd_Object)
+	{
+	    return DoMethodA (nd->nd_Object, msg);
+	}
+    }
+
+    if ((msg->dtf_FrameFlags & FRAMEF_SPECIFY) && o)
+    {
+	si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+	fri = msg->dtf_ContentsInfo;
+	if (cd->cd_CurrentNode && nd->nd_Font)
+	    font = nd->nd_Font;
+	else if (cd->cd_Font)
+	    font = cd->cd_Font;
+	else
+	    tfont = font = OpenFont (fri->fri_Screen->Font);
+
+	cd->cd_TotVert  = si->si_TotVert  = cd->cd_LineHeight * 24;
+	cd->cd_TotHoriz = si->si_TotHoriz = font->tf_XSize * 80;
+
+	if (tfont)
+	    CloseFont (tfont);
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+
+ULONG ASM Dispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+{
+    struct AGLib *ag = (struct AGLib *) cl->cl_UserData;
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct NodeData *nd = NULL;
+    struct DTSpecialInfo *si;
+    struct RastPort *rp;
+    struct gpRender gpr;
+    ULONG retval = 0L;
+    struct Node *node;
+    Object *newobj;
+
+    ONTIMER(0);
+
+    if (cd->cd_CurrentNode)
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+    switch (msg->MethodID)
+    {
+	case OM_NEW:
+	    if (newobj = (Object *) DoSuperMethodA (cl, o, msg))
+	    {
+		BOOL success = FALSE;
+		ULONG errNumber;
+		ULONG poolsize;
+
+		cd = INST_DATA (cl, newobj);
+
+		/* Start out with controls by default */
+		cd->cd_Flags |= AGF_CONTROLS;
+
+		/* Say we have scrollraster stuff */
+		EG (newobj)->MoreFlags |= GMORE_SCROLLRASTER;
+
+		poolsize = sizeof (struct Line) * 100;
+		if (cd->cd_Pool = CreatePool (MEMF_CLEAR | MEMF_PUBLIC, poolsize, poolsize))
+		{
+		    if (initializeAG (ag, cl, newobj, (struct opSet *) msg))
+		    {
+			if (cd->cd_Region = NewRegion ())
+			    success = TRUE;
+			else
+			    SetIoErr (ERROR_NO_FREE_STORE);
+		    }
+		}
+		else
+		    SetIoErr (ERROR_NO_FREE_STORE);
+
+		if (!success)
+		{
+		    errNumber = IoErr ();
+
+		    CoerceMethod (cl, newobj, OM_DISPOSE);
+		    newobj = NULL;
+
+		    SetIoErr (errNumber);
+		}
+	    }
+	    retval = (ULONG) newobj;
+	    break;
+
+	case OM_GET:
+	    retval = getAGAttr (ag, cl, o, (struct opGet *) msg);
+	    break;
+
+	case OM_SET:
+	case OM_UPDATE:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    retval += setAGAttrs (ag, cl, o, (struct opSet *) msg);
+	    if (retval && (OCLASS (o) == cl))
+	    {
+		/* Get a pointer to the rastport */
+		if (rp = ObtainGIRPort (((struct opSet *) msg)->ops_GInfo))
+		{
+		    /* Force a redraw */
+		    gpr.MethodID   = GM_RENDER;
+		    gpr.gpr_GInfo  = ((struct opSet *) msg)->ops_GInfo;
+		    gpr.gpr_RPort  = rp;
+		    gpr.gpr_Redraw = GREDRAW_UPDATE;
+		    DoMethodA (o, &gpr);
+
+		    /* Release the temporary rastport */
+		    ReleaseGIRPort (rp);
+		}
+		/* Clear the return value */
+		retval = 0L;
+	    }
+	    break;
+
+	case DTM_GOTO:
+	    retval = sam (ag, cd, msg, sizeof (struct dtGoto));
+	    break;
+
+	case DTM_TRIGGER:
+	    retval = sam (ag, cd, msg, sizeof (struct dtTrigger));
+	    break;
+
+	case DTM_PROCLAYOUT:
+	case GM_LAYOUT:
+	    /* We need to cache the window & requester pointers */
+	    if (((struct gpLayout *) msg)->gpl_Initial)
+	    {
+		/* Copy the GadgetInfo structure */
+		cd->cd_GInfo = *(((struct gpLayout *)msg)->gpl_GInfo);
+		cd->cd_Window    = ((struct gpLayout *) msg)->gpl_GInfo->gi_Window;
+		cd->cd_Requester = ((struct gpLayout *) msg)->gpl_GInfo->gi_Requester;
+
+		if (cd->cd_Window)
+		{
+		    if (cd->cd_Window->RPort)
+			cd->cd_RPort = *(cd->cd_Window->RPort);
+		    else
+			memset (&cd->cd_RPort, 0, sizeof (struct RastPort));
+		}
+	    }
+
+	    /* We have to pass this one up to our superclass */
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+
+	    si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+	    if (si->si_Flags & DTSIF_LAYOUT)
+	    {
+		si->si_Flags |= DTSIF_NEWSIZE;
+		retval = 1L;
+	    }
+	    else
+	    {
+		/* Show that we are busy */
+		cd->cd_Flags |= AGF_BUSY;
+
+		notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+				   GA_ID, G (o)->GadgetID,
+				   DTA_Busy, TRUE,
+				   TAG_DONE);
+
+		si->si_Flags |= DTSIF_LAYOUT;
+		sam (ag, cd, msg, sizeof (struct gpLayout));
+	    }
+	    break;
+
+	case DTM_REMOVEDTOBJECT:
+	    /* Do we have a control process running */
+	    if ((cd->cd_Flags & AGF_RUNNING) && cd->cd_Process)
+	    {
+		/* Tell the control process to go away */
+		Signal (cd->cd_Process, SIGBREAKF_CTRL_E);
+
+		/* Wait until they go away */
+		si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+		while (si->si_Flags & (DTSIF_LAYOUT | DTSIF_PRINTING))
+		    Delay (3);
+
+		cd->cd_Window = NULL;
+		cd->cd_Requester = NULL;
+	    }
+	    break;
+
+	case DTM_FRAMEBOX:
+	    retval = frameMethod (ag, cl, o, (struct dtFrameBox *) msg);
+	    break;
+
+	case GM_HITTEST:
+	    if (!(cd->cd_Flags & AGF_BUSY))
+		retval = propagateHit (ag, cl, o, (struct gpHitTest *)msg);
+	    break;
+
+	case GM_GOACTIVE:
+	case GM_HANDLEINPUT:
+	    retval = handleInput (ag, cl, o, (struct gpInput *) msg);
+	    break;
+
+	case GM_GOINACTIVE:
+	    retval = goinactive (ag, cl, o, (struct gpInput *) msg);
+	    break;
+
+	case GM_RENDER:
+	    retval = renderMethod (ag, cl, o, (struct gpRender *) msg);
+	    break;
+
+	case DTM_CLEARSELECTED:
+	    ((struct DTSpecialInfo *) (G (o)->SpecialInfo))->si_Flags &= ~DTSIF_HIGHLIGHT;
+
+	case DTM_SELECT:
+	    if (nd->nd_Object)
+	    {
+		struct DTSpecialInfo *esi;
+
+		esi = (struct DTSpecialInfo *) G(nd->nd_Object)->SpecialInfo;
+		si  = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+
+		retval = DoMethodA (nd->nd_Object, msg);
+		si->si_Flags = esi->si_Flags;
+	    }
+	    else
+	    {
+		struct dtSelect *dts = (struct dtSelect *) msg;
+
+		/* Get a pointer to the rastport */
+		if (rp = ObtainGIRPort (dts->dts_GInfo))
+		{
+		    /* Toggle the currently selected line */
+		    gpr.MethodID   = GM_RENDER;
+		    gpr.gpr_GInfo  = dts->dts_GInfo;
+		    gpr.gpr_RPort  = rp;
+		    gpr.gpr_Redraw = GREDRAW_TOGGLE;
+		    DoMethodA (o, &gpr);
+
+		    /* Release the temporary rastport */
+		    ReleaseGIRPort (rp);
+		}
+		/* Clear the return value */
+		retval = 0L;
+	    }
+	    break;
+
+	case DTM_WRITE:
+	case DTM_COPY:
+	case DTM_PRINT:
+	    if (nd->nd_Object)
+	    {
+		struct DTSpecialInfo *esi;
+
+		esi = (struct DTSpecialInfo *) G(nd->nd_Object)->SpecialInfo;
+		si  = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+
+		retval = DoMethodA (nd->nd_Object, msg);
+		si->si_Flags = esi->si_Flags;
+	    }
+	    else
+	    {
+		switch (msg->MethodID)
+		{
+		    case DTM_WRITE:
+			retval = writeMethod (ag, cl, o, (struct dtWrite *) msg);
+			break;
+
+		    case DTM_COPY:
+			retval = copyMethod (ag, cl, o, (struct dtGeneral *) msg);
+			break;
+
+		    case DTM_PRINT:
+			retval = dumpNode (ag, 255, ((struct dtPrint *)msg)->dtp_PIO, o, cd);
+			break;
+		}
+	    }
+	    break;
+
+	case OM_DISPOSE:
+	    /* Show that it's time to go away */
+	    cd->cd_Flags |= AGF_DISPOSE;
+
+	    /* Do we have a control process running */
+	    if ((cd->cd_Flags & AGF_RUNNING) && cd->cd_Process)
+	    {
+		/* Tell the control process to go away */
+		Signal (cd->cd_Process, SIGBREAKF_CTRL_C);
+
+		/* Wait until they go away */
+		while (cd->cd_Flags & AGF_RUNNING)
+		    Delay (2);
+	    }
+
+	    /* Free the history list */
+	    while (node = RemHead ((struct List *) &cd->cd_HistoryList))
+		FreeVec (node);
+
+	    /* Delete the line list */
+	    DeletePool (cd->cd_Pool);
+
+	    /* Close the font */
+	    if (cd->cd_Font)
+		CloseFont (cd->cd_Font);
+
+	    /* Release the current node */
+	    ReleaseNode (ag, cl, o, cd->cd_CurrentNode);
+
+	    /* Get rid of the database */
+	    if (cd->cd_Database)
+		DoMethod (cd->cd_Database, OM_DISPOSE);
+
+	    /* Get rid of the button's frame */
+	    if (cd->cd_Frame)
+		DoMethod (cd->cd_Frame, OM_DISPOSE);
+
+	    /* Get rid of the glue */
+	    if (cd->cd_Glue)
+		DoMethod (cd->cd_Glue, OM_DISPOSE);
+
+	    if (LocaleBase)
+		CloseLocale (cd->cd_Locale);
+
+	    if (cd->cd_Region)
+		DisposeRegion (cd->cd_Region);
+
+	    /* Let the superclass handle everything else */
+	default:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    break;
+    }
+
+    OFFTIMER(0);
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+Class *initClass (struct AGLib * ag)
+{
+    Class *cl;
+
+    if (cl = MakeClass (AMIGAGUIDEDTCLASS, DATATYPESCLASS, NULL, sizeof (struct ClientData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = (ULONG (*)()) Dispatch;
+	cl->cl_UserData = (ULONG) ag;
+	AddClass (cl);
+    }
+
+    return (cl);
+}
+@
+
+
+39.14
+log
+@*** empty log message ***
+@
+text
+@d326 7
+d413 4
+@
+
+
+39.13
+log
+@no change
+@
+text
+@d219 1
+d233 8
+d321 4
+@
+
+
+39.12
+log
+@clean up
+@
+text
+@d7 3
+d377 2
+d594 2
+a595 1
+			return writeMethod (ag, cl, o, (struct dtWrite *) msg);
+d598 2
+a599 1
+			return copyMethod (ag, cl, o, (struct dtGeneral *) msg);
+d602 2
+a603 1
+			return dumpNode (ag, 255, ((struct dtPrint *)msg)->dtp_PIO, o, cd);
+d660 3
+@
+
+
+39.11
+log
+@clean up
+@
+text
+@d94 1
+a94 1
+    NewList (&cd->cd_HistoryList);
+d96 1
+a96 1
+    NewList (&cd->cd_XRefList);
+d105 1
+a105 1
+    cd->cd_HelpGroup  = GetTagData (AGA_HelpGroup,  GetUniqueID (),          msg->ops_AttrList);
+d107 3
+d175 3
+a177 2
+			cd->cd_Message.sm_AG = ag;
+			cd->cd_Message.sm_Class = cl;
+d187 8
+a194 2
+			while (!(cd->cd_Flags & AGF_RUNNING))
+			    Delay (2);
+d196 2
+a197 1
+			return (TRUE);
+d202 2
+d205 3
+d383 1
+d391 1
+a391 2
+
+		if (initializeAG (ag, cl, newobj, (struct opSet *) msg))
+d393 1
+a393 1
+		    if (cd->cd_Region = NewRegion ())
+d395 1
+a395 2
+			if (cd->cd_Pool = CreatePool (MEMF_CLEAR | MEMF_PUBLIC, poolsize, poolsize))
+			{
+d397 2
+a398 1
+			}
+d401 2
+d406 2
+a407 1
+		    cd->cd_Flags |= AGF_COERCED;
+d410 2
+a457 2
+//		struct RastPort *rp = ((struct gpLayout *) msg)->gpl_GInfo->gi_Window->RPort;
+
+a462 4
+#if 0
+		/* Clone the initial RastPort */
+		cd->cd_RPort = *rp;
+#else
+a465 1
+		    {
+a466 1
+		    }
+a467 2
+		    {
+			kprintf ("!!! DANGER -- no rastport at layout !!!\n");
+a468 1
+		    }
+a469 5
+		else
+		{
+		    kprintf ("!!! DANGER -- no window at layout !!!\n");
+		}
+#endif
+d616 1
+a616 1
+	    while (node = RemHead (&cd->cd_HistoryList))
+a645 4
+
+	    /* Clear the IO error field */
+	    if (!(cd->cd_Flags & AGF_COERCED))
+		SetIoErr (0);
+@
+
+
+39.10
+log
+@render speedup.
+@
+text
+@d9 201
+a209 5
+#define	DB(x)	;
+#define	DS(x)	;
+#define	DC(x)	;
+#define	DM(x)	;
+#define	DL(x)	;
+d211 21
+d234 64
+a297 2
+/* This used to be -1, but then that was before the days of DTA_Sync */
+#define	DEF_TOP		0
+d301 1
+a301 1
+Class *initClass (struct AGLib * ag)
+d303 17
+a319 1
+    Class *cl;
+d321 1
+a321 1
+    if (cl = MakeClass (AMIGAGUIDEDTCLASS, DATATYPESCLASS, NULL, sizeof (struct ClientData), 0L))
+d323 14
+a336 3
+	cl->cl_Dispatcher.h_Entry = Dispatch;
+	cl->cl_UserData = (ULONG) ag;
+	AddClass (cl);
+d339 1
+a339 1
+    return (cl);
+d343 2
+a358 1
+    {
+a359 1
+    }
+a360 1
+    DM (kprintf ("ag : method=%3ld msg=%08lx : ", msg->MethodID, msg));
+a363 1
+	    DM (kprintf ("om_new\n"));
+d371 2
+d388 1
+a396 1
+	    DM (kprintf ("om_get\n"));
+a400 1
+	    DM (kprintf ("om_set\n"));
+a401 1
+	    DM (kprintf ("om_update\n"));
+a424 1
+	    DM (kprintf ("dtm_goto\n"));
+a428 1
+	    DM (kprintf ("dtm_trigger\n"));
+a433 1
+	    DM (kprintf ("gm_layout\n"));
+d437 2
+d444 4
+a447 1
+		DL (kprintf ("  win=0x%lx, req=0x%lx\n", cd->cd_Window, cd->cd_Requester));
+a449 1
+		    DL (kprintf ("  rport=0x%lx\n", cd->cd_Window->RPort));
+d451 1
+d453 1
+d455 2
+d458 5
+d464 1
+a467 1
+	    DL (kprintf ("  pass to super\n"));
+a472 1
+		DL (kprintf ("  newsize\n"));
+a480 1
+		DL (kprintf ("  notify changes\n"));
+a486 1
+		DL (kprintf ("  send to process\n"));
+a491 1
+	    DM (kprintf ("dtm_removedtobject\n"));
+a508 1
+	    DM (kprintf ("dtm_framebox\n"));
+a512 1
+	    DM (kprintf ("gm_hittest\n"));
+a518 1
+	    DM (kprintf ("gm_handleinput\n"));
+a522 1
+	    DM (kprintf ("gm_goinactive\n"));
+a526 1
+	    DM (kprintf ("gm_render\n"));
+a529 1
+#if 1
+a530 1
+	    DM (kprintf ("dtm_clearselected\n"));
+a533 1
+	    DM (kprintf ("dtm_select\n"));
+a564 14
+#else
+	case DTM_CLEARSELECTED:
+	case DTM_SELECT:
+	    if (nd->nd_Object)
+	    {
+		struct DTSpecialInfo *esi;
+
+		esi = (struct DTSpecialInfo *) G(nd->nd_Object)->SpecialInfo;
+		si  = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+
+		retval = DoMethodA (nd->nd_Object, msg);
+		si->si_Flags = esi->si_Flags;
+	    }
+	    break;
+a565 1
+#endif
+a566 13
+	    DM (kprintf ("dtm_write\n"));
+	    if (nd->nd_Object)
+	    {
+		struct DTSpecialInfo *esi;
+
+		esi = (struct DTSpecialInfo *) G(nd->nd_Object)->SpecialInfo;
+		si  = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+
+		retval = DoMethodA (nd->nd_Object, msg);
+		si->si_Flags = esi->si_Flags;
+	    }
+	    break;
+
+d568 1
+a568 1
+	    DM (kprintf ("dtm_copy\n"));
+d581 11
+a591 1
+		retval = copyMethod (ag, cl, o, (struct dtGeneral *) msg);
+a594 5
+	case DTM_PRINT:
+	    DM (kprintf ("dtm_print\n"));
+	    retval = printMethod (ag, cl, o, (struct dtPrint *) msg);
+	    break;
+
+a595 1
+	    DM (kprintf ("om_dispose\n"));
+a602 1
+		DS (kprintf ("  break process\n"));
+a610 1
+	    DS (kprintf ("  free history list\n"));
+a617 1
+	    DS (kprintf ("  close font\n"));
+a621 1
+	    DS (kprintf ("  release current node\n"));
+a624 1
+	    DS (kprintf ("  dispose of database\n"));
+a628 1
+	    DS (kprintf ("  dispose of frame\n"));
+a632 1
+	    DS (kprintf ("  dispose of glue\n"));
+a635 1
+	    DS (kprintf ("  dispose of locale\n"));
+d642 3
+a644 1
+	    DS (kprintf ("  pass to superclass\n"));
+a647 1
+	    DM (kprintf ("default\n"));
+a650 2
+
+    DM (kprintf ("return (method=%3ld msg=%08lx) : %08lx\n", msg->MethodID, msg, retval));
+d656 1
+a656 6
+/* TAB, SPACE, COMMA, ... */
+UBYTE delimArray[] = "	 *-,()<>[];\"";
+
+/*****************************************************************************/
+
+BOOL initializeAG (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+d658 1
+a658 6
+    struct ClientData *cd = INST_DATA (cl, o);	/* Object data */
+    LONG line, column;
+    BPTR lock = NULL;				/* Lock on directory */
+    STRPTR name;				/* Where are we going? */
+    UWORD i;
+    BPTR fh;
+d660 1
+a660 28
+    /* Initialize the variables */
+    NewList (&cd->cd_HistoryList);
+    NewList ((struct List *) &cd->cd_LineList);
+    NewList (&cd->cd_XRefList);
+
+    /* Establish defaults */
+    cd->cd_WordDelim = delimArray;
+
+    if (LocaleBase)
+	cd->cd_Locale = OpenLocale (NULL);
+
+    /* Get the help group */
+    cd->cd_HelpGroup  = GetTagData (AGA_HelpGroup,  GetUniqueID (),          msg->ops_AttrList);
+
+    /* Get the name of the database */
+    name   = (STRPTR) GetTagData (DTA_Name, NULL, msg->ops_AttrList);
+
+    /* Get the current position information */
+    line   = GetTagData (DTA_TopVert,  DEF_TOP, msg->ops_AttrList);
+    column = GetTagData (DTA_TopHoriz, DEF_TOP, msg->ops_AttrList);
+
+    /* Disable all the buttons */
+    for (i = 0; i < MAX_CONTROLS; i++)
+	cd->cd_Controls[i].c_Flags |= CF_DISABLED;
+
+    /* Something to glue everything together */
+    DB (kprintf ("new model\n"));
+    if (cd->cd_Glue = newobject (ag, ag->ag_ModelClass, NULL, TAG_DONE))
+d662 3
+a664 171
+	if (cd->cd_Frame = newobject (ag, NULL, FRAMEICLASS,
+				      IA_EdgesOnly, FALSE,
+				      IA_FrameType, FRAME_BUTTON,
+				      TAG_DONE))
+	{
+	    DB (kprintf ("new database %s\n", name));
+	    if (cd->cd_Database = cd->cd_CurrentDatabase = newobject (ag, ag->ag_DatabaseClass, NULL,
+								      DBA_Name,		name,
+								      DBA_ClientData,	cd,
+								      TAG_DONE))
+	    {
+		/* Where are we going? */
+		name = (STRPTR) GetTagData (DTA_NodeName, NULL, msg->ops_AttrList);
+		name = (name) ? name : "Main";
+
+		GetAttr (DTA_Handle, o, (ULONG *) & fh);
+		if (fh)
+		{
+		    lock = ParentOfFH (fh);
+		}
+
+		/* Set the current node */
+		DB (kprintf ("obtain %s node\n", name));
+		if (cd->cd_CurrentNode = ObtainNode (ag, cl, o, name, line, column))
+		{
+		    /* Set all the attributes */
+		    setAGAttrs (ag, cl, o, (struct opSet *) msg);
+
+		    /* Create a process to monitor this object */
+		    DB (kprintf ("createnewproc\n"));
+		    if (cd->cd_Process = createnewproc (ag,
+							NP_Output, Output (),
+							NP_CloseOutput, FALSE,
+							NP_Input, Input (),
+							NP_CloseInput, FALSE,
+							NP_Cli, TRUE,
+							NP_Name, PROC_NAME,
+							NP_CommandName, PROC_NAME,
+							NP_StackSize, 8096L,
+							NP_Entry, ObjectHandler,
+							NP_Priority, 0L,
+							NP_CurrentDir, lock,
+							TAG_DONE))
+		    {
+			/* Initialize the message */
+			cd->cd_Message.sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+			cd->cd_Message.sm_Message.mn_Length = sizeof (struct StartupMsg);
+			cd->cd_Message.sm_AG = ag;
+			cd->cd_Message.sm_Class = cl;
+			cd->cd_Message.sm_Object = o;
+
+			/* Show that we are operational */
+			cd->cd_Going = TRUE;
+
+			/* Send the information to the process */
+			PutMsg (&(cd->cd_Process->pr_MsgPort), &cd->cd_Message);
+
+			/* Wait until the new process starts */
+			while (!(cd->cd_Flags & AGF_RUNNING))
+			    Delay (2);
+
+			return (TRUE);
+		    }
+		}
+		else
+		{
+		    DS (kprintf ("couldn't find node : \"%s\"\n", name));
+		}
+	    }
+	    else
+	    {
+		DS (kprintf ("couldn't open database : \"%s\"\n", name));
+	    }
+	}
+	else
+	{
+	    DS (kprintf ("couldn't obtain button frame\n"));
+	}
+    }
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+/* These are attributes that the model understands */
+Tag model_attrs[] =
+{
+    DTA_TopVert,
+    DTA_VisibleVert,
+    DTA_TotalVert,
+    DTA_VertUnit,
+
+    DTA_TopHoriz,
+    DTA_VisibleHoriz,
+    DTA_TotalHoriz,
+    DTA_HorizUnit,
+
+    ICA_TARGET,
+    ICA_MAP,
+    TAG_END,
+};
+
+/* These are attributes that CAN NOT be passed to embedded objects */
+Tag group_attrs[] =
+{
+    DTA_Domain,
+
+    ICA_TARGET,
+    ICA_MAP,
+    TAG_END,
+};
+
+/*****************************************************************************/
+
+/* Trigger methods we support */
+struct DTMethod tm[] =
+{
+    {"Contents",	"CONTENTS",	STM_CONTENTS},
+    {"Index",		"INDEX",	STM_INDEX},
+    {"Retrace",		"RETRACE",	STM_RETRACE},
+    {"Browse <",	"PREVIOUS",	STM_BROWSE_PREV},
+    {"Browse >",	"NEXT",		STM_BROWSE_NEXT},
+
+    {NULL,},
+};
+
+/*****************************************************************************/
+
+/* Methods we support */
+ULONG m[] =
+{
+    OM_NEW,
+    OM_GET,
+    OM_SET,
+    OM_UPDATE,
+    OM_DISPOSE,
+
+    GM_LAYOUT,
+    GM_HITTEST,
+    GM_GOACTIVE,
+    GM_HANDLEINPUT,
+    GM_RENDER,
+
+#if 0
+    DTM_SELECT,
+#endif
+    DTM_CLEARSELECTED,
+
+    DTM_PRINT,
+    DTM_COPY,
+
+    DTM_GOTO,
+    DTM_TRIGGER,
+    DTM_REMOVEDTOBJECT,
+    DTM_FRAMEBOX,
+
+    ~0,
+};
+
+/*****************************************************************************/
+
+/* Inquire attribute of an object */
+ULONG getAGAttr (struct AGLib * ag, Class * cl, Object * o, struct opGet * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct NodeData *nd;
+
+    /* See if it is a request for a model attribute */
+    if (TagInArray (msg->opg_AttrID, model_attrs))
+    {
+	return (DoMethodA (cd->cd_Glue, msg));
+a665 3
+    else if (!TagInArray (msg->opg_AttrID, group_attrs) && cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+d667 1
+a667 295
+	if (nd->nd_Object)
+	{
+	    return DoMethodA (nd->nd_Object, msg);
+	}
+    }
+
+    switch (msg->opg_AttrID)
+    {
+	case DTA_TriggerMethods:
+	    *msg->opg_Storage = (ULONG) tm;
+	    break;
+
+	case DTA_Methods:
+	    *msg->opg_Storage = (ULONG) m;
+	    break;
+
+	case DTA_TextAttr:
+	    *msg->opg_Storage = (ULONG) cd->cd_TextAttr;
+	    break;
+
+	default:
+	    return (DoSuperMethodA (cl, o, msg));
+    }
+
+    return (1L);
+}
+
+/*****************************************************************************/
+
+/* Set attributes of an object */
+ULONG setAGAttrs (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+{
+    struct TagItem *tags = msg->ops_AttrList;
+    struct TagItem *origtags;
+    struct TagItem *tstate;
+    struct ClientData *cd;
+    struct TagItem *tag;
+    ULONG refresh = 0L;
+    ULONG tidata;
+
+    cd = INST_DATA (cl, o);
+
+    /* Set aside the tags so that we can properly send them out */
+    origtags = msg->ops_AttrList;
+    msg->ops_AttrList = CloneTagItems (origtags);
+
+    /* Handle model attributes first */
+    if (FilterTagItems (msg->ops_AttrList, model_attrs, TAGFILTER_AND))
+    {
+	/* Pass along same message, with filtered attrlist.
+	 * This message will be mapped and propagated to all component gadgets,
+	 * who will refresh themselves if needed.
+	 * There's no additional need to refresh the group gadget.
+	 *
+	 * For the case of OM_NEW, we have to convert to OM_SET,
+	 * since we've previously created the thing. */
+	if (msg->MethodID == OM_NEW)
+	{
+	    DoMethod (cd->cd_Glue, OM_SET, (LONG) msg->ops_AttrList, (LONG) msg->ops_GInfo);
+	}
+	else
+	{
+	    /* Pass along OM_SET or OM_UPDATE message as is (with mapped tags). */
+	    DoMethodA (cd->cd_Glue, msg);
+	}
+    }
+
+#if 0
+    /* If this is a new, then pass along the attributes */
+    if (msg->MethodID != OM_NEW)
+    {
+	/* re-clone, without re-allocating */
+	RefreshTagItemClones (msg->ops_AttrList, origtags);
+	if (FilterTagItems (msg->ops_AttrList, model_attrs, TAGFILTER_NOT))
+	{
+	    /* Perhaps there is a need to refresh the group gadget now. */
+	    retval += DoSuperMethodA (cl, o, msg);
+	}
+	/* re-clone, without re-allocating */
+	RefreshTagItemClones (msg->ops_AttrList, origtags);
+	if (FilterTagItems (msg->ops_AttrList, string_attrs, TAGFILTER_AND))
+	{
+	    /* Perhaps there is a need to refresh the group gadget now. */
+	    retval += (ULONG) DM ((Object *) cd->cd_MText, msg);
+	}
+    }
+#endif
+
+    /* free clone and restore original */
+    FreeTagItems (msg->ops_AttrList);
+    msg->ops_AttrList = origtags;
+
+    /* process rest */
+    tstate = tags;
+    while (tag = NextTagItem (&tstate))
+    {
+	tidata = tag->ti_Data;
+	switch (tag->ti_Tag)
+	{
+	    case DTA_TextAttr:
+		cd->cd_TextAttr = (struct TextAttr *) tidata;
+		if (cd->cd_Font)
+		    CloseFont (cd->cd_Font);
+		cd->cd_Font = OpenFont (cd->cd_TextAttr);
+		break;
+
+	    case DTA_TopVert:
+		DB (kprintf (" DTA_TopVert, %ld\n", tidata));
+		if (cd->cd_TopVert != tidata)
+		{
+		    cd->cd_TopVert = tidata;
+		    refresh = 1L;
+		}
+		break;
+	    case DTA_VisibleVert:
+		DC (kprintf (" DTA_VisibleVert, %ld\n", tidata));
+		cd->cd_VisVert = tidata;
+		refresh = 1L;
+		break;
+	    case DTA_TotalVert:
+		DC (kprintf (" DTA_TotalVert, %ld\n", tidata));
+		cd->cd_TotVert = tidata;
+		refresh = 1L;
+		break;
+
+	    case DTA_TopHoriz:
+		DB (kprintf (" DTA_TopHoriz, %ld\n", tidata));
+		if (cd->cd_TopHoriz != tidata)
+		{
+		    cd->cd_TopHoriz = tidata;
+		    refresh = 1L;
+		}
+		break;
+	    case DTA_VisibleHoriz:
+		DC (kprintf (" DTA_VisibleHoriz, %ld\n", tidata));
+		cd->cd_VisHoriz = tidata;
+		refresh = 1L;
+		break;
+	    case DTA_TotalHoriz:
+		DC (kprintf (" DTA_TotalHoriz, %ld\n", tidata));
+		cd->cd_TotHoriz = tidata;
+		refresh = 1L;
+		break;
+
+	    case TDTA_WordDelim:
+		cd->cd_WordDelim = (UBYTE *) tidata;
+		break;
+
+	    case DTA_Sync:
+		if (tidata)
+		    refresh = 1L;
+		break;
+	}
+    }
+    return (refresh);
+}
+
+/*****************************************************************************/
+
+ULONG frameMethod (struct AGLib * ag, Class * cl, Object * o, struct dtFrameBox * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct TextFont *tfont = NULL;
+    struct DTSpecialInfo *si;
+    struct TextFont *font;
+    struct FrameInfo *fri;
+    struct NodeData *nd;
+    ULONG retval = 1L;
+
+    if (cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+	if (nd->nd_Object)
+	{
+	    return DoMethodA (nd->nd_Object, msg);
+	}
+    }
+
+    if ((msg->dtf_FrameFlags & FRAMEF_SPECIFY) && o)
+    {
+	si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+	fri = msg->dtf_ContentsInfo;
+	if (cd->cd_CurrentNode && nd->nd_Font)
+	    font = nd->nd_Font;
+	else if (cd->cd_Font)
+	    font = cd->cd_Font;
+	else
+	    tfont = font = OpenFont (fri->fri_Screen->Font);
+
+	cd->cd_TotVert  = si->si_TotVert  = cd->cd_LineHeight * 24;
+	cd->cd_TotHoriz = si->si_TotHoriz = font->tf_XSize * 80;
+
+	if (tfont)
+	    CloseFont (tfont);
+    }
+
+    return (retval);
+}
+
+
+/*****************************************************************************/
+
+BOOL writeObject (struct AGLib *ag, APTR handle, Object * o, struct ClientData *cd, struct GadgetInfo * gi, LONG mode)
+{
+    struct IFFHandle *iff = (struct IFFHandle *) handle;
+    BPTR fh = (BPTR) handle;
+    BOOL success = FALSE;
+    struct IBox *sel;
+
+    GetAttr (DTA_SelectDomain, o, (ULONG *) & sel);
+
+    if (sel == NULL)
+    {
+#if 0
+	if (mode == DTWM_IFF)
+	{
+	    if (OpenIFF (iff, IFFF_WRITE) == 0)
+	    {
+		if (PushChunk (iff, ID_FTXT, ID_FORM, IFFSIZE_UNKNOWN) == 0)
+		{
+		    if (PushChunk (iff, 0, ID_CHRS, cd->cd_BufferLen) == 0)
+			if (WriteChunkBytes (iff, cd->cd_Buffer, cd->cd_BufferLen) == cd->cd_BufferLen)
+			    if (PopChunk (iff) == 0)
+				success = TRUE;
+		    PopChunk (iff);
+		}
+		CloseIFF (iff);
+	    }
+	}
+	else if (mode == DTWM_RAW)
+	{
+	    if (Write (fh, cd->cd_Buffer, cd->cd_BufferLen) == cd->cd_BufferLen)
+		success = TRUE;
+	}
+#endif
+    }
+    else
+    {
+	ULONG s = MIN (cd->cd_AWord, cd->cd_EWord);
+	ULONG e = MAX (cd->cd_AWord, cd->cd_EWord);
+	ULONG len;
+
+	len = e - s;
+
+	if (mode == DTWM_IFF)
+	{
+	    if (OpenIFF (iff, IFFF_WRITE) == 0)
+	    {
+		if (PushChunk (iff, ID_FTXT, ID_FORM, IFFSIZE_UNKNOWN) == 0)
+		{
+		    if (PushChunk (iff, 0, ID_CHRS, len) == 0)
+			if (WriteChunkBytes (iff, (STRPTR) s, len) == len)
+			    if (PopChunk (iff) == 0)
+				success = TRUE;
+		    PopChunk (iff);
+		}
+		CloseIFF (iff);
+	    }
+	}
+	else if (mode == DTWM_RAW)
+	{
+	    if (Write (fh, (STRPTR) s, len) == len)
+		success = TRUE;
+	}
+
+	DoMethod (o, DTM_CLEARSELECTED, gi);
+    }
+
+    if (!success)
+	DisplayBeep (NULL);
+
+    return (success);
+}
+
+/*****************************************************************************/
+
+ULONG copyMethod (struct AGLib * ag, Class * cl, Object * o, struct dtGeneral * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct IFFHandle *iff;
+    BOOL success = FALSE;
+
+    if (iff = AllocIFF ())
+    {
+	if (iff->iff_Stream = (ULONG) OpenClipboard (0L))
+	{
+	    InitIFFasClip (iff);
+	    success = writeObject (ag, iff, o, cd, msg->dtg_GInfo, DTWM_IFF);
+	    CloseClipboard ((struct ClipboardHandler *) iff->iff_Stream);
+	}
+
+	FreeIFF (iff);
+    }
+    return ((ULONG) success);
+a668 1
+
+@
+
+
+39.9
+log
+@tracks help group
+@
+text
+@d17 5
+d62 19
+a80 1
+		if (!(initializeAG (ag, cl, newobj, (struct opSet *) msg)))
+a81 1
+		    DS (kprintf ("coerce dispose\n"));
+d205 2
+a206 1
+	    retval = propagateHit (ag, cl, o, (struct gpHitTest *)msg);
+d338 2
+a339 4
+	    /* Free the line list */
+	    DS (kprintf ("  free line list\n"));
+	    while (node = RemHead ((struct List *) & cd->cd_LineList))
+		FreeVec (node);
+d369 3
+d419 2
+a420 7
+#if 0
+    line   = GetTagData (DTA_TopVert,  0, msg->ops_AttrList);
+    column = GetTagData (DTA_TopHoriz, 0, msg->ops_AttrList);
+#else
+    line   = GetTagData (DTA_TopVert, -1, msg->ops_AttrList);
+    column = GetTagData (DTA_TopHoriz, -1, msg->ops_AttrList);
+#endif
+d752 5
+@
+
+
+39.8
+log
+@no change
+@
+text
+@d388 3
+d393 2
+a619 1
+    struct NodeData *nd = NULL;
+a627 4
+    if (cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+    }
+@
+
+
+39.7
+log
+@*** empty log message ***
+@
+text
+@d143 3
+@
+
+
+39.6
+log
+@*** empty log message ***
+@
+text
+@d12 2
+a13 1
+#define	DS(x)	;
+d50 1
+d54 1
+d68 1
+d73 1
+d75 1
+d99 1
+d104 1
+d110 1
+a111 1
+	    DB (kprintf ("GM_LAYOUT\n"));
+d119 1
+a119 1
+		DB (kprintf (" win=0x%lx, req=0x%lx\n", cd->cd_Window, cd->cd_Requester));
+d122 5
+a126 3
+		    /* Clone the RastPort */
+		    DB (kprintf (" rport=0x%lx\n", cd->cd_Window->RPort));
+		    cd->cd_RPort = *(cd->cd_Window->RPort);
+d131 1
+a131 1
+	    DB (kprintf (" pass to super\n"));
+d137 1
+a137 1
+		DB (kprintf (" newsize\n"));
+d143 1
+a143 1
+		DB (kprintf (" notify changes\n"));
+d150 1
+a150 1
+		DB (kprintf ("  send to process\n"));
+a152 1
+	    DB (kprintf (" retval=%ld\n", retval));
+d156 1
+d174 1
+d179 1
+d185 1
+d190 1
+d195 1
+d201 1
+a201 1
+	    DS (kprintf ("DTM_CLEARSELECTED\n"));
+d205 1
+d254 1
+d268 1
+d286 1
+d291 1
+a291 1
+	    DS (kprintf ("OM_DISPOSE\n"));
+d349 1
+d354 1
+d387 4
+d393 1
+@
+
+
+39.5
+log
+@no changes
+@
+text
+@d103 1
+d111 7
+a117 2
+		/* Clone the RastPort */
+		cd->cd_RPort = *(cd->cd_Window->RPort);
+d121 1
+d127 1
+d133 1
+d140 1
+d143 1
+d374 1
+d382 1
+d399 1
+d406 1
+@
+
+
+39.4
+log
+@changed the name
+@
+text
+@d12 1
+d56 1
+d261 1
+d269 1
+d278 1
+d283 1
+d288 1
+d293 1
+d297 3
+a299 1
+	    DoMethod (cd->cd_Database, OM_DISPOSE);
+d302 3
+a304 1
+	    DoMethod (cd->cd_Frame, OM_DISPOSE);
+d307 3
+a309 1
+	    DoMethod (cd->cd_Glue, OM_DISPOSE);
+d311 6
+d350 3
+d426 8
+d436 4
+a440 1
+
+@
+
+
+39.3
+log
+@now handles selection with embedded objects properly
+@
+text
+@d348 2
+a349 1
+								      DBA_Name, name,
+@
+
+
+39.2
+log
+@*** empty log message ***
+@
+text
+@d10 1
+d37 2
+a71 3
+		struct RastPort *rp;
+		struct gpRender gpr;
+
+d171 38
+d211 13
+d225 12
+d239 6
+d246 6
+d308 5
+d327 3
+d470 8
+a481 1
+    DTM_PRINT,
+d591 1
+a591 1
+	    retval += (ULONG) DM ((Object *) lod->lod_MText, msg);
+d651 4
+d702 98
+@
+
+
+39.1
+log
+@*** empty log message ***
+@
+text
+@d34 1
+d40 5
+d98 1
+d171 8
+d239 1
+d252 4
+a560 1
+
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d9 2
+a10 2
+#define	DL(x)	;
+#define	DW(x)	;
+a58 3
+	    DW (kprintf ("om_set (ag)\n"));
+	    DW (Delay (5));
+
+a92 3
+	    DW (kprintf ("gm_layout (ag)\n"));
+	    DW (Delay (5));
+
+a93 1
+	    DL (kprintf ("ag layout\n"));
+a160 2
+	    DW (kprintf ("gm_render (ag)\n"));
+	    DW (Delay (5));
+d221 1
+d228 1
+a228 1
+    NewList (&cd->cd_LineList);
+d232 3
+a234 1
+    name = (STRPTR) GetTagData (DTA_Name, NULL, msg->ops_AttrList);
+d259 1
+a259 1
+		if (cd->cd_CurrentNode = ObtainNode (ag, cl, o, name))
+d338 40
+a386 1
+	DL (kprintf ("get model attr\n"));
+a394 1
+	    DL (kprintf ("get embedded attr\n"));
+d401 9
+a409 1
+	case TDTA_TextAttr:
+a424 1
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+d505 6
+a510 2
+		si->si_TopVert = tidata;
+		refresh = 1L;
+a511 1
+
+d513 3
+a515 1
+		si->si_VisVert = tidata;
+a516 1
+
+d518 3
+a520 1
+		si->si_TotVert = tidata;
+d524 6
+a529 2
+		si->si_TopHoriz = tidata;
+		refresh = 1L;
+a530 1
+
+d532 3
+a534 1
+		si->si_VisHoriz = tidata;
+a535 1
+
+d537 3
+a539 1
+		si->si_TotHoriz = tidata;
+d541 1
+a564 1
+	    DL (kprintf ("frameMethod\n"));
+a570 1
+	DL (kprintf ("frame specify!!!\n"));
+d580 2
+a581 2
+	si->si_TotVert = cd->cd_LineHeight * 24;
+	si->si_TotHoriz = font->tf_XSize * 80;
+a588 1
+
+@

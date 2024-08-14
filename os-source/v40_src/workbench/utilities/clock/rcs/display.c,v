@@ -1,0 +1,1446 @@
+head     38.17;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.17
+date     93.08.25.10.52.12;  author vertex;  state Exp;
+branches ;
+next     38.16;
+
+38.16
+date     92.05.12.17.47.34;  author vertex;  state Exp;
+branches ;
+next     38.15;
+
+38.15
+date     92.05.11.12.54.11;  author vertex;  state Exp;
+branches ;
+next     38.14;
+
+38.14
+date     92.05.05.15.46.16;  author vertex;  state Exp;
+branches ;
+next     38.13;
+
+38.13
+date     92.04.27.10.00.21;  author vertex;  state Exp;
+branches ;
+next     38.12;
+
+38.12
+date     92.03.31.12.28.22;  author vertex;  state Exp;
+branches ;
+next     38.11;
+
+38.11
+date     92.03.27.11.01.15;  author vertex;  state Exp;
+branches ;
+next     38.10;
+
+38.10
+date     92.03.19.12.20.16;  author vertex;  state Exp;
+branches ;
+next     38.9;
+
+38.9
+date     92.03.13.14.09.13;  author vertex;  state Exp;
+branches ;
+next     38.8;
+
+38.8
+date     92.03.12.13.50.58;  author vertex;  state Exp;
+branches ;
+next     38.7;
+
+38.7
+date     92.03.12.12.32.27;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     92.03.12.12.13.36;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.03.06.11.11.01;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.03.05.14.01.03;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.02.26.13.30.52;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.02.24.09.51.14;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     92.02.10.13.45.37;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Display updating for Clock
+@
+
+
+38.17
+log
+@Makes sure pens used for rendering are contrasting...
+
+@
+text
+@
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <graphics/rastport.h>
+#include <intuition/intuition.h>
+#include <string.h>
+
+#include <clib/graphics_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/layers_protos.h>
+#include <clib/intuition_protos.h>
+
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/layers_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+
+#include "clock.h"
+#include "circle.h"
+#include "date.h"
+
+
+/*****************************************************************************/
+
+
+extern struct Library *GfxBase;
+extern struct Library *SysBase;
+extern struct Library *LayersBase;
+extern struct Library *IntuitionBase;
+
+extern UBYTE  doSeconds;
+extern UBYTE  doDates;
+extern STRPTR dateFormat;
+extern STRPTR timeFormat;
+
+extern struct Screen   *sp;
+extern struct Window   *wp;
+extern struct RastPort *rp;
+extern struct DrawInfo *di;
+
+
+/*****************************************************************************/
+
+
+WORD  radius_x, radius_y;	/* x & y radii of circle */
+WORD  center_x, center_y;	/* coordinates of circle's center */
+BOOL  secondsHand;
+ULONG oldDays;
+UWORD oldWidth  = 0;
+UWORD oldHeight = 0;
+char  dateStr[50];
+char  timeStr[50];
+
+ULONG facePen;
+ULONG faceBorderPen;
+ULONG handsPen;
+ULONG secondsPen;
+
+
+/*****************************************************************************/
+
+
+#define NUMVECTORS 20
+
+struct RastPort clonerp;
+UBYTE           av[NUMVECTORS*5];
+struct AreaInfo ai;
+struct TmpRas   tr;
+APTR            raster;
+
+
+/*****************************************************************************/
+
+
+struct Hand
+{
+    WORD handsize;		/* handsize relative to clock radius */
+    WORD fat;			/* width of hand */
+    WORD cent_x, cent_y;	/* coord of hand end point */
+    WORD left_x, left_y;	/* coord of hand left-side point */
+    WORD rght_x, rght_y;	/* coord of hand right-side point */
+    WORD beta;			/* angle at which hand is at */
+    WORD old_beta;		/* last angle calculated */
+};
+
+
+/**c***************************************************************************/
+
+
+/* analog clock hand array members */
+#define	HOURS		0
+#define MINUTES		1
+#define SECONDS		2
+
+
+/* relative sizes of analog clock hands */
+#define RAD		16
+#define BIG		13
+#define LITTLE		9
+#define SECOND		13
+
+
+struct Hand hand[] =
+{
+    {LITTLE, 6, 0, 0, 0, 0, 0, 0, 0, 0},
+    {BIG,    3, 0, 0, 0, 0, 0, 0, 0, 0},
+    {SECOND, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+};
+
+
+/*****************************************************************************/
+
+
+BOOL PreRender(VOID)
+{
+    if (raster = AllocRaster(wp->Width+15,wp->Height))
+    {
+        InitTmpRas(&tr,raster,RASSIZE(wp->Width+15,wp->Height));
+        clonerp.TmpRas = &tr;
+        return(TRUE);
+    }
+
+    oldWidth = 0;   /* This will cause a complete redraw the next time through */
+
+    return(FALSE);
+}
+
+
+/*****************************************************************************/
+
+
+VOID PostRender(VOID)
+{
+    WaitBlit();
+    FreeRaster(raster,wp->Width+15,wp->Height);
+    clonerp.TmpRas = NULL;
+}
+
+
+/*****************************************************************************/
+
+
+/* plots the coordinates for a hand in the AreaInfo of the rastport */
+VOID PlotHand(WORD i)
+{
+    AreaMove(&clonerp, center_x, center_y);
+    AreaDraw(&clonerp, hand[i].left_x, hand[i].left_y);
+    AreaDraw(&clonerp, hand[i].cent_x, hand[i].cent_y);
+    AreaDraw(&clonerp, hand[i].rght_x, hand[i].rght_y);
+    AreaDraw(&clonerp, center_x, center_y);
+}
+
+
+/*****************************************************************************/
+
+
+/* draws all the clock hands */
+VOID DrawHands(BOOL plotSeconds)
+{
+WORD  i;
+
+    /* Fill in the "hand" array with the current info */
+    for (i = 0; i < 3; i++)
+    {
+	hand[i].cent_x = cosine( hand[i].handsize * radius_x / RAD, (hand[i].beta + 270)) + center_x;
+	hand[i].cent_y = sine( hand[i].handsize * radius_y / RAD, (hand[i].beta + 270)) + center_y;
+
+	hand[i].left_x = cosine(( hand[i].handsize - 2) * radius_x / RAD, (hand[i].beta + 270 - hand[i].fat)) + center_x;
+	hand[i].left_y = sine(( hand[i].handsize - 2) * radius_y / RAD, (hand[i].beta + 270 - hand[i].fat)) + center_y;
+
+	hand[i].rght_x = cosine(( hand[i].handsize - 2) * radius_x / RAD, (hand[i].beta + 270 + hand[i].fat)) + center_x;
+	hand[i].rght_y = sine(( hand[i].handsize - 2) * radius_y / RAD, (hand[i].beta + 270 + hand[i].fat)) + center_y;
+    }
+
+    SetAPen(&clonerp,handsPen);
+    PlotHand(HOURS);
+    PlotHand(MINUTES);
+    AreaEnd(&clonerp);
+
+    if (plotSeconds)
+    {
+        SetAPen(&clonerp,secondsPen);
+        PlotHand(SECONDS);
+        AreaEnd(&clonerp);
+    }
+
+    secondsHand = plotSeconds;
+}
+
+
+/*****************************************************************************/
+
+
+/* draws the entire clock imagery */
+VOID DrawClock(BOOL plotSeconds)
+{
+WORD i, rx, ry;
+WORD rx1, rx2, ry1, ry2;
+
+    /* Draw clock's face */
+    rx = (radius_x = (wp->Width - (WORD)wp->BorderRight - (WORD)wp->BorderLeft - 4) / 2);
+    ry = (radius_y = (wp->Height - (WORD)wp->BorderTop - (WORD)wp->BorderBottom - 12) / 2);
+
+    if (!doDates)
+        ry = (radius_y += 4);
+
+    center_x = radius_x + 2 + wp->BorderLeft;
+    center_y = radius_y + 2 + wp->BorderTop;
+
+    if (PreRender())
+    {
+        if (sp->BitMap.Depth > 1)
+        {
+            SetDrMd(&clonerp, JAM1);
+
+            SetAPen(&clonerp, facePen);
+            AreaEllipse(&clonerp,center_x,center_y,rx,ry);
+            AreaEnd(&clonerp);
+
+            SetAPen(&clonerp, faceBorderPen);
+            DrawEllipse(&clonerp,center_x,center_y,rx,ry);
+            DrawEllipse(&clonerp,center_x,center_y,rx-1,ry);
+        }
+        else
+        {
+            SetAPen(&clonerp, faceBorderPen);
+        }
+
+        /* draw hour and tick marks */
+        rx = ( rx - rx / 18 );
+        ry = ( ry - ry / 18 );
+
+        i = rx / 15;
+        rx1 = rx - i;
+        rx2 = rx1 - i;
+
+        i = ry / 15;
+        ry1 = ry - i;
+        ry2 = ry1 - i;
+
+        for (i = 0; i < 360; i += 6)
+        {
+            if (((i / 5) * 5) == i)         /* draw a diamond hour mark */
+            {
+                AreaMove(&clonerp, cosine(rx,i)+center_x, sine(ry,i)+center_y );
+                AreaDraw(&clonerp, cosine(rx1,i-3)+center_x, sine(ry1,i-3)+center_y);
+                AreaDraw(&clonerp, cosine(rx2,i)+center_x, sine(ry2,i)+center_y);
+                AreaDraw(&clonerp, cosine(rx1,i+3)+center_x, sine(ry1,i+3)+center_y);
+                AreaDraw(&clonerp, cosine(rx,i)+center_x, sine(ry,i)+center_y);
+                AreaEnd(&clonerp);
+            }
+
+            else if ((radius_y > 30) && (radius_x > 60))     /* draw a tick mark */
+            {
+                Move(&clonerp,cosine(rx, i) + center_x, sine(ry, i) + center_y);
+                Draw(&clonerp,cosine(rx1, i) + center_x, sine(ry1, i) + center_y);
+            }
+        }
+
+        DrawHands(plotSeconds);
+
+        PostRender();
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* Calculate the angle of each clock hand based on the number of seconds.
+ * Fills in the "hands" array with the results
+ */
+VOID CalcBetas(ULONG seconds)
+{
+ULONG secs;
+ULONG mins;
+ULONG hrs;
+
+    hrs  = (seconds / (60*60)) % 24;
+    mins = (seconds / 60) % 60;
+    secs = seconds % 60;
+
+    hand[SECONDS].beta = secs * 6;
+    hand[MINUTES].beta = (WORD)(mins * 6 + secs / 10);
+    hand[HOURS].beta   = (WORD)(hrs * 30 + mins / 2);
+}
+
+
+/*****************************************************************************/
+
+
+/* draws the current date in the bottom of the analog clock */
+VOID ShowDate(ULONG seconds)   /* seconds since 01-Jan-78 */
+{
+struct Region    *region;
+struct Rectangle  rect;
+UWORD             len;
+
+    GetDate(seconds,dateFormat,dateStr);
+    if (region = NewRegion())
+    {
+        rect.MinX = wp->BorderLeft;
+        rect.MaxX = wp->Width - wp->BorderRight - 1;
+        rect.MinY = wp->Height - wp->BorderBottom - 9;
+        rect.MaxY = wp->Height - wp->BorderBottom - 1;
+
+        if (OrRectRegion(region,&rect))
+        {
+            region = InstallClipRegion(wp->WLayer,region);
+
+            SetRast(&clonerp,di->dri_Pens[BACKGROUNDPEN]);
+
+            if (doDates)
+            {
+                len = strlen(dateStr);
+                SetAPen(&clonerp,di->dri_Pens[TEXTPEN]);
+                Move(&clonerp,(wp->Width - TextLength(&clonerp,dateStr,len))/2,
+                               wp->Height-wp->BorderBottom-clonerp.TxHeight+clonerp.TxBaseline);
+                Text(&clonerp,dateStr,len);
+            }
+            region = InstallClipRegion(wp->WLayer,region);
+        }
+        DisposeRegion(region);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID DrawAnalog(ULONG seconds, BOOL initial)
+{
+BOOL  draw;
+ULONG days;
+
+    if (initial)
+    {
+        clonerp          = *rp;
+        clonerp.AreaInfo = &ai;
+        InitArea(&ai,av,NUMVECTORS);
+    }
+
+    LockLayerInfo(&wp->WScreen->LayerInfo);
+
+    if ((wp->Width != oldWidth) || (wp->Height != oldHeight) || initial
+    || (doDates && !oldDays) || (!doDates && oldDays))
+    {
+        oldWidth    = wp->Width;
+        oldHeight   = wp->Height;
+        BeginRefresh(wp);		/* clear any damage regions */
+        EndRefresh(wp,TRUE);
+
+        if (sp->BitMap.Depth == 1)
+        {
+            facePen       = di->dri_Pens[BACKGROUNDPEN];
+            faceBorderPen = di->dri_Pens[TEXTPEN];
+            handsPen      = faceBorderPen;
+            secondsPen    = faceBorderPen;
+        }
+        else
+        {
+            facePen       = di->dri_Pens[SHINEPEN];
+            faceBorderPen = di->dri_Pens[SHADOWPEN];
+            handsPen      = di->dri_Pens[SHADOWPEN];
+            secondsPen    = di->dri_Pens[FILLPEN];
+
+            if (handsPen == facePen)
+            {
+                handsPen      = di->dri_Pens[BACKGROUNDPEN];
+                faceBorderPen = di->dri_Pens[BACKGROUNDPEN];
+            }
+
+            if (secondsPen == facePen)
+                secondsPen = di->dri_Pens[BACKGROUNDPEN];
+        }
+
+        SetAPen(&clonerp,di->dri_Pens[BACKGROUNDPEN]);    /* zap current contents */
+        RectFill(&clonerp,wp->BorderLeft,
+                          wp->BorderTop,
+                          wp->Width-wp->BorderRight-1,
+                          wp->Height-wp->BorderBottom-1);
+
+        CalcBetas(seconds);
+        DrawClock(doSeconds);		/* draw the entire clock display */
+        oldDays = 0;			/* causes date to be redrawn */
+    }
+    else if (LAYERREFRESH & wp->WLayer->Flags)
+    {
+        BeginRefresh(wp);
+        DrawClock(secondsHand);		/* draw the entire clock display through the damage region */
+        EndRefresh(wp,TRUE);
+        oldDays = 0; 			/* causes date to be redrawn */
+    }
+    else
+    {
+        CalcBetas(seconds);
+
+        draw = FALSE;
+        if (hand[HOURS].beta != hand[HOURS].old_beta)
+        {
+            PlotHand(HOURS);
+            draw = TRUE;
+        }
+
+        if (hand[MINUTES].beta != hand[MINUTES].old_beta)
+        {
+            PlotHand(MINUTES);
+            draw = TRUE;
+        }
+
+        if ((!doSeconds && secondsHand) || (doSeconds && (hand[SECONDS].beta != hand[SECONDS].old_beta)))
+        {
+            PlotHand(SECONDS);
+            draw = TRUE;
+        }
+
+        if (draw)
+        {
+            SetAPen(&clonerp, facePen);
+
+            if (PreRender())
+            {
+                AreaEnd(&clonerp);                /* erase all the hands */
+                DrawHands(doSeconds);
+                PostRender();
+            }
+        }
+    }
+
+    if (doDates)
+    {
+        days = seconds / (60*60*24);
+        if (days != oldDays)
+        {
+            oldDays = days;
+            ShowDate(seconds);
+        }
+    }
+
+    UnlockLayerInfo(&wp->WScreen->LayerInfo);
+
+    hand[HOURS].old_beta   = hand[HOURS].beta;
+    hand[MINUTES].old_beta = hand[MINUTES].beta;
+    hand[SECONDS].old_beta = hand[SECONDS].beta;
+}
+
+
+/*****************************************************************************/
+
+
+VOID UpdateDigital(ULONG seconds)
+{
+ULONG days;
+
+    if (doDates && (seconds % 4 < 2))
+    {
+        days = seconds / (60*60*24);
+        if (days != oldDays)
+        {
+            GetDate(seconds,dateFormat,dateStr);
+            oldDays = days;
+        }
+        SetWindowTitles(wp,dateStr,(STRPTR)-1);
+    }
+    else
+    {
+        GetTime(seconds,timeFormat,timeStr);
+        SetWindowTitles(wp,timeStr,(STRPTR)-1);
+    }
+}
+@
+
+
+38.16
+log
+@Now clears the TmpRas pointer from the cloned rastport to avoid Text() crapping
+  out when printing the date.
+@
+text
+@d54 4
+d59 1
+d175 1
+a175 1
+    SetAPen(&clonerp,di->dri_Pens[SHADOWPEN]);
+d182 1
+a182 1
+        SetAPen(&clonerp,di->dri_Pens[FILLPEN]);
+d200 1
+a200 1
+    /* Draw clock's (white) background */
+d216 1
+a216 1
+            SetAPen(&clonerp, di->dri_Pens[SHINEPEN]);
+d220 1
+a220 1
+            SetAPen(&clonerp, di->dri_Pens[SHADOWPEN]);
+d226 1
+a226 1
+            SetAPen(&clonerp, di->dri_Pens[SHADOWPEN]);
+d353 24
+d419 1
+a419 4
+            if (sp->BitMap.Depth > 1)
+                SetAPen(&clonerp, di->dri_Pens[SHINEPEN]);
+            else
+                SetAPen(&clonerp, di->dri_Pens[BACKGROUNDPEN]);
+@
+
+
+38.15
+log
+@Now uses a copy of the window's rastport to do its rendering
+@
+text
+@d114 1
+d131 1
+a334 1
+        clonerp.TmpRas   = &tr;
+@
+
+
+38.14
+log
+@Added "initial" parameter
+@
+text
+@d60 1
+d82 1
+a82 1
+/*****************************************************************************/
+a112 1
+        rp->TmpRas = &tr;
+a113 1
+
+a129 11
+    rp->TmpRas = NULL;
+}
+
+
+/*****************************************************************************/
+
+
+VOID AreaEndInit(struct RastPort *rp)
+{
+    AreaEnd(rp);
+    memset(av,0,sizeof(av));
+d139 6
+a144 6
+    AreaMove(rp, center_x, center_y);
+    AreaDraw(rp, hand[i].left_x, hand[i].left_y);
+    AreaDraw(rp, hand[i].cent_x, hand[i].cent_y);
+    AreaDraw(rp, hand[i].rght_x, hand[i].rght_y);
+    AreaDraw(rp, center_x, center_y);
+}
+d168 1
+a168 1
+    SetAPen(rp,di->dri_Pens[SHADOWPEN]);
+d171 1
+a171 1
+    AreaEndInit(rp);
+d175 1
+a175 1
+        SetAPen(rp,di->dri_Pens[FILLPEN]);
+d177 1
+a177 1
+        AreaEndInit(rp);
+d207 1
+a207 1
+            SetDrMd(rp, JAM1);
+d209 3
+a211 3
+            SetAPen(rp, di->dri_Pens[SHINEPEN]);
+            AreaEllipse(rp,center_x,center_y,rx,ry);
+            AreaEndInit(rp);
+d213 3
+a215 3
+            SetAPen(rp, di->dri_Pens[SHADOWPEN]);
+            DrawEllipse(rp,center_x,center_y,rx,ry);
+            DrawEllipse(rp,center_x,center_y,rx-1,ry);
+d219 1
+a219 1
+            SetAPen(rp, di->dri_Pens[SHADOWPEN]);
+d238 6
+a243 6
+                AreaMove(rp, cosine(rx,i)+center_x, sine(ry,i)+center_y );
+                AreaDraw(rp, cosine(rx1,i-3)+center_x, sine(ry1,i-3)+center_y);
+                AreaDraw(rp, cosine(rx2,i)+center_x, sine(ry2,i)+center_y);
+                AreaDraw(rp, cosine(rx1,i+3)+center_x, sine(ry1,i+3)+center_y);
+                AreaDraw(rp, cosine(rx,i)+center_x, sine(ry,i)+center_y);
+                AreaEndInit(rp);
+d248 2
+a249 2
+                Move(rp,cosine(rx, i) + center_x, sine(ry, i) + center_y);
+                Draw(rp,cosine(rx1, i) + center_x, sine(ry1, i) + center_y);
+d304 1
+a304 1
+            SetRast(rp,di->dri_Pens[BACKGROUNDPEN]);
+d309 4
+a312 4
+                SetAPen(rp,di->dri_Pens[TEXTPEN]);
+                Move(rp,(wp->Width - TextLength(rp,dateStr,len))/2,
+                        wp->Height-wp->BorderBottom-rp->TxHeight+rp->TxBaseline);
+                Text(rp,dateStr,len);
+d329 7
+a335 2
+    rp->AreaInfo = &ai;
+    InitArea(&ai,av,NUMVECTORS);
+d347 5
+a351 5
+        SetAPen(rp,di->dri_Pens[BACKGROUNDPEN]);    /* zap current contents */
+        RectFill(rp,wp->BorderLeft,
+                    wp->BorderTop,
+                    wp->Width-wp->BorderRight-1,
+                    wp->Height-wp->BorderBottom-1);
+d390 1
+a390 1
+                SetAPen(rp, di->dri_Pens[SHINEPEN]);
+d392 1
+a392 1
+                SetAPen(rp, di->dri_Pens[BACKGROUNDPEN]);
+d396 1
+a396 1
+                AreaEndInit(rp);                /* erase all the hands */
+@
+
+
+38.13
+log
+@Moved things around to try and fix the trashing display problem
+@
+text
+@d298 1
+a298 1
+VOID ShowDate(ULONG seconds)   /* days since 01-Jan-78 */
+d336 1
+a336 1
+VOID DrawAnalog(ULONG seconds)
+d346 1
+a346 1
+    if ((wp->Width != oldWidth) || (wp->Height != oldHeight)
+d369 1
+a369 1
+        oldDays = 0; 			/* causes date to be redrawn later */
+@
+
+
+38.12
+log
+@Try to prevent left over seconds hands...
+@
+text
+@d47 1
+a47 1
+ULONG oldSeconds;
+d49 2
+a50 2
+UWORD oldWidth;
+UWORD oldHeight;
+d108 1
+a108 1
+VOID DrawFace(VOID)
+d110 13
+a122 2
+WORD i, rx, ry;
+WORD rx1, rx2, ry1, ry2;
+d124 1
+a124 3
+    /* Draw clock's (white) background */
+    rx = (radius_x = (wp->Width - (WORD)wp->BorderRight - (WORD)wp->BorderLeft - 4) / 2);
+    ry = (radius_y = (wp->Height - (WORD)wp->BorderTop - (WORD)wp->BorderBottom - 12) / 2);
+a125 2
+    if (!doDates)
+        ry = (radius_y += 4);
+d127 6
+a132 2
+    center_x = radius_x + 2 + wp->BorderLeft;
+    center_y = radius_y + 2 + wp->BorderTop;
+a133 3
+    if (sp->BitMap.Depth > 1)
+    {
+        SetDrMd(rp, JAM1);
+d135 1
+a135 3
+        SetAPen(rp, di->dri_Pens[SHINEPEN]);
+        AreaEllipse(rp,center_x,center_y,rx,ry);
+        AreaEnd(rp);
+a136 8
+        SetAPen(rp, di->dri_Pens[SHADOWPEN]);
+        DrawEllipse(rp,center_x,center_y,rx,ry);
+        DrawEllipse(rp,center_x,center_y,rx-1,ry);
+    }
+    else
+    {
+        SetAPen(rp, di->dri_Pens[SHADOWPEN]);
+    }
+d138 5
+a142 31
+    /* draw hour and tick marks */
+    rx = ( rx - rx / 18 );
+    ry = ( ry - ry / 18 );
+
+    i = rx / 15;
+    rx1 = rx - i;
+    rx2 = rx1 - i;
+
+    i = ry / 15;
+    ry1 = ry - i;
+    ry2 = ry1 - i;
+
+    for (i = 0; i < 360; i += 6)
+    {
+        if (((i / 5) * 5) == i)         /* draw a diamond hour mark */
+        {
+            AreaMove(rp, cosine(rx,i)+center_x, sine(ry,i)+center_y );
+            AreaDraw(rp, cosine(rx1,i-3)+center_x, sine(ry1,i-3)+center_y);
+            AreaDraw(rp, cosine(rx2,i)+center_x, sine(ry2,i)+center_y);
+            AreaDraw(rp, cosine(rx1,i+3)+center_x, sine(ry1,i+3)+center_y);
+            AreaDraw(rp, cosine(rx,i)+center_x, sine(ry,i)+center_y);
+            AreaEnd(rp);
+        }
+
+        else if ((radius_y > 30) && (radius_x > 60))     /* draw a tick mark */
+        {
+            Move(rp,cosine(rx, i) + center_x, sine(ry, i) + center_y);
+            Draw(rp,cosine(rx1, i) + center_x, sine(ry1, i) + center_y);
+        }
+    }
+}
+d148 1
+d162 2
+a163 1
+VOID DrawHands(VOID)
+d165 15
+d183 1
+a183 1
+    AreaEnd(rp);
+d185 1
+a185 1
+    if (doSeconds)
+d189 1
+a189 1
+        AreaEnd(rp);
+d191 2
+d199 2
+a200 1
+VOID GetBetas(ULONG seconds)
+d202 2
+a203 3
+ULONG secs;
+ULONG mins;
+ULONG hrs;
+d205 3
+a207 3
+    hrs  = (seconds / (60*60)) % 24;
+    mins = (seconds / 60) % 60;
+    secs = seconds % 60;
+d209 2
+a210 4
+    hand[SECONDS].beta = secs * 6;
+    hand[MINUTES].beta = (WORD)(mins * 6 + secs / 10);
+    hand[HOURS].beta   = (WORD)(hrs * 30 + mins / 2);
+}
+d212 2
+a213 3
+
+/*****************************************************************************/
+
+d215 1
+a215 10
+/* Sets up the hands structures with the required coordinates for
+ * each point on each hand using the hands angle.  Does not do any
+ * drawing.
+ */
+
+VOID HandPoints(VOID)
+{
+WORD  i;
+
+    for (i = 0; i < 3; i++)
+d217 7
+a223 4
+	hand[i].cent_x = cosine( hand[i].handsize * radius_x /
+	    RAD, (hand[i].beta + 270)) + center_x;
+	hand[i].cent_y = sine( hand[i].handsize * radius_y /
+	    RAD, (hand[i].beta + 270)) + center_y;
+d225 8
+a232 14
+	hand[i].left_x = cosine(( hand[i].handsize - 2) * radius_x /
+	    RAD, (hand[i].beta + 270 - hand[i].fat)) + center_x;
+	hand[i].left_y = sine(( hand[i].handsize - 2) * radius_y /
+	    RAD, (hand[i].beta + 270 - hand[i].fat)) + center_y;
+
+	hand[i].rght_x = cosine(( hand[i].handsize - 2) * radius_x /
+	    RAD, (hand[i].beta + 270 + hand[i].fat)) + center_x;
+	hand[i].rght_y = sine(( hand[i].handsize - 2) * radius_y /
+	    RAD, (hand[i].beta + 270 + hand[i].fat)) + center_y;
+    }
+}
+
+
+/*****************************************************************************/
+d234 11
+d246 11
+a256 6
+VOID ShowDate(ULONG seconds)
+{
+struct Region    *region;
+struct Rectangle  rect;
+ULONG             days;
+UWORD             len;
+d258 1
+a258 14
+    days = seconds / (60*60*24);
+    if (days != oldDays)
+    {
+        GetDate(seconds,dateFormat,dateStr);
+        oldDays = days;
+
+        if (region = NewRegion())
+        {
+            rect.MinX = wp->BorderLeft;
+            rect.MaxX = wp->Width - wp->BorderRight - 1;
+            rect.MinY = wp->Height - wp->BorderBottom - 9;
+            rect.MaxY = wp->Height - wp->BorderBottom - 1;
+
+            if (OrRectRegion(region,&rect))
+d260 4
+a263 1
+                region = InstallClipRegion(wp->WLayer,region);
+d265 1
+a265 1
+                SetRast(rp,di->dri_Pens[BACKGROUNDPEN]);
+d267 1
+a267 12
+                if (doDates)
+                {
+                    len = strlen(dateStr);
+                    SetAPen(rp,di->dri_Pens[TEXTPEN]);
+                    Move(rp,(wp->Width - TextLength(rp,dateStr,len))/2,
+                            wp->Height-wp->BorderBottom-rp->TxHeight+rp->TxBaseline);
+                    Text(rp,dateStr,len);
+                }
+                region = InstallClipRegion(wp->WLayer,region);
+            }
+            DisposeRegion(region);
+        }
+d275 4
+a278 1
+BOOL PreRender(VOID)
+d280 3
+a282 4
+    if (raster = AllocRaster(wp->Width+15,wp->Height))
+    {
+        rp->TmpRas = &tr;
+        InitTmpRas(&tr,raster,RASSIZE(wp->Width+15,wp->Height));
+d284 3
+a286 2
+        return(TRUE);
+    }
+d288 3
+a290 1
+    return(FALSE);
+d297 2
+a298 1
+VOID PostRender(VOID)
+d300 30
+a329 3
+    WaitBlit();
+    FreeRaster(raster,wp->Width+15,wp->Height);
+    rp->TmpRas = NULL;
+d336 1
+a336 1
+VOID DrawAnalog(ULONG seconds, BOOL initial)
+a337 1
+BOOL  full;
+d339 1
+d346 1
+a346 3
+    full = FALSE;
+
+    if ((wp->Width != oldWidth) || (wp->Height != oldHeight) || initial
+d349 3
+a351 5
+        full      = TRUE;
+        initial   = TRUE;
+        oldWidth  = wp->Width;
+        oldHeight = wp->Height;
+        BeginRefresh(wp);
+d354 1
+a354 1
+        SetAPen(rp,0);
+d359 4
+a365 1
+        full = TRUE;
+d367 3
+d371 1
+a371 2
+
+    if (full)
+d373 1
+a373 11
+        if (PreRender())
+        {
+            DrawFace();
+
+            if (initial)
+            {
+                GetBetas(seconds);
+                oldSeconds = seconds;
+            }
+
+            oldDays = 0;
+a374 10
+            HandPoints();
+            DrawHands();
+            PostRender();
+        }
+
+        if (WFLG_WINDOWREFRESH & wp->Flags)
+            EndRefresh(wp,TRUE);
+    }
+    else
+    {
+a375 3
+
+        GetBetas(seconds);
+
+d388 1
+a388 1
+        if ((!doSeconds && oldSeconds) || (doSeconds && (hand[SECONDS].beta != hand[SECONDS].old_beta)))
+d403 2
+a404 3
+                AreaEnd(rp);                /* erase all the hands */
+                HandPoints();
+                DrawHands();
+d408 1
+d410 8
+a417 4
+        if (doSeconds)
+            oldSeconds = seconds;
+        else
+            oldSeconds = 0;
+d420 2
+a424 5
+
+    if (doDates)
+        ShowDate(seconds);
+
+    UnlockLayerInfo(&wp->WScreen->LayerInfo);
+@
+
+
+38.11
+log
+@No longer renders the Seconds hands when it doesn't need to
+@
+text
+@d348 1
+d377 1
+a395 1
+            hand[HOURS].old_beta = hand[HOURS].beta;
+a401 1
+            hand[MINUTES].old_beta = hand[MINUTES].beta;
+a407 1
+            hand[SECONDS].old_beta = hand[SECONDS].beta;
+d433 4
+@
+
+
+38.10
+log
+@Now resizes the clock face based on whether the date is displayed or not
+@
+text
+@d406 1
+a406 1
+        if ((!doSeconds && oldSeconds) || (hand[SECONDS].beta != hand[SECONDS].old_beta))
+@
+
+
+38.9
+log
+@Fixed refresh code
+@
+text
+@d117 3
+d259 1
+a259 1
+VOID ShowDate(ULONG seconds, ULONG force)
+d267 1
+a267 1
+    if ((days != oldDays) || force)
+d344 2
+a345 1
+    if ((wp->Width != oldWidth) || (wp->Height != oldHeight) || initial)
+a374 5
+                oldDays    = 0;
+            }
+            else
+            {
+                oldDays--;
+d376 1
+d436 1
+a436 8
+    {
+        ShowDate(seconds,FALSE);
+    }
+    else if (oldDays)
+    {
+        ShowDate(seconds,TRUE);
+        oldDays = 0;
+    }
+@
+
+
+38.8
+log
+@*** empty log message ***
+@
+text
+@d49 2
+a106 51
+/* Sets up the hands structures with the required co-ordinates for
+ * each point on each hand using the hands angle.  Does not do any
+ * drawing.
+ */
+
+VOID HandPoints(VOID)
+{
+WORD i;
+
+    for(i = 0; i < 3; i++)
+    {
+	hand[i].cent_x = cosine( hand[i].handsize * radius_x /
+	    RAD, (hand[i].beta + 270)) + center_x;
+	hand[i].cent_y = sine( hand[i].handsize * radius_y /
+	    RAD, (hand[i].beta + 270)) + center_y;
+
+	hand[i].left_x = cosine(( hand[i].handsize - 2) * radius_x /
+	    RAD, (hand[i].beta + 270 - hand[i].fat)) + center_x;
+	hand[i].left_y = sine(( hand[i].handsize - 2) * radius_y /
+	    RAD, (hand[i].beta + 270 - hand[i].fat)) + center_y;
+
+	hand[i].rght_x = cosine(( hand[i].handsize - 2) * radius_x /
+	    RAD, (hand[i].beta + 270 + hand[i].fat)) + center_x;
+	hand[i].rght_y = sine(( hand[i].handsize - 2) * radius_y /
+	    RAD, (hand[i].beta + 270 + hand[i].fat)) + center_y;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID HandFill(WORD i)
+{
+    AreaMove(rp, center_x, center_y);
+    AreaDraw(rp, hand[i].left_x, hand[i].left_y);
+    AreaDraw(rp, hand[i].cent_x, hand[i].cent_y);
+    AreaDraw(rp, hand[i].rght_x, hand[i].rght_y);
+    AreaDraw(rp, center_x, center_y);
+}
+
+
+/*****************************************************************************/
+
+
+VOID DrawHands(VOID)
+{
+    SetAPen(rp,di->dri_Pens[SHADOWPEN]);
+    HandFill(HOURS);
+    HandFill(MINUTES);
+    AreaEnd(rp);
+a107 12
+    if (doSeconds)
+    {
+	SetAPen(rp,di->dri_Pens[FILLPEN]);
+	HandFill(SECONDS);
+	AreaEnd(rp);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+d110 2
+a111 2
+    WORD i, rx, ry;
+    WORD rx1, rx2, ry1, ry2;
+d167 83
+a249 1
+    HandPoints();
+d329 1
+a329 1
+VOID DrawAnalog(ULONG seconds, BOOL full, BOOL refresh)
+d331 2
+a332 4
+UBYTE draw;
+ULONG secs;
+ULONG mins;
+ULONG hrs;
+a336 5
+    draw = FALSE;
+    hrs  = (seconds / (60*60)) % 24;
+    mins = (seconds / 60) % 60;
+    secs = seconds % 60;
+
+d339 1
+a339 2
+    if (refresh)
+        BeginRefresh(wp);
+d341 1
+a341 1
+    if (full)
+d343 5
+a347 3
+        oldDays    = 0;
+        oldSeconds = 0;
+        draw       = TRUE;
+d349 1
+a349 1
+        SetAPen(rp,di->dri_Pens[BACKGROUNDPEN]);
+d354 6
+d361 2
+d366 14
+d382 3
+d386 3
+a388 5
+
+    /* compute angle (0 - 360) each hand should be at based on the time */
+    hand[SECONDS].beta = secs * 6;
+    hand[MINUTES].beta = (WORD)(mins * 6 + secs / 10);
+    hand[HOURS].beta   = (WORD)(hrs * 30 + mins / 2);
+d390 1
+a390 21
+    /* erase old min, & hr. hands if they changed */
+    if (hand[HOURS].beta != hand[HOURS].old_beta)
+    {
+        draw = TRUE;
+        HandFill(HOURS);
+        hand[HOURS].old_beta = hand[HOURS].beta;
+    }
+
+    if (hand[MINUTES].beta != hand[MINUTES].old_beta)
+    {
+        draw = TRUE;
+        HandFill(MINUTES);
+        hand[MINUTES].old_beta = hand[MINUTES].beta;
+    }
+
+    if (oldSeconds)
+    {
+        draw = TRUE;
+        HandFill(SECONDS);
+        oldSeconds = 0;
+    }
+d392 6
+a397 2
+    if (doSeconds)
+        oldSeconds = seconds;
+d399 6
+a404 3
+    if (draw)
+    {
+        HandPoints();   /* compute vertices of all hands */
+d406 6
+a411 4
+        if (sp->BitMap.Depth > 1)
+            SetAPen(rp, di->dri_Pens[SHINEPEN]);
+        else
+            SetAPen(rp, di->dri_Pens[BACKGROUNDPEN]);
+d413 1
+a413 1
+        if (PreRender())
+d415 12
+a426 3
+            AreaEnd(rp);    /* erase all the hands */
+            DrawHands();    /* draw clock hands */
+            PostRender();
+d428 5
+a433 3
+
+    if (refresh)
+        EndRefresh(wp,TRUE);
+@
+
+
+38.7
+log
+@*** empty log message ***
+@
+text
+@d282 1
+a282 1
+    if (raster = AllocVec(RASSIZE(wp->Width,wp->Height),MEMF_CHIP|MEMF_PUBLIC))
+d285 1
+a285 1
+        InitTmpRas(&tr,raster,RASSIZE(wp->Width,wp->Height));
+d300 1
+a300 1
+    FreeVec(raster);
+@
+
+
+38.6
+log
+@Fixed layer deadlock
+@
+text
+@a240 1
+BOOL              inrefresh;
+a256 7
+                inrefresh = FALSE;
+                if (wp->Flags & WINDOWREFRESH)
+                {
+                    EndRefresh(wp,FALSE);
+                    inrefresh = TRUE;
+                }
+
+a269 3
+
+                if (inrefresh)
+                    BeginRefresh(wp);
+d394 3
+a405 3
+
+    if (refresh)
+        EndRefresh(wp,TRUE);
+@
+
+
+38.5
+log
+@*** empty log message ***
+@
+text
+@d319 1
+a319 1
+VOID DrawAnalog(ULONG seconds, BOOL full)
+d336 3
+d414 3
+@
+
+
+38.4
+log
+@Fixed bug with window refreshing and date display in analog mode.
+If the date got damaged, it only got refreshed the following day :-)
+
+Fixed bug with sometimes getting duplicate clock hands after resizing
+the window                                                            
+@
+text
+@d241 1
+d258 7
+d278 3
+d334 1
+a334 1
+    LockLayerRom(rp->Layer);
+d412 1
+a412 1
+    UnlockLayerRom(rp->Layer);
+@
+
+
+38.3
+log
+@No longer trashes the bottom border of the analog clock when the window height
+  is odd
+Now forces a redisplay of the date and hands when showing the analog clock for
+  the first time
+@
+text
+@d308 1
+a308 1
+VOID DrawAnalog(BOOL clear)
+a309 30
+    LockLayerRom(rp->Layer);
+
+    if (clear)
+    {
+        SetAPen(rp,di->dri_Pens[BACKGROUNDPEN]);
+        RectFill(rp,wp->BorderLeft,
+                    wp->BorderTop,
+                    wp->Width-wp->BorderRight-1,
+                    wp->Height-wp->BorderBottom-1);
+
+        oldDays    = 0;
+        oldSeconds = 0;
+    }
+
+    if (PreRender())
+    {
+        DrawFace();
+        DrawHands();
+        PostRender();
+    }
+
+    UnlockLayerRom(rp->Layer);
+}
+
+
+/*****************************************************************************/
+
+
+VOID RedrawAnalog(ULONG seconds, BOOL initial)
+{
+d325 1
+a325 1
+    if (initial && PreRender())
+a326 2
+        DrawFace();
+        PostRender();
+d330 12
+@
+
+
+38.2
+log
+@Now sets the rp->TmpRas field to NULL after done with rendering to avoid problems
+  with calls to Text()
+@
+text
+@d252 1
+a252 1
+            rect.MinY = wp->Height - wp->BorderBottom - 10;
+d359 3
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d284 1
+a284 1
+        rp->TmpRas   = &tr;
+d301 1
+@

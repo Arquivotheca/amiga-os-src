@@ -1,0 +1,449 @@
+head     37.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+37.0
+date     91.01.23.16.16.35;  author eric;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.0
+log
+@added to rcs
+@
+text
+@/************************************************************************
+ *									*
+ *	Copyright (c) 1988 Enhanced Software Technologies, Inc.		*
+ *			   All Rights Reserved				*
+ *									*
+ *	This software and/or documentation is protected by U.S.		*
+ *	Copyright Law (Title 17 United States Code).  Unauthorized	*
+ *	reproduction and/or sales may result in imprisonment of up	*
+ *	to 1 year and fines of up to $10,000 (17 USC 506).		*
+ *	Copyright infringers may also be subject to civil liability.	*
+ *									*
+ ************************************************************************
+ */
+
+
+/*
+ *  FILE
+ *
+ *	arexx.c    AREXX functions
+ *
+ *  SCCS
+ *
+ *	@@(#)arexx.c	11.20	10/10/89
+ *
+ *  DESCRIPTION
+ *
+ *	This file contains AREXX functions.
+ *
+ */
+
+#include "autoconfig.h"
+
+#include <stdio.h>
+#include <rexx/storage.h>
+#include <rexx/rxslib.h>
+#include <exec/memory.h>
+#include <libraries/dos.h>
+
+#include "dbug.h"
+#include "typedefs.h"
+
+/* External Function Declarations */
+
+extern struct FileLock *CurrentDir ();
+extern void *GetMsg ();
+extern struct RexxMsg *CreateRexxMsg ();
+extern void DeleteRexxMsg ();
+extern struct RexxArg *CreateArgstring ();
+extern void DeleteArgstring ();
+extern LONG IsRexxMsg ();
+extern void *AllocMem ();
+extern struct MsgPort *FindPort ();
+extern struct MsgPort *CreatePort ();
+extern void *OpenLibrary ();
+extern struct FileLock *Lock ();
+
+/* Local Function Declarations */
+
+static int send_string ();
+static struct RexxArg *recieve_reply ();
+void rexx_cleanup ();
+
+struct RexxMsg *create_rexxmsg ();
+void delete_rexxmsg ();
+struct RexxArg *create_argstring ();
+static void delete_argstring ();
+BOOL is_rexxmsg ();
+
+/* Variables */
+
+struct RxsLib *RexxSysBase = NULL;
+
+/* Our private reply port */
+static struct MsgPort *rexx_replyport = NULL;
+
+static char querybuf[256] = "";
+static char *queryposition = &querybuf[0];
+
+static struct FileLock *oldlock;
+
+/* Functions */
+
+/*
+ *	This routine gets the next pathname during filter mode using
+ *      a rexx type interface (currently Amiga only), and places it
+ *	into the buffer pointed to by "buf".
+ *
+ *	Returns 1 on success, 0 on failure.
+ */
+
+int rexx_getfilename (buf)
+char *buf;
+{
+    register struct RexxArg *ra;
+    int rtnval = 0;
+    
+    DBUG_ENTER ("rexx_getfilename");
+    if (send_string ("FILENAME RELATIVE")) {
+	if ((ra = recieve_reply ()) != NULL) {
+	    if (strncmp (ra, ":::", 3) == 0) {
+		DBUG_PRINT ("rxgf", ("brushell reports no more filenames"));
+	    } else {
+		strcpy (buf, ra);
+		rtnval = 1;
+	    }
+	    delete_argstring (ra);
+	}
+    }
+    DBUG_PRINT ("rxgf", ("returns %d", rtnval));
+    DBUG_RETURN (rtnval);
+}
+
+
+/*
+ *	This routine sends a query string to a rexx type interface
+ *	(currently Amiga only).
+ *
+ *	Returns 1 on success, 0 on failure.
+ *
+ */
+
+int rexx_query (buf)
+char *buf;
+{
+    register struct RexxArg *ra;
+    auto char scratchbuf[256];
+    int rtnval = 0;
+    
+    DBUG_ENTER ("rexx_query");
+    DBUG_PRINT ("rexq", ("query = '%s'", buf));
+    if (strlen (buf) < (sizeof (scratchbuf) - 11)) {
+	strcpy (scratchbuf, "QUERYMSG \042");
+	strcat (scratchbuf, buf);
+	strcat (scratchbuf, "\042");
+	if (send_string (scratchbuf)) {
+	    if ((ra = recieve_reply ()) != NULL) {
+		strcpy (querybuf, ra);
+		queryposition = querybuf;
+		delete_argstring (ra);
+		rtnval = 1;
+	    }
+	}
+    }
+    DBUG_RETURN (rtnval);
+}
+
+/*
+ *	This routine reads a single character from a rexx type interface
+ *	(currently Amiga only).  Returns EOF on failure.  Note that the
+ *	return type is int, so it can return EOF as an out-of-band
+ *	indicator that no character is available.
+ *
+ */
+
+int rexx_getc ()
+{
+    int rtnval;
+
+    DBUG_ENTER ("rexx_getc");
+    if (*queryposition == '\0') {
+	rtnval = EOF;
+    } else {
+	rtnval = *queryposition++;
+    }
+    DBUG_PRINT ("rxgetc", ("return %d", rtnval));
+    DBUG_RETURN (rtnval);
+}
+
+/*
+ *	This routine sends an error string out a rexx type interface
+ *	(currently Amiga only).
+ *
+ *	Returns 1 on success, 0 on error;
+ *
+ *	The return value is currently ignored.
+ */
+
+int rexx_error (buf)
+char *buf;
+{
+    int rtnval = 0;
+    auto char scratchbuf[256];
+    
+    DBUG_ENTER ("rexx_error");
+    if (strlen (buf) < (sizeof (scratchbuf) - 11)) {
+	strcpy (scratchbuf, "ERRORMSG \042");
+	strcat (scratchbuf, buf);
+	strcat (scratchbuf, "\042");
+	if (tell (scratchbuf)) {
+	    rtnval = 1;
+	}
+    }
+    DBUG_PRINT ("rxerr", ("returns %d", rtnval));
+    DBUG_RETURN (rtnval);
+}
+
+/* Open the rexx library (if there) and the appropriate message ports
+ * for communications with the Intuition interface.
+ * Returns 1 on success, 0 on error.
+ */
+
+int rexx_init ()
+{
+    register struct RexxArg *ra;
+    register struct FileLock *lock;
+    int rtnval = 0;
+    
+    DBUG_ENTER ("rexx_init");
+    DBUG_PRINT ("rxinit", ("open REXX library"));
+    RexxSysBase = (struct RxsLib *) OpenLibrary (RXSNAME, 0L);
+    DBUG_PRINT ("rxinit", ("open private reply port"));
+    if ((rexx_replyport = CreatePort (NULL, 0L)) != NULL) {
+	DBUG_PRINT ("rxinit", ("get volume name/path"));
+	if (send_string ("VOLUME")) {
+	    if ((ra = recieve_reply ()) != NULL) {
+		DBUG_PRINT ("volume", ("volume %s", ra));
+		if ((lock = Lock (ra, ACCESS_READ)) == NULL) {
+		    DBUG_PRINT ("rxinit", ("can't find this directory"));
+		} else {
+		    oldlock = CurrentDir (lock);
+		    rtnval = 1;
+		}
+		delete_argstring (ra);
+	    }
+	}
+    }
+    DBUG_RETURN (rtnval);
+}
+
+/* Close any librarys and message ports, etc. which were opened
+ * by a call to rexx_init().  Also send a "all done" message to
+ * BRUshell.
+ */
+
+void rexx_cleanup ()
+{
+    DBUG_ENTER ("rexx_cleanup");
+    (void) tell ("FINISHED");
+    CurrentDir (oldlock);
+    if (rexx_replyport) {
+	DeletePort (rexx_replyport);
+    }
+    if (RexxSysBase) {
+	CloseLibrary (RexxSysBase);
+    }
+    DBUG_VOID_RETURN;
+}
+
+/*
+ * Send a string to BRUshell, wait for and discard the reply.
+ *
+ * Returns 1 on success, 0 on failure.
+ */
+
+static int tell (string)
+char *string;
+{
+    register struct RexxArg *ra;
+    int rtnval = 0;
+    
+    DBUG_ENTER ("tell");
+    if (send_string (string)) {
+	if ((ra = recieve_reply ()) != NULL) {
+	    delete_argstring (ra);
+	    rtnval = 1;				/* semantic change (fnf) */
+	}
+    }
+    DBUG_RETURN (rtnval);
+}
+
+/*
+ * Returns 1 on success, 0 on failure.
+ */
+
+static int send_string (string)
+char *string;
+{
+    register struct RexxMsg *rm;
+    register struct MsgPort *bp;
+    register struct RexxArg *ra;
+    int rtnval = 0;
+    
+    DBUG_ENTER ("send_string");
+    if ((rm = create_rexxmsg (rexx_replyport, NULL, NULL)) != NULL) {
+	ra = create_argstring (string, (ULONG) strlen (string));
+	if (ra == NULL) {
+	    delete_rexxmsg (rm);
+	} else {
+	    rm -> rm_Action |= (1L << RXFB_RESULT);
+	    ARG0 (rm) = (STRPTR) ra;
+	    Forbid ();
+	    if (bp = FindPort ("BRU_SHELL")) {
+		PutMsg (bp, (struct Message *) rm);
+	    }
+	    Permit ();
+	    if (bp == NULL) {
+		/* we could not find the BRUshell port, this failed! */
+		delete_rexxmsg (rm);
+		delete_argstring (ra);
+	    } else {
+		rtnval = 1;
+	    }
+	}
+    }
+    DBUG_PRINT ("rxsend", ("returns %d", rtnval));
+    DBUG_RETURN (rtnval);
+}
+
+/*
+ * Return a Rexx Argstring pointer if succesful, or a NULL pointer if
+ * failure or CMD DID NOT REQUIRE A RESULT.
+ */
+
+static struct RexxArg *recieve_reply ()
+{
+    register struct RexxMsg *rm;
+    register struct RexxArg *ra;
+    
+    DBUG_ENTER ("recieve_reply");
+    WaitPort (rexx_replyport);
+    while (rm = (struct RexxMsg *) GetMsg (rexx_replyport)) {
+	if ((rm -> rm_Result1 == 0) && (rm -> rm_Result2 != 0)) {
+	    ra = (struct RexxArg *) (rm -> rm_Result2);
+	    DBUG_PRINT ("rxarg", ("got reply string '%s'", ra));
+	} else {
+	    ra = NULL;	
+	}
+	delete_argstring (ARG0 (rm));
+	delete_rexxmsg (rm);
+    }
+    DBUG_RETURN (ra);
+}
+
+/* ARexx Library Flex Functions	*/
+
+static struct RexxMsg *create_rexxmsg (rport, ext, host)
+struct MsgPort *rport;
+char *ext;
+char *host;
+{
+    register struct RexxMsg *rm;
+    
+    DBUG_ENTER ("create_rexxmsg");
+    if (RexxSysBase) {
+	DBUG_PRINT ("rxcmsg", ("use ARexx Library msg port"));
+	rm = CreateRexxMsg (rport, ext, host);
+    } else {
+	DBUG_PRINT ("rxcmsg", ("use our own msg port"));
+	rm = AllocMem ((ULONG) sizeof (struct RexxMsg), 
+		       MEMF_PUBLIC | MEMF_CLEAR);
+	if (rm != NULL) {
+	    rm -> rm_Node.mn_Length = sizeof (struct RexxMsg);
+	    rm -> rm_FileExt = (STRPTR) ext;
+	    rm -> rm_CommAddr = (STRPTR) host;
+	}
+    }
+    DBUG_RETURN (rm);
+}
+
+static void delete_rexxmsg (rexxmsg)
+struct RexxMsg *rexxmsg;
+{
+    DBUG_ENTER ("delete_rexxmsg");
+    if (rexxmsg != NULL) {
+	if (RexxSysBase) {
+	    DeleteRexxMsg (rexxmsg);
+	} else {
+	    FreeMem (rexxmsg, (ULONG) (rexxmsg -> rm_Node.mn_Length));
+	}
+    }
+    DBUG_VOID_RETURN;
+}
+
+static struct RexxArg *create_argstring (string, length)
+char *string;
+ULONG length;
+{
+    register struct RexxArg *ra;
+    register ULONG size;
+    struct RexxArg *rtnval = NULL;
+    
+    DBUG_ENTER ("create_argstring");
+    if( RexxSysBase ) {
+	rtnval = CreateArgstring (string, length);
+    } else {
+	size = sizeof (struct RexxArg) + length - 7L;
+	if ((ra = AllocMem (size, MEMF_PUBLIC | MEMF_CLEAR)) != NULL) {
+	    ra -> ra_Size = size;
+	    ra -> ra_Length = length;
+	    CopyMem (string, &ra -> ra_Buff[0], length);
+	    /* Ensure we end in a NULL, if will be used as 'C' string */
+	    ra -> ra_Buff[length] = '\0';
+	    rtnval = (struct RexxArg *) &(ra -> ra_Buff[0]);
+	}
+    }
+    DBUG_RETURN (rtnval);
+}
+
+static void delete_argstring (argstring)
+struct RexxArg *argstring;
+{
+    register UBYTE *ra;
+    
+    DBUG_ENTER ("delete_argstring");
+    if (RexxSysBase) {
+	DeleteArgstring (argstring);
+    } else {
+	ra = ((UBYTE *) argstring) - 8L;
+	FreeMem (ra, ((struct RexxArg *) ra) -> ra_Size);
+    }
+    DBUG_VOID_RETURN;
+}
+
+static BOOL is_rexxmsg (rexxmsg)
+struct RexxMsg *rexxmsg;
+{
+    BOOL rtnval = FALSE;
+
+    DBUG_ENTER ("is_rexxmsg");
+    if (RexxSysBase) {
+	rtnval = IsRexxMsg (rexxmsg);
+    }
+    DBUG_RETURN (rtnval);
+}
+
+@

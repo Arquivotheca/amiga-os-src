@@ -1,0 +1,425 @@
+head     39.5;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.5; strict;
+comment  @ * @;
+
+
+39.5
+date     93.03.24.12.13.08;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.03.22.16.22.53;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.08.13.13.28.46;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.07.15.22.46.03;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.26.03.07.19;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.36.05;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.5
+log
+@moved current dir test before PROGDIR: test
+@
+text
+@/* lvosetcurrentdire.c
+ * amigaguide.datatype
+ *
+ */
+
+#include "amigaguidebase.h"
+
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+BPTR IsFileThere (struct AGLib * ag, STRPTR path)
+{
+    BPTR retval = NULL;
+    BPTR parent;
+    BPTR lock;
+
+    if (lock = Lock (path, ACCESS_READ))
+    {
+	parent = ParentDir (lock);
+	UnLock (lock);
+	retval = CurrentDir (parent);
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+BPTR ASM LVOSetCurrentDirE (REG (a6) struct AGLib * ag, REG (a0) BPTR p, REG (d1) STRPTR name)
+{
+    struct Process *pr = (struct Process *) FindTask (NULL);
+    BPTR retval = NULL;
+    BPTR old, lock;
+
+    STRPTR lang = NULL;
+    struct Locale *loc;
+    UWORD i, maxLoop;
+    char path[100];
+    BOOL doProgDir;
+    UBYTE cnt = 0;
+    APTR oldWP;
+
+
+    /* Make sure we have a name at least. */
+    if (name)
+    {
+	/* Do we have locale.library opened? */
+	if (LocaleBase)
+	{
+	    if (loc = OpenLocale (NULL))
+	    {
+		maxLoop = 10;
+		for (i = 0; i < maxLoop; i++)
+		{
+		    if (lang)
+		    {
+			oldWP = pr->pr_WindowPtr;
+			pr->pr_WindowPtr = (APTR) - 1;
+			doProgDir = TRUE;
+			if (!(lock = Lock ("PROGDIR:", ACCESS_READ)))
+			    if (lock = Lock ("HELP:", ACCESS_READ))
+				doProgDir = FALSE;
+			UnLock (lock);
+			pr->pr_WindowPtr = oldWP;
+
+			cnt = 3;
+			while (--cnt)
+			{
+			    if (doProgDir)
+			    {
+				doProgDir = FALSE;
+				strcpy (path, "PROGDIR:Help");
+				AddPart (path, lang, sizeof (path));
+				AddPart (path, name, sizeof (path));
+
+				if (GetProgramDir () && (retval = IsFileThere (ag, path)))
+				    break;
+			    }
+			    else
+			    {
+				doProgDir = TRUE;
+				strcpy (path, "HELP:");
+				AddPart (path, lang, sizeof (path));
+				AddPart (path, name, sizeof (path));
+
+				if (retval = IsFileThere (ag, path))
+				    break;
+			    }
+			}
+
+			/* we found something! */
+			if (cnt)
+			    break;
+		    }
+
+		    if (i < 10)
+			lang = loc->loc_PrefLanguages[i];
+		}
+
+		CloseLocale (loc);
+	    }
+	}
+
+	if (cnt)
+	{
+	    /* Clear the error return */
+	    SetIoErr (0);
+
+	    /* Return the path */
+	    return retval;
+	}
+
+	/* See if it exists in the current directory */
+	if (retval = Lock (name, ACCESS_READ))
+	{
+	    /* Release the lock */
+	    UnLock (retval);
+
+	    /* Get the path */
+	    if (retval = DupLock (pr->pr_CurrentDir))
+		retval = CurrentDir (retval);
+
+	    /* Clear the error return */
+	    SetIoErr (0);
+
+	    /* Return the path */
+	    return (retval);
+	}
+
+	/* See if it is in PROGDIR */
+	strcpy (path, "PROGDIR:");
+	AddPart (path, name, sizeof (path));
+	oldWP = pr->pr_WindowPtr;
+	pr->pr_WindowPtr = (APTR) - 1;
+	retval = IsFileThere (ag, path);
+	pr->pr_WindowPtr = oldWP;
+	if (retval)
+	{
+	    /* Clear the error return */
+	    SetIoErr (0);
+
+	    /* Return the path */
+	    return (retval);
+	}
+
+	/* See if they provided a path pointer */
+	if (p == NULL)
+	{
+	    /* No, use ours. */
+	    p = ag->ag_GlobalPath;
+	}
+
+	/* funky bptr-list following! */
+	while ((p = (BPTR) BADDR (p)) && (retval == NULL))
+	{
+	    /* Convert to a lock and duplicate it */
+	    lock = (BPTR) (((LONG *) p)[1]);
+
+	    /* Go to the new place */
+	    if (old = CurrentDir (lock))
+	    {
+		/* Try locking the name */
+		if (retval = Lock (name, ACCESS_READ))
+		{
+		    /* We found the file, so return its directory */
+		    UnLock (retval);
+
+		    /* Unwind */
+		    CurrentDir (old);
+
+		    /* Put an unlockable lock in as current directory */
+		    if (retval = DupLock (lock))
+			retval = CurrentDir (retval);
+
+		    /* Clear the error return */
+		    SetIoErr (0);
+
+		    return (retval);
+		}
+
+		/* Go back to the previous directory */
+		CurrentDir (old);
+	    }
+
+	    /* Get the next path node */
+	    p = ((LONG *) p)[0];
+	}
+
+	SetIoErr (ERROR_OBJECT_NOT_FOUND);
+    }
+    else
+    {
+	SetIoErr (ERROR_INVALID_COMPONENT_NAME);
+    }
+
+    return (NULL);
+}
+@
+
+
+39.4
+log
+@no change
+@
+text
+@d44 1
+d114 18
+a133 1
+
+a137 1
+
+d147 2
+a148 2
+	/* See if it exists in the current directory */
+	if (retval = Lock (name, ACCESS_READ))
+d150 3
+a152 6
+	    UnLock (retval);
+	    if (retval = DupLock (pr->pr_CurrentDir))
+		retval = CurrentDir (retval);
+
+	    /* Clear the error return */
+	    SetIoErr (0);
+d154 2
+a155 4
+	    /* Return the path */
+	    return (retval);
+	}
+	else
+d157 2
+a158 6
+	    /* See if they provided a path pointer */
+	    if (p == NULL)
+	    {
+		/* No, use ours. */
+		p = ag->ag_GlobalPath;
+	    }
+d160 2
+a161 2
+	    /* funky bptr-list following! */
+	    while ((p = (BPTR) BADDR (p)) && (retval == NULL))
+d163 2
+a164 5
+		/* Convert to a lock and duplicate it */
+		lock = (BPTR) (((LONG *) p)[1]);
+
+		/* Go to the new place */
+		if (old = CurrentDir (lock))
+d166 2
+a167 5
+		    /* Try locking the name */
+		    if (retval = Lock (name, ACCESS_READ))
+		    {
+			/* We found the file, so return its directory */
+			UnLock (retval);
+d169 2
+a170 6
+			/* Unwind */
+			CurrentDir (old);
+
+			/* Put an unlockable lock in as current directory */
+			if (retval = DupLock (lock))
+			    retval = CurrentDir (retval);
+d172 3
+a174 2
+			/* Clear the error return */
+			SetIoErr (0);
+d176 2
+a177 2
+			return (retval);
+		    }
+d179 1
+a179 2
+		    /* Go back to the previous directory */
+		    CurrentDir (old);
+d182 2
+a183 2
+		/* Get the next path node */
+		p = ((LONG *) p)[0];
+d185 3
+d196 1
+@
+
+
+39.3
+log
+@no changes
+@
+text
+@a19 1
+	DB (kprintf ("  found \"%s\"\n", path));
+a23 4
+    else
+    {
+	DB (kprintf ("  couldn't find \"%s\"\n", path));
+    }
+a44 1
+    DB (kprintf ("LVOSetCurrentDirE : enter 0x%lx [%s]\n", name, name));
+a49 1
+	    DB (kprintf ("  OpenLocale\n"));
+a130 1
+	DB (kprintf ("  search current dir\n"));
+a145 1
+	    DB (kprintf ("  search path\n"));
+a194 2
+
+    DB (kprintf ("LVOSetCurrentDirE : return NULL\n"));
+@
+
+
+39.2
+log
+@uses locale
+@
+text
+@d39 1
+a39 2
+    BPTR old = NULL;
+    BPTR lock;
+@
+
+
+39.1
+log
+@added locale path searching
+@
+text
+@a41 1
+    struct Process *process;
+a43 1
+    UWORD version = 0;
+d65 2
+a66 3
+			process = (struct Process *) FindTask (NULL);
+			oldWP = process->pr_WindowPtr;
+			process->pr_WindowPtr = (APTR) - 1;
+d69 1
+a69 1
+			    if (lock = Lock ("LOCALE:", ACCESS_READ))
+d72 1
+a72 1
+			process->pr_WindowPtr = oldWP;
+d90 1
+a90 1
+				strcpy (path, "LOCALE:Help");
+d123 7
+a129 1
+	if (retval = IsFileThere (ag, path))
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d1 2
+a2 1
+/* SetCurrentDirELVO.c
+d8 28
+a35 1
+BPTR ASM LVOSetCurrentDirE (REG (a6) struct AGLib *ag, REG (a0) BPTR p, REG (d1) STRPTR name)
+d42 10
+d53 1
+d56 79
+d136 1
+d142 5
+d152 1
+d180 4
+d195 2
+d200 1
+a200 1
+	pr->pr_Result2 = ERROR_INVALID_COMPONENT_NAME;
+d202 2
+@

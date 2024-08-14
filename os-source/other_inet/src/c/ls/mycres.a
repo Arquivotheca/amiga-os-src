@@ -1,0 +1,246 @@
+* mycres.a - Specialized C initial startup procedure under AmigaDOS
+* Adapted for LS use from c.a by Justin V. McCormick 89-05-12
+* Converted to CAPE 89-06-03
+*
+	IFD	CAPE			; Special OP flags for CAPE
+
+	CSYMFMT
+	BASEREG	B
+	SMALLOBJ
+	OPTIMON
+	ADDSYM
+	include "work:ipre.i"		; A precompiled collection of the below...
+
+	ELSE
+
+	INCLUDE	"exec/types.i"
+	INCLUDE	"exec/alerts.i"
+	INCLUDE	"exec/nodes.i"
+	INCLUDE	"exec/lists.i"
+	INCLUDE	"exec/ports.i"
+	INCLUDE	"exec/libraries.i"
+	INCLUDE	"exec/tasks.i"
+	INCLUDE	"exec/memory.i"
+	INCLUDE	"exec/execbase.i"
+	INCLUDE	"libraries/dos.i"
+	INCLUDE	"libraries/dosextens.i"
+	INCLUDE	"workbench/startup.i"
+	INCLUDE	"exec/funcdef.i"
+	INCLUDE	"exec/exec_lib.i"
+	INCLUDE	"libraries/dos_lib.i"
+
+	ENDC
+
+	
+MEMFLAGS	EQU	MEMF_CLEAR+MEMF_PUBLIC
+
+; some usefull macros:
+
+SYS	MACRO	*
+	IFGT	NARG-2
+	FAIL	!!!
+	ENDC
+	IFEQ	NARG-2
+	MOVE.L	\2,a6
+	ENDC
+	JSR	_LVO\1(a6)
+	ENDM
+	
+	XDEF	XCEXIT			; exit(code) is standard way to leave C.
+	XDEF	@XCEXIT
+
+	XREF	@myalloc
+	XREF	@myfree
+	XREF	@astrncpy		; String copy routine
+	XREF	DOSBase
+	XREF	LinkerDB		; linker defined base value
+	XREF	NEWDATAL
+	XREF	RESBASE
+	XREF	RESLEN
+	XREF	_BSSBAS			; linker defined base of BSS
+	XREF	_BSSLEN			; linker defined length of BSS
+	XREF	@_main			; Name of C program to start with.
+;	XREF	@MemCleanup		; Free all allocated memory
+
+	SECTION	CODE
+* --------------------------------------------------------------------- *
+start:
+	move.l	a0,a2			; save command pointer
+	move.l	d0,d2			; and command length
+	lea	LinkerDB,a4		; load base register
+
+	movem.l	d0-d1/a0-a2,-(sp)
+	sub.l	#RESBASE,a4
+	move.l	#RESLEN,d0
+	move.l	#MEMFLAGS,d1
+	SYS	AllocMem,4
+	tst.l	d0
+	 bne	1$
+	movem.l	(sp)+,d0-d1/a0-a2
+	rts
+	
+1$
+	move.l	d0,a0
+	move.l	d0,a2
+
+; a2 now has difference
+	move.l	d0,a1
+	move.l	#NEWDATAL,d0
+; copy data over
+cpy:
+	move.l	(a4)+,(a0)+
+	subq.l	#1,d0
+	bne	cpy
+; a4 now points at number of relocs
+	move.l	(a4)+,d0
+reloc:
+	 beq.s	nreloc
+	move.l	a1,a0
+	add.l	(a4)+,a0		; a0 now has add of reloc
+	add.l	(a0),a2
+	move.l	a2,(a0) 
+	move.l	a1,a2			; restore offset
+	subq.l	#1,d0
+	bra	reloc
+
+nreloc:
+ 	move.l	a1,A4			; set up new base register
+	add.l	#RESBASE,A4
+	movem.l	(sp)+,d0-d1/a0-a2
+
+	movea.l	4,a6
+	move.l	a6,SysBase(A4)
+	move.l	sp,_StackPtr(A4)	; Save stack ptr
+
+; get the address of our task
+	move.l	ThisTask(a6),a3
+
+; clear any pending signals
+	moveq	#0,d0
+	move.l	#$00003000,d1
+	SYS	SetSignal
+	
+; are we running as a son of Workbench?
+	tst.l	pr_CLI(a3)
+	 bne.s	fromCLI
+
+* --------------------------------------------------------------------- *
+* Workbench Startup Code
+fromWorkbench:
+; wait for a message from our starter
+	lea	pr_MsgPort(a3),a0	; our process base
+	SYS	WaitPort
+	lea	pr_MsgPort(a3),a0	; our process base
+	SYS	GetMsg
+	move.l	d0,d2
+	 beq.w	exitToDOS
+
+; return the startup message to our parent
+; we forbid so workbench can't UnLoadSeg() us
+; before we are done:
+	SYS	Forbid
+	movea.l	d2,a1
+	SYS	ReplyMsg
+	bra.w	exitToDOS
+
+* --------------------------------------------------------------------- *
+* CLI Startup Code
+; Entry: d2 = command length
+;	 a2 = Command pointer
+fromCLI:
+; attempt to open DOS library:
+	lea	DOSName(PC),a1
+	moveq	#0,d0
+	SYS	OpenLibrary
+	move.l	d0,DOSBase(A4)
+	 bne.s	1$
+	moveq	#100,d0
+	bra.s	exit2
+1$
+; find command name:
+	move.l	pr_CLI(a3),a3
+	add.l	a3,a3			; bcpl pointer conversion
+	add.l	a3,a3
+	move.l	cli_CommandName(a3),a3
+	add.l	a3,a3			; bcpl pointer conversion
+	add.l	a3,a3
+
+; collect parameters:
+	move.l	d2,d0			; get command line length
+	moveq.l #0,d1
+	move.b	(a3)+,d1
+	add.l	d1,d0			; add length of command name
+	addq.l	#1,d0			; allow for space after command 
+	jsr	@myalloc		; allocate enough space for whole cmd line
+	tst.l	d0
+	 beq.s	closeDOS		; Oops, allocate failed
+	move.l	d0,_CmdLine(A4)
+
+; copy command name into allocated space
+	movea.l	a3,a1
+	movea.l	d0,a0
+	moveq	#0,d0
+	move.b	-1(a3),d0
+	jsr	@astrncpy
+
+; insert a space unless command itself is the only argument
+	cmpi.w	#2,d2
+	 bcs.s	2$
+	move.b	#' ',(a0)+
+	
+; Append/copy command line into allocated space
+	move.l	d2,d0
+	movea.l	a2,a1
+	jsr	@astrncpy
+2$
+	movea.l	_CmdLine(A4),a0		; push command line address
+
+* --------------------------------------------------------------------- *
+* Call @_main
+main:
+	jsr	@_main			; call C entrypoint
+	moveq.l #0,d0			; set successful status
+	bra.s	exit2
+XCEXIT:
+	move.l	4(sp),d0		; extract exit return code
+@XCEXIT:
+exit2:
+	move.l	d0,-(sp)		; Save exit return status
+
+	movea.l	_CmdLine(A4),a0
+	jsr	@myfree			; Free command line
+
+;	jsr	@MemCleanup		; Free malloced resources
+
+closeDOS:
+; Close the DOS library
+	move.l	DOSBase(A4),a1
+	SYS	CloseLibrary,4		; close Dos library
+
+; this rts sends us back to DOS:
+exitToDOS:
+	move.l	#RESLEN,d0
+	movea.l	A4,a1
+	suba.l	#RESBASE,a1
+	move.l	(sp)+,d7		; Grab exit return code
+	movea.l _StackPtr(A4),sp	; restore stack ptr
+	SYS	FreeMem,4
+	move.l	d7,d0			; Put exit return code in d0
+	rts
+
+*-----------------------------------------------------------------------
+DOSName	dc.b	'dos.library',0
+
+
+	SECTION _MERGED,BSS
+* --------------------------------------------------------------------- *
+	XDEF	_CmdLine
+	XDEF	SysBase
+	XDEF	_StackPtr
+_CmdLine:
+	ds.b	4
+SysBase:
+	ds.b	4
+_StackPtr
+	ds.b	4
+	END

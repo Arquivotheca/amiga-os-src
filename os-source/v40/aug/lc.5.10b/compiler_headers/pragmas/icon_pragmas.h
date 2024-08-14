@@ -1,0 +1,22 @@
+/* "icon.library"*/
+/*--- functions in V36 or higher (distributed as Release 2.0) ---*/
+/*	Use DiskObjects instead of obsolete WBObjects*/
+/*pragma libcall IconBase OBSOLETEGetWBObject 1E 801*/
+/*pragma libcall IconBase OBSOLETEPutWBObject 24 9802*/
+#pragma libcall IconBase GetIcon 2A A9803
+#pragma libcall IconBase PutIcon 30 9802
+#pragma libcall IconBase FreeFreeList 36 801
+/*pragma libcall IconBase OBSOLETEFreeWBObject 3C 801*/
+/*pragma libcall IconBase OBSOLETEAllocWBObject 42 0*/
+#pragma libcall IconBase AddFreeList 48 A9803
+#pragma libcall IconBase GetDiskObject 4E 801
+#pragma libcall IconBase PutDiskObject 54 9802
+#pragma libcall IconBase FreeDiskObject 5A 801
+#pragma libcall IconBase FindToolType 60 9802
+#pragma libcall IconBase MatchToolValue 66 9802
+#pragma libcall IconBase BumpRevision 6C 9802
+/*pragma libcall IconBase FreeAlloc 72 A9803*/
+#pragma libcall IconBase GetDefDiskObject 78 001
+#pragma libcall IconBase PutDefDiskObject 7E 801
+#pragma libcall IconBase GetDiskObjectNew 84 801
+/*--- (4 function slots reserved here) ---*/

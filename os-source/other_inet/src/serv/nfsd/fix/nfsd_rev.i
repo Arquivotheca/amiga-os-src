@@ -1,0 +1,14 @@
+VERSION		EQU	3
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'3.12.92'
+	ENDM
+VERS	MACRO
+		dc.b	'nfsd 3.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'nfsd 3.5 (3.12.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: nfsd 3.5 (3.12.92)',0
+	ENDM

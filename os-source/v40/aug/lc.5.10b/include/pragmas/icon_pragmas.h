@@ -1,0 +1,1 @@
+€…†IconBase GetIcon 2A A9803…†IconBase PutIcon 30³…†IconBase FreeFreeList 36‘…†IconBase AddFreeList 48 A9803…†IconBase GetDiskObject 4E‘…†IconBase PutDiskObject 54³…†IconBase FreeDiskObject 5A‘…†IconBase FindToolType 60³…†IconBase MatchToolValue 66³…†IconBase BumpRevision 6C³…†IconBase GetDefDiskObject 78 001…†IconBase PutDefDiskObject 7E‘…†IconBase GetDiskObjectNew 84‘

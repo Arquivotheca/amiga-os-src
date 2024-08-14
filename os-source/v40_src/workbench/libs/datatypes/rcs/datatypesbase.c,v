@@ -1,0 +1,555 @@
+head     39.6;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.6; strict;
+comment  @ * @;
+
+
+39.6
+date     93.08.25.14.21.58;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     93.01.25.11.05.06;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.01.05.14.35.51;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.23.17.22.26;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.29.00.49.25;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.23.23.49.09;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.01.13.01.02;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.6
+log
+@clean up
+@
+text
+@/* datatypesbase.c
+ *
+ */
+
+#define	LIBRARY_PRIMITIVES	TRUE
+
+#include "datatypesbase.h"
+
+/****** datatypes.library/--background-- ****************************************
+*
+*   PURPOSE
+*	The datatypes.library provides transparent data handling
+*	abilities to applications.  Application developers can register
+*	their data format with datatypes.library and provide a class
+*	library for handling their data within other applications.
+*
+*   OVERVIEW
+*
+*	* Object Oriented
+*
+*	datatypes.library implementation is object oriented, using the
+*	boopsi functions of Intuition.  Each data class is implemented
+*	as a shared system library.
+*
+*	* Embedded Objects
+*
+*	datatypes.library provides the ability to embed different object
+*	types within an application.  For example, an application can
+*	embed an picture object or even an AmigaGuide document browser
+*	within their application's window.  Objects can also be embedded
+*	within other objects.
+*
+*	* Gadget-like
+*
+*	Embedded objects are actually boopsi gadgets.  That means that
+*	input handling is done on Intuition's task.  Time intensive
+*	operations, such as layout when the window size changes, are
+*	off-loaded to a sub-process.  Printing, clipboard operations,
+*	file read/write are also off-loaded to a separate process on an
+*	as-needed basis.
+*
+*	* Trigger Methods
+*
+*	Sometimes it is necessary for an application to provide
+*	additional controls for navigating through an object.  For
+*	example, with an AmigaGuide object it is necessary to have
+*	controls for "Contents", "Index", "Browse >", "Browse <".  Each
+*	class implements a method that returns the trigger methods, and
+*	the appropriate labels, that a class supports.
+*
+*	* Format Conversion
+*
+*	As long as the objects are sub-classes of the same class, data
+*	from one format can be written out as another format.  For
+*	example, it is possible to read in an ILBM file and write out a
+*	JPEG file, since both data types are sub-classes of PICTURE.
+*
+*	* Future Compatible
+*
+*	Each class implements a method that returns the supported
+*	methods within a class.  This way an application can ask an
+*	object if it is capable of any particular method, such as
+*	DTM_WRITE for example.
+*
+*	* Data Type Detection
+*
+*	datatypes.library provides the ability to examine a file or
+*	the clipboard to determine what type of data it contains.
+*
+*******************************************************************************
+*
+* Created:  27-Feb-92, David N. Junod
+*
+*/
+
+struct Library *ASM LibInit (REG (d0) struct DataTypesLib * dtl, REG (a0) BPTR seglist, REG (a6) struct Library * sysbase)
+{
+    UWORD i;
+
+    dtl->dtl_SegList = seglist;
+    dtl->dtl_SysBase = sysbase;
+
+    for (i = 0; i < MAX_LOCKS; i++)
+	InitSemaphore (&(dtl->dtl_Lock[i]));
+
+    if (sysbase->lib_Version >= 39)
+    {
+	dtl->dtl_DOSBase       = OpenLibrary ("dos.library", 39);
+	dtl->dtl_UtilityBase   = OpenLibrary ("utility.library", 39);
+	dtl->dtl_IntuitionBase = OpenLibrary ("intuition.library", 39);
+	dtl->dtl_GfxBase       = OpenLibrary ("graphics.library", 39);
+	dtl->dtl_LayersBase    = OpenLibrary ("layers.library", 39);
+
+	return ((struct Library *) dtl);
+    }
+    return (NULL);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibOpen (REG (a6) struct DataTypesLib * dtl)
+{
+    LONG retval = (LONG) dtl;
+    struct NamedObject *no;
+    BOOL success = TRUE;
+
+    ObtainSemaphore (&(dtl->dtl_Lock[MASTER_LOCK]));
+
+    /* Use an internal use counter */
+    dtl->dtl_UsageCnt++;
+    dtl->dtl_Lib.lib_Flags &= ~LIBF_DELEXP;
+
+    if (dtl->dtl_UsageCnt == 1)
+    {
+	if (dtl->dtl_DTClass == NULL)
+	{
+	    success = FALSE;
+
+	    /* Now attempt to get a handle on the public token */
+	    if (no = FindNamedObject (NULL, TOKEN_NAME, NULL))
+	    {
+		dtl->dtl_Token = (struct Token *) no->no_Object;
+		ReleaseNamedObject (no);
+
+		if (dtl->dtl_LocaleBase = OpenLibrary ("locale.library", 38))
+		    dtl->dtl_Catalog = OpenCatalogA (NULL, "Sys/libs.catalog", NULL);
+
+		if (dtl->dtl_IFFParseBase = OpenLibrary ("iffparse.library", 0))
+		    if (dtl->dtl_DTClass = initDTClass (dtl))
+			success = TRUE;
+	    }
+	}
+    }
+
+    if (!success)
+    {
+	dtl->dtl_UsageCnt--;
+	retval = NULL;
+
+	/* Close the classes */
+	CloseClasses (dtl);
+
+	/* Free up the things we opened */
+	if (dtl->dtl_LocaleBase)
+	{
+	    CloseCatalog (dtl->dtl_Catalog);
+	    CloseLibrary (dtl->dtl_LocaleBase);
+	}
+
+	CloseLibrary (dtl->dtl_IFFParseBase);
+
+	/* Null bases */
+	dtl->dtl_IFFParseBase = NULL;
+	dtl->dtl_LocaleBase = NULL;
+	dtl->dtl_Catalog = NULL;
+	dtl->dtl_DTClass = NULL;
+    }
+    ReleaseSemaphore (&(dtl->dtl_Lock[MASTER_LOCK]));
+    return (retval);
+}
+
+/*****************************************************************************/
+
+#define	DTC	dtl->dtl_DTClass
+
+BOOL ASM CloseClasses (REG (a6) struct DataTypesLib * dtl)
+{
+    if (DTC)
+	if (FreeClass (DTC))
+	    return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibClose (REG (a6) struct DataTypesLib * dtl)
+{
+    if (dtl->dtl_UsageCnt)
+	dtl->dtl_UsageCnt--;
+
+    if ((dtl->dtl_UsageCnt == 0) && dtl->dtl_DTClass)
+    {
+	if (CloseClasses (dtl))
+	{
+	    /* Free up the things we opened */
+	    if (dtl->dtl_LocaleBase)
+	    {
+		CloseCatalog (dtl->dtl_Catalog);
+		CloseLibrary (dtl->dtl_LocaleBase);
+	    }
+	    CloseLibrary (dtl->dtl_IFFParseBase);
+
+	    /* Null bases */
+	    dtl->dtl_IFFParseBase = NULL;
+	    dtl->dtl_LocaleBase = NULL;
+	    dtl->dtl_Catalog = NULL;
+	    dtl->dtl_DTClass = NULL;
+	}
+    }
+
+    if (dtl->dtl_Lib.lib_Flags & LIBF_DELEXP)
+	return (LibExpunge (dtl));
+
+    return (NULL);
+}
+
+/*****************************************************************************/
+
+LONG ASM LibExpunge (REG (a6) struct DataTypesLib * dtl)
+{
+    BPTR seg = dtl->dtl_SegList;
+
+    if (dtl->dtl_UsageCnt)
+    {
+	dtl->dtl_Lib.lib_Flags |= LIBF_DELEXP;
+	return (NULL);
+    }
+    else if (dtl->dtl_DTClass)
+    {
+	if (CloseClasses (dtl))
+	{
+	    /* Free up the things we opened */
+	    if (dtl->dtl_LocaleBase)
+	    {
+		CloseCatalog (dtl->dtl_Catalog);
+		CloseLibrary (dtl->dtl_LocaleBase);
+	    }
+
+	    CloseLibrary (dtl->dtl_IFFParseBase);
+
+	    /* Null bases */
+	    dtl->dtl_IFFParseBase = NULL;
+	    dtl->dtl_LocaleBase = NULL;
+	    dtl->dtl_Catalog = NULL;
+	    dtl->dtl_DTClass = NULL;
+	}
+	else
+	{
+	    dtl->dtl_Lib.lib_Flags |= LIBF_DELEXP;
+	    return (NULL);
+	}
+    }
+
+    /* Remove the library base */
+    Remove ((struct Node *) dtl);
+
+    /* Close the libraries */
+    CloseLibrary (dtl->dtl_LayersBase);
+    CloseLibrary (dtl->dtl_GfxBase);
+    CloseLibrary (dtl->dtl_IntuitionBase);
+    CloseLibrary (dtl->dtl_UtilityBase);
+    CloseLibrary (dtl->dtl_DOSBase);
+
+    /* Free the library base */
+    FreeMem ((APTR)((ULONG)(dtl) - (ULONG)(dtl->dtl_Lib.lib_NegSize)), dtl->dtl_Lib.lib_NegSize + dtl->dtl_Lib.lib_PosSize);
+
+    return ((LONG) seg);
+}
+@
+
+
+39.5
+log
+@fixed token problem
+@
+text
+@a8 4
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+a79 2
+    DB (kprintf ("LibInit\n"));
+
+a93 1
+	DB (kprintf ("  LibInit returns 0x%lx\n", dtl));
+a95 1
+    DB (kprintf ("  fails...\n"));
+a106 2
+    DB (kprintf ("\n\nLibOpen\n"));
+
+a121 1
+		DB (kprintf ("  Token 0x%lx\n", no->no_Object));
+a127 1
+		DB (kprintf ("  open iffparse\n"));
+d129 2
+a130 15
+		{
+		    DB (kprintf ("  initDTNClass\n"));
+		    if (dtl->dtl_DTNClass = initDTNClass (dtl))
+		    {
+			DB (kprintf ("  initDTClass\n"));
+			if (dtl->dtl_DTClass = initDTClass (dtl))
+			{
+			    success = TRUE;
+			}
+		    }
+		}
+	    }
+	    else
+	    {
+		DB (kprintf ("  couldn't obtain token\n"));
+a136 1
+	DB (kprintf ("  failure\n"));
+a145 1
+	    DB (kprintf ("  close locale\n"));
+a149 1
+	DB (kprintf ("  close iffparse\n"));
+a152 1
+	DB (kprintf ("  variables cleared\n"));
+d156 1
+a156 1
+	dtl->dtl_DTClass = dtl->dtl_DTNClass = NULL;
+a157 1
+
+a158 2
+
+    DB (kprintf ("  LibOpen returns 0x%lx\n", retval));
+a164 1
+#define	DTNC	dtl->dtl_DTNClass
+d168 2
+a169 7
+    DB (kprintf ("  CloseClasses "));
+    if (DTC && DTNC)
+    {
+	if (freeDTClass (dtl, DTC))
+	{
+	    freeDTNClass (dtl, DTNC);
+	    DB (kprintf ("TRUE\n"));
+a170 3
+	}
+    }
+    DB (kprintf ("FALSE\n"));
+a177 2
+
+    DB (kprintf ("LibClose\n"));
+a187 1
+		DB (kprintf ("  close locale\n"));
+a190 2
+
+	    DB (kprintf ("  close iffparse\n"));
+a193 1
+	    DB (kprintf ("  variables cleared\n"));
+d197 1
+a197 1
+	    dtl->dtl_DTClass = dtl->dtl_DTNClass = NULL;
+a212 2
+    DB (kprintf ("LibExpunge\n"));
+
+a224 1
+		DB (kprintf ("  close locale\n"));
+a228 1
+	    DB (kprintf ("  close iffparse\n"));
+a231 1
+	    DB (kprintf ("  variables cleared\n"));
+d235 1
+a235 1
+	    dtl->dtl_DTClass = dtl->dtl_DTNClass = NULL;
+a238 1
+	    DB (kprintf ("  delay expunge\n"));
+@
+
+
+39.4
+log
+@autodoc fixes
+@
+text
+@d100 1
+a100 1
+	DB (kprintf ("LibInit returns 0x%lx\n", dtl));
+d103 1
+a103 1
+    DB (kprintf ("fails...\n"));
+d129 9
+a137 2
+	    if (dtl->dtl_LocaleBase = OpenLibrary ("locale.library", 38))
+		dtl->dtl_Catalog = OpenCatalogA (NULL, "Sys/libs.catalog", NULL);
+d139 2
+a140 5
+	    DB (kprintf ("open iffparse\n"));
+	    if (dtl->dtl_IFFParseBase = OpenLibrary ("iffparse.library", 0))
+	    {
+		DB (kprintf ("initDTNClass\n"));
+		if (dtl->dtl_DTNClass = initDTNClass (dtl))
+d142 2
+a143 2
+		    DB (kprintf ("initDTClass\n"));
+		    if (dtl->dtl_DTClass = initDTClass (dtl))
+d145 2
+a146 22
+#if 1
+#if 0
+			/* Add all the datatypes */
+			SystemTagList ("C:AddDataTypes REFRESH QUIET", NULL);
+#endif
+
+			/* Now attempt to get a handle on the public token */
+			no = FindNamedObject (NULL, TOKEN_NAME, NULL);
+#else
+			/* Now attempt to get a handle on the public token */
+			if (!(no = FindNamedObject (NULL, TOKEN_NAME, NULL)))
+			{
+			    /* Add all the datatypes */
+			    if (SystemTagList ("C:AddDataTypes REFRESH QUIET", NULL) == 0L)
+			    {
+				/* Now attempt to get a handle on the public token */
+				no = FindNamedObject (NULL, TOKEN_NAME, NULL);
+			    }
+			}
+#endif
+
+			if (no)
+a147 3
+			    DB (kprintf ("Token 0x%lx\n", no->no_Object));
+			    dtl->dtl_Token = (struct Token *) no->no_Object;
+			    ReleaseNamedObject (no);
+d153 4
+d162 1
+d165 21
+d190 1
+a190 1
+    DB (kprintf ("LibOpen returns 0x%lx\n", retval));
+d201 1
+a201 2
+
+    DB (kprintf ("CloseClasses "));
+d231 1
+d235 7
+a243 1
+
+a244 2
+	    DB (kprintf ("C) close iffparse\n"));
+	    CloseLibrary (dtl->dtl_IFFParseBase);
+d260 2
+d274 1
+d278 7
+a286 1
+
+a287 1
+	    CloseLibrary (dtl->dtl_IFFParseBase);
+d291 1
+@
+
+
+39.3
+log
+@expunge wasn't freeing library base.
+@
+text
+@d142 1
+d145 1
+@
+
+
+39.2
+log
+@always run AddDataTypes on startup
+@
+text
+@d245 1
+a246 1
+    DB (kprintf ("LibExpunge\n"));
+a265 1
+	    DB (kprintf ("E) close iffparse\n"));
+d275 1
+a275 1
+    DB (kprintf ("Remove 0x%lx\n", dtl));
+d278 1
+a278 1
+    DB (kprintf ("close libraries\n"));
+d285 4
+a288 2
+    DB (kprintf ("all done\n"));
+    return ((LONG) dtl->dtl_SegList);
+@
+
+
+39.1
+log
+@open Sys/libs.catalog instead of datatype.catalog
+@
+text
+@d141 4
+d146 3
+d152 1
+a152 1
+			    if (SystemTagList ("C:AddDataTypes DEVS:DataTypes/#? QUIET", NULL) == 0L)
+d158 1
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d130 1
+a130 1
+		dtl->dtl_Catalog = OpenCatalogA (NULL, "datatypes.catalog", NULL);
+@

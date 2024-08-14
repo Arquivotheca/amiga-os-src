@@ -1,0 +1,2020 @@
+head     39.5;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+39.5
+date     93.08.19.16.35.49;  author peter;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.06.02.15.51.05;  author peter;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     93.05.21.17.34.36;  author peter;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     93.04.27.14.37.09;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.11.02.17.09.01;  author peter;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.10.30.15.21.30;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Routines to show many low-level system structures.
+@
+
+
+39.5
+log
+@Removed "sp" command.
+@
+text
+@/*
+ * Amiga Grand Wack
+ *
+ * show.c -- Routines to show many low-level system structures.
+ *
+ * $Id: show.c,v 39.4 93/06/02 15:51:05 peter Exp Locker: peter $
+ *
+ * Here is the code to show many of the low-level system structures of
+ * the target Amiga.  Most of the stuff here is Exec level stuff
+ * (nodes, libraries, ports, tasks, etc.), plus processes.
+ *
+ */
+
+#include "exec/types.h"
+#include "exec/nodes.h"
+#include "exec/lists.h"
+#include "exec/interrupts.h"
+#include "exec/memory.h"
+#include "exec/ports.h"
+#include "exec/libraries.h"
+#include "exec/devices.h"
+#include "exec/tasks.h"
+#include "exec/resident.h"
+#include "exec/execbase.h"
+
+#include "libraries/dos.h"
+#include "libraries/dosextens.h"
+
+#include "symbols.h"
+#include "std.h"
+
+#include "linklib_protos.h"
+#include "linklib_pragmas.h"
+extern APTR LinkLibBase;
+
+#include "sys_proto.h"
+#include "main_proto.h"
+#include "showd_proto.h"
+#include "link_proto.h"
+#include "show_proto.h"
+#include "io_proto.h"
+#include "parse_proto.h"
+
+#define LTOB(b_ptr) (b_ptr << 2)
+
+extern APTR CurrAddr;
+extern APTR SpareAddr;
+extern long FrameSize;
+
+#define NAMESIZE 100
+
+/* Read the string at address 'addr' into buffer 'buffer'.
+ * No more than 'maxlen' bytes will be transferred, including the
+ * trailing \0.  Returns the actual number of bytes transferred.
+ */
+unsigned long
+GetString( APTR addr, char *buffer, unsigned long maxlen )
+{
+    unsigned long len = 0;
+
+    if ( addr == 0 )
+    {
+	buffer[ 0 ] = 0;
+    }
+    else
+    {
+	len = ReadString( addr, buffer, maxlen );
+	buffer[ maxlen - 1 ] = 0;
+    }
+    return( len );
+}
+
+
+unsigned long
+GetBSTR( APTR addr, char *buffer, unsigned long maxlen )
+{
+    unsigned long len = 0;
+
+    if ( addr == 0 )
+    {
+	buffer[ 0 ] = 0;
+    }
+    else
+    {
+	len = ReadByte( addr ) + 1;
+	if ( len > maxlen )
+	{
+	    len = maxlen;
+	}
+	ReadBlock( ( (UBYTE *) addr ) + 1, buffer, len-1 );
+	buffer[ len - 1 ] = 0;
+    }
+    return( len );
+}
+
+
+void
+GetName( APTR nameAddr, char *nameStr )
+{
+    GetString( nameAddr, nameStr, NAMESIZE );
+}
+
+
+/***********************************************************************
+*
+*   Show Node
+*
+************************************************************************
+*    Address NT  Pri Name
+*  C XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define NFMT0 "  Address   NT  Pri Name\n"
+#define NFMT1 "%08lx  %2ld %4ld \"%s\"\n"
+#define NFMT2 "%08lx  %2ld %4ld --\n"
+
+void
+ShowNode( struct Node *n )
+{
+    struct Node node;
+    char name[NAMESIZE];
+
+    ReadBlock( n, &node, sizeof( struct Node ) );
+    if ( ( node.ln_Name ) && ValidAddress( node.ln_Name ) )
+    {
+	GetName( node.ln_Name, name );
+	PPrintf( NFMT1, n, node.ln_Type, node.ln_Pri, name );
+    }
+    else
+    {
+	PPrintf( NFMT2, n, node.ln_Type, node.ln_Pri );
+    }
+}
+
+
+STRPTR
+ShowNodes( char *arg )
+{
+    struct Node *node;
+    struct Node *succ;
+    struct Node *thisnode;
+    struct Node **nodearray;
+    long i;
+
+    if ( parseAddress( arg, (ULONG *)&thisnode ) )
+    {
+	LinkLock();
+	node = thisnode;
+	while ( succ = ReadPointer( node ) )
+	{
+	    /* move to list header */
+	    node = succ;
+	}
+
+	nodearray = ObtainNodeArray( (struct List *) (((ULONG *)node) - 1), 100 );
+	LinkUnlock();
+	if ( nodearray )
+	{
+	    PPrintf( NFMT0 );
+	    for ( i = 1; i <= (long) nodearray[ 0 ]; i++ )
+	    {
+		if ( nodearray[ i ] == thisnode )
+		{
+		    PPrintf("* ");
+		}
+		else
+		{
+		    PPrintf("  ");
+		}
+		ShowNode( nodearray[ i ] );
+	    }
+	    ReleaseNodeArray( nodearray );
+	}
+    }
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Tasks
+*
+************************************************************************
+* Address NT  Pri Stat  SigWait  SPReg Name
+* XXXXXX  DD DDDD SSSS XXXXXXXX XXXXXX SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define TFMT0 "Address   NT  Pri Stat  SigWait  SPReg   Name\n"
+#define TFMT1 "%08lx  %2ld %4ld %s %08lx %08lx \"%s\""
+
+static char *states[] =
+{
+    "????",
+    " add",
+    " run",
+    "redy",
+    "wait",
+    "expt",
+    "remv"
+};
+
+
+void
+dumpTaskSummary( struct Task *task )
+{
+    struct Task tc;
+    char   name[ NAMESIZE ];
+    UBYTE  state;
+
+    ReadBlock( task, &tc, sizeof( struct Task ) );
+
+    if ( ( tc.tc_State < TS_INVALID ) || ( tc.tc_State > TS_REMOVED ) )
+    {
+	state = 0;
+    }
+    else
+    {
+	state = tc.tc_State;
+    }
+
+    GetName( tc.tc_Node.ln_Name, name );
+
+    PPrintf( TFMT1, task, tc.tc_Node.ln_Type, tc.tc_Node.ln_Pri,
+	    states[ state ], tc.tc_SigWait, tc.tc_SPReg, name );
+
+    if ( tc.tc_Node.ln_Type == NT_PROCESS )
+    {
+	struct Process pr;
+	ReadBlock( task, &pr, sizeof( struct Process ) );
+	if ( pr.pr_CLI )
+	{
+	    PPrintf( " (" );
+	    PrintBSTR( &(((struct CommandLineInterface *)LTOB(pr.pr_CLI))->cli_CommandName) );
+	    PPrintf( ")" );
+	}
+    }
+    NewLine();
+}
+
+
+STRPTR
+ShowTasks( void )
+{
+    struct ExecBase *ebptr;
+    struct ExecBase eb;
+    struct Node **readyarray;
+    struct Node **waitarray;
+    long i;
+
+    LinkLock();
+    ebptr = ReadPointer( ABSSYSBASE );
+    ReadBlock( ebptr, &eb, sizeof( struct ExecBase ) );
+    readyarray = ObtainNodeArray( &ebptr->TaskReady, 100 );
+    waitarray = ObtainNodeArray( &ebptr->TaskWait, 100 );
+    LinkUnlock();
+    if ( ( readyarray ) && ( waitarray ) )
+    {
+	PPrintf( TFMT0 );
+	dumpTaskSummary( eb.ThisTask );
+	for ( i = 1; i <= (long)readyarray[ 0 ]; i++ )
+	{
+	    dumpTaskSummary( (struct Task *)readyarray[ i ] );
+	}
+	for ( i = 1; i <= (long)waitarray[ 0 ]; i++ )
+	{
+	    dumpTaskSummary( (struct Task *)waitarray[ i ] );
+	}
+    }
+    ReleaseNodeArray( readyarray );
+    ReleaseNodeArray( waitarray );
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Devices
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define DFMT0 "Address   NT  Pri Ver Rev Name\n"
+#define DFMT1 "%08lx  %2ld %4ld%4ld%4ld \"%s\"\n"
+
+void
+ShowDeviceHead( struct Node *device )
+{
+    struct Library dev; 
+    char name[ NAMESIZE ];
+
+    ReadBlock( device, &dev, sizeof( struct Library ) );
+
+    GetName( dev.lib_Node.ln_Name, name );
+
+    PPrintf( DFMT1, device, dev.lib_Node.ln_Type, dev.lib_Node.ln_Pri,
+	dev.lib_Version, dev.lib_Revision, name );
+}
+
+
+STRPTR
+ShowDeviceList( void )
+{
+    struct ExecBase *ebptr;
+    struct Node **devicearray;
+    long i;
+
+    ebptr = ReadPointer( ABSSYSBASE );
+    if ( devicearray = ObtainNodeArray( &ebptr->DeviceList, 32 ) )
+    {
+	PPrintf( DFMT0 );
+	for ( i = 1; i <= (long)devicearray[ 0 ]; i++ )
+	{
+	    ShowDeviceHead( devicearray[ i ] );
+	}
+	ReleaseNodeArray( devicearray );
+    }
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Resources
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+STRPTR
+ShowResourceList( void )
+{
+    struct ExecBase *ebptr;
+    struct Node **resourcearray;
+    long i;
+
+    ebptr = ReadPointer( ABSSYSBASE );
+    if ( resourcearray = ObtainNodeArray( &ebptr->ResourceList, 32 ) )
+    {
+	PPrintf( DFMT0 );
+	for ( i = 1; i <= (long)resourcearray[ 0 ]; i++ )
+	{
+	    ShowDeviceHead( resourcearray[ i ] );
+	}
+	ReleaseNodeArray( resourcearray );
+    }
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Libraries
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+STRPTR
+ShowLibraryList( void )
+{
+    struct ExecBase *ebptr;
+    struct Node **libraryarray;
+    long i;
+
+    ebptr = ReadPointer( ABSSYSBASE );
+    if ( libraryarray = ObtainNodeArray( &ebptr->LibList, 32 ) )
+    {
+	PPrintf( DFMT0 );
+	for ( i = 1; i <= (long)libraryarray[ 0 ]; i++ )
+	{
+	    ShowDeviceHead( libraryarray[ i ] );
+	}
+	ReleaseNodeArray( libraryarray );
+    }
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Ports
+*
+************************************************************************
+*  Address NT  Pri Flags SigTask/Bit MsgList Name
+*  XXXXXX  DD  DDD  XX   XXXXXX DDD  XXXXXX SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+#define PFMT0 "Address   NT  Pri Flags SigTask / Bit MsgList   Name\n"
+#define PFMT1 "%08lx  %2ld %4ld  %02lx   %08lx %3ld  %08lx \"%s\"\n"
+
+void
+ShowPortHead( struct Node *port )
+{
+    struct MsgPort p;
+    char name[ NAMESIZE ];
+
+    ReadBlock( port, &p, sizeof( struct MsgPort ) );
+    GetName( p.mp_Node.ln_Name, name );
+    PPrintf( PFMT1, port, p.mp_Node.ln_Type, p.mp_Node.ln_Pri,
+	p.mp_Flags, p.mp_SigTask, p.mp_SigBit,
+	20 + (ULONG) port, name );
+}
+
+
+STRPTR
+ShowPortList( void )
+{
+    struct ExecBase *ebptr;
+    struct Node **portarray;
+    long i;
+
+    ebptr = ReadPointer( ABSSYSBASE );
+    if ( portarray = ObtainNodeArray( &ebptr->PortList, 32 ) )
+    {
+	PPrintf( PFMT0 );
+	for ( i = 1; i <= (long)portarray[ 0 ]; i++ )
+	{
+	    ShowPortHead( portarray[ i ] );
+	}
+	ReleaseNodeArray( portarray );
+    }
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Interrupts
+*
+************************************************************************
+*  IV   Data   Code   Node NT Pri Name
+*  DD XXXXXX XXXXXX XXXXXX DD DDD SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+#define IFMT0 "IV   Data     Code     Node   NT Name\n"
+#define IFMT1 "%2ld %08lx %08lx %08lx %2ld \"%s\"\n"
+
+STRPTR
+ShowIntVects( void )
+{
+    struct ExecBase eb;
+    long i;
+    struct Node node;
+    char name[ NAMESIZE ];
+    char *n;
+
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( IFMT0 );
+    for ( i = 0; i < 16; i++ )
+    {
+        name[ 0 ] = 0;
+	n = name;
+	if ( eb.IntVects[ i ].iv_Node != 0 )
+	{
+	    ReadBlock( eb.IntVects[i].iv_Node, &node, sizeof( struct Node ) );
+	    GetName( node.ln_Name, name );
+	}
+	else
+	{
+	    if ( eb.IntVects[ i ].iv_Code != 0 )
+	    {
+		n = "server-chain";
+	    }
+	}
+
+	PPrintf( IFMT1, i, eb.IntVects[ i ].iv_Data, eb.IntVects[ i ].iv_Code,
+		eb.IntVects[ i ].iv_Node, node.ln_Type, n );
+    }
+    LinkUnlock();
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Memory Regions
+*
+************************************************************************
+***********************************************************************/
+#define FMT_REGION "%8lx attr %04lx lower %8lx upper %8lx first %8lx free %ld.\n"
+
+void
+ShowRegion( struct MemHeader *region )
+{
+    struct MemHeader mem;
+
+    ReadBlock( region, &mem, sizeof( struct MemHeader ) );
+
+    PPrintf( FMT_REGION, region, mem.mh_Attributes, 
+	    mem.mh_Lower, mem.mh_Upper, mem.mh_First, mem.mh_Free );
+}
+
+STRPTR
+ShowRegionList( void )
+{
+    struct ExecBase eb;
+    struct MemHeader *node;
+    struct MemHeader *succ;
+
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof ( struct ExecBase ) );
+    for (node = (struct MemHeader *)eb.MemList.lh_Head;
+	succ = ReadPointer( node );
+	node = succ )
+    {
+	ShowRegion( node );
+    }
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show all Memory Chunks
+*
+************************************************************************
+***********************************************************************/
+#define	FMT_TITLE \
+"   -----addr--ALLOCATED---size--------   -----addr-----FREE-----size--------\n"
+#define	FMT_END   "   %8lx-%-8lx %8lx #%-8ld\n"
+#define FMT_CHUNK "   %8lx-%-8lx %8lx #%-8ld  %8lx-%-8lx %8lx #%-10ld\n"
+
+void
+ShowMemory( struct MemRegion *region )
+{
+    ULONG *chunk;
+    struct MemHeader mem;
+    long size;
+    long lastEnd;
+
+    ShowRegion( region );
+
+    ReadBlock( region, &mem, sizeof ( struct MemHeader ) );
+    lastEnd = (long) mem.mh_Lower;
+
+    PPrintf( FMT_TITLE );
+    for ( chunk = (ULONG *) mem.mh_First; chunk; chunk = ReadPointer( chunk ) )
+    {
+	size = ReadLong( chunk + 1 );
+	PPrintf( FMT_CHUNK, lastEnd, ( (long)chunk ) - 1,
+	    ( (long) chunk ) - lastEnd, ( (long) chunk ) - lastEnd,
+	    chunk, ( (long) chunk ) + size - 1, size, size );
+	lastEnd = ( (long) chunk ) + size;
+    }
+    if ( ( ( (long)mem.mh_Upper ) - lastEnd ) != 0 )
+    {
+	PPrintf( FMT_END, lastEnd, ( (long)mem.mh_Upper ) - 1,
+	    ( (long)mem.mh_Upper ) - lastEnd, ( (long)mem.mh_Upper ) - lastEnd );
+    }
+    PPrintf( FMT_TITLE );
+}
+
+
+STRPTR
+ShowMemoryList( void )
+{
+    struct ExecBase *ebptr;
+    struct Node **memoryarray;
+    long i;
+
+    LinkLock();
+    ebptr = ReadPointer( ABSSYSBASE );
+    if ( memoryarray = ObtainNodeArray( &ebptr->MemList, 100 ) )
+    {
+	for ( i = 1; i <= (long)memoryarray[ 0 ]; i++ )
+	{
+	    ShowMemory( memoryarray[ i ] );
+	}
+	ReleaseNodeArray( memoryarray );
+    }
+    LinkUnlock();
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show Resident Modules
+*
+************************************************************************
+***********************************************************************/
+#define RMFMT0 "Address   Pri Type Ver Name\n"
+#define RMFMT1 "%08lx  %4ld%4ld%4ld %s"
+
+void
+ShowModule( struct Resident *m )
+{
+    struct Resident r;
+    char name[ NAMESIZE ];
+    int len;
+
+    ReadBlock( m, &r, sizeof( struct Resident ) );
+    GetName( r.rt_IdString, name );
+
+    /* Strip trailing newline character, which sometimes is and sometimes
+     * isn't present.  This will allow us to have consistent output from
+     * inconsistent RomTag IdStrings.
+     */
+    if ( len = strlen( name ) )
+    {
+	if ( name[ len - 1 ] == '\n' )
+	{
+	    name[ len - 1 ] = '\0';
+	}
+    }
+
+    /* Most RomTags have a trailing ^M in the string, which we should
+     * also nuke for cleaner output.
+     */
+    if ( len = strlen( name ) )
+    {
+	if ( name[ len - 1 ] == 0x0D )
+	{
+	    name[ len - 1 ] = '\0';
+	}
+    }
+
+    PPrintf( RMFMT1, m, r.rt_Pri, r.rt_Type, r.rt_Version, name );
+    if ( ( strlen( name ) ) && ( name[ strlen( name ) - 1 ] != '\n' ) )
+    {
+	NewLine();
+    }
+}
+
+
+STRPTR
+ShowResModules( void )
+{
+    struct ExecBase eb;
+    long i;
+    ULONG mods[100];
+    APTR modbase;
+
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( RMFMT0 );
+
+    modbase = (APTR) eb.ResModules;
+
+
+    while( modbase )
+    {
+	ReadBlock( modbase, &mods[0], sizeof( mods ) );
+	modbase = 0;
+    
+	for ( i = 0; mods[ i ] != 0; i++ )
+	{
+	    if( mods[ i ] & ( 1<<31 ) )
+	    {
+		/* link field */
+		modbase = (APTR) ( mods[ i ] & ~(1<<31) );
+		break;
+	    }
+	
+	    ShowModule( (struct Resident *)mods[ i ] );
+	}
+    }
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   ShowTask
+*
+***********************************************************************/
+
+long
+compareTaskName( struct Task *task, char *arg )
+{
+    struct Task tc;
+    struct Process pr;
+    char name[ NAMESIZE ];
+    long found = FALSE;
+
+    ReadBlock( task, &tc, sizeof( struct Task ) );
+    GetName( tc.tc_Node.ln_Name, name );
+    if ( strstr( name, arg ) )
+    {
+	found = TRUE;
+    }
+    else if ( tc.tc_Node.ln_Type == NT_PROCESS )
+    {
+	ReadBlock( task, &pr, sizeof( struct Process ) );
+	if ( pr.pr_CLI )
+	{
+	    GetBSTR( (APTR)(ReadLong( &(((struct CommandLineInterface *)LTOB(pr.pr_CLI))->cli_CommandName) ) << 2),
+		name, NAMESIZE );
+	    if ( strstr( name, arg ) )
+	    {
+		found = TRUE;
+	    }
+	}
+    }
+    return( found );
+}
+
+
+struct Task *
+findTask( char *arg )
+{
+    struct ExecBase *ebptr;
+    struct Task *task;
+    struct Node **readyarray;
+    struct Node **waitarray;
+    long i;
+    long found;
+
+    LinkLock();
+    ebptr = ReadPointer( ABSSYSBASE );
+    readyarray = ObtainNodeArray( &ebptr->TaskReady, 100 );
+    waitarray = ObtainNodeArray( &ebptr->TaskWait, 100 );
+    task = ReadPointer( &ebptr->ThisTask);
+    LinkUnlock();
+    found = compareTaskName( task, arg );
+    if ( ( readyarray ) && ( waitarray ) )
+    {
+	i = 1;
+	while ( ( !found ) && ( i <= (long)readyarray[ 0 ] ) )
+	{
+	    task = (struct Task *)readyarray[ i ];
+	    found = compareTaskName( task, arg );
+	    i++;
+	}
+	i = 1;
+	while ( ( !found ) && ( i <= (long)waitarray[ 0 ] ) )
+	{
+	    task = (struct Task *)waitarray[ i ];
+	    found = compareTaskName( task, arg );
+	    i++;
+	}
+    }
+    if ( !found )
+    {
+	task = NULL;
+    }
+    ReleaseNodeArray( readyarray );
+    ReleaseNodeArray( waitarray );
+
+    return( task );
+}
+
+
+#define	tft0 "'%s' at %lx (in %s state at priority %ld)\n"
+#define tft1 "Type %ld  Flags %02lx  IDNestCnt %ld  TDNestCnt %ld\n"
+#define tft2 "Signal:  Alloc %08lx  Wait  %08lx  Recvd %08lx  Except %08lx\n"
+#define tft3 "Trap:    Data  %08lx  Code  %08lx  Alloc %04lx  Able %04lx\n"
+#define	tft4 "Except:  Data  %08lx  Code  %08lx\n"
+#define	tft5 "Stack:   Reg   %08lx  Lower %08lx  Upper %08lx\n"
+#define tft6 "CPURegs: PC    %08lx  SR    %04lx\n"  
+
+void
+dumpTask( struct Task *task )
+{
+    struct Task tc;
+    char name[100];
+    UBYTE state;
+    long sp;
+    short reg;
+
+    LinkLock();
+    ReadBlock( task, &tc, sizeof( struct Task ) );
+
+    if ( ( tc.tc_State < TS_INVALID ) || ( tc.tc_State > TS_REMOVED ) )
+    {
+	state = 0;
+    }
+    else
+    {
+	state = tc.tc_State;
+    }
+
+    GetName( tc.tc_Node.ln_Name, name );
+    PPrintf( tft0, name, task, states[ state ], tc.tc_Node.ln_Pri );
+
+    PPrintf( tft1, tc.tc_Node.ln_Type, tc.tc_Flags, tc.tc_IDNestCnt,
+	tc.tc_TDNestCnt );
+
+    PPrintf( tft2, tc.tc_SigAlloc, tc.tc_SigWait, tc.tc_SigRecvd,
+	tc.tc_SigExcept );
+
+    PPrintf( tft3, tc.tc_TrapData, tc.tc_TrapCode, tc.tc_TrapAlloc,
+	tc.tc_TrapAble );
+
+    PPrintf( tft4, tc.tc_ExceptData, tc.tc_ExceptCode );
+
+    PPrintf( tft5, tc.tc_SPReg, tc.tc_SPLower, tc.tc_SPUpper );
+
+    if ( ( tc.tc_State == TS_READY ) || ( tc.tc_State == TS_WAIT ) )
+    {
+	sp = (long)tc.tc_SPReg;
+	PPrintf( tft6, ReadPointer( (APTR) sp ), ReadWord( (APTR)( sp + 4 ) ) );
+
+	PPrintf( "D: " );
+	for ( reg = 0; reg < 8; reg++)
+	{
+	    PPrintf( "%08lx ", ReadPointer( (APTR)( sp + 6 + reg * 4 ) ) );
+	}
+
+	PPrintf( "\nA: " );
+	for ( reg = 8; reg < 15; reg++ )
+	{
+	    PPrintf( "%08lx ", ReadPointer( (APTR)( sp + 6 + reg * 4 ) ) );
+	}
+    }
+    NewLine();
+    LinkUnlock();
+}
+
+
+STRPTR
+ShowTask( char *arg )
+{
+    struct Task *task;
+
+    if ( ( parseAddress( arg, (unsigned long *)&task ) ) ||
+	( task = findTask( arg ) ) )
+    {
+	dumpTask( task );
+    }
+    else
+    {
+	PPrintf("Task not found\n");
+    }
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   ShowProcess
+*
+***********************************************************************/
+
+#define pft0 "SegList      %08lx  StackSize    %08lx  GlobVec  %08lx\n"
+#define pft1 "TaskNum      %8ld  StackBase    %08lx  Result2  %8ld\n"
+#define pft2 "CurrentDir   %08lx  CIS          %08lx  COS      %08lx\n"
+#define pft3 "ConsoleTask  %08lx  FileSysTask  %08lx  CLI      %08lx\n"
+#define pft4 "ReturnAddr   %08lx  PktWait      %08lx\n"
+
+
+void
+dumpProcess( struct Process *proc )
+{
+    struct Process pr;
+    struct Task tc;
+
+    ReadBlock( proc, &tc, sizeof( struct Task ) );
+    if ( tc.tc_Node.ln_Type != NT_PROCESS )
+    {
+	PPrintf( "(NOT A PROCESS!)\n" );
+	dumpTask( (struct Task *)proc );
+	return;
+    }
+
+    LinkLock();
+    dumpTask( (struct Task *)proc );
+    PPrintf( "Process Dependent ------------------------------------------\n" );
+    ReadBlock( proc, &pr, sizeof( struct Process ) );
+    if ( pr.pr_CLI )
+    {
+	PPrintf( "cli_CommandName: " );
+	PrintBSTR( &(((struct CommandLineInterface *)LTOB(pr.pr_CLI))->cli_CommandName) );
+	NewLine();
+    }
+    PPrintf( pft0, LTOB( pr.pr_SegList ), pr.pr_StackSize, pr.pr_GlobVec );
+    PPrintf( pft1, pr.pr_TaskNum, LTOB( pr.pr_StackBase ), pr.pr_Result2 );
+    PPrintf( pft2, LTOB( pr.pr_CurrentDir ), LTOB( pr.pr_CIS ), LTOB( pr.pr_COS ) );
+    PPrintf( pft3, pr.pr_ConsoleTask, pr.pr_FileSystemTask, LTOB( pr.pr_CLI ) );
+    PPrintf( pft4, pr.pr_ReturnAddr, pr.pr_PktWait );
+    LinkUnlock();
+}
+
+
+STRPTR
+ShowProcess( char *arg )
+{
+    struct Process *proc;
+
+    if ( ( parseAddress( arg, (unsigned long *)&proc ) ) ||
+	( proc = (struct Process *)findTask( arg ) ) )
+    {
+	dumpProcess( proc );
+    }
+    else
+    {
+	PPrintf( "Process not found\n" );
+    }
+
+    return( NULL );
+}
+
+
+/***********************************************************************
+*
+*   Show ExecBase
+*
+***********************************************************************/
+
+#define ebf0 "SoftVer %3ld\n"
+#define ebfa "ChkSums: Library %s  SysBase %s  LowMem %s  Critical %s\n" 
+#define ebf1 "ColdCapture  %08lx  CoolCapture  %08lx  WarmCapture  %08lx\n"
+#define ebf2 "SysStkUpper  %08lx  SysStkLower  %08lx  MaxLocMem    %08lx\n"
+#define ebf3 "DebugEntry   %08lx  DebugData    %08lx  AlertData    %08lx\n"
+
+#define ebf4 "ThisTask     %08lx  SysFlags         %04lx\n"
+#define ebf5 "IdleCount    %8ld  DispCount    %8ld\n"
+#define ebf6 "Quantum         %5ld  Elapsed         %5ld\n"
+#define ebf7 "IDNestCnt        %4ld  TDNestCnt        %4ld\n"
+#define ebf8 "TrapCode     %08lx  ExceptCode   %08lx  ExitCode     %08lx\n"
+#define ebf9 "SigAlloc     %08lx  TrapAlloc        %04lx\n"
+#define ebfA "AttnFlags CPU: %s FPU: %s\n"
+
+STRPTR
+ShowExecBase( void )
+{
+    struct ExecBase eb;
+    char *ok1;
+    char *ok2;
+    char *ok3;
+    char *ok4;
+    char *cpu;
+    char *fpu;
+
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    SpareAddr = ReadPointer( ABSSYSBASE );
+    ok1 = ok2 = ok3 = ok4 = "???";
+    if ( (long)( ReadLong( ABSSYSBASE ) + eb.ChkBase ) == -1 )
+    {
+	ok2 = "ok ";
+    }
+    PPrintf( ebf0, eb.SoftVer );
+    PPrintf( ebfa, ok1, ok2, ok3, ok4 );
+    PPrintf( ebf1, eb.ColdCapture, eb.CoolCapture, eb.WarmCapture );
+    PPrintf( ebf2, eb.SysStkUpper, eb.SysStkLower, eb.MaxLocMem );
+    PPrintf( ebf3, eb.DebugEntry, eb.DebugData, eb.AlertData );
+    PPrintf( ebf4, eb.ThisTask, eb.SysFlags );
+    PPrintf( ebf5, eb.IdleCount, eb.DispCount );
+    PPrintf( ebf6, eb.Quantum, eb.Elapsed );
+    PPrintf( ebf7, eb.IDNestCnt, eb.TDNestCnt );
+    PPrintf( ebf8, eb.TaskTrapCode, eb.TaskExceptCode, eb.TaskExitCode );
+    PPrintf( ebf9, eb.TaskSigAlloc, eb.TaskTrapAlloc );
+    cpu = "68000";
+
+    if ( eb.AttnFlags & AFF_68040 )
+    {
+	cpu = "68040";
+    }
+    else if ( eb.AttnFlags & AFF_68030 )
+    {
+	cpu = "68030";
+    }
+    else if ( eb.AttnFlags & AFF_68020 )
+    {
+	cpu = "68020";
+    }
+    else if ( eb.AttnFlags & AFF_68010 )
+    {
+	cpu = "68010";
+    }
+
+    fpu = "none";
+
+    if ( eb.AttnFlags & AFF_68882 )
+    {
+	fpu = "68882";
+    }
+    else if ( eb.AttnFlags & AFF_68881 )
+    {
+	fpu = "68881";
+    }
+    else if ( ( eb.AttnFlags & ( AFF_68881 | AFF_68882 | AFF_FPU40 | AFF_68040 ) ) ==
+	( AFF_FPU40 | AFF_68040 ) )
+    {
+	fpu = "68040";
+    }
+
+    PPrintf( ebfA, cpu, fpu );
+    LinkUnlock();
+
+    return( NULL );
+}
+
+
+
+
+
+@
+
+
+39.4
+log
+@ShowNodes() now handles MinNodes (specifically nodes whose ln_Name
+pointer is not a legal address).  ShowNodes(), ShowTasks(), and others
+now use the disabled-ReadNodeArray() feature.  Removed findROMAddrs()
+function.
+@
+text
+@d6 1
+a6 1
+ * $Id: show.c,v 39.3 93/05/21 17:34:36 peter Exp Locker: peter $
+a47 1
+extern struct Task *LastTask;
+a824 1
+	LastTask = task;
+a889 1
+	LastTask = (struct Task *)proc;
+a899 26
+
+/* Display stack pointer of last task looked at, and put it in the spare
+ * address.
+ */
+STRPTR
+ShowSP( void )
+{
+    struct Task tc;
+
+    if ( LastTask )
+    {
+	LinkLock();
+	ReadBlock( LastTask, &tc, sizeof( struct Task ) );
+
+	SpareAddr = (APTR) tc.tc_SPReg;
+	LinkUnlock();
+
+	PPrintf( " of task/process %08lx is at %08lx\n", LastTask, SpareAddr );
+    }
+    else
+    {
+	PPrintf( " of what task?\n" );
+    }
+
+    return( NULL );
+}
+@
+
+
+39.3
+log
+@Command functions now return NULL string.  Now can look up a task or
+process by address or by name.  "ShowResModules" strips ^M's from
+module names.
+@
+text
+@d6 1
+a6 1
+ * $Id: show.c,v 39.2 93/04/27 14:37:09 peter Exp Locker: peter $
+d114 2
+a115 1
+#define NFMT1 "%lc %08lx  %2ld %4ld \"%s\"\n"
+d124 9
+a132 4
+    GetName( node.ln_Name, name );
+
+    PPrintf( NFMT1, ( (APTR) n == CurrAddr ) ? '*' : ' ', n,
+	    node.ln_Type, node.ln_Pri, name );
+d137 1
+a137 1
+ShowNodes( void )
+d139 5
+a143 5
+    ULONG *n1;
+    ULONG *succ;
+
+    LinkLock();
+    n1 = (ULONG *) CurrAddr;
+d145 1
+a145 1
+    while ( ReadPointer( n1 ) )
+d147 7
+a153 3
+	/* move to list header */
+	n1 = ReadPointer( n1 );
+    }
+d155 19
+a173 4
+    PPrintf( NFMT0 );
+    for ( n1 = ReadPointer( n1 - 1 ); succ = ReadPointer( n1 ); n1 = succ )
+    {
+	ShowNode( (struct Node *)n1 );
+a174 1
+    LinkUnlock();
+d204 1
+a204 1
+ShowTaskHead( struct Task *task )
+a240 13
+void
+ShowTaskList( struct List *l )
+{
+    struct Node *node;
+    struct Node *succ;
+
+    for (node = l->lh_Head; succ = ReadPointer( node ); node = succ )
+    {
+	ShowTaskHead( (struct Task *)node );
+    }
+}
+
+
+d244 1
+d246 3
+d251 4
+a254 6
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+
+    PPrintf( TFMT0 );
+    ShowTaskHead( eb.ThisTask );
+    ShowTaskList( &eb.TaskReady );
+    ShowTaskList( &eb.TaskWait );
+d256 17
+a272 2
+
+    return( NULL );
+d305 3
+a307 3
+    struct ExecBase eb;
+    struct Node *node;
+    struct Node *succ;
+d309 2
+a310 6
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( DFMT0 );
+    for ( node = (struct Node *)eb.DeviceList.lh_Head;
+	succ = ReadPointer( node );
+	node = succ )
+d312 6
+a317 1
+	ShowDeviceHead( node );
+a318 2
+    LinkUnlock();
+
+d335 3
+a337 3
+    struct ExecBase eb;
+    struct Node *node;
+    struct Node *succ;
+d339 2
+a340 6
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( DFMT0 );
+    for ( node = (struct Node *)eb.ResourceList.lh_Head;
+	succ = ReadPointer( node );
+	node = succ )
+d342 6
+a347 1
+	ShowDeviceHead( node );
+a348 2
+    LinkUnlock();
+
+d365 3
+a367 3
+    struct ExecBase eb;
+    struct Node *node;
+    struct Node *succ;
+d369 2
+a370 6
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( DFMT0 );
+    for ( node = (struct Node *)eb.LibList.lh_Head;
+	succ = ReadPointer( node );
+	node = succ )
+d372 6
+a377 1
+	ShowDeviceHead( node );
+a378 2
+    LinkUnlock();
+
+d412 3
+a414 3
+    struct ExecBase eb;
+    struct Node *node;
+    struct Node *succ;
+d416 2
+a417 6
+    LinkLock();
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+    PPrintf( PFMT0 );
+    for ( node = (struct Node *)eb.PortList.lh_Head;
+	succ = ReadPointer(node);
+	node = succ )
+d419 6
+a424 1
+	ShowPortHead( node );
+a425 2
+    LinkUnlock();
+
+d563 3
+a565 3
+    struct ExecBase eb;
+    struct Node *node;
+    struct Node *succ;
+d568 2
+a569 4
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof(struct ExecBase ) );
+    for ( node = (struct Node *) eb.MemList.lh_Head;
+	succ = ReadPointer( node );
+	node = succ )
+d571 5
+a575 1
+	ShowMemory( node );
+d709 1
+a709 1
+    struct ExecBase eb;
+d711 3
+a713 1
+    struct Task *succ;
+d717 5
+a721 3
+    ReadBlock( ReadPointer( ABSSYSBASE ), &eb, sizeof( struct ExecBase ) );
+
+    task = eb.ThisTask;
+d723 1
+a723 14
+
+    if ( !found )
+    {
+	task = (struct Task *)eb.TaskReady.lh_Head;
+	while ( ( !found ) && ( succ = ReadPointer( task ) ) )
+	{
+	    if ( !( found = compareTaskName( task, arg ) ) )
+	    {
+		task = succ;
+	    }
+	}
+    }
+
+    if ( !found )
+d725 2
+a726 2
+	task = (struct Task *)eb.TaskWait.lh_Head;
+	while ( ( !found ) && ( succ = ReadPointer( task ) ) )
+d728 10
+a737 4
+	    if ( !( found = compareTaskName( task, arg ) ) )
+	    {
+		task = succ;
+	    }
+a739 1
+
+d744 2
+a746 1
+    LinkUnlock();
+d751 1
+a751 1
+#define	tft0 "'%s' in %s state at priority %ld\n"
+d781 1
+a781 1
+    PPrintf( tft0, name, states[ state ], tc.tc_Node.ln_Pri, (long)task );
+a929 27
+/* Starting at the current address, find anything that looks like a ROM
+ * address.  Useful in stack-backtrace.
+ */
+STRPTR
+FindROMAddrs( void )
+{
+    unsigned long addr = (long)CurrAddr;
+    unsigned long data;
+
+    PPrintf( " from %08lx\n", addr );
+    while ( ( addr - ( (unsigned long)CurrAddr ) ) < FrameSize )
+    {
+	data = ReadLong( (APTR)addr );
+	/* Looks like a ROM address */
+	if ( ( data & 0xFFF00000 ) == 0x00f00000 )
+	{
+	    PPrintf( "%08lx\n", data );
+	}
+
+	/* Go to next word */
+	addr += 2;
+    }
+    CurrAddr = (APTR)addr;
+
+    return( NULL );
+}
+
+d1020 5
+@
+
+
+39.2
+log
+@Rework of link architecture/naming.  Changes to handle prompt having
+newline in it.
+@
+text
+@d6 1
+a6 1
+ * $Id: show.c,v 39.1 92/11/02 17:09:01 peter Exp Locker: peter $
+d42 1
+d64 1
+a64 1
+	buffer[0] = 0;
+d69 1
+a69 1
+	buffer[maxlen - 1] = 0;
+d74 1
+d82 1
+a82 1
+	buffer[0] = 0;
+d86 1
+a86 1
+	len = ReadByte( addr )+1;
+d91 2
+a92 2
+	ReadBlock( ((UBYTE *)addr)+1, buffer, len-1 );
+	buffer[len - 1] = 0;
+d97 1
+d104 1
+d120 1
+a120 1
+    char    name[NAMESIZE];
+d122 2
+a123 2
+    ReadBlock (n, &node, sizeof (node));
+    GetName (node.ln_Name, name);
+d125 2
+a126 2
+    PPrintf (NFMT1, ((APTR) n == CurrAddr) ? '*' : ' ', n,
+	    node.ln_Type, node.ln_Pri, name);
+d129 2
+a130 1
+void
+d139 3
+a141 1
+    while (ReadPointer(n1)) {	/* move to list header */
+d145 2
+a146 2
+    PPrintf (NFMT0);
+    for ( n1 = ReadPointer(n1 - 1); succ = ReadPointer(n1); n1 = succ )
+d151 2
+d178 1
+d183 1
+a183 1
+    char   name[NAMESIZE];
+d186 1
+a186 1
+    ReadBlock (task, &tc, sizeof (tc));
+d188 2
+a189 1
+    if (tc.tc_State < TS_INVALID | tc.tc_State > TS_REMOVED)
+d191 1
+d193 1
+d195 1
+d197 1
+a197 1
+    GetName (tc.tc_Node.ln_Name, name);
+d199 2
+a200 2
+    PPrintf (TFMT1, task, tc.tc_Node.ln_Type, tc.tc_Node.ln_Pri,
+	    states[state], tc.tc_SigWait, tc.tc_SPReg, name);
+d202 1
+a202 1
+    if (tc.tc_Node.ln_Type == NT_PROCESS)
+d208 1
+a208 1
+	    PPrintf(" (");
+d210 1
+a210 1
+	    PPrintf(")");
+d223 1
+a223 1
+    for (node = l->lh_Head; succ = ReadPointer(node); node = succ )
+d230 1
+a230 1
+void
+d236 1
+a236 1
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+d238 1
+a238 1
+    PPrintf(TFMT0);
+d243 2
+d263 1
+a263 1
+    char name[NAMESIZE];
+d265 1
+a265 1
+    ReadBlock (device, &dev, sizeof (dev));
+d267 5
+a271 1
+    GetName (dev.lib_Node.ln_Name, name);
+a272 3
+    PPrintf (DFMT1, device, dev.lib_Node.ln_Type, dev.lib_Node.ln_Pri,
+	dev.lib_Version, dev.lib_Revision, name);
+}
+d274 1
+a274 1
+void
+d282 8
+a289 6
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf (DFMT0);
+    for (node = (struct Node *) eb.DeviceList.lh_Head; succ = ReadPointer(node);
+	    node = succ) {
+	                    ShowDeviceHead (node);
+    }
+d291 2
+d295 1
+d305 1
+a305 1
+void
+d313 8
+a320 6
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf (DFMT0);
+    for ( node = (struct Node *) eb.ResourceList.lh_Head; succ = ReadPointer(node);
+	    node = succ ) {
+	                    ShowDeviceHead (node);
+    }
+d322 2
+d326 1
+d336 1
+a336 1
+void
+d344 8
+a351 6
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf (DFMT0);
+    for (node = (struct Node *) eb.LibList.lh_Head; succ = ReadPointer(node);
+	    node = succ ) {
+	                    ShowDeviceHead (node);
+    }
+d353 2
+d357 1
+d374 1
+a374 1
+    char name[NAMESIZE];
+d376 5
+a380 5
+    ReadBlock (port, &p, sizeof (p));
+    GetName (p.mp_Node.ln_Name, name);
+    PPrintf (PFMT1, port, p.mp_Node.ln_Type, p.mp_Node.ln_Pri,
+		 p.mp_Flags, p.mp_SigTask, p.mp_SigBit,
+		 20 + (ULONG) port, name);
+d383 2
+a384 1
+void
+d392 11
+a402 7
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf(PFMT0);
+    for (node = (struct Node *) eb.PortList.lh_Head; succ = ReadPointer(node);
+	    node = succ) {
+	                    ShowPortHead (node);
+    }
+    LinkUnlock();
+d418 1
+a418 1
+void
+d422 1
+a422 1
+    long    i;
+d424 2
+a425 2
+    char    name[NAMESIZE];
+    char    *n;
+d428 5
+a432 4
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf (IFMT0);
+    for (i = 0; i < 16; i++) {
+        name[0] = 0;
+d434 4
+a437 3
+	if (eb.IntVects[i].iv_Node != 0) {
+	    ReadBlock (eb.IntVects[i].iv_Node, &node, sizeof (node));
+	    GetName (node.ln_Name, name);
+d439 5
+a443 3
+	else {
+	    if (eb.IntVects[i].iv_Code != 0) {
+	    n = "server-chain";
+d447 2
+a448 2
+	PPrintf (IFMT1, i, eb.IntVects[i].iv_Data, eb.IntVects[i].iv_Code,
+		eb.IntVects[i].iv_Node, node.ln_Type, n);
+d451 2
+d467 1
+a467 1
+    struct MemHeader  mem;
+d469 1
+a469 1
+    ReadBlock (region, &mem, sizeof (struct MemHeader));
+d471 2
+a472 2
+    PPrintf (FMT_REGION, region, mem.mh_Attributes, 
+	    mem.mh_Lower, mem.mh_Upper, mem.mh_First, mem.mh_Free);
+d475 1
+a475 1
+void
+d482 1
+a482 1
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+d489 2
+d508 4
+a511 4
+    ULONG 	*chunk;
+    struct MemHeader    mem;
+    long    size, lastEnd;
+    ShowRegion (region);
+d513 3
+a515 1
+    ReadBlock (region, &mem, sizeof (struct MemHeader));
+d518 15
+a532 12
+    PPrintf(FMT_TITLE);
+    for (chunk = (ULONG *) mem.mh_First; chunk; chunk = ReadPointer(chunk)) {
+	size = ReadLong(chunk+1);
+	PPrintf (FMT_CHUNK, lastEnd, ((long)chunk)-1,
+		((long)chunk)-lastEnd, ((long)chunk)-lastEnd,
+		chunk, ((long) chunk)+size-1, size, size);
+	lastEnd = ((long) chunk)+size;
+    }
+    if ((((long)mem.mh_Upper)-lastEnd) != 0)
+	PPrintf (FMT_END, lastEnd, ((long)mem.mh_Upper)-1,
+		((long)mem.mh_Upper)-lastEnd, ((long)mem.mh_Upper)-lastEnd);
+    PPrintf(FMT_TITLE);
+d535 2
+a536 1
+void
+d544 6
+a549 4
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    for (node = (struct Node *) eb.MemList.lh_Head; succ = ReadPointer(node);
+	    node = succ ) {
+	                    ShowMemory (node);
+d552 2
+d570 17
+a586 1
+    char name[NAMESIZE];
+d588 10
+a597 2
+    ReadBlock (m, &r, sizeof (r));
+    GetName (r.rt_IdString, name);
+d599 2
+a600 2
+    PPrintf (RMFMT1, m, r.rt_Pri, r.rt_Type, r.rt_Version, name);
+    if ( ( strlen(name) ) && ( name[ strlen(name)-1 ] != '\n' ) )
+d606 2
+a607 1
+void
+d611 3
+a613 3
+    long    i;
+    ULONG  mods[100];
+    APTR   modbase;
+d615 2
+a616 2
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+    PPrintf (RMFMT0);
+d621 3
+a623 2
+    while( modbase ) {
+	ReadBlock(modbase, &mods[0], sizeof( mods ));
+d626 4
+a629 2
+	for (i = 0; mods[i] != 0; i++) {
+	    if( mods[i] & (1<<31) ) {
+d631 1
+a631 1
+		modbase = (APTR) ( mods[i] & ~(1<<31) );
+d635 1
+a635 1
+	    ShowModule( (struct Resident *)mods[i] );
+d638 2
+d649 79
+d737 1
+a737 1
+ShowTask( void )
+d740 1
+a740 1
+    char    name[100];
+d742 2
+a743 4
+    long    sp;
+    short   reg;
+
+    LastTask = (struct Task *)CurrAddr;
+d746 1
+a746 1
+    ReadBlock (CurrAddr, &tc, sizeof (tc));
+d748 2
+a749 1
+    if (tc.tc_State < TS_INVALID | tc.tc_State > TS_REMOVED)
+d751 1
+d753 1
+d755 1
+d757 2
+a758 2
+    GetName (tc.tc_Node.ln_Name, name);
+    PPrintf (tft0, name, states[state], tc.tc_Node.ln_Pri, (long) CurrAddr);
+d760 52
+a811 30
+    PPrintf (tft1, tc.tc_Node.ln_Type, tc.tc_Flags, tc.tc_IDNestCnt,
+	    tc.tc_TDNestCnt);
+
+    PPrintf (tft2, tc.tc_SigAlloc, tc.tc_SigWait, tc.tc_SigRecvd,
+	    tc.tc_SigExcept);
+
+    PPrintf (tft3, tc.tc_TrapData, tc.tc_TrapCode, tc.tc_TrapAlloc,
+	    tc.tc_TrapAble);
+
+    PPrintf (tft4, tc.tc_ExceptData, tc.tc_ExceptCode);
+
+    PPrintf (tft5, tc.tc_SPReg, tc.tc_SPLower, tc.tc_SPUpper);
+
+    if (tc.tc_State == TS_READY | tc.tc_State == TS_WAIT) {
+	sp = (long) tc.tc_SPReg;
+	PPrintf (tft6, ReadPointer( ((APTR) sp) ), ReadWord( (APTR)( sp + 4 ) ));
+
+	PPrintf ("D: ");
+	for (reg = 0; reg < 8; reg++) {
+	    PPrintf ("%08lx ", ReadPointer( (APTR)( sp + 6 + reg * 4 ) ));
+	}
+
+	PPrintf ("\nA: ");
+	for (reg = 8; reg < 15; reg++) {
+	    PPrintf ("%08lx ", ReadPointer( (APTR)( sp + 6 + reg * 4 ) ));
+	}
+    }
+    NewLine ();
+    LinkUnlock();
+/*    do_decode (); */
+d827 1
+d829 1
+a829 1
+ShowProcess( void )
+d831 1
+a831 1
+    struct Process  pr;
+d834 5
+a838 4
+    ReadBlock (CurrAddr, &tc, sizeof (tc));
+    if (tc.tc_Node.ln_Type != NT_PROCESS) {
+	PPrintf ("(NOT A PROCESS!)\n");
+        ShowTask();
+d843 4
+a846 4
+    ShowTask();
+    PPrintf ("Process Dependent ------------------------------------------\n");
+    ReadBlock (CurrAddr, &pr, sizeof (pr));
+    if (pr.pr_CLI)
+d852 26
+a877 6
+    PPrintf (pft0, LTOB(pr.pr_SegList), pr.pr_StackSize, pr.pr_GlobVec);
+    PPrintf (pft1, pr.pr_TaskNum, LTOB(pr.pr_StackBase), pr.pr_Result2);
+    PPrintf (pft2, LTOB(pr.pr_CurrentDir), LTOB(pr.pr_CIS), LTOB(pr.pr_COS));
+    PPrintf (pft3, pr.pr_ConsoleTask, pr.pr_FileSystemTask, LTOB(pr.pr_CLI));
+    PPrintf (pft4, pr.pr_ReturnAddr, pr.pr_PktWait);
+    LinkUnlock();
+d880 1
+d884 1
+a884 1
+void
+d892 1
+a892 1
+	ReadBlock (LastTask, &tc, sizeof (tc));
+d897 1
+a897 1
+	PPrintf(" of task/process %08lx is at %08lx\n", LastTask, SpareAddr );
+d901 1
+a901 1
+	PPrintf(" of what task?\n");
+d903 2
+d910 1
+a910 1
+void
+d913 1
+a913 1
+    unsigned long addr = (long) CurrAddr;
+d916 2
+a917 2
+    PPrintf (" from %08lx\n", addr );
+    while ( ( addr - ((unsigned long)CurrAddr) ) < FrameSize )
+d923 1
+a923 1
+	    PPrintf ("%08lx\n", data );
+d929 3
+a931 1
+    CurrAddr = (APTR) addr;
+d954 1
+a954 1
+void
+d958 6
+a963 6
+    char   *ok1,
+           *ok2,
+           *ok3,
+           *ok4;
+    char   *cpu;
+    char   *fpu;
+d966 1
+a966 1
+    ReadBlock (ReadPointer( ABSSYSBASE ), &eb, sizeof (eb));
+d969 15
+a983 12
+    if ((long)(ReadLong( ABSSYSBASE ) + eb.ChkBase) == -1) ok2 = "ok ";
+    PPrintf (ebf0, eb.SoftVer);
+    PPrintf (ebfa, ok1, ok2, ok3, ok4);
+    PPrintf (ebf1, eb.ColdCapture, eb.CoolCapture, eb.WarmCapture);
+    PPrintf (ebf2, eb.SysStkUpper, eb.SysStkLower, eb.MaxLocMem);
+    PPrintf (ebf3, eb.DebugEntry, eb.DebugData, eb.AlertData);
+    PPrintf (ebf4, eb.ThisTask, eb.SysFlags);
+    PPrintf (ebf5, eb.IdleCount, eb.DispCount);
+    PPrintf (ebf6, eb.Quantum, eb.Elapsed);
+    PPrintf (ebf7, eb.IDNestCnt, eb.TDNestCnt);
+    PPrintf (ebf8, eb.TaskTrapCode, eb.TaskExceptCode, eb.TaskExitCode);
+    PPrintf (ebf9, eb.TaskSigAlloc, eb.TaskTrapAlloc);
+d1013 2
+a1014 2
+    else if ( ( eb.AttnFlags & (AFF_68881|AFF_68882|AFF_FPU40|AFF_68040) ) ==
+	( AFF_FPU40|AFF_68040 ) )
+d1019 1
+a1019 1
+    PPrintf (ebfA, cpu, fpu);
+d1021 2
+@
+
+
+39.1
+log
+@showtasks now shows cli_CommandName's of processes.  Implemented
+GetString() and GetBSTR().  GetName() now uses GetString().
+@
+text
+@d6 1
+a6 1
+ * $Id: show.c,v 39.0 92/10/30 15:21:30 peter Exp Locker: peter $
+d32 4
+d39 1
+a39 1
+#include "access_proto.h"
+d67 1
+a67 1
+	len = GetStringBlock( addr, buffer, maxlen );
+d84 1
+a84 1
+	len = GetMemB( addr )+1;
+d89 1
+a89 1
+	GetBlock( ((UBYTE *)addr)+1, buffer, len-1 );
+d118 1
+a118 1
+    GetBlock (n, &node, sizeof (node));
+d129 1
+d131 1
+a131 1
+    wackForbid();
+d134 2
+a135 2
+    while (GetMemP (n1)) {	/* move to list header */
+	n1 = GetMemP( n1 );
+d139 1
+a139 1
+    for (n1 = GetMemP (n1 - 1); GetMemP (n1); n1 = GetMemP (n1))
+d143 1
+a143 1
+    wackPermit();
+d176 1
+a176 1
+    GetBlock (task, &tc, sizeof (tc));
+d191 1
+a191 1
+	GetBlock( task, &pr, sizeof( struct Process ) );
+d199 1
+a199 1
+    PPrintf("\n");
+d207 1
+d209 1
+a209 1
+    for (node = l->lh_Head; GetMemP (node); (node = (struct Node *) GetMemP (node)))
+d221 2
+a222 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d228 1
+a228 1
+    wackPermit();
+d249 1
+a249 1
+    GetBlock (device, &dev, sizeof (dev));
+d262 1
+d264 2
+a265 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d267 2
+a268 2
+    for (node = (struct Node *) eb.DeviceList.lh_Head; GetMemP (node);
+	    node = (struct Node *) GetMemP (node)) {
+d271 1
+a271 1
+    wackPermit();
+d288 1
+d290 2
+a291 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d293 2
+a294 2
+    for (node = (struct Node *) eb.ResourceList.lh_Head; GetMemP (node);
+	    node = (struct Node *) GetMemP (node)) {
+d297 1
+a297 1
+    wackPermit();
+d314 1
+d316 2
+a317 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d319 2
+a320 2
+    for (node = (struct Node *) eb.LibList.lh_Head; GetMemP (node);
+	    node = (struct Node *) GetMemP (node)) {
+d323 1
+a323 1
+    wackPermit();
+d344 1
+a344 1
+    GetBlock (port, &p, sizeof (p));
+d356 1
+d358 2
+a359 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d361 2
+a362 2
+    for (node = (struct Node *) eb.PortList.lh_Head; GetMemP (node);
+	    node = (struct Node *) GetMemP (node)) {
+d365 1
+a365 1
+    wackPermit();
+d390 2
+a391 2
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d397 1
+a397 1
+	    GetBlock (eb.IntVects[i].iv_Node, &node, sizeof (node));
+d409 1
+a409 1
+    wackPermit();
+d426 1
+a426 1
+    GetBlock (region, &mem, sizeof (struct MemHeader));
+d437 1
+d439 1
+a439 1
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d441 2
+a442 2
+	GetMemP( node );
+	node = (struct MemHeader *) GetMemP (node))
+d468 1
+a468 1
+    GetBlock (region, &mem, sizeof (struct MemHeader));
+d472 2
+a473 2
+    for (chunk = (ULONG *) mem.mh_First; chunk; chunk = GetMemP(chunk)) {
+	size = (long) GetMemL (chunk+1);
+d490 1
+d492 4
+a495 4
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+    for (node = (struct Node *) eb.MemList.lh_Head; GetMemP (node);
+	    node = (struct Node *) GetMemP (node)) {
+d498 1
+a498 1
+    wackPermit();
+d517 1
+a517 1
+    GetBlock (m, &r, sizeof (r));
+d521 4
+d535 1
+a535 1
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+d542 1
+a542 1
+	GetBlock(modbase, &mods[0], sizeof( mods ));
+d583 2
+a584 2
+    wackForbid();
+    GetBlock (CurrAddr, &tc, sizeof (tc));
+d609 1
+a609 1
+	PPrintf (tft6, GetMemP( ((APTR) sp) ), GetMem( (APTR)( sp + 4 ) ));
+d613 1
+a613 1
+	    PPrintf ("%08lx ", GetMemP( (APTR)( sp + 6 + reg * 4 ) ));
+d618 1
+a618 1
+	    PPrintf ("%08lx ", GetMemP( (APTR)( sp + 6 + reg * 4 ) ));
+d622 1
+a622 1
+    wackPermit();
+d645 1
+a645 1
+    GetBlock (CurrAddr, &tc, sizeof (tc));
+d652 1
+a652 1
+    wackForbid();
+d655 1
+a655 1
+    GetBlock (CurrAddr, &pr, sizeof (pr));
+d660 1
+a660 1
+	PPrintf("\n");
+d667 1
+a667 1
+    wackPermit();
+d680 2
+a681 2
+	wackForbid();
+	GetBlock (LastTask, &tc, sizeof (tc));
+d684 1
+a684 1
+	wackPermit();
+d706 1
+a706 1
+	data = GetMemL( (APTR)addr );
+d750 3
+a752 3
+    wackForbid();
+    GetBlock (GetMemP( ABSSYSBASE ), &eb, sizeof (eb));
+    SpareAddr = GetMemP( ABSSYSBASE );
+d754 1
+a754 1
+    if ((long)(GetMemL( ABSSYSBASE ) + eb.ChkBase) == -1) ok2 = "ok ";
+d802 1
+a802 1
+    wackPermit();
+@
+
+
+39.0
+log
+@Initial RCS check-in.
+@
+text
+@d6 1
+a6 1
+ * $Id: $
+d48 43
+d94 1
+a94 7
+    if (nameAddr == 0) {
+	nameStr[0] = 0;
+    }
+    else {
+	GetBlock (nameAddr, nameStr, NAMESIZE);
+	nameStr[NAMESIZE - 1] = 0;
+    }
+d151 1
+a151 1
+#define TFMT1 "%08lx  %2ld %4ld %s %08lx %08lx \"%s\"\n"
+d179 1
+d182 13
+@

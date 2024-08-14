@@ -1,0 +1,620 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  L35_30:1.7 L35_29:1.6 L35_28:1.6 L35_26:1.6 L35_25:1.6;
+locks    ; strict;
+comment  @ * @;
+
+
+1.8
+date     90.04.06.20.03.08;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.06.05.17.52.00;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     87.11.17.13.32.51;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     87.11.17.12.14.32;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     87.10.28.13.16.32;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.10.27.15.23.36;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.10.01.09.15.11;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.08.20.11.09.35;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 2
+@
+
+
+1.8
+log
+@for rcs 4.x header change
+@
+text
+@/*
+	Diablo_C-150 driver.
+	David Berezowski - October/87
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+
+#define NUMSTARTCMD	7	/* # of cmd bytes before binary data */
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD)	/* total of above */
+#define NUMLFCMD	3	/* # of cmd bytes for linefeed */
+#define MAXCOLORBUFS	16	/* max # of color buffers */
+
+extern UBYTE MargBuf[];
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	static UWORD RowSize, ColorSize, BufSize, TotalBufSize, dataoffset;
+	static UWORD colors[MAXCOLORBUFS]; /* color ptrs */
+	static UWORD color_order[] =
+		{0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15};
+	static UWORD huns, tens, ones; /* used to program buffer size */
+	static UWORD NumColorBufs; /* actual # of color buffers */
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+			 /* calc # of bytes of row data */
+			RowSize = (x + 7) / 8;
+			 /* size of each color buf */
+			ColorSize = RowSize + NUMTOTALCMD;
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				NumColorBufs = MAXCOLORBUFS;
+			}
+			else {
+				NumColorBufs = 4;
+			}
+			BufSize = ColorSize * MAXCOLORBUFS + NUMLFCMD;
+			TotalBufSize = BufSize * 2;
+			/*
+				My color order		Black, Yellow, Magenta, Cyan.
+				Diablo's color order	Black, Magenta, Yellow, Cyan.
+			*/
+			for (i=0; i<NumColorBufs; i++) {
+				colors[color_order[i]] = ColorSize * i;
+			}
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = NUMSTARTCMD;
+				/* lmarg=.5 inch, rmarg=9 inches */
+				err = (*(PD->pd_PWrite))
+					("\033l5\r\033r90\r", 9);
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row # (0 to Height - 1).
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors);
+			err = PDERR_NOERR; /* all ok */
+
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+
+				For each color buf, scan backwards through the
+				buffer for the first non-zere data byte.
+				Compact up to this point, then send the entire
+				compacted buffer in one go.
+			*/
+			/* ptr to data */
+			ptrstart = &PD->pd_PrintBuf[dataoffset];
+			/* ptr to buf start */
+			ptr2start = ptr2 = ptrstart - NUMSTARTCMD;
+			x = 0; /* flag no transfer required yet */
+			for (ct=0; ct<NumColorBufs;
+				ct++, ptrstart += ColorSize) {
+				i = RowSize;
+				ptr = ptrstart + i - 1;
+				while (i > 0 && *ptr == 0) {
+					i--;
+					ptr--;
+				}
+				if (i != 0) { /* if data */
+					ptr = ptrstart - NUMSTARTCMD;
+					*ptr++ = 27;
+					*ptr++ = 'g';
+					*ptr++ = ct + '0';	/* color */
+					*ptr++ = (huns = i / 100) | '0';
+					*ptr++ = (i - huns * 100) / 10 | '0';
+					*ptr++ = i % 10 | '0';	/* width */
+					*ptr = ',';	/* terminator */
+					i += NUMTOTALCMD;
+					/* if must transfer data */
+					if (x != 0) {
+						/* get src start */
+						ptr = ptrstart - NUMSTARTCMD;
+						do { /* transfer and update dest ptr */
+							*ptr2++ = *ptr++;
+						} while (--i);
+					}
+					else { /* no transfer required */
+						ptr2 += i; /* update dest ptr */
+					}
+				}
+				if (i != RowSize + NUMTOTALCMD) { /* if compacted or 0 */
+					x = 1; /* flag that we need to transfer next time */
+				}
+			}
+			*ptr2++ = 27;
+			*ptr2++ = 'k';
+			*ptr2++ = '1';		/* lf */
+			err = (*(PD->pd_PWrite))(ptr2start, ptr2 - ptr2start);
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NUMSTARTCMD ?
+					BufSize : 0) + NUMSTARTCMD;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = BufSize - NUMTOTALCMD - NUMLFCMD;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq struct.
+				y	- 0.
+			*/
+			/* if user did not cancel print */
+			if (ct != PDERR_CANCEL) {
+				/* restore preferences pitch and margins */
+				i = CalcMarg(PD->pd_Preferences.PrintLeftMargin
+					, PD->pd_Preferences.PrintRightMargin);
+				err = (*(PD->pd_PWrite))(MargBuf, i);
+			}
+			/* wait for both buffers to empty */
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 5 : /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq struct.
+				y	- 0.
+			*/
+			PED->ped_MaxColumns = PD->pd_Preferences.PaperSize ==
+				W_TRACTOR ? 85 : 80;
+	/* def is 80 chars (8.0 in.), W_TRACTOR is 85 chars (8.5 in.) */
+			PED->ped_MaxXDots = (PED->ped_XDotsInch *
+				PED->ped_MaxColumns) / 10;
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.7
+log
+@V1.3 Gamma 15
+@
+text
+@@
+
+
+1.6
+log
+@V1.3 Gamma 3 release
+@
+text
+@d13 2
+a14 2
+#define NUMSTARTCMD		7	/* # of cmd bytes before binary data */
+#define NUMENDCMD		0	/* # of cmd bytes after binary data */
+d16 1
+a16 1
+#define NUMLFCMD		3	/* # of cmd bytes for linefeed */
+d19 2
+d22 1
+a22 3
+long ct;
+long x, y;
+long status;
+d40 1
+a40 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d44 4
+a47 3
+
+			RowSize = (x + 7) / 8; /* calc # of bytes of row data */
+			ColorSize = RowSize + NUMTOTALCMD; /* size of each color buf */
+d57 1
+a57 1
+				My color order			Black, Yellow, Magenta, Cyan.
+d65 1
+a65 1
+				err = PDERR_BUFFERMEMORY; /* couldn't get the memory */
+d70 2
+a71 1
+				err = (*(PD->pd_PWrite))("\033l5\r\033r90\r", 9);
+d78 2
+a79 2
+				x	- NA
+				y	- row.
+d88 3
+a90 3
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+d92 4
+a95 3
+				For each color buf, scan backwards through the buffer
+				for the first non-zere data byte.  Compact up to this
+				point, then send the entire compacted buffer in one go.
+d97 4
+a100 2
+			ptrstart = &PD->pd_PrintBuf[dataoffset];	/* ptr to data */
+			ptr2start = ptr2 = ptrstart - NUMSTARTCMD;	/* ptr to buf start */
+d102 2
+a103 1
+			for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+d114 1
+a114 1
+					*ptr++ = ct + '0';		/* color */
+d117 2
+a118 2
+					*ptr++ = i % 10 | '0';	/* printout width */
+					*ptr = ',';				/* terminator */
+d120 4
+a123 2
+					if (x != 0) { /* if must transfer data */
+						ptr = ptrstart - NUMSTARTCMD; /* get src start */
+d141 2
+a142 2
+				dataoffset = 
+					(dataoffset == NUMSTARTCMD ? BufSize : 0) + NUMSTARTCMD;
+d148 3
+a150 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d163 2
+a164 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d166 9
+a174 1
+			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+d176 1
+a176 1
+				FreeMem(PD->pd_PrintBuf, TotalBufSize); /* free memory */
+d183 3
+a185 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d187 5
+a191 5
+			PED->ped_MaxColumns = 
+				PD->pd_Preferences.PaperSize == W_TRACTOR ? 85 : 80;
+			/* def is 80 chars (8.0 in.), W_TRACTOR is 85 chars (8.5 in.) */
+			PED->ped_MaxXDots =
+				(PED->ped_XDotsInch * PED->ped_MaxColumns) / 10;
+@
+
+
+1.5
+log
+@V1.3 Gamma 3 release (no change)
+@
+text
+@d88 1
+a88 1
+				y	- # of rows sent.
+@
+
+
+1.4
+log
+@added support for narrow and wide tractor paper
+V1.3 Gamma1 check-in
+@
+text
+@@
+
+
+1.3
+log
+@put 'case 1' code in transfer.c file
+V1.3 gamma 1 check-in
+@
+text
+@d26 1
+d171 5
+@
+
+
+1.2
+log
+@V1.3 beta 4 check-in
+@
+text
+@d3 1
+a3 1
+	David Berezowski - April/87
+a11 1
+#include "../printer/prtgfx.h"
+a18 4
+#define DEBUG	0		/* debugging switch (0 - off, 1 - on) */
+#define DEBUG2	0		/* debugging (case 2) */
+#define WHITE	1		/* white-space checking */
+
+d20 3
+a22 3
+long ct;		/* color type or ptr to ior */
+long x, y;		/* x,y co-ords or pc,pr print values or special */
+long status;	/* control code */
+a25 1
+	extern struct PrinterExtendedData *PED;
+a31 1
+	static UWORD bit_table[8] = {128, 64, 32, 16, 8, 4, 2, 1};
+a34 7
+	struct PrtInfo *PInfo;
+	union colorEntry *ColorInt;
+	UBYTE *bptr, *yptr, *mptr, *cptr, Black, Yellow, Magenta, Cyan;
+	UBYTE *dmatrix, dvalue, threshold;
+	UWORD width, sx, xmult, xmod, color, bit, x3, y3;
+	WORD etx, etx2;
+	int (*Scale)();
+d37 7
+a43 1
+		case 0 : /* alloc memory for printer buffer */
+a45 6
+#if WHITE
+#else
+			huns = RowSize / 100;
+			tens = (RowSize - huns * 100) / 10;
+			ones = RowSize % 10;
+#endif WHITE
+d63 1
+a63 5
+#if DEBUG
+				kprintf("Couldn't get %ld bytes for printer buf\n",
+					TotalBufSize);
+#endif DEBUG
+				err = PDERR_BUFFERMEMORY;
+d68 1
+a68 3
+				if (!(err = (*(PD->pd_PWrite))("\033l5\r\033r90\r", 9))) {
+					err = PDERR_NOERR;
+				}
+d72 8
+a79 58
+		case 1 : /* put pixel in buffer */
+			PInfo = (struct PrtInfo *)ct;
+			x = PInfo->pi_xpos;
+			ColorInt = PInfo->pi_ColorInt;
+			bptr = &PD->pd_PrintBuf[dataoffset + colors[y & 3]];
+			yptr = &PD->pd_PrintBuf[dataoffset + colors[4 + (y & 3)]];
+			mptr = &PD->pd_PrintBuf[dataoffset + colors[8 + (y & 3)]];
+			cptr = &PD->pd_PrintBuf[dataoffset + colors[12 + (y & 3)]];
+			width = PInfo->pi_width;
+			xmult = PInfo->pi_xmult;
+			xmod = PInfo->pi_xmod;
+			etx = etx2 = PInfo->pi_etx;
+			if (threshold = PInfo->pi_threshold) {
+				dvalue = threshold ^ 15;
+			}
+			else {
+				dmatrix = PInfo->pi_dmatrix + ((y & 3) << 2);
+			}
+			color = PD->pd_Preferences.PrintShade == SHADE_COLOR;
+			do {
+                /* get color info */
+                Black = ColorInt->colorByte[PCMBLACK];
+                Yellow = ColorInt->colorByte[PCMYELLOW];
+                Magenta = ColorInt->colorByte[PCMMAGENTA];
+                Cyan = ColorInt->colorByte[PCMCYAN];
+                ColorInt++;
+                /* scale, dither, and render pixel */
+				sx = xmult;
+				etx -= xmod;
+				if (etx <= 0) {
+					etx += etx2;
+					sx++;
+				}
+				do { /* use this pixel 'sx' times */
+					x3 = x >> 3;
+					bit = bit_table[x & 7];
+					if (!threshold) {
+	                    dvalue = dmatrix[x & 3];
+					}
+					if (Black > dvalue) {
+                        *(bptr + x3) |= bit;
+                    }
+					else  { /* black not rendered */
+						if (color) {
+	                        if (Yellow > dvalue) {
+    	                        *(yptr + x3) |= bit;
+        	                }
+	                        if (Magenta > dvalue) {
+    	                        *(mptr + x3) |= bit;
+        	                }
+	                        if (Cyan > dvalue) {
+    	                        *(cptr + x3) |= bit;
+        	                }
+						}
+					}
+                    ++x; /* done 1 more printer pixel */
+                } while (--sx);
+			} while (--width);
+a80 4
+			/* v1.2 */
+/*			PD->pd_PrintBuf[dataoffset + (x >> 3) +
+				colors[(ct << 2) + (y & 3)]] |= bit_table[x & 7];
+*/			err = PDERR_NOERR; /* all ok */
+d83 1
+a83 6
+		case 2 : /* dump buffer to printer */
+#if DEBUG2
+			kprintf("2: ct=%ld, x=%ld, y=%ld, status=%ld\n",
+				ct, x, y, status);
+#endif DEBUG2
+#if WHITE
+d85 4
+a102 3
+#if DEBUG
+				kprintf("i=%ld, ", i);
+#endif
+a113 3
+#if DEBUG
+						kprintf("transferring %ld bytes\n", i);
+#endif
+a119 3
+#if DEBUG
+						kprintf("no transfer, advancing ptr2 by %ld\n", i);
+#endif
+a122 5
+#if DEBUG
+				else {
+					kprintf("\n");
+				}
+#endif
+a130 4
+#else
+			err = (*(PD->pd_PWrite))
+				(&(PD->pd_PrintBuf[dataoffset - NUMSTARTCMD]), BufSize);
+#endif WHITE
+d137 6
+a142 1
+		case 3 : /* clear and init buffer */
+a147 19
+#if WHITE
+#else
+			for (ct=0; ct<NumColorBufs; ct++) {
+				ptr = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD +
+					ct * ColorSize];
+				*ptr++ = 27;
+				*ptr++ = 'g';
+				*ptr++ = ct + '0';		/* color */
+				*ptr++ = huns + '0';
+				*ptr++ = tens + '0';
+				*ptr++ = ones + '0';	/* printout width */
+				*ptr = ',';				/* terminator */
+			}
+			ptr = &PD->pd_PrintBuf[dataoffset + BufSize -
+				NUMSTARTCMD - NUMLFCMD];
+			*ptr++ = 27;
+			*ptr++ = 'k';
+			*ptr = '1';		/* lf */
+#endif WHITE
+d151 6
+a156 1
+		case 4 : /* free the print buffer memory */
+d164 6
+a169 4
+	case 5 : /* io_special flag call */
+#if DEBUG
+			kprintf("5: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif
+a171 6
+#if DEBUG
+		default:
+			kprintf("default, what am I doing here?  ");
+			err = PDERR_NOERR; /* all ok */
+			break;
+#endif
+a172 5
+#if DEBUG
+	if (status != 1) {
+		kprintf("Exit, err=%ld\n", err);
+	}
+#endif
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d12 1
+a12 1
+#include "../printer/prtprivate.h"
+d94 2
+a95 2
+			x = PInfo->xpos;
+			ColorInt = PInfo->ColorInt;
+d100 5
+a104 5
+			width = PInfo->width;
+			xmult = PInfo->xmult;
+			xmod = PInfo->xmod;
+			etx = etx2 = PInfo->etx;
+			if (threshold = PInfo->threshold) {
+d108 1
+a108 1
+				dmatrix = PInfo->dmatrix + ((y & 3) << 2);
+@

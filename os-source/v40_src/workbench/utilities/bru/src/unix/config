@@ -1,0 +1,1290 @@
+#! /bin/sh
+
+#  FILE
+#
+#	config    shell file to determine environment
+#
+#  SCCS
+#
+#	@(#)config	12.8	11 Feb 1991
+#
+#  SYNOPSIS
+#
+#	config
+#
+#  DESCRIPTION
+#
+#	Examine various things in the environment to determine what type
+#	of environment we are executing in.  Build the appropriate list
+#	of C compiler defines in the autoconfig.h file, included by each
+#	bru C source file.
+#
+#	We do not use "test -r" or "test -f" to test for files because
+#	they seem to fail on symbolic links.  We can't use "test -h"
+#	because that fails on systems without symbolic links.  We can't
+#	just cat the files to /dev/null, since cat does not return nonzero
+#	status for failure on pyramids.  However, cp to /dev/null seems
+#	to work everywhere so far, as long as you are root.  Grrr!!!
+#
+#  ACKNOWLEDGEMENTS
+#
+#	Autoconfiguration based on a shell script "where.sh" posted to
+#	usenet net.sources by Arnold Robbins of Georgia Tech and on
+#	Larry Wall's Configure scripts for rn and patch.
+#
+
+v=0			# Verbosity is off
+
+inc=/usr/include
+cc=${CC:-cc}
+
+# Some systems (pyramid in att universe?) have broken seekdir/telldir.
+# Set up default here (seekdir ok).
+
+broken_seekdir=0
+
+# Set up to catch signals and cleanup if we are interrupted.
+
+trap "rm -f libc.names testfar* testvoid* testchar*" 1 2 3
+
+# Look for any optional arguments.
+
+while [ "$1" != "" ]
+do
+	case "$1" in
+	-v)	v=1
+		;;
+	*)	echo 1>&2 "config: unknown option '$1'"
+		exit 1
+		;;
+	esac
+	shift
+done
+
+# Check to see if we are running some xenix
+
+if cp /xenix /dev/null >/dev/null 2>&1
+then
+	xenix=1
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "You are running Xenix ..."
+	fi
+else
+	xenix=0
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "You are not running Xenix ..."
+	fi
+fi
+
+# If we are running xenix, then check to see if we have a
+# broken C compiler that doesn't understand the "far" keyword.
+# Bru does not use this keyword, but some xenix systems have
+# it in their header files for shared memory, and thus won't
+# even compile their own header files!  In this case, we just
+# define it away and hope for the best.  (Ditto for "near").
+
+broken_far="/* #define far */"
+broken_near="/* #define near */"
+
+if test "$xenix" = "1"
+then
+	echo "extern char far *bletch();" >testfar.c
+	echo "extern char near *barf();" >>testfar.c
+	$cc -S testfar.c >/dev/null 2>&1
+	if test $? -ne 0
+	then
+		broken_far="#define far"
+		broken_near="#define near"
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Your C near and far keywords are broken ..."
+		fi
+	fi
+	rm -f testfar.*
+fi
+
+# Some simple checks to see if the compiler groks the "void" type.
+
+broken_void="/* #define BROKEN_VOID 0 */"
+
+echo "extern void exit ();" >testvoid.c
+echo "extern void *dummy ();" >>testvoid.c
+$cc -S testvoid.c >testvoid.out 2>&1
+if test $? -ne 0
+then
+	broken_void="#define BROKEN_VOID 1"
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "Your C void implementation is broken ..."
+	fi
+elif grep warning testvoid.out >/dev/null 2>&1
+then
+	broken_void="#define BROKEN_VOID 1"
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "Your C void implementation is broken ..."
+	fi
+fi
+rm -f testvoid.*
+
+# Some simple checks to see if the native characters are signed or 
+# unsigned, and whether or not explicit "signed char" and "unsigned char"
+# types are accepted by the compiler.  We assume chars are signed unless
+# the test indicates otherwise, and that neither of the explicit types
+# are accepted.  See chksum.c for why we need this...
+
+chars_are_signed=1
+cat <<EOT >testchar.c
+	main ()
+	{
+		int i = 0; char ch = 0;
+		ch--; i+= ch; printf("%d\n",i==(-1));
+	}
+EOT
+$cc -o testchar testchar.c
+if test -f testchar
+then
+	chars_are_signed=`./testchar`
+fi
+rm -f testchar*
+
+signed_chars_ok=0
+cat <<EOT >testchar.c
+	main ()
+	{
+		int i = 0; signed char ch = 0;
+		ch--; i+= ch; printf("%d\n",i==(-1));
+	}
+EOT
+$cc -o testchar testchar.c >/dev/null 2>&1
+if test -f testchar
+then
+	signed_chars_ok=`./testchar`
+fi
+rm -f testchar*
+
+unsigned_chars_ok=0
+cat <<EOT >testchar.c
+	main ()
+	{
+		int i = 0; unsigned char ch = 0;
+		ch--; i+= ch; printf("%d\n",i==255);
+	}
+EOT
+$cc -o testchar testchar.c >/dev/null 2>&1
+if test -f testchar
+then
+	unsigned_chars_ok=`./testchar`
+fi
+rm -f testchar*
+	
+# Now go poking around to find libc.a and extract a list of
+# the names defined therein.  All of the names we currently
+# look for contain only the characters [a-z][A-Z].  The use
+# of "tr" to extract the names is directly from the tr manual
+# page.  However, there seems to be at least two strains of
+# 'tr', the one under ultrix (bsd?) is significantly different.
+# Look for the read() system call to verify that we have found a
+# usable tr.
+#
+# Note that on 286 Xenix we want the "medium model" libc if we can't
+# find a libc with a normal name.  On a 386, the "small model" will work.
+
+if [ $v = 1 ]
+then
+	echo 1>&2 "Looking for your C library to extract names ... "
+fi
+
+libc=""
+libdirs="/lib /usr/lib"
+libnames="libc.a"
+if test "$xenix" = "1"
+then
+	if uname -a | grep 80286 >/dev/null 2>&1
+	then
+		libdirs="$libdirs /lib/286"
+		libnames="$libnames Mlibc.a"
+	else
+		libdirs="$libdirs /lib/386"
+		libnames="$libnames Slibc.a"
+	fi
+fi
+if test -d /usr/ccs/lib			# System V Release 4
+then
+	libdirs="$libdirs /usr/ccs/lib"
+fi
+for libname in $libnames
+do
+	for libdir in $libdirs
+	do
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Looking for $libdir/$libname ..."
+		fi
+		if cp $libdir/$libname /dev/null >/dev/null 2>&1
+		then
+			libc=$libdir/$libname
+			break
+		fi
+	done
+	if test "$libc" != ""
+	then
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Good, will use $libc ..."
+		fi
+		break
+	fi
+done
+
+if test "$libc" = ""
+then
+	echo 1>&2 "Gack!  Can't find your C runtime library, usually libc.a"
+	exit 1
+else
+	if [ $v = 1 ] ;then echo 1>&2 "Extracting names from $libc ..." ;fi
+	nm $libc | tr -cs "[A-Z][a-z]" "[\012*]" >libc.names
+	if grep "^read$" libc.names >/dev/null
+	then
+		if [ $v = 1 ] ;then echo 1>&2 "You have a normal 'tr' ..." ;fi
+	else
+		nm $libc | tr -cs "A-Za-z" "\012" >libc.names
+		if grep "^read$" libc.names >/dev/null
+		then
+			if [ $v = 1 ]
+			then
+				echo 1>&2 "Your 'tr' is strange, but usable..."
+			fi
+		else
+			echo 1>&2 "Your 'tr' is garbage ..."
+			exit 1
+		fi
+	fi
+fi
+
+# Look for statvfs() in libc.a
+
+have_statvfs=0
+if grep "^statvfs$" libc.names >/dev/null
+then
+	if cp $inc/sys/statvfs.h /dev/null >/dev/null 2>&1
+	then
+		have_statvfs=1
+	fi
+fi
+if [ $v = 1 ]
+then
+	if [ $have_statvfs = 1 ]
+	then
+		echo 1>&2 "You have statvfs() ..."
+	else
+		echo 1>&2 "You don't have statvfs() ..."
+	fi
+fi
+
+# Look for tzset() in libc.a
+
+if grep "^tzset$" libc.names >/dev/null
+then
+	have_tzset=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have tzset() ..." ;fi
+else
+	have_tzset=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have tzset() ..." ;fi
+fi
+
+# Look for gettimeofday() in libc.a
+
+if grep "^gettimeofday$" libc.names >/dev/null
+then
+	have_gettimeofday=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have gettimeofday() ..." ;fi
+else
+	have_gettimeofday=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have gettimeofday() ..." ;fi
+fi
+
+# Look for uname() in libc.a
+
+if grep "^uname$" libc.names >/dev/null
+then
+	have_uname=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have uname() ..." ;fi
+else
+	have_uname=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have uname() ..." ;fi
+fi
+
+# Look for getopt() in libc.a
+
+if grep "^getopt$" libc.names >/dev/null
+then
+	have_getopt=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have getopt() ..." ;fi
+else
+	have_getopt=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have getopt() ..." ;fi
+fi
+
+# Look for strtok() in libc.a
+
+if grep "^strtok$" libc.names >/dev/null
+then
+	have_strtok=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have strtok() ..." ;fi
+else
+	have_strtok=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have strtok() ..." ;fi
+fi
+
+# Look for strtol() in libc.a
+# Pyramids in the ucb universe are sneaky and hide it in getpwent.o...
+
+if grep "^strtol$" libc.names >/dev/null
+then
+	have_strtol=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have strtol() ..." ;fi
+else
+	have_strtol=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have strtol() ..." ;fi
+fi
+
+# Look for mkdir() in libc.a
+
+if grep "^mkdir$" libc.names >/dev/null
+then
+	have_mkdir=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have mkdir() ..." ;fi
+else
+	have_mkdir=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have mkdir() ..." ;fi
+fi
+
+# Look for ulimit() in libc.a
+
+if grep "^ulimit$" libc.names >/dev/null
+then
+	have_ulimit=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have ulimit() ..." ;fi
+else
+	have_ulimit=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have ulimit() ..." ;fi
+fi
+
+# Look for memset() in libc.a
+
+if grep "^memset$" libc.names >/dev/null
+then
+	have_memset=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have memset() ..." ;fi
+else
+	have_memset=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have memset() ..." ;fi
+fi
+
+# Look for memcpy() in libc.a
+
+if grep "^memcpy$" libc.names >/dev/null
+then
+	have_memcpy=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have memcpy() ..." ;fi
+else
+	have_memcpy=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have memcpy() ..." ;fi
+fi
+
+# Look for bcopy() in libc.a
+
+if grep "^bcopy$" libc.names >/dev/null
+then
+	have_bcopy=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have bcopy() ..." ;fi
+else
+	have_bcopy=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have bcopy() ..." ;fi
+fi
+
+# Look for strchr() in libc.a
+
+if grep "^strchr$" libc.names >/dev/null
+then
+	have_strchr=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have strchr() ..." ;fi
+else
+	have_strchr=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have strchr() ..." ;fi
+fi
+
+# Look for strrchr() in libc.a
+
+if grep "^strrchr$" libc.names >/dev/null
+then
+	have_strrchr=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have strrchr() ..." ;fi
+else
+	have_strrchr=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have strrchr() ..." ;fi
+fi
+
+# Look for index() in libc.a
+
+if grep "^index$" libc.names >/dev/null
+then
+	have_index=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have index() ..." ;fi
+else
+	have_index=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have index() ..." ;fi
+fi
+
+# Look for rindex() in libc.a
+
+if grep "^rindex$" libc.names >/dev/null
+then
+	have_rindex=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have rindex() ..." ;fi
+else
+	have_rindex=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have rindex() ..." ;fi
+fi
+
+# Look for directory routines in libc.a.  All we care about here
+# is that the appropriate routines are found in the library.
+# User interface issues, such as what include file to use to
+# interface to the routines, are taken care of by other defines.
+# 
+
+for i in opendir closedir readdir telldir seekdir
+do
+	if grep "^$i$" libc.names >/dev/null
+	then
+		have_seekdir=1
+		if [ $v = 1 ] ;then echo 1>&2 "You have $i() ..." ;fi
+	else
+		have_seekdir=0
+		if [ $v = 1 ] ;then echo 1>&2 "You don't have $i() ..." ;fi
+		break
+	fi
+done
+
+# Check to see if we have the file <sys/utsname.h>.  If not, then
+# the fake utsname stuff will be used (mostly for non-unix or bsd
+# type machines).  Also check to see if there is a "machine"
+# member in the utsname structure.  This is a very simple
+# minded grep, and will fail if "machine" happens to be in the
+# file in some other place.
+
+have_utsname=0
+have_utsname_machine=0
+
+if cp $inc/sys/utsname.h /dev/null >/dev/null 2>&1
+then
+	have_utsname=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have utsname ..." ;fi
+	if grep machine $inc/sys/utsname.h >/dev/null 2>&1
+	then
+		have_utsname_machine=1
+		if [ $v = 1 ]
+		then
+			echo 1>&2 " and includes machine type ..."
+		fi
+	fi
+fi
+
+# Check to see if we are running under Apple's A/UX.
+
+if cp $inc/sys/ssioctl.h /dev/null >/dev/null 2>&1
+then
+	aux=1
+	if [ $v = 1 ] ;then echo 1>&2 "This appears to be Apple's A/UX ..." ;fi
+else
+	aux=0
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "This does not appear to be Apple's A/UX ..."
+	fi
+fi
+
+# If any of the source files have been checked out for
+# editing then assume that we want TESTONLY defined.
+
+testonly=0
+for i in ../*/SCCS/p.*
+do
+	if cp $i /dev/null >/dev/null 2>&1
+	then
+		testonly=1
+		break
+	fi
+done
+if [ $v = 1 -a $testonly = 1 ]
+then
+	echo 1>&2 "Looks like an internal copy ..."
+fi
+
+# Poke around in signal.h to find out whether signal() returns
+# pointer to function returning int or pointer to function returning
+# void.
+
+if cp $inc/signal.h /dev/null >/dev/null 2>&1
+then
+	sigfile="$inc/signal.h"
+fi
+if cp $inc/sys/signal.h /dev/null >/dev/null 2>&1
+then
+	sigfile="$sigfile $inc/sys/signal.h"
+fi
+if test "$sigfile" = ""
+then
+	echo 1>&2 "Strange...  I don't find any signal.h anywhere..."
+	sigtypevoid=0
+	sigtypeint=1
+else
+	if [ $v = 1 ] ;then echo 1>&2 "Checking out your $sigfile ..." ;fi
+	if grep '(int (\*)' $sigfile > /dev/null
+	then
+		sigtypevoid=0
+		sigtypeint=1
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Signals use type int (*)() ..."
+		fi
+	elif grep '(void (\*)' $sigfile > /dev/null
+	then
+		sigtypevoid=1
+		sigtypeint=0
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Signals use type void (*)() ..."
+		fi
+	else
+		sigtypevoid=0
+		sigtypeint=1
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "Your $sigfile file is strange ..."
+			echo 1>&2 "Assuming signals use type int (*)() ..."
+		fi
+	fi
+fi
+
+#  Look for the remsh/rsh programs. If found, compile in support
+#  for remote tape handling (though we have no guarantee that
+#  /etc/rmt will be found on any remote system).
+
+rmt=0
+
+if cp /usr/ucb/rsh /dev/null >/dev/null 2>&1
+then
+	rmt=1
+fi
+
+if cp /usr/bin/remsh /dev/null >/dev/null 2>&1
+then
+	rmt=1
+fi
+
+if cp /bin/remsh /dev/null >/dev/null 2>&1
+then
+	rmt=1
+fi
+
+if [ $v = 1 ]
+then
+	if [ $rmt = 1 ]
+	then
+		echo 1>&2 "Looks like remote tapes may be supportable ..."
+	else
+		echo 1>&2 "Looks like no remote tape support is possible ..."
+	fi
+fi
+
+# Look to see if we have ANSI C <stdarg.h>.
+
+have_stdarg=0
+if cp $inc/stdarg.h /dev/null >/dev/null 2>&1
+then
+	have_stdarg=1
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "You have stdarg ..."
+	fi
+fi
+
+# Look to see if we have varargs support.  We need a <varargs.h>
+# and vfprintf() and vsprintf() functions in the library.  Strictly
+# speaking, we might be able to live without vfprintf and vsprintf,
+# but it would be a lot more painful.  So for now, the test is
+# for all or none.
+
+have_varargs=0
+if cp $inc/varargs.h /dev/null >/dev/null 2>&1
+then
+	if grep "^vfprintf$" libc.names >/dev/null
+	then
+		if grep "^vsprintf$" libc.names >/dev/null
+		then		
+			have_varargs=1
+			if [ $v = 1 ]
+			then
+				echo 1>&2 "You have varargs ..."
+			fi
+		fi
+	fi
+fi
+
+# Look to see if we have termio style terminal handling.
+
+if cp $inc/termio.h /dev/null >/dev/null 2>&1
+then
+	have_termio=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have termio ..." ;fi
+else
+	have_termio=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have termio ..." ;fi
+fi
+
+# Check to see if we have symbolic links.  Nothing elaborate,
+# just check for S_IFLNK in <sys/stat.h> and for readlink() in
+# libc.a.
+#
+# We also check here for contiguous files (Masscomp only known
+# system at this time with this implementation).
+#
+# We also check for strange fields between the st_atime and st_mtime
+# fields.  Original system V defines something in the documentation
+# for utime called a utimbuf, which is the argument for the utime()
+# call, but never explicitly defined a structure in any header file.
+# Applications just passed a pointer to the atime field in the stat
+# structure.  Berkelely apparently added some fields in the stat
+# structure but still required the old contiguous atime/mtime args to
+# utime, so applications had to build their own utimbufs.  Now along
+# comes at least one system (Motorola V/88), which requires utimbuf to
+# have the same padding as stat.h, but STILL does not define an explicit
+# utimbuf structure anywhere.  GRRRR!!!
+
+have_strange_utimbuf=0
+
+if cp $inc/stat.h /dev/null >/dev/null 2>&1
+then
+	statfile="$inc/stat.h"
+fi
+if cp $inc/sys/stat.h /dev/null >/dev/null 2>&1
+then
+	statfile="$sigfile $inc/sys/stat.h"
+fi
+if test "$statfile" = ""
+then
+	echo 1>&2 "Strange... Can't find stat.h..."
+	have_symlinks=0
+	have_contiguous=0
+	have_strange_utimbuf=0
+else
+	if grep "^readlink$" libc.names >/dev/null
+	then
+		readlink=yes
+	else
+		readlink=no
+	fi
+	if grep S_IFLNK $statfile >/dev/null
+	then
+		symlinks=yes
+	else
+		symlinks=no
+	fi
+	if test "$symlinks" = "yes" -a "$readlink" = "yes"
+	then
+		have_symlinks=1
+		if [ $v = 1 ] ;then echo 1>&2 "You have symlinks ..." ;fi
+	else
+		have_symlinks=0
+		if [ $v = 1 ] ;then echo 1>&2 "You don't have symlinks ..." ;fi
+	fi
+	if grep S_IFCTG $statfile >/dev/null
+	then
+		have_contiguous=1
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "You have contiguous files ..."
+		fi
+	else
+		have_contiguous=0
+		if [ $v = 1 ]
+		then
+			echo 1>&2 "You don't have contiguous files ..."
+		fi
+	fi
+	if grep st_ausec $statfile >/dev/null
+	then
+		if grep st_musec $statfile >/dev/null
+		then
+			have_strange_utimbuf=1
+			if [ $v = 1 ]
+			then
+				echo 1>&2 "You have a strange utimbuf ..."
+			fi
+			
+		fi
+	fi	
+fi
+
+# Check to see if we have FIFO's.  Nothing elaborate,
+# just check for S_IFIFO in <sys/stat.h>.
+# We already found the stat.h file (or didn't find it) earlier.
+
+if test "$statfile" = ""
+then
+	have_fifos=0
+else
+	if grep S_IFIFO $statfile >/dev/null
+	then
+		have_fifos=1
+	else
+		have_fifos=0
+	fi
+fi
+
+if [ $v = 1 ]
+then
+	if [ $have_fifos = 1 ]
+	then
+		echo 1>&2 "You have fifos ..."
+	else
+		echo 1>&2 "You don't have fifos ..."
+	fi
+fi
+
+#
+
+if cp /bin/universe /dev/null >/dev/null 2>&1	# on a pyramid
+then
+	if [ $v = 1 ] ;then echo 1>&2 "You are on a pyramid ..." ;fi
+	OPATH=$PATH
+	PATH=/bin
+	case `universe` in	# universe is dumb
+				# looking only at argv[0]
+	att)
+		if [ $v = 1 ] ;then echo 1>&2 "Looks like att universe ..." ;fi
+		broken_seekdir=1
+		;;
+
+	ucb)
+		if [ $v = 1 ] ;then echo 1>&2 "Looks like ucb universe ..." ;fi
+		;;
+
+	*)	echo 1>&2 "Gack! Can't figure out your universe ..."
+		;;
+	esac
+	PATH=$OPATH
+fi
+
+# Check to set if we have BSD style wait facilities.  Look for "union wait"
+# in <sys/wait.h>, if it exists.
+
+have_unionwait=0
+if cp $inc/sys/wait.h /dev/null >/dev/null 2>&1
+then
+	if grep "union wait" $inc/sys/wait.h >/dev/null
+	then
+		have_unionwait=1
+	fi
+fi
+
+if [ $v = 1 ]
+then
+	if [ $have_unionwait = 1 ]
+	then
+		echo 2>&1 "You have BSD style waits ..."
+	else
+		echo 2>&1 "You don't have BSD style waits ..."
+	fi
+fi
+
+# Check to see if we have System V shared memory facilities.  If so,
+# then we can use double buffering.  Check to see that we have both
+# the header files and the library functions.  Some systems cheat and
+# have only the header files (pyramids in the ucb universe for example).
+
+for i in $inc/sys/ipc.h $inc/sys/shm.h $inc/sys/msg.h
+do
+	if cp $i /dev/null >/dev/null 2>&1
+	then
+		ipcheaders=yes
+	else
+		ipcheaders=no
+		break
+	fi
+done
+
+for i in shmdt shmget shmat shmctl msgctl msgget msgrcv msgsnd
+do
+	name=\^$i\$
+	if grep $name libc.names >/dev/null
+	then
+		ipcfuncs=yes
+	else
+		ipcfuncs=no
+		break
+	fi
+done
+
+if test "$ipcheaders" = "yes" -a "$ipcfuncs" = "yes"
+then
+	have_shm=1
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "You can support double buffering ..."
+	fi
+else
+	have_shm=0
+	if [ $v = 1 ]
+	then
+		echo 1>&2 "You can't support double buffering ..."
+	fi
+fi
+
+# Check to see if we have <dirent.h> and set have_dirent
+# appropriately.
+
+if cp $inc/dirent.h /dev/null >/dev/null 2>&1
+then
+	have_dirent=1
+	if [ $v = 1 ] ;then echo 1>&2 "You have dirent ..." ;fi
+else
+	have_dirent=0
+	if [ $v = 1 ] ;then echo 1>&2 "You don't have dirent ..." ;fi
+fi
+
+# Now remove the library list, we are done with it.
+
+rm -f libc.names
+
+# Now create the new autoconfig.h file, saving any old one
+# first.
+
+if cp autoconfig.h /dev/null >/dev/null 2>&1
+then
+    mv autoconfig.h Oautoconfig.h
+fi
+
+cat <<EOT >autoconfig.h
+/*
+ *	This autoconfiguration file was built automatically by make.sh.
+ *	Any handmade changes will get overwritten the next time
+ *	autoconfiguration is done, thus it is best to change make.sh as
+ *	necessary.
+ */
+
+/*
+ *	Define whether or not the C compiler under xenix handles
+ *	the "far" keyword without error.  Some compilers won't
+ *	even compile their own header files!  In this case, we
+ *	just define the "far" away and hope for the best.  Bru
+ *	does not use any "far" keywords.  This is only applicable
+ *	to xenix.  If the line "#define far" does not appear below
+ *	then you are not running xenix, or your compiler is ok.
+ *	(Ditto comments above for "near" keyword.)
+ */
+
+$broken_far
+$broken_near
+
+/*
+ *	Define whether or not the C compiler fully understands the
+ *	"void" type.  If not, define BROKEN_VOID to 1.  Otherwise,
+ *	leave undefined or define to 0.
+ */
+
+$broken_void
+
+/*
+ *	Define whether or not native characters are signed or unsigned.
+ *	If signed, set CHARS_ARE_SIGNED to 1.
+ */
+
+#ifndef CHARS_ARE_SIGNED
+#define CHARS_ARE_SIGNED $chars_are_signed
+#endif
+
+/*
+ *	Define whether or not the explicit type "signed char" is 
+ *	acceptable to the compiler.
+ */
+
+#ifndef SIGNED_CHARS_OK
+#define SIGNED_CHARS_OK $signed_chars_ok
+#endif
+
+/*
+ *	Define whether or not the explicit type "unsigned char" is 
+ *	acceptable to the compiler.
+ */
+
+#ifndef UNSIGNED_CHARS_OK
+#define UNSIGNED_CHARS_OK $unsigned_chars_ok
+#endif
+
+/*
+ *	Define whether or not statvfs() can be found in libc.a along with
+ *	the include file <statvfs.h>.  This call can be used to avoid
+ *	non-filesystem thingies like /proc or /dev/fd under SVR4.
+ */
+
+#ifndef HAVE_STATVFS
+#define HAVE_STATVFS $have_statvfs
+#endif
+
+/*
+ *	Define whether or not uname() can be found in libc.a.  If not, then
+ *	we need to use our own private copy.  This will usually be missing
+ *	on some older BSD derived systems.  Also define whether or not the
+ *	<sys/utsname.h> include file is available, and if so, does the
+ *	utsname structure has a "machine" member (some do not).
+ */
+
+#ifndef HAVE_UNAME
+#define HAVE_UNAME $have_uname
+#endif
+
+#ifndef HAVE_UTSNAME
+#define HAVE_UTSNAME $have_utsname
+#endif
+
+#ifndef HAVE_UTSNAME_MACHINE
+#define HAVE_UTSNAME_MACHINE $have_utsname_machine
+#endif
+
+/*
+ *	Define whether or not you have BSD style waits.
+ */
+
+#ifndef HAVE_UNIONWAIT
+#define HAVE_UNIONWAIT $have_unionwait
+#endif
+
+/*
+ *	Define whether or not tzset() can be found in libc.a.  If not, then
+ *	we are probably on a BSD type system and can use gettimeofday
+ *	instead.
+ */
+
+#ifndef HAVE_TZSET
+#define HAVE_TZSET $have_tzset
+#endif
+
+/*
+ *	Define whether or not gettimeofday() can be found in libc.a.  If 
+ *	we don't have tzset and timezone, we can use this instead.  Usually
+ *	found on BSD flavored systems.
+ */
+
+#ifndef HAVE_GETTIMEOFDAY
+#define HAVE_GETTIMEOFDAY $have_gettimeofday
+#endif
+
+/*
+ *	Define whether or not getopt() can be found in libc.a.  If not, then
+ *	we need to use our own private copy.  This will usually be missing
+ *	on some older BSD derived systems.
+ */
+
+#ifndef HAVE_GETOPT
+#define HAVE_GETOPT $have_getopt
+#endif
+
+/*
+ *	Define whether or not strtok() can be found in libc.a.  If not, then
+ *	we need to use our own private copy.  This will usually be missing
+ *	on some older BSD derived systems.
+ */
+
+#ifndef HAVE_STRTOK
+#define HAVE_STRTOK $have_strtok
+#endif
+
+/*
+ *	Define whether or not strtol() can be found in libc.a.  If not, then
+ *	we need to use our own private copy.  This will usually be missing
+ *	on some older BSD derived systems.
+ */
+
+#ifndef HAVE_STRTOL
+#define HAVE_STRTOL $have_strtol
+#endif
+
+/*
+ *	Define whether or not mkdir() can be found in libc.a.  If not, then
+ *	we need to build directory nodes the hard way.  Most BSD derived 
+ *	systems, or USG systems extended to use NFS, will have mkdir().
+ */
+
+#ifndef HAVE_MKDIR
+#define HAVE_MKDIR $have_mkdir
+#endif
+
+/*
+ *	Define whether or not ulimit() can be found in libc.a.
+ */
+
+#ifndef HAVE_ULIMIT
+#define HAVE_ULIMIT $have_ulimit
+#endif
+
+/*
+ *	Define whether or not memset() can be found in libc.a.  If not, then
+ *	we do our block memory zero'ing using a portable C loop, which can
+ *	be significantly slower.
+ */
+
+#ifndef HAVE_MEMSET
+#define HAVE_MEMSET $have_memset
+#endif
+
+/*
+ *	Define whether or not bcopy() can be found in libc.a.
+ */
+
+#ifndef HAVE_BCOPY
+#define HAVE_BCOPY $have_bcopy
+#endif
+
+/*
+ *	Define whether or not strchr() can be found in libc.a.
+ */
+
+#ifndef HAVE_STRCHR
+#define HAVE_STRCHR $have_strchr
+#endif
+
+/*
+ *	Define whether or not strrchr() can be found in libc.a.
+ */
+
+#ifndef HAVE_STRRCHR
+#define HAVE_STRRCHR $have_strrchr
+#endif
+
+/*
+ *	Define whether or not INDEX() can be found in libc.a.
+ */
+
+#ifndef HAVE_INDEX
+#define HAVE_INDEX $have_index
+#endif
+
+/*
+ *	Define whether or not rindex() can be found in libc.a.
+ */
+
+#ifndef HAVE_RINDEX
+#define HAVE_RINDEX $have_rindex
+#endif
+
+/*
+ *	Define whether or not memcpy() can be found in libc.a.
+ */
+
+#ifndef HAVE_MEMCPY
+#define HAVE_MEMCPY $have_memcpy
+#endif
+
+/*
+ *	Define whether or not the BSD style directory access routines can
+ *	be found in libc.a.  If not, we need to use the internal versions
+ *	(set HAVE_SEEKDIR to 0).  It is preferable to use the system
+ *	supplied versions if they are available.
+ */
+
+#ifndef HAVE_SEEKDIR
+#define HAVE_SEEKDIR $have_seekdir
+#endif
+
+/*
+ *	Define whether or not the include file <dirent.h> is available.
+ *	If so, then HAVE_DIRENT should be set to 1.
+ */
+
+#ifndef HAVE_DIRENT
+#define HAVE_DIRENT $have_dirent
+#endif
+
+/*
+ *	Bru will attempt to use telldir/closedir/opendir/seekdir
+ *	sequences to close directories that it is not actively
+ *	using, reducing the number of file descriptors in use.
+ *	This helps to prevent recursive directory reading of deeply
+ *	nested hierarchies from failing due limits on the number
+ *	of simultaneously open file descriptors.  On some systems,
+ *	even though the manual pages imply that this sequence
+ *	will work, the implementation appears to be broken.  If
+ *	so, then define BROKEN_SEEKDIR to 1.
+ *
+ */
+
+#ifndef BROKEN_SEEKDIR
+#define BROKEN_SEEKDIR $broken_seekdir
+#endif
+
+/*
+ *	Define AUX to 1 if the host is running Apple's A/UX unix
+ *	implementation.
+ */
+
+#ifndef AUX
+#define AUX $aux
+#endif
+
+/*
+ *	Define xenix if it looks like the host is a xenix system and
+ *	xenix is not already defined.  Most xenix systems don't define
+ *	unix, so one of these MUST be defined.
+ */
+
+#ifndef xenix
+#define xenix $xenix
+#endif
+
+/*
+ *	If any of the source files have been checked out for editing
+ *	from SCCS, then define TESTONLY to handle special cases of
+ *	non-expansion of sccs keywords.
+ */
+
+#ifndef TESTONLY
+#define TESTONLY $testonly
+#endif
+
+/*
+ *	Define exactly one of SIGTYPEINT or SIGTYPEVOID, to indicate
+ *	whether or not signal returns a pointer to a function returning
+ *	int, or a pointer to a function return void, respectively.
+ */
+
+#if (!SIGTYPEINT && !SIGTYPEVOID)
+#define SIGTYPEINT $sigtypeint
+#define SIGTYPEVOID $sigtypevoid
+#endif
+
+/*
+ *	Define RMT to 1 if we have support for remote shells, on the
+ *	assumption that some system out there may have /etc/rmt on it,
+ *	thus allowing us to support remote tape drives.
+ */
+
+#ifndef RMT
+#define RMT $rmt
+#endif
+
+/*
+ *	Define HAVE_STDARG to 1 if support is provided for 
+ *	the ANSI C <stdarg.h> style variable argument lists.
+ *	Otherwise, we will look at HAVE_VARARGS to decide what
+ *	to do about variable argument lists.
+ */
+
+#ifndef HAVE_STDARG
+#define HAVE_STDARG $have_stdarg
+#endif
+
+/*
+ *	Define HAVE_VARARGS to 1 if support is provided for 
+ *	the varargs macros.  Otherwise, we will fake the varargs
+ *	stuff with a local copy, which should work on any system
+ *	that doesn't strictly require varargs.
+ */
+
+#ifndef HAVE_VARARGS
+#define HAVE_VARARGS $have_varargs
+#endif
+
+/*
+ *	Define HAVE_TERMIO to 1 if we have <termio.h> style terminal
+ *	handling.
+ */
+
+#ifndef HAVE_TERMIO
+#define HAVE_TERMIO $have_termio
+#endif
+
+/*
+ *	Define HAVE_SYMLINKS to 1 if symbolic links are available.
+ */
+
+#ifndef HAVE_SYMLINKS
+#define HAVE_SYMLINKS $have_symlinks
+#endif
+
+/*
+ *	Define HAVE_CONTIGUOUS to 1 if Masscomp style contiguous
+ *	files are supported by the host machine.
+ */
+
+#ifndef HAVE_CONTIGUOUS
+#define HAVE_CONTIGUOUS $have_contiguous
+#endif
+
+/*
+ *	Define HAVE_STRANGE_UTIMBUF to 1 your machine does NOT define
+ *	a struct utimbuf anywhere (see utime(2)) and requires a utimbuf
+ *	that is different than the "classical" definition:
+ *
+ *		struct utimbuf {
+ *			time_t actime;
+ *			time_t modtime;
+ *		};
+ *
+ */
+
+#ifndef HAVE_STRANGE_UTIMBUF
+#define HAVE_STRANGE_UTIMBUF $have_strange_utimbuf
+#endif
+
+/*
+ *	Define HAVE_FIFOS to 1 if fifos are available.
+ */
+
+#ifndef HAVE_FIFOS
+#define HAVE_FIFOS $have_fifos
+#endif
+
+/*
+ *	Define HAVE_SHM to 1 if System V style shared memory is available.
+ *	If it is, we can use use double buffering to greatly increase
+ *	throughput in some situations (actual improvement is hardware 
+ *	dependent).
+ */
+
+#ifndef HAVE_SHM
+#define HAVE_SHM $have_shm
+#endif
+
+/*
+ *	Define FAST_CHKSUM to 1 if you are willing to support a private
+ *	machine dependant checksum routine (usually written in assembler)
+ *	that replaces the simple checksum loop in the function "chksum".
+ *	Your routine must be named sumblock, and takes two arguments,
+ *	a pointer to the first byte and a byte count.  Be careful to
+ *	test your custom version of bru archive read/write compatibility
+ *	with the version that uses the C code.  If you know enough to
+ *	write this, you are assumed to know enough to figure out how
+ *	to change the makefile appropriately.
+ */
+
+#ifndef FAST_CHKSUM
+#define FAST_CHKSUM 0
+#endif
+
+/*
+ *	Define CONFIG_DATE as a string of the form given by
+ *	the unix "date" command with no arguments".  This is the
+ *	date that autoconfig was last run.  It also usually ends
+ *	up being the installation date.
+ */
+
+#define CONFIG_DATE "`date`"
+
+EOT
+
+exit 0

@@ -1,0 +1,705 @@
+TABLE OF CONTENTS
+
+eucdriver.library/--background
+eucdriver.library/EUCFontExtent
+eucdriver.library/EUCText
+eucdriver.library/EUCTextExtent
+eucdriver.library/EUCTextFit
+eucdriver.library/EUCTextLength
+eucdriver.library/--background                 eucdriver.library/--background
+
+ VECTORED FONTS
+
+ Introduction -
+
+	The Japanese 3.xx release of the Amiga OS makes it possible
+ for applications to print text in the Japanese (Nihongo) language.
+ The first problem is that the Amiga font sub-system was designed
+ to print ECMA Latin1 character sets ... infact this assumption that
+ byte streams are ECMA Latin1 characters is deeply rooted in various
+ O.S. functions, and in the C linker library functions (e.g., strcmp())
+ which applications may use.
+
+ 	So the very first problem to be solved is how to print some
+ 6000+ Japanese glyphs using our existing Fonts, and Text() rendering
+ model.  By good fortune, left to right printing direction is acceptable.
+ This leaves the problem of how to associate more than 256 characters with
+ a font.  Because of the large number of glyphs used in Japan, we often do
+ not want to store all glyphs in memory all the time, but we would like to
+ support multiple Japanese font families, sizes, and relevant styles.
+ 
+	The solution in the Japanese 3.xx release of the O.S. is support
+ for fonts which render themselves.  Another way to describe these fonts
+ is to refer to them as "VECTORED FONTS."  Not to be confused with
+ OUTLINE fonts, vectored fonts know how to render themselves by providing
+ vectors which redirect text related graphics.library functions.
+ In actual use this means that a vectored font could render itself from a
+ set of bitmap fonts (as we are doing in the eucdriver.library), or even
+ do on the fly rendering from outline data.
+
+	From an application point of view, vectored fonts are basically
+ used like any Amiga bitmap font.  The application uses OpenFont(),
+ of OpenDiskFont() to open a vectored font.  It uses SetFont()
+ to use the font for rendering, and CloseFont() to free the font.
+ Vectored fonts provide redirection vectors for all relevant
+ graphics.library functions (e.g., Text(), TextFit(), CloseFont(), etc.)
+
+
+ Vectored Fonts vs O.S. domain responsibilities -
+
+
+	When you break down the Amiga text sub-system, we have --
+
+	o Opening fonts
+
+	o Closing fonts
+
+	o Expunging fonts
+
+	o Provide access to a list of available fonts
+
+	o Text rendering
+
+	o Text fitting functions
+
+	o Bitmap scaled font support
+
+	o Outline font support
+
+	o Setting a font for use
+
+ 	Opening fonts includes the process of selecting a font
+ which best matches the application's request.  Requesting a font
+ requires a TextAttr structure, or TTextAttr structure which may
+ include additional tags.  The process of selection, and match
+ criteria MUST remain within the realm of O.S. responsibilities,
+ since match criteria may be improved in the future.  An example
+ would be the addition of new font tags.  If it was possible for
+ a vectored font to provide its own match checking, the font might
+ require software modification everytime new match criteria is
+ added to the OpenFont() or OpenDiskFont() procedure.
+
+	In V37 diskfont.library we added support for bitmap
+ scaled fonts, and outline fonts.  In both cases it is the
+ responsibility of diskfont.library to interpret the TextAttr,
+ or TTextAttr structure, and return a font which best matches
+ the requested criteria.  For the sake of future expansion, we will
+ leave interpretation, and creation of scaled fonts in the
+ O.S. domain.  This does not preclude a vectored font from providing
+ its own scaled glyphs, it just means that the font driver is not
+ required to provide its own code to interpret TextAttr structures,
+ or provide its own scaling code which provides all the capabilities
+ already in diskfont.library.
+
+	Responsibility for providing a list of available fonts
+ will remain in the O.S. domain for the Japanese release of
+ the O.S.  In theory vectored fonts could provide their own list
+ of available fonts which could be merged with fonts diskfont.library
+ already knows about.  The main problem with this is that the vector
+ font must have been started, and fully installed before it can provide
+ a list, however diskfont.library does not require a font be open to
+ provide the availablility list.  This means that disk based data must
+ still be provided to identify available sizes for a font, and we already
+ have mechanisms which provide this information.  So for now, a vectored
+ font must be stored on disk like any other bitmap font, or outline font.
+
+	A vectored font is responsible for providing its own rendering
+ code, essentially replacing the built-in Text() function in
+ graphics.library.  A vectored font may also need to provide its own
+ text fitting functions such as the Japanese fonts.  The interface
+ to these functions are well defined, though pixel based.  Outline
+ fonts which measure placement more accurately than screen pixel
+ resolution will need to translate internal measurements into pixel
+ coordinates.
+
+	New functionality in diskfont.library provides a mechanism
+ for immediately expunging a diskfont.  Vectored fonts may also
+ provide a function to be called with a font is closed.  Finally
+ under KS V39, applications may add themselves to the low-memory
+ expunge handler chain.  Between these, vectored fonts can provide
+ whatever is needed to expunge a vectored font.
+
+	Setting a font for use with the SetFont() function will
+ remain an O.S. domain function.  Since this function essentially
+ does nothing more than attach a font to a rastport, a vectored font
+ should not need to alter this procedure.  
+
+
+ Vectored fonts and the TextFont structure -
+
+
+	The current TextFont structure is unchanged, and is used
+ as a handle for a vectored font.  What has changed is the
+ TextFontExentsion structure created by the OS.  This structure
+ is now longer, and may contain redirection vectors, and other
+ data needed for a vectored font.  Since many applications look
+ in the TextFont structure for font information, this practice
+ is still mostly acceptable.  The TextFont structure looks like:
+
+ struct TextFont {             
+
+----The following fields are unchanged for vectored fonts---
+
+     struct Message tf_Message;
+     UWORD   tf_YSize;    
+     UBYTE   tf_Style;    
+     UBYTE   tf_Flags;    
+     UWORD   tf_XSize;    
+     UWORD   tf_Baseline; 
+     UWORD   tf_BoldSmear;
+     UWORD   tf_Accessors;
+
+---The following fields may no longer be entirely correct---
+
+     UBYTE   tf_LoChar;   
+     UBYTE   tf_HiChar;   
+     APTR    tf_CharData; 
+
+     UWORD   tf_Modulo;
+     APTR    tf_CharLoc;
+     APTR    tf_CharSpace;
+     APTR    tf_CharKern;
+ };
+
+	All TextFont structure fields for a vectored font must
+ be provided, but it is not necessarily true that glyph data
+ and related tables are entirely contained within this structure. 
+ In general applications do not look at glyph data, or number of
+ characters in TextFont structure.  To avoid crashing though, at
+ least one dummy glyph must be provided in the TextFont structure.
+ One additional point, even though tf_Style is essentially unchanged
+ for now, we are looking at extending style's through use of
+ tag lists, so the actual style of the font may not be entirely
+ described by the tf_Style field.
+
+
+ CODESETS
+
+	The second part of the problem is that the 8 bit Latin1
+ codeset is inadequate for storing Japanese text.  Codesets such
+ as the UNICODE 16 bit codeset make it possible to assign a unique
+ code to most of the Japanese characters, but UNICODE is not what is
+ being used in Japan.
+
+	UNICODE makes it possible to store codes for MANY languages
+ in a single text file, or stream.  However UNICODE does not
+ attempt to address the more complex problem of rendering glyphs
+ for many languages, nor does it address language handling rules
+ (e.g., word demarcation, mixed rendering direction, etc.).  This
+ kind of problem is mostly outside of the scope of UNICODE beyond
+ noting that text should be stored in the LOGICAL order (the
+ order in which it would be TYPED), and that rendering should
+ be handled in the expected way for each language.  A complete
+ multi-language solution is outside of the scope of what can
+ be handled using the Text() function in graphics.library.
+
+	The Japanese have at least 3 significant codesets
+ (and derivations) of which we have selected the EUC codeset for
+ use on the Amiga.  Other common codesets in Japan are JIS, and
+ SHIFT-JIS.  Of these, EUC has a number of advantages.  It is
+ mappable into JIS, or SHIFT-JIS.  It is more easily identified
+ because Japanese characters are stored as two bytes, both of
+ which have the high bit set.  It allows us to use all characters
+ in the ASCII set ($00-$7F), and all C1 control codes (e.g., $9B 
+ used by console.device).  It does not allow us to use any of the
+ Latin1 characters ($A0-$FF), but these are not required for use in
+ Japan, and infact, are not provided for by any of the Japanese
+ codesets noted above.  This may appear to be a signficant problem,
+ but remember, just as European users would never question the lack
+ of Japanese ideographs, the Japanese do not question the lack of
+ Latin1 characters.  When the Japanese computer industry decides that
+ Latin1 characters are needed (if ever), they will probably be
+ provided for using unassigned 16 bit codes.
+
+	EUC is a mixed single, and double byte codeset.  At first
+ this appears to be more complicated than use of a pure double
+ byte codeset such as UNICODE.  Hoewver in actual use this turns
+ out not to be the case.  For some purposes a pure double byte
+ codeset is simpler to use, but it is not true that something
+ as fundamental as string comparison is simplifed by use of
+ UNICODE.  For example it is not true that simply recompiling
+ a string comparison function to compare UWORDs instead of
+ UBYTEs is all that is needed.  The order of UNICODE codes
+ is random; the order of EUC is essentially pre-sorted, except
+ for proper comparison of single byte, and double byte pairing
+ in the strings.
+
+
+
+ CODESET IDENTIFICATION
+
+	A more general problem which is not addressed by
+ UNICODE is codeset identification.  Most existing Amiga
+ software, and even many OS functions, assume text streams
+ are single byte text.  Text oriented applications often make
+ significant assumptions about text.  Functions like strcmp()
+ lack codeset identification arguments.  Worse, the UNICODE
+ set tries to avoid duplication of glyphs, so sorting order
+ and rendering rules may vary from language to language, even
+ though they share the same codes.  An example would be sharing
+ of codes for the ideographs used by the Chinese, and Japanese
+ languages.
+
+	So the fundamental problems do not go away by using
+ UNICODE, though it offers an opportunity to avoid some future
+ problems when trying to support many languages at the same time.
+ As noted above, multi-language support cannot be retrofitted
+ into existing software without a considerable amount of rework,
+ so the compromise for Japanese localization is use of the EUC
+ codeset which is a standard in Japan.  For some applications,
+ Japanese support will consist of little more than providing
+ localized EUC text strings, and use of a Japanese font.  Text
+ oriented applications like word-processors will need to be
+ rewritten, which makes sense given that the needs of the
+ Japanese user entering text are significantly different from
+ those provided by existing Amiga word-processors.
+
+
+ CODESET AND FONTS
+
+	The Japanese 3.xx release of the OS provides a new
+ graphics.library function called GetFontCodeSet( struct TextFont *);
+ This function returns the codeset identifier for a font, which
+ for most existing fonts will be 0 (meaning that the font is
+ meant to be used with an 8 bit codeset).  Japanese fonts will
+ return a different value (see locale.h/i for definitions).
+ In the case of the Operating System, Intuition string gadgets,
+ and the console-handler (CON:) switch to Japanese entry mode
+ when a Japanese font is selected.  They both use the
+ GetFontCodeSet() function to make this determination.  The same
+ function can be used by applications to switch to Japanese specific
+ code when a Japanese font is selected by the user.
+
+
+ IMPLEMENTATION OF THE EUC DRIVER
+
+	The EUC font driver is constructed as a standard Amiga
+ shared library.  This driver is opened by diskfont.library
+ automatically when a Japanese font is opened using OpenDiskFont().
+ A small extension file is stored in Japanese bitmap font directories
+ which tell diskfont.library which driver library is required for the font.
+ This extension file, and details of initialization are described in
+ the documentation for diskfont.library.
+
+	The EUC font driver stores glyph data as a set of standard
+ Amiga bitmap fonts.  This is not a requirement, though it works
+ out well for printing of Japanese text.  Each font file is
+ reasonable size, so each file can be loaded, and expunged as needed
+ when memory is low.  It is also possible to edit the files using
+ a standard Amiga font editor if needed (requires assigning FONTS:
+ to the directories in which these files are stored).  Use of
+ many standard Amiga font files lets us use diskfont.library
+ to create bitmap scaled fonts if needed.
+
+	The EUC font driver provides replacement functions for
+ the Text() routine, and most of the text fitting functions in
+ graphics.library.  These functions are automatically redirected
+ to the EUC font routines, so you just call graphics.library
+ functions in the normal way.
+
+
+ MEMORY MANAGEMENT
+
+	Because of the large amount of RAM required for the
+ Japanese fonts, the eucdriver.library loads font data from
+ disk only when needed.  This is done by a separete PROCESS, so
+ TASKS may continue to call graphics.library functions like Text().
+ The EUC driver and new diskfont.library try to expunge least recently
+ used font files first during low memory conditions.
+
+
+ JAPANESE FONTS
+
+	The Japanese 3.xx release of the OS ships with four
+ Japanese font families called:
+
+	coral/16	- A gothic Japanese font
+	
+	pearl/24	- A mincho Japanese font
+
+	coral_e/18	- An enhanced version of Coral
+
+	pearl_e/26	- An enhanced version of Pearl
+
+
+	The 16x16 gothic font, and 24x24 mincho font are common
+ sizes for Japanese bitmap fonts, however, many of the glyphs in
+ these fonts do not have any white space, so the fonts may 'touch'
+ when printed.
+
+	Many existing Amiga applications assume that fonts
+ have whitespace in the font data, so it makes sense to provide
+ a version of these fonts which have whitespace.  What does not
+ make sense is storing a separate (and larger) copy of all the font
+ data on disk, or in memory, so the EUC driver provides a special
+ feature.  The trick here is the EUC driver can create Japanese fonts
+ with whitespace from the original font data which lacks it.  So you will
+ notice that the enhanced versions of Coral, and Pearl are two pixels
+ taller than the un-ehanced versions (and two pixels wider).
+
+	Selection of font size will depend on your needs.  For example,
+ the 16x16 size makes it easier for applications which need to re-layout
+ requesters designed for use with Topaz 8.  All Japanese bitmap
+ fonts are currently non-proportional, so layout for most applications
+ means modifying height, and top edge of visual objects.  The minimum
+ usable Workbench screen size for Japanese is 640x400, so the extra
+ height of windows is expected.
+
+	The EUC driver is flexable enough that other sizes for
+ Coral, and Pearl can be added later (even other Japanese font
+ families with the addition of a small extension file described
+ in the diskfont.library documentation).
+
+	Each Japanese font has a regular 8 bit character set font
+ stored like any other Amiga bitmap font.  This is the font file
+ which is used as a 'handle' for the vectoring graphics routines, and
+ in the case of the EUC driver, contains the glyph data to use to render
+ the ASCII characters $00-$7F.
+
+	The EUC codeset is a mixed single, and double byte codeset,
+ so for the sake of simplicity, the single byte ASCII glyphs
+ are always rendered half as wide as the double byte Japanese
+ glyphs.  Therefore, for a 16x16 Japanese font, it doesn't
+ matter that two bytes are two ASCII characters, or one Japanese
+ character; the width of two bytes is 16 pixels.  For Coral_E/18,
+ the same is true, except two bytes are always 18 pixels wide,
+ and 18 pixels high.
+
+	Additional Japanese bitmap fonts can be added to the
+ system later.  An example might be a 32x32 mincho font.  This
+ would be added as a set of 32x32 fonts in the Pearl font
+ directory.  A base font 32 high by 16 wide would needed to be
+ created (usually done with a font editor) for the ASCII characters.
+ To add an extended version of this font, a 34 high by 17 wide font
+ would be added to the Pearl_E font directory.
+
+	To add a whole new family of fonts, a small loadable
+ file would need to be created, but the process is essentially
+ the same.  Specific documentation regarding font storage format
+ for the eucdriver.library can be obtained from CATS.
+
+	***NOTE*** The use of multiple Amiga fonts is not a
+	requirement for creating a vectored font.  The driver
+	for a vectored font may use any data storage format
+	it wishes.  Once again, the EUC driver uses multiple
+	Amiga font files for convience.
+
+eucdriver.library/EUCFontExtent               eucdriver.library/EUCFontExtent
+
+   NAME
+	EUCFontExtent -- get the font attributes of the current font
+
+   SYNOPSIS
+	EUCFontExtent(font, fontExtent)
+	              A0    A1
+
+	void EUCFontExtent(struct TextFont *, struct TextExtent *);
+
+   FUNCTION
+	See graphics/FontExtent().
+
+   INPUTS
+	font       - the TextFont from which the font metrics are extracted.
+	fontExtent - the TextExtent structure to be filled.
+
+   RESULT
+	fontExtent is filled.
+
+   NOTES
+	This function is meaningless for a Japanese font, so a
+	redirection vector is not provided.  The te_width returned
+	has no meaning because this function assumes that you plan on
+	taking the result, and multiplying it by the maximum number
+	of columns you want to print, thereby obtaining the maximum
+	bounding box requrired to print a string containing any
+	characters.  This assumes that the codeset of the font is
+	1 byte per 1 glyph per 1 column of text, which is not true
+	for Japanese fonts.  Therefore this function will return
+	an extent equivalent to that which would be returned for any
+	other ECMALATIN1 codeset font, which if you think about it is
+	correct.  Because Japanese double-byte characters are twice as
+	wide as single-byte characters, the multiplication to determine
+	worst case is still true.
+
+   SEE ALSO
+	TextExtent()  graphics/text.h
+
+eucdriver.library/EUCText                           eucdriver.library/EUCText
+
+   NAME
+	EUCText -- Write EUC text characters.
+
+   SYNOPSIS
+	EUCText(rp, string, length)
+	        A1  A0      D0-0:16
+
+	void EUCText(struct RastPort *, STRPTR, WORD);
+
+   FUNCTION
+	See graphics/Text().  Replaces graphics/Text() when
+	rendering an EUC font.
+
+	Single character output is partially supported, though
+	not recommended (it is recommended that complete, and
+	non-ambiguous EUC text strings be printed by the application).
+	Ambiguous EUC bytes are stored in the RastPort->rp_Dummy
+	field, and the ambiguous character is printed as white-space.
+	Upon subsequent calls to Text(), this function checks for
+	a previous character, and if found, backspaces the
+	RastPort->rp_cp_x position, and prints the text string as
+	if the previous character was pre-pended to the string.
+
+	When calling the various text fitting functions, such as
+	TextLength(), the previous character (if any) is not
+	checked for, so may throw off your calculations if intermixed
+	with Text() calls printing ambiguous strings.  Once again, the
+	proper solution is to print whole lines of text, and avoid
+	printing strings which end in ambiguous EUC bytes.
+
+	Japanese fonts are marked as mono-spaced fonts.  This is not
+	entirely true because not every glyph has the same width,
+	however ... for many cases it is true that there is a direct
+	relationship of number of bytes in a string and printed width.
+	This is because the single-byte characters in an EUC string
+	are printed as half the width of the double-byte Japanese
+	character codes.  The application may mix use of fonts
+	(e.g., a multi-font word-processor), but for those applications
+	which require mono-spaced fonts (or console.device which
+	requires mono-spaced fonts), the Japanese fonts are most likely
+	as usable as any other mono-spaced font.  There is one catch
+	here ... if RastPort->TxSpacing is greater than 0 (most
+	applications do not use RastPort->TxSpacing), the amount of
+	space added is added per glyph, so the printed pixel width
+	of the string is no longer a simple multiplication of byte
+	length times font->XSize.
+
+	Use of the graphics text fitting functions does not check
+	for pre-character bytes.  It is assumed that if you are
+	using these functions that you are also printing non-ambiguous
+	EUC text strings.
+
+   INPUTS
+	rp     - a pointer to the RastPort which describes where the
+	         text is to be output
+	string - the address of string to output
+	length - the number of characters in the string.
+	         If zero, there are no characters to be output.
+
+
+   NOTES
+	o   Assumes that the string being printed is the EUC codeset
+	    so character codes greater than or equal to 0xA1 are
+	    interpreted as half of an EUC byte pair.
+	o   Printing of Latin1 characters is supported if followed
+	    by a second byte which is less than 0xA1.  While this
+	    practice is not recommended, it may be required by some
+	    applications.
+	o   Printing EUC character codes greater than 0xF4 will return
+	    unpredictable results.  These codes are reserved for
+	    future expansion, and gaiji.
+	o   Changing the text direction with RastPort->TxSpacing is
+	    not supported.
+	o   Negative RastPort->TxSpacing is not supported.
+	o   Positive RastPort->TxSpacing is added per glyph, so
+	    for example, a spacing value of one (1) pixel will
+	    add one pixel of white space per ROMAN single-byte
+	    character printed, and one per JAPANESE double-byte
+	    character printed.
+	o   Roman single-byte characters must be half the width
+	    of Japanese double byte characters.
+
+   BUGS
+	o   Color Japanese fonts are currently not supported (maybe
+	    in the future).
+eucdriver.library/EUCTextExtent               eucdriver.library/EUCTextExtent
+
+   NAME
+	EUCTextExtent -- Determine raster extent of text data.
+
+   SYNOPSIS
+	EUCTextExtent(rp, string, count, textExtent)
+	              A1  A0      D0:16  A2
+
+	void EUCTextExtent(struct RastPort *, STRPTR, WORD,
+	     struct TextExtent *);
+
+   FUNCTION
+	See graphics/TextExtent().  Like EUCTextLength(), does
+	not take into account any pre-character byte.
+
+   INPUTS
+	rp     - a pointer to the RastPort which describes where the
+	         text attributes reside.
+	string - the address of the string to determine the length of.
+	count  - the number of characters in the string.
+                If zero, there are no characters in the string.
+	textExtent - a structure to hold the result.
+
+   RESULT
+	textExtent is filled in as follows:
+	    te_Width  - same as TextLength() result: the rp_cp_x
+	                advance that rendering this text would cause.
+	    te_Height - same as tf_YSize.  The height of the
+	                font.
+	    te_Extent.MinX - the offset to the left side of the
+	                rectangle this would render into.  Often zero.
+	    te_Extent.MinY - same as -tf_Baseline.  The offset
+	                from the baseline to the top of the rectangle
+	                this would render into.
+	    te_Extent.MaxX - the offset of the left side of the
+	                rectangle this would render into.  Often the
+	                same as te_Width-1.
+	    te_Extent.MaxY - same as tf_YSize-tf_Baseline-1.
+	                The offset from the baseline to the bottom of
+	                the rectangle this would render into.
+
+
+   NOTES
+
+   SEE ALSO
+	EUCTextLength()
+
+eucdriver.library/EUCTextFit                     eucdriver.library/EUCTextFit
+
+   NAME
+	EUCTextFit - count "bytes" that will fit in a given extent.
+
+   SYNOPSIS
+	chars = EUCTextFit(rastport, string, strLen, textExtent,
+	D0                 A1        A0      D0      A2
+	        constrainingExtent, strDirection,
+	        A3                  D1
+	        constrainingBitWidth, constrainingBitHeight)
+	        D2                    D3
+
+	ULONG EUCTextFit(struct RastPort *, STRPTR, UWORD,
+	    struct TextExtent *, struct TextExtent *, WORD, UWORD, UWORD);
+
+   FUNCTION
+	See graphics/TextFit().  Like EUCTextLength(), does not
+	take into account any pre-character byte.  See note below
+	regarding interpretation of this functions return value.
+
+   INPUTS
+	rp     - a pointer to the RastPort which describes where the
+	         text attributes reside.
+	string - the address of string to determine the constraint of
+	strLen - The number of characters in the string.
+	         If zero, there are no characters in the string.
+	textExtent - a structure to hold the extent result.
+	constrainingExtent - the extent that the text must fit in.
+	    This can be NULL, indicating only the constrainingBit
+	    dimensions will describe the constraint.
+	strDirection - the offset to add to the string pointer to
+	    get to the next character in the string.  Usually 1.
+	    Set to -1 and the string to the end of the string to
+	    perform a TextFit() anchored at the end.  No other value
+	    is valid.  Note that this description is not entirely
+	    true for EUC, rather -1 means negative text direction
+	    since EUC byte pairs must be interpreted as 1 character.
+	constrainingBitWidth - an alternative way to specify the
+	    rendering box constraint width that is independent of
+	    the rendering origin.  Range 0..32767.
+	constrainingBitHeight - an alternative way to specify the
+	    rendering box constraint height that is independent of
+	    the rendering origin.  Range 0..32767.
+
+   RESULTS
+	chars - See graphics/TextFit().  The result must be
+		interpreted as the number of BYTES which can be
+		printed with the Text() function, and not the
+		number of Japanese characters (or glyphs) since
+		EUC is a mixed single/double byte codeset.
+
+   NOTES
+	This function interprets text strings as EUC strings, so
+	returns a "chars" value on single byte, or EUC double byte
+	boundaries.  This is true whether or not you indicate
+	positive, or negative direction, however if the string
+	ends in an ambiguous EUC byte (a single byte whose value is
+	>= 0xA1), the resulting "chars" length is interpreted via
+	the following rules:
+
+	o If the entire string fits in the contraints, "chars"
+	  is equal to the length of the string (number of BYTES)
+	  including the ambiguous byte.
+	o If a postive string direction is indicated in register
+	  D1, and the entire string does not fit, the ambiguous
+	  byte will be truncated along with whatever number of
+	  bytes must be truncated to fit in the contraints.
+	o If a negative string direction is indicated in register
+	  D1, and the entire string does not fit, the amiguous
+	  byte plus N non-ambiguous bytes proceeding it will be
+	  returned in register D0.
+	o In all cases, the string is assumed to start on a
+	  non-ambiguous EUC boundary.  Random results can be
+	  returned if you arbitrarily select string starting
+	  position in the middle of an EUC byte pair since this
+	  function will then incorrectly parse/identify EUC
+	  byte pairs.  For example --
+
+	  0xA1, 0xA2, 0xBE, 0xBF
+
+	  If these bytes represent two EUC characters, but the
+	  string starting position is submitted starting on 0xA2,
+	  then this routine will parse 0xA2BE as an EUC byte pair, and
+	  0xBF as an ambiguous ending byte.
+	  
+	  This kind of parsing problem has never been true in the
+	  past because of the assumption that all character strings can
+	  be treated as single byte, ECMA Latin1 character streams.
+
+   BUGS
+
+   SEE ALSO
+
+eucdriver.library/EUCTextLength               eucdriver.library/EUCTextLength
+
+   NAME
+	EUCTextLength -- Calculates length in pixels of EUC strings
+
+   SYNOPSIS
+	length = EUCTextLength(rp, string, count)
+	D0:16	               A1  A0      D0:16
+
+	WORD EUCTextLength(struct RastPort *, STRPTR, WORD);
+
+   FUNCTION
+	See graphics/TextLength().  Does not check the RastPort
+	for a pre-character byte.  Assumes that a non-ambiguous
+	EUC string is provided, so your calculations may be off
+	if mixing calls to this function with Text() calls
+	printing ambiguous strings.
+
+   INPUTS
+	rp     - a pointer to the RastPort which describes where the
+	         text is to be output
+	string - the address of string to output
+	length - the number of BYTES in the string.
+	         If zero, there are no characters to be output.
+
+   RETURNS
+	length - the number of pixels in x this text would occupy, not
+	         including any negative kerning that may take place at
+	         the beginning of the text string, nor taking into
+	         account the effects of any clipping that may take
+	         place.
+
+   NOTES
+	Does not check for pre-char which is supported strictly
+	as a kludge for retrofitting Japanese output in some
+	applications which print single bytes.
+
+	Assumes string does not end in ambiguous character - if so,
+	treats it as 1 single-byte character.
+
+	Negative spacing is not supported for EUC fonts.
+
+	Assumes single-byte characters are mono-spaced, and half the
+	display width of Japanese double-byte characters.
+
+   BUGS
+
+   SEE ALSO
+
+

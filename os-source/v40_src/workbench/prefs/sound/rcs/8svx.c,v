@@ -1,0 +1,838 @@
+head     38.9;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:38.9; strict;
+comment  @ * @;
+
+
+38.9
+date     92.06.10.14.34.45;  author davidj;  state Exp;
+branches ;
+next     38.8;
+
+38.8
+date     92.04.22.14.43.58;  author vertex;  state Exp;
+branches ;
+next     38.7;
+
+38.7
+date     92.01.02.16.42.12;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     91.11.26.15.16.35;  author davidj;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     91.11.25.14.43.48;  author Unknown;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.11.11.15.00.24;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.06.25.11.03.50;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.06.24.15.42.54;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.06.24.13.31.54;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@8SVX-read and play code for Sound prefs editor
+@
+
+
+38.9
+log
+@now use DataTypes for sound playing.
+@
+text
+@
+/* includes */
+#include <exec/devices.h>
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/ports.h>
+#include <exec/execbase.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <devices/audio.h>
+#include <prefs/sound.h>
+#include <intuition/classes.h>
+#include <intuition/classusr.h>
+#include <libraries/iffparse.h>
+#include <datatypes/datatypes.h>
+#include <datatypes/datatypesclass.h>
+#include <datatypes/soundclass.h>
+
+/* prototypes */
+#include <clib/exec_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/datatypes_protos.h>
+
+/* direct ROM interface */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/datatypes_pragmas.h>
+
+/* application includes */
+#include "pe_custom.h"
+
+#define SysBase ed->ed_SysBase
+
+/*****************************************************************************/
+
+VOID __stdargs BeginIO (struct IORequest * io);
+LONG __stdargs TimeDelay (long unit, unsigned long secs, unsigned long microsecs);
+ULONG setdtattrs (EdDataPtr ed, Object * o, ULONG data,...);
+
+/*****************************************************************************/
+
+static char __chip soundtable[] =
+{
+    0x00, 0x30, 0x56, 0x6E, 0x78, 0x72, 0x56, 0x2C,
+    0xFF, 0xD3, 0xAC, 0x8F, 0x84, 0x90, 0xAC, 0xD1
+};
+
+static char voltable[] =
+{
+    0x40, 0x3C, 0x38, 0x34, 0x30, 0x2C, 0x28, 0x24,
+    0x20, 0x1C, 0x18, 0x14, 0x10, 0x0C, 0x08, 0x04
+};
+
+/*****************************************************************************/
+
+EdStatus DoAudio (EdDataPtr ed, STRPTR name, BOOL real)
+{
+    UBYTE audioChannels[] = {3, 6, 1, 2, 4, 8};
+    struct dtTrigger dtt;
+    struct IOAudio ioa2;
+    struct IOAudio ioa;
+    APTR sample = NULL;
+
+    if (ed->ed_PrefsWork.sop_AudioType == SPTYPE_SAMPLE)
+    {
+	setdtattrs (ed, ed->ed_DataObject,
+		    SDTA_Period, ed->ed_PrefsWork.sop_AudioPeriod,
+		    SDTA_Volume, ed->ed_PrefsWork.sop_AudioVolume,
+		    TAG_DONE);
+
+	dtt.MethodID = DTM_TRIGGER;
+	dtt.dtt_Function = STM_PLAY;
+	DoMethodA (ed->ed_DataObject, &dtt);
+    }
+    else if (real && ed->ed_PrefsWork.sop_AudioQueue)
+    {
+	ioa.ioa_Request.io_Message.mn_Node.ln_Pri = 85;
+	ioa.ioa_Request.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+	ioa.ioa_Request.io_Message.mn_Length = sizeof (struct IOAudio);
+	ioa.ioa_Request.io_Message.mn_ReplyPort = &((struct Process *) (SysBase->ThisTask))->pr_MsgPort;
+	ioa.ioa_Data = audioChannels;
+	ioa.ioa_Length = sizeof (audioChannels);
+
+	if (!OpenDevice ("audio.device", 0, &ioa, 0))
+	{
+	    register ULONG delay;
+	    register UWORD vol;
+
+	    ioa.ioa_Request.io_Flags = ADIOF_PERVOL;
+	    ioa.ioa_Request.io_Command = CMD_WRITE;
+	    ioa.ioa_Volume = ed->ed_PrefsWork.sop_AudioVolume;
+	    ioa.ioa_Period = ed->ed_PrefsWork.sop_AudioPeriod;
+
+	    ioa.ioa_Cycles = 0;
+	    ioa.ioa_Length = sizeof (soundtable);
+	    ioa.ioa_Data = (APTR) & soundtable;
+	    ioa.ioa_Volume = (voltable[0] * ed->ed_PrefsWork.sop_AudioVolume) / 64;
+
+	    ioa2 = ioa;
+	    ioa2.ioa_Request.io_Command = ADCMD_PERVOL;
+
+	    BeginIO (&ioa);
+
+	    delay = ed->ed_PrefsWork.sop_AudioDuration * 400;
+
+	    for (vol = 1; vol < sizeof (voltable); vol++)
+	    {
+		ioa2.ioa_Volume = (voltable[vol] * ed->ed_PrefsWork.sop_AudioVolume) / 64;
+		ioa2.ioa_Request.io_Flags = IOF_QUICK | ADIOF_SYNCCYCLE;
+		BeginIO (&ioa2);
+		WaitIO (&ioa2);
+		TimeDelay (UNIT_MICROHZ, 0, delay);
+	    }
+
+	    AbortIO (&ioa);
+	    WaitIO (&ioa);
+
+	    CloseDevice (&ioa);
+	    FreeVec (sample);
+	}
+    }
+    return (ES_NORMAL);
+}
+@
+
+
+38.8
+log
+@Now handles Fibonacci compressed samples
+@
+text
+@d12 2
+d15 3
+d23 1
+d29 1
+a32 1
+#include "8svx.h"
+a35 1
+
+a37 1
+
+d39 2
+a40 8
+LONG __stdargs TimeDelay( long unit, unsigned long secs, unsigned long microsecs );
+
+
+/*****************************************************************************/
+
+
+#define CMP_NONE     0
+#define CMP_FIBDELTA 1
+a41 16
+struct VoiceHeader
+{
+    ULONG vh_OneShotHiSamples;
+    ULONG vh_RepeatHiSamples;
+    ULONG vh_SamplesPerHiCycle;
+    UWORD vh_SamplesPerSec;
+    UBYTE vh_Octaves;
+    UBYTE vh_Compression;
+    ULONG vh_Volume;
+};
+
+#define ID_8SVX MAKE_ID('8','S','V','X')
+#define ID_VHDR MAKE_ID('V','H','D','R')
+#define ID_BODY MAKE_ID('B','O','D','Y')
+
+
+a43 1
+
+a55 1
+
+d58 1
+a58 11
+
+/* Fibonacci delta encoding for sound data */
+BYTE far codeToDelta[16] = {-34,-21,-13,-8,-5,-3,-2,-1,0,1,2,3,5,8,13,21};
+
+/* Unpack Fibonacci-delta encoded data from n byte source
+ * buffer into 2*n byte dest buffer, given initial data
+ * value x.  It returns the lats data value x so you can
+ * call it several times to incrementally decompress the data.
+ */
+
+BYTE D1Unpack(BYTE source[], LONG n, BYTE dest[], BYTE x)
+d60 5
+a64 2
+UBYTE d;
+LONG i, lim;
+d66 1
+a66 2
+    lim = n << 1;
+    for (i=0; i < lim; ++i)
+d68 4
+a71 6
+        /* Decode a data nibble, high nibble then low nibble */
+        d = source[i >> 1];     /* get a pair of nibbles */
+        if (i & 1)              /* select low or high nibble */
+            d &= 0xf;           /* mask to get the low nibble */
+        else
+            d >>= 4;            /* shift to get the high nibble */
+d73 3
+a75 2
+        x += codeToDelta[d];    /* add in the decoded delta */
+        dest[i] = x;            /* store a 1 byte sample */
+d77 1
+a77 40
+
+    return(x);
+}
+
+
+/*****************************************************************************/
+
+
+/* Unpack Fibonacci-delta encoded data from n byte
+ * source buffer into 2*(n-2) byte dest buffer.
+ * Source buffer has a pad byte, an 8-bit initial
+ * value, followed by n-2 bytes comprising 2*(n-2)
+ * 4-bit encoded samples.
+ */
+
+VOID DUnpack(UBYTE *source, ULONG n, APTR dest)
+{
+    D1Unpack(source+2, n-2, dest, source[1]);
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus DoAudio(EdDataPtr ed, STRPTR name, BOOL real)
+{
+UBYTE                  audioChannels[] = {3, 6, 1, 2, 4, 8};
+struct VoiceHeader     sampleHeader;
+EdStatus               result = ES_NORMAL;
+struct StoredProperty *sp;
+struct ContextNode    *cn;
+struct IFFHandle      *iff;
+struct IOAudio         ioa2;
+struct IOAudio         ioa;
+APTR                   sample = NULL;
+ULONG                  sampleLength;
+BPTR                   fp;
+APTR                   data;
+
+    if (ed->ed_PrefsWork.sop_AudioType == SPTYPE_SAMPLE)
+d79 6
+a84 6
+	ed->ed_ErrorFileName = name;
+	if (!(fp = Open(name,MODE_OLDFILE)))
+	{
+	    ed->ed_SecondaryResult = IoErr();
+	    return(ES_DOSERROR);
+	}
+d86 1
+a86 1
+	if (iff = AllocIFF())
+d88 2
+a89 3
+	    result = ES_IFF_NOT_8SVX;
+	    iff->iff_Stream = fp;
+	    InitIFFasDOS(iff);
+d91 4
+a94 58
+	    if (!OpenIFF(iff,IFFF_READ))
+	    {
+		if (!PropChunk(iff,ID_8SVX,ID_VHDR))
+		{
+		    if (!StopChunk(iff,ID_8SVX,ID_BODY))
+		    {
+			if (!StopOnExit(iff,ID_8SVX,ID_FORM))
+			{
+			    if (!ParseIFF(iff,IFFPARSE_STEP))
+			    {
+				while (TRUE)
+				{
+				    if (ParseIFF(iff,IFFPARSE_SCAN))
+					break;
+
+				    if (!(sp = FindProp(iff,ID_8SVX,ID_VHDR)))
+					break;
+
+				    sampleHeader = *((struct VoiceHeader *) sp->sp_Data);
+
+				    cn = CurrentChunk(iff);
+				    if (real)
+				    {
+                                        sampleLength = cn->cn_Size;
+				        if (sampleHeader.vh_Compression == CMP_FIBDELTA)
+                                            sampleLength = (sampleLength - 2) * 2;
+
+					if (!(sample = AllocVec(sampleLength,MEMF_CLEAR|MEMF_CHIP)))
+					    break;
+
+				 	data = (APTR)((ULONG)sample + sampleLength - cn->cn_Size);
+
+					if (ReadChunkBytes(iff,data,cn->cn_Size) != cn->cn_Size)
+					{
+					    FreeVec(sample);
+					    break;
+					}
+
+				        if (sampleHeader.vh_Compression == CMP_FIBDELTA)
+				            DUnpack(data,cn->cn_Size,sample);
+				    }
+				    result              = ES_NORMAL;
+				    ed->ed_SamplePeriod = (SysBase->ex_EClockFrequency * 5) / sampleHeader.vh_SamplesPerSec;
+				    break;
+				}
+			    }
+			}
+		    }
+		}
+		CloseIFF(iff);
+	    }
+	    FreeIFF(iff);
+	}
+	Close(fp);
+    }
+
+    if (result != ES_NORMAL)
+	return(result);
+d96 9
+a104 8
+    if (real && ed->ed_PrefsWork.sop_AudioQueue)
+    {
+	ioa.ioa_Request.io_Message.mn_Node.ln_Pri  = 85;
+	ioa.ioa_Request.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+	ioa.ioa_Request.io_Message.mn_Length       = sizeof(struct IOAudio);
+	ioa.ioa_Request.io_Message.mn_ReplyPort    = &((struct Process *) (SysBase->ThisTask))->pr_MsgPort;
+	ioa.ioa_Data                               = audioChannels;
+	ioa.ioa_Length                             = sizeof(audioChannels);
+d106 1
+a106 6
+	if (!OpenDevice("audio.device",0,&ioa,0))
+	{
+	    ioa.ioa_Request.io_Flags   = ADIOF_PERVOL;
+	    ioa.ioa_Request.io_Command = CMD_WRITE;
+	    ioa.ioa_Volume             = ed->ed_PrefsWork.sop_AudioVolume;
+	    ioa.ioa_Period             = ed->ed_PrefsWork.sop_AudioPeriod;
+d108 1
+a108 1
+	    if (ed->ed_PrefsWork.sop_AudioType == SPTYPE_SAMPLE)
+d110 5
+a114 6
+		ioa.ioa_Cycles = 1;
+		ioa.ioa_Length = sampleLength;
+		ioa.ioa_Data   = sample;
+
+		BeginIO(&ioa);
+		WaitIO(&ioa);
+a115 4
+	    else
+	    {
+		register ULONG delay;
+		register UWORD vol;
+d117 2
+a118 20
+		ioa.ioa_Cycles = 0;
+		ioa.ioa_Length = sizeof(soundtable);
+		ioa.ioa_Data   = (APTR)&soundtable;
+		ioa.ioa_Volume = (voltable[0] * ed->ed_PrefsWork.sop_AudioVolume) / 64;
+
+		ioa2                        = ioa;
+		ioa2.ioa_Request.io_Command = ADCMD_PERVOL;
+
+		BeginIO(&ioa);
+
+		delay = ed->ed_PrefsWork.sop_AudioDuration * 400;
+
+		for (vol = 1; vol < sizeof (voltable); vol++)
+		{
+		    ioa2.ioa_Volume           = (voltable[vol] * ed->ed_PrefsWork.sop_AudioVolume) / 64;
+		    ioa2.ioa_Request.io_Flags = IOF_QUICK | ADIOF_SYNCCYCLE;
+		    BeginIO(&ioa2);
+	            WaitIO(&ioa2);
+		    TimeDelay(UNIT_MICROHZ,0,delay);
+		}
+d120 2
+a121 6
+		AbortIO(&ioa);
+		WaitIO(&ioa);
+	    }
+
+	    CloseDevice(&ioa);
+	    FreeVec(sample);
+d124 1
+a124 2
+
+    return(ES_NORMAL);
+@
+
+
+38.7
+log
+@*** empty log message ***
+@
+text
+@d79 51
+d143 1
+d183 5
+a187 1
+					if (!(sample = AllocVec(cn->cn_Size,MEMF_CHIP)))
+d190 3
+a192 1
+					if (ReadChunkBytes(iff,sample,cn->cn_Size) != cn->cn_Size)
+d197 3
+a202 1
+				    sampleLength        = cn->cn_Size;
+@
+
+
+38.6
+log
+@took out extra CMD_FLUSH
+@
+text
+@d30 1
+d33 1
+d37 1
+d40 1
+d59 1
+d62 1
+d75 1
+d79 1
+a79 1
+EdStatus DoAudio (EdDataPtr ed, STRPTR name, BOOL real)
+d81 11
+a91 11
+    UBYTE audioChannels[] = {3, 6, 1, 2, 4, 8};
+    struct VoiceHeader sampleHeader;
+    EdStatus result = ES_NORMAL;
+    struct StoredProperty *sp;
+    struct ContextNode *cn;
+    struct IFFHandle *iff;
+    struct IOAudio ioa2;
+    struct IOAudio ioa;
+    APTR sample = NULL;
+    ULONG sampleLength;
+    BPTR fp;
+d96 1
+a96 1
+	if (!(fp = Open (name, MODE_OLDFILE)))
+d98 2
+a99 2
+	    ed->ed_SecondaryResult = IoErr ();
+	    return (ES_DOSERROR);
+d102 1
+a102 1
+	if (iff = AllocIFF ())
+d106 1
+a106 1
+	    InitIFFasDOS (iff);
+d108 1
+a108 1
+	    if (!OpenIFF (iff, IFFF_READ))
+d110 1
+a110 1
+		if (!PropChunk (iff, ID_8SVX, ID_VHDR))
+d112 1
+a112 1
+		    if (!StopChunk (iff, ID_8SVX, ID_BODY))
+d114 1
+a114 1
+			if (!StopOnExit (iff, ID_8SVX, ID_FORM))
+d116 1
+a116 1
+			    if (!ParseIFF (iff, IFFPARSE_STEP))
+d120 1
+a120 1
+				    if (ParseIFF (iff, IFFPARSE_SCAN))
+d123 1
+a123 1
+				    if (!(sp = FindProp (iff, ID_8SVX, ID_VHDR)))
+d128 1
+a128 1
+				    cn = CurrentChunk (iff);
+d131 1
+a131 1
+					if (!(sample = AllocVec (cn->cn_Size, MEMF_CHIP)))
+d134 1
+a134 1
+					if (ReadChunkBytes (iff, sample, cn->cn_Size) != cn->cn_Size)
+d136 1
+a136 1
+					    FreeVec (sample);
+d140 1
+a140 1
+				    result = ES_NORMAL;
+d142 1
+a142 1
+				    sampleLength = cn->cn_Size;
+d149 1
+a149 1
+		CloseIFF (iff);
+d151 1
+a151 1
+	    FreeIFF (iff);
+d153 1
+a153 1
+	Close (fp);
+d157 1
+a157 1
+	return (result);
+d161 1
+a161 1
+	ioa.ioa_Request.io_Message.mn_Node.ln_Pri = 85;
+d163 4
+a166 4
+	ioa.ioa_Request.io_Message.mn_Length = sizeof (struct IOAudio);
+	ioa.ioa_Request.io_Message.mn_ReplyPort = &((struct Process *) (SysBase->ThisTask))->pr_MsgPort;
+	ioa.ioa_Data = audioChannels;
+	ioa.ioa_Length = sizeof (audioChannels);
+d168 1
+a168 1
+	if (!OpenDevice ("audio.device", 0, &ioa, 0))
+d170 1
+a170 1
+	    ioa.ioa_Request.io_Flags = ADIOF_PERVOL;
+d172 2
+a173 2
+	    ioa.ioa_Volume = ed->ed_PrefsWork.sop_AudioVolume;
+	    ioa.ioa_Period = ed->ed_PrefsWork.sop_AudioPeriod;
+d179 1
+a179 1
+		ioa.ioa_Data = sample;
+d181 2
+a182 2
+		BeginIO (&ioa);
+		WaitIO (&ioa);
+d190 2
+a191 2
+		ioa.ioa_Length = sizeof (soundtable);
+		ioa.ioa_Data = (APTR) & soundtable;
+d194 2
+a195 1
+		ioa2 = *(&ioa);
+d197 1
+a197 1
+		BeginIO (&ioa);
+d199 1
+a199 3
+		ioa2.ioa_Request.io_Command = ADCMD_PERVOL;
+
+		delay = (ULONG) ed->ed_PrefsWork.sop_AudioDuration * 400L;
+d203 1
+a203 1
+		    ioa2.ioa_Volume = (voltable[vol] * ed->ed_PrefsWork.sop_AudioVolume) / 64;
+d205 3
+a207 8
+
+		    BeginIO (&ioa2);
+		    if (!(ioa2.ioa_Request.io_Flags & IOF_QUICK))
+		    {
+			WaitIO (&ioa2);
+		    }
+
+		    TimeDelay (UNIT_MICROHZ, 0, delay);
+d210 2
+a211 10
+#if 0
+		/* Not needed */
+		ioa2.ioa_Request.io_Flags = IOF_QUICK;
+		ioa2.ioa_Request.io_Command = CMD_FLUSH;
+		BeginIO (&ioa2);
+		WaitIO (&ioa2);
+#endif
+
+		AbortIO (&ioa);
+		WaitIO (&ioa);
+d214 2
+a215 2
+	    CloseDevice (&ioa);
+	    FreeVec (sample);
+d219 1
+a219 1
+    return (ES_NORMAL);
+@
+
+
+38.5
+log
+@added envelope to built in sound
+@
+text
+@d209 2
+a212 1
+
+d215 1
+@
+
+
+38.4
+log
+@Fixed incorrect error returns
+@
+text
+@a29 1
+
+d32 2
+a33 3
+
+VOID __stdargs BeginIO(struct IORequest *io);
+
+a36 1
+
+a54 1
+
+d57 5
+d63 5
+a67 1
+UWORD __chip beepData = 0x46ba;
+a68 1
+
+d72 1
+a72 1
+EdStatus DoAudio(EdDataPtr ed, STRPTR name, BOOL real)
+d74 11
+a84 10
+struct IOAudio         ioa;
+UBYTE                  audioChannels[] = {3,6,1,2,4,8};
+APTR                   sample = NULL;
+ULONG                  sampleLength;
+struct VoiceHeader     sampleHeader;
+struct IFFHandle      *iff;
+struct ContextNode    *cn;
+BPTR                   fp;
+struct StoredProperty *sp;
+EdStatus               result = ES_NORMAL;
+d88 59
+a146 59
+        ed->ed_ErrorFileName   = name;
+        if (!(fp = Open(name,MODE_OLDFILE)))
+        {
+            ed->ed_SecondaryResult = IoErr();
+            return(ES_DOSERROR);
+        }
+
+        if (iff = AllocIFF())
+        {
+            result = ES_IFF_NOT_8SVX;
+            iff->iff_Stream = fp;
+            InitIFFasDOS(iff);
+
+            if (!OpenIFF(iff,IFFF_READ))
+            {
+                if (!PropChunk(iff,ID_8SVX,ID_VHDR))
+                {
+                    if (!StopChunk(iff,ID_8SVX,ID_BODY))
+                    {
+                        if (!StopOnExit(iff,ID_8SVX,ID_FORM))
+                        {
+                            if (!ParseIFF(iff,IFFPARSE_STEP))
+                            {
+                                while (TRUE)
+                                {
+                                    if (ParseIFF(iff,IFFPARSE_SCAN))
+                                        break;
+
+                                    if (!(sp = FindProp(iff,ID_8SVX,ID_VHDR)))
+                                        break;
+
+                                    sampleHeader = *((struct VoiceHeader *)sp->sp_Data);
+
+                                    cn = CurrentChunk(iff);
+                                    if (real)
+                                    {
+                                        if (!(sample = AllocVec(cn->cn_Size,MEMF_CHIP)))
+                                            break;
+
+                                        if (ReadChunkBytes(iff,sample,cn->cn_Size) != cn->cn_Size)
+                                        {
+                                            FreeVec(sample);
+                                            break;
+                                        }
+                                    }
+                                    result = ES_NORMAL;
+                                    ed->ed_SamplePeriod = (SysBase->ex_EClockFrequency*5) / sampleHeader.vh_SamplesPerSec;
+                                    sampleLength = cn->cn_Size;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                CloseIFF(iff);
+            }
+            FreeIFF(iff);
+        }
+        Close(fp);
+d150 1
+a150 1
+        return(result);
+d154 68
+a221 31
+        ioa.ioa_Request.io_Message.mn_Node.ln_Pri  = 85;
+        ioa.ioa_Request.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+        ioa.ioa_Request.io_Message.mn_Length       = sizeof(struct IOAudio);
+        ioa.ioa_Request.io_Message.mn_ReplyPort    = &((struct Process *)(SysBase->ThisTask))->pr_MsgPort;
+        ioa.ioa_Data                               = audioChannels;
+        ioa.ioa_Length                             = sizeof(audioChannels);
+
+        if (!OpenDevice("audio.device",0,&ioa,0))
+        {
+            ioa.ioa_Request.io_Flags   = ADIOF_PERVOL;
+            ioa.ioa_Request.io_Command = CMD_WRITE;
+            ioa.ioa_Volume             = ed->ed_PrefsWork.sop_AudioVolume;
+            ioa.ioa_Period             = ed->ed_PrefsWork.sop_AudioPeriod;
+
+            if (ed->ed_PrefsWork.sop_AudioType == SPTYPE_SAMPLE)
+            {
+                ioa.ioa_Cycles = 1;
+                ioa.ioa_Length = sampleLength;
+                ioa.ioa_Data   = sample;
+            }
+            else
+            {
+                ioa.ioa_Cycles = (ed->ed_PrefsWork.sop_AudioDuration*653/ed->ed_PrefsWork.sop_AudioPeriod)+1;
+                ioa.ioa_Length = 2;
+                ioa.ioa_Data   = (APTR)&beepData;
+            }
+            BeginIO(&ioa);
+            WaitIO(&ioa);
+            CloseDevice(&ioa);
+            FreeVec(sample);
+        }
+d224 1
+a224 1
+    return(ES_NORMAL);
+@
+
+
+38.3
+log
+@Corrected handling of Cycle count for beeps
+@
+text
+@d79 1
+a79 1
+EdStatus               result;
+d83 1
+@
+
+
+38.2
+log
+@Uses period from prefs file even for sampled sound
+@
+text
+@d170 1
+a170 1
+                ioa.ioa_Cycles = ed->ed_PrefsWork.sop_AudioDuration;
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@a73 1
+ULONG                  samplePeriod;
+d128 1
+a128 1
+                                    samplePeriod = (SysBase->ex_EClockFrequency*5) / sampleHeader.vh_SamplesPerSec;
+d160 1
+a163 1
+                ioa.ioa_Period = samplePeriod;
+a169 1
+                ioa.ioa_Period = ed->ed_PrefsWork.sop_AudioPeriod;
+@

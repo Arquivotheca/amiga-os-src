@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	18
+DATE	MACRO
+		dc.b	'30.11.93'
+	ENDM
+VERS	MACRO
+		dc.b	'mpegplayer 40.18'
+	ENDM
+VSTRING	MACRO
+		dc.b	'mpegplayer 40.18 (30.11.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: mpegplayer 40.18 (30.11.93)',0
+	ENDM

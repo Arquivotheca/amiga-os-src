@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'24.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'led 42.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'led 42.1 (24.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: led 42.1 (24.2.94)',0
+	ENDM

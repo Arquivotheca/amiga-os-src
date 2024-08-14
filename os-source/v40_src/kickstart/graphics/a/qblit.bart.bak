@@ -1,0 +1,190 @@
+*******************************************************************************
+*
+*	$Id: qblit.asm,v 39.2 92/07/01 10:37:33 chrisg Exp $
+*
+*******************************************************************************
+
+    
+    include 'exec/types.i'
+    include 'exec/nodes.i'
+    include 'exec/lists.i'
+    include 'exec/ports.i'
+    include 'exec/interrupts.i'
+    include 'exec/libraries.i'
+	include	'exec/ables.i'
+
+    include 'graphics/gfx.i'
+    include 'graphics/gfxbase.i'
+    include 'hardware/blit.i'
+    include 'hardware/intbits.i'
+    include 'hardware/dmabits.i'
+    include 'hardware/custom.i'
+    include 'graphics/view.i'
+    include 'submacs.i'
+    include '/sane_names.i'
+
+	section	graphics
+    xref    _intreq
+    xref    _intreqr
+    xref    _intena
+    xref    _intenar
+    xref    _custom
+    xref    _dmaconr
+
+    xref    DEBUG
+
+	xref	_LVOPermit
+
+    xdef    _QBlit
+******* graphics.library/QBlit ************************************************
+*
+*   NAME
+*
+*	QBlit -- Queue up a request for blitter usage
+*
+*   SYNOPSIS
+*	QBlit( bp )
+*	       a1
+*
+*	void QBlit( struct bltnode * );
+*
+*   FUNCTION
+*	Link a request for the use of the blitter to the end of the
+*       current blitter queue.  The pointer bp points to a blit structure
+*       containing, among other things, the link information, and the
+*       address of your routine which is to be called when the blitter
+*       queue finally gets around to this specific request.  When your
+*       routine is called, you are in control of the blitter ... it is
+*       not busy with anyone else's requests.  This means that you can
+*       directly specify the register contents and start the blitter.
+*       See the description of the blit structure and the uses of QBlit
+*       in the section titled Graphics Support in the OS Kernel Manual.
+*	Your code must be written to run either in supervisor or user
+*	mode on the 68000.
+*
+*   INPUTS
+*	bp - pointer to a blit structure
+*
+*   RESULT
+*	Your routine is called when the blitter is ready for you.
+*	In general requests for blitter usage through this channel are
+*	put in front of those who use the blitter via OwnBlitter and
+*	DisownBlitter. However for small blits there is more overhead
+*	using the queuer than Own/Disown Blitter.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	QBSBlit() hardware/blit.h
+*
+******************************************************************************
+    xref    waitblitdone
+	xdef	qb_entry
+	xdef	qb_entry2
+
+_QBlit:
+*   pure assembly code
+    clr.l   (a1)        *   clear ptr to next blit node
+	move.l	gb_ExecBase(a6),a0
+	FORBID	a0,NOFETCH
+	DISABLE	a0,NOFETCH
+qb_entry:
+    if  gb_blthd(a6)=#0.l .ex
+qb_entry2:
+	addq.w  #1,gb_BlitLock(a6)
+	if  =   .ex * if = then now owned
+* let us call the routine now
+	    movem.l a2/a5,-(sp) * save a2 and a5
+	    move.l  a1,a2       * save ptr into a2
+	    move.l  4(a1),a5    * get entry point of handler
+
+; this is the first time. we must disable blit interrupts.
+	    or.w    #QBOWNER,gb_Flags(a6)
+	    move.w	_intenar,d0
+	    and.w	#INTF_BLIT,d0
+	    bset	#15,d0
+	    move.w	#INTF_BLIT,_intena	; disable blit ints
+	    enable_interrupts
+	    WAITBLITDONE
+	    disable_interrupts
+	    move	d0,_intena
+go_again:
+	    lea _custom,a0  * get ptr to I/O space
+	    move.w  #INTF_BLIT,intreq(a0)
+	    jsr     (a5)
+* anymore blits to do?
+	    if =
+		btst    #CLEANMEn,bn_stat(a2)
+		if <>
+		    enable_interrupts
+		    WAITBLITDONE
+		    move.l  bn_cleanup(a2),a5
+		    disable_interrupts
+		    jsr (a5)
+		endif
+		bclr    #QBOWNERn,gb_Flags+1(a6)
+		DISOWNBLITTER
+		move.l	gb_ExecBase(a6),a2
+		ENABLE	a2,NOFETCH
+		exg.l	a2,a6
+		jsr	_LVOPermit(a6)
+		move.l	a2,a6
+		movem.l (sp)+,a2/a5
+	* bart - 10.07.85
+		rts 
+	    endif
+* clean up
+	    move.l  a2,a1       * ptr back to a1
+	    move.l  4(a1),a5    * incase he changed it
+	    tst.b	_dmaconr 					* bart - 03.08.90 if bad agnus
+	    btst    #DMAB_BLTDONE-8,_dmaconr
+*	    beq     go_again
+	    beq.s     enabl_disabl  * bart - 10.07.85
+abort_go:   movem.l (sp)+,a2/a5 * restore a2
+	    tst.l  gb_blthd(a6)
+	    beq.s  no_head
+	    move.l gb_blithd(a6),a0
+	    move.l a0,(a1)
+	    move.w #BITSET+INTF_BLIT,_intena
+	    move.l a6,a0
+	    move.l gb_ExecBase(a0),a6
+	    ENABLE
+	    jsr	_LVOPermit(a6)
+	    move.l a0,a6
+	    rts
+no_head:
+* more blits on this node to do
+	endif
+	move.l  a1,gb_blthd(a6) * put at head of list
+    else
+	addq.w  #1,gb_BlitLock(a6)
+	move.l  gb_blttl(a6),a0
+	move.l  a1,(a0)         * link at end of list
+    endif
+    move.l  a1,gb_blttl(a6)     * new end of list
+    move.w  #BITSET+INTF_BLIT,_intena
+	move.l	a6,a0
+	move.l	gb_ExecBase(a0),a6
+	ENABLE
+	jsr	_LVOPermit(a6)
+	move.l	a0,a6
+    rts
+
+enabl_disabl:
+    btst.b  #INTB_BLIT,_intenar+1 * bart - 1.06.85
+    if = 
+	enable_interrupts	* bart - 10.07.85
+	disable_interrupts	* bart - 10.07.85
+    else
+	move.w  #INTF_BLIT,_intena
+	enable_interrupts	* bart - 10.07.85
+	disable_interrupts	* bart - 10.07.85
+	move.w  #BITSET+INTF_BLIT,_intena
+    endif
+    if  gb_blthd(a6)=#0.l .ex
+	bra     go_again
+    else
+	bra     abort_go
+    endif
+
+    end

@@ -1,0 +1,158 @@
+*******************************************************************************
+*
+*	$Id: qbsblit.asm,v 39.3 92/07/23 10:50:14 chrisg Exp $
+*
+*******************************************************************************
+
+    
+    include 'exec/types.i'
+    include 'exec/nodes.i'
+    include 'exec/lists.i'
+    include 'exec/ports.i'
+    include 'exec/interrupts.i'
+    include 'exec/libraries.i'
+	include	'exec/ables.i'
+
+    include 'graphics/gfx.i'
+    include 'graphics/gfxbase.i'
+    include '/cia8520.i'
+    include 'hardware/blit.i'
+    include 'hardware/intbits.i'
+    include 'hardware/dmabits.i'
+    include 'hardware/custom.i'
+    include 'graphics/view.i'
+    include 'submacs.i'
+    include '/sane_names.i'
+
+	section	graphics
+    xref    _ciab
+    xref    _intreq
+    xref    _intreqr
+    xref    _intena
+    xref    _intenar
+    xref    _custom
+    xref    _vposr
+    xref    _dmaconr
+
+    xref    disownblitter
+    xref    start_timer
+    xref    DEBUG
+
+    xref    _Forbid
+    xref    _Permit
+
+    xref    _LVOAbleICR
+    xref    waitblitdone
+	xref	_LVOPermit
+
+    xdef    _QBSBlit
+    xref    _Debug
+	xref	_QBlit
+	xref	qb_entry
+	xref	qb_entry2
+******* graphics.library/QBSBlit **********************************************
+*
+*   NAME
+*
+*	QBSBlit -- Synchronize the blitter request with the video beam.
+*
+*   SYNOPSIS
+*
+*	QBSBlit( bsp )
+*		 a1
+*
+*	void QBSBlit( struct bltnode * );
+*
+*   FUNCTION
+*	Call a user routine for use of the blitter, enqueued separately from
+*       the QBlit queue.  Calls the user routine contained in the blit
+*       structure when the video beam is located at a specified position
+*       onscreen.   Useful when you are trying to blit into a visible part
+*       of the screen and wish to perform the data move while the beam is
+*       not trying to display that same area.  (prevents showing part of
+*       an old display and part of a new display simultaneously).  Blitter
+*       requests on the QBSBlit queue take precedence over those on the
+*       regular blitter queue. The beam position is specified the blitnode.
+*
+*   INPUTS
+*	bsp - pointer to a blit structure.  See description in the
+*             Graphics Support section of the manual for more info.
+*
+*   RESULT
+*       User routine is called when the QBSBlit queue reaches this
+*       request AND the video beam is in the specified position.
+*	If there are lots of blits going on and the video beam
+*	has wrapped around back to the top it will call all the
+*	remaining bltnodes as fast as it can to try and catch up.
+*
+*   BUGS
+*	Not very smart when getting blits from different tasks.
+*	They all get put in same queue so there are unfortunately
+*	some interdependencies with the beam syncing.
+*
+*   SEE ALSO
+*	QBlit() hardware/blit.h
+*
+******************************************************************************
+_QBSBlit:
+*	jmp	_QBlit				* defeat for 6526
+    clr.l   (a1)            *   clear ptr to next blit node
+	move.l	gb_ExecBase(a6),a0
+	FORBID	a0,NOFETCH
+    disable_interrupts
+	tst.b	gb_VBlank(a6)
+	bne.s	give_up
+	tst.w	gb_BeamSync(a6)
+	beq.s	qb_entry
+give_up:
+* do clipping
+	move.w	bn_beamsync(a1),d0
+	move.w	gb_MaxDisplayRow(a6),d1
+	if d1<d0
+		move.w	d1,bn_beamsync(a1)
+	endif
+* more clipping for possible negative offsets -- bart v1.3
+	if #0>d0
+		move.w  d1,bn_beamsync(a1)
+	endif
+    if  gb_bsblthd(a6)=#0.l .extend
+	tst.l   gb_blthd(a6)
+	if <>
+	    move.w  #BITSET+INTF_BLIT,_intena   * o.k. for blit interrupt
+	    move.w  bn_beamsync(a1),gb_BeamSync(a6) * we are waiting...
+	    move.l  a1,gb_bsblthd(a6)
+	    bra.s   bstailit
+	endif
+	
+	move.w  bn_beamsync(a1),d0  *   get target beam position
+	move.l  _vposr,d1   *   get beam position
+	asr.l   #8,d1
+	and.l	#$7FF,d1
+
+*	bart -- prevent unpredicatble beam collisions for workbench icons
+ 	if d1<d0.w
+ 	    move.l  a1,-(sp)
+ 	    bsr start_timer
+ 	    move.l  (sp)+,a1
+ 	    move.l  a1,gb_bsblthd(a6)   * put at head of list
+ 	    move.w  bn_beamsync(a1),gb_BeamSync(a6) * we are waiting...
+ 	    bra.s     bstailit
+ 	else
+*           move.w  #$F99,$dff180
+ 	    bra qb_entry2
+ 	endif
+
+    else
+	move.l  gb_bsblttl(a6),a0
+	move.l  a1,(a0)         * link at end of list
+    endif
+bstailit:
+    move.l  a1,gb_bsblttl(a6)       * new end of list
+    enable_interrupts
+	move.l	a6,a0
+	move.l	gb_ExecBase(a6),a6
+	jsr	_LVOPermit(a6)
+	move.l	a0,a6
+    rts
+
+	end

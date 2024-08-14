@@ -1,0 +1,200 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     93.04.26.12.28.33;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@* FAT_MFS.a **************************************************************
+** Copyright 1991 CONSULTRON
+*
+*      MSDOS FAT related functions.
+*
+*************************************************************************/
+
+    include "FS:FS.i"
+
+    section text,code
+
+
+    XREF _fsys
+
+*******
+* readFATentry() -- read FAT entry and return cluster value
+*
+*   FAT entry #s >= START_CLUST are from actual FAT table.
+*   FAT entry #s <= ROOTDIR_CLUST can not be found in the FAT table. 
+*       They are calculated and the FAT_EOF generated is determined by the
+*       end of the root directory blocks used (clusters).
+*   It is ASSUMED that ONLY data cluster reads are performed.
+*
+* LONG readFATentry(fsys,fentry)
+*
+* Inputs:
+* A0 = struct FS *fsys; = FS global structure
+* D0 = LONG fentry; = cluster #
+*
+*******/
+;MM_readFATentry reg d2
+
+;fentry      equr    d0  ;LONG
+;fe          equr    d1  ;LONG
+;entnum      equr    d2  ;LONG
+;fat         equr    a1  ;UBYTE *
+;fsys        equr    a0  ;struct FS *
+
+    XDEF    @@readFATentry
+
+@@readFATentry:
+        move.l  d2,-(sp)            ; push regs on stack
+r_fe_data:
+        move.l  f_fat_copy(a0),a1   ; get copy of FAT
+        move.l  d0,d2
+
+    ;**** chk for 16 bit FAT entries
+        btst    #FAT16_B,f_Diskflags(a0) ; chk if FAT 16 bit flag set
+        beq.s   r_fe12              ; FAT 12 bit
+r_fe16:
+        lsl.l   #1,d2               ; x 2
+        move.b  1(a1,d2.l),d1       ; load high FAT byte into reg
+        lsl.w   #8,d1               ; shift into high byte of lower word
+        move.b  0(a1,d2.l),d1       ; load low FAT byte into reg
+        bra.s   readFATentry_fini
+r_fe12:
+        mulu    #3,d2               ; x 3
+        lsr.l   #1,d2               ; / 2
+        move.b  1(a1,d2.l),d1       ; load high FAT byte into reg
+        lsl.w   #8,d1               ; shift into high byte of lower word
+        move.b  0(a1,d2.l),d1       ; load low FAT byte into reg
+
+        btst    #ODD_BIT,d0         ; chk if fentry is ODD
+        beq.s   r_fe12_even         ; go if fentry is EVEN
+r_fe12_odd:
+        lsr.w   #4,d1               ; shift right 4; get rid of lower nibble
+        bra.s   r_fe12_fini
+r_fe12_even:
+        andi.w  #FAT12_MASK,d1     ; get rid of upper nibble
+        
+r_fe12_fini:
+        cmpi.w  #FAT12_BAD,d1       ; chk for FAT bounds
+        blt.s   readFATentry_fini   ; > FAT_BAD
+
+        ori.w   #~FAT12_MASK,d1     ; convert to 16 bit FAT entry
+
+readFATentry_fini:
+        moveq.l #0,D0
+        move.w  d1,D0               ; pass return in d0
+
+readFATentry_end:
+        move.l  (sp)+,d2            ;pop regs from stack
+        rts
+
+
+*******
+* writeFATentry() -- Write FAT entry with specified cluster value
+*
+*   FAT entry #s >= START_CLUST are from actual FAT table.
+*   FAT entry #s <= ROOTDIR_CLUST can not be found in the FAT table. 
+*       They are calculated and the FAT_EOF generated is determined by the
+*       end of the root directory blocks used (clusters).
+*   It is ASSUMED that ONLY data cluster writes are performed.
+*
+* LONG writeFATentry(fsys,fentry,newent)
+*
+* Inputs:
+* A0 = struct FS *fsys; = FS global structure
+* D0 = LONG fentry; = cluster #
+* D1 = LONG newent; = new FAT entry; usually next cluster # in chain, or FAT_BAD etc.
+*
+*   Return:
+*   d0 = value
+*      = FAT_FREE (0) if still free (error occurred)
+*
+*******/
+;MM_writeFATentry reg d2/d3/d4
+
+;fentry      equr    d0  ;LONG
+;fe          equr    d1  ;LONG
+;entnum      equr    d2  ;LONG
+;newent      equr    d3  ;LONG
+;temp        equr    d4  ;LONG
+;fat         equr    a1  ;UBYTE *
+;fsys        equr    a0  ;struct FS *
+
+    XDEF    @@writeFATentry
+
+@@writeFATentry:
+        movem.l d2/d3/d4,-(sp)      ;push regs on stack
+        move.l  D1,d3               ; get new entry from reg
+
+        cmpi.l  #ROOTDIR_CLUST,d0   ; chk if root clust
+        ble.s   w_fe_FREE           ; fentry is root dir
+
+        bpl.s   w_fe_data           ; fentry is not root dir
+
+    ; cannot allocate any more root dir clusters; return FAT_FREE
+
+w_fe_FREE:
+        move.l  #FAT_FREE,D0        ; FAT entry = FREE
+        bra.s   writeFATentry_end
+w_fe_data:
+        move.l  f_fat_copy(a0),a1   ; get copy of FAT
+        move.l  d0,d2
+
+    ;**** chk for 16 bit FAT entries
+        btst    #FAT16_B,f_Diskflags(a0) ; chk if FAT 16 bit flag set
+        beq.s   w_fe12              ; FAT 12 bit
+w_fe16:
+        lsl.l   #1,d2               ; x 2
+        bra.s   w_fe_store
+w_fe12:
+        mulu    #3,d2               ; x 3
+        lsr.l   #1,d2               ; / 2
+
+        btst    #ODD_BIT,d0         ; chk if fentry is ODD
+        beq.s   w_fe12_even         ; go if fentry is EVEN
+w_fe12_odd:
+        lsl.w   #4,d1               ; put FAT entry one nibble to left
+        move.b  0(a1,d2.l),d4       ; load low FAT byte into reg
+        andi.b  #$F,d4              ; mask lower nibble
+        or.b    d4,d1               ; put lower nibble into FAT entry
+        bra.s   w_fe_store
+w_fe12_even:
+        andi.w  #FAT12_MASK,d1     ; get rid of upper nibble
+        move.b  1(a1,d2.l),d4       ; load high FAT byte into reg
+        andi.b  #$F0,d4             ; mask upper nibble
+        lsl.w   #8,d4               ; shift into upper byte of word
+        or.w    d4,d1               ; put lower nibble into FAT entry
+w_fe_store:
+        move.b  d1,0(a1,d2.l)       ; load entry low byte into FAT low byte
+        ror.w   #8,d1               ; shift high byte into lower byte
+        move.b  d1,1(a1,d2.l)       ; load entry high byte into FAT high byte
+
+writeFATentry_fini:
+        bset    #FAT_MOD_B,f_Diskflags(a0) ; set FAT modified flag
+        moveq.l #0,D0
+        move.w  d3,D0               ; pass return in d0
+
+writeFATentry_end:
+        movem.l (sp)+,d2/d3/d4      ;pop regs from stack
+        rts
+
+        end
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'23.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'specialfx 40.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'specialfx 40.10 (23.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: specialfx 40.10 (23.9.93)',0
+	ENDM

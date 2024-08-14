@@ -1,0 +1,343 @@
+
+/* *** menuhand.c ************************************************************
+ * 
+ * Menu handler for the Display Task of the Zaphod Project
+ *
+ * Copyright (C) 1986, Commodore-Amiga, Inc.
+ * 
+ * CONFIDENTIAL and PROPRIETARY
+ *
+ * History     Name        Description
+ * ---------   ------      -------------------------------------------------
+ * 25 Jan 88   -RJ         Added mouse.com support (identified with MOUSE)
+ * 9 Apr 86    =RJ=        Created this out of disptask.c
+ * 13 Mar 86   =RJ=        Changed this from cdtask.c to disptask.c
+ * 20 Feb 86   =RJ Mical=  Created this file
+ *   
+ * **************************************************************************/
+
+#include "zaphod.h"
+							 
+
+LONG OldMenuSeconds = 0;
+LONG OldMenuMicros = 0;
+
+
+
+MenuEvent(display, code, seconds, micros)
+struct Display *display;
+USHORT code;
+LONG seconds, micros;
+{
+	struct MenuItem *item;
+
+	if (code == MENUNULL)
+			{
+			TestDoubleMenu(seconds, micros);
+			return;
+			}
+
+	while (code != MENUNULL)
+		{
+		switch (MENUNUM(code))
+			{
+			case PROJECT_MENU:
+				ProjectEvent(display, code);
+				break;
+			case EDIT_MENU:
+				EditEvent(display, code);
+				break;
+			case DISPLAY_MENU:
+				DisplayEvent(display, code);
+				break;
+			}
+		item = ItemAddress(&MenuHeaders[MENU_HEADERS_COUNT - 1], code);
+		code = item->NextSelect;
+		}  
+}
+
+
+
+ProjectEvent(display, code)
+struct Display *display;
+USHORT code;
+{
+	switch(ITEMNUM(code))
+		{
+		case SAVE_ITEM:
+			WriteSettingsFile(display);
+			break;
+		case RESTORE_ITEM:
+			if (ReadSettingsFile(display, TRUE))
+				SetColorColors(display, -1);
+			break;
+		case HELP_ITEM:
+			Help(SUBNUM(code), display);
+			break;
+		case ABOUT_ITEM:
+			Alert(RJ_WAS_HERE, display);
+			break;
+		case CLOSE_ITEM:
+			CloseDisplayTask(display);
+			break;
+/*???		case ADJUST KEY TIMING:*/
+		case ADJUST_ITEM:
+			AdjustKeyTiming(display);
+			break;
+		}
+}
+
+
+
+EditEvent(display, code)
+struct Display *display;
+USHORT code;
+{
+	switch(ITEMNUM(code))
+		{
+		case COPY_ITEM:
+				Alert(ALERT_COPY_HELP, display);
+			break;
+		case PASTE_ITEM:
+			PasteClip();
+			break;
+		}
+}
+
+
+
+DisplayEvent(display, code)
+struct Display *display;
+SHORT code;
+{
+	LONG seconds, micros;
+	SHORT i;
+	struct SuperWindow *superwindow;
+	struct Window *window;
+	struct MsgPort *port;
+	struct DisplayList *displaylist;
+
+	superwindow = display->FirstWindow;
+
+	switch (ITEMNUM(code))
+		{
+		case FULLSIZE_ITEM:
+			if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				Alert(ALERT_FROZEN_TEXT, display);
+				break;
+				}
+			FullSize(display);
+			break;
+		case SMALLSIZE_ITEM:
+			Lock(&display->DisplayLock);
+			SmallSize(display);
+			if ((display->Modes & BORDER_VISIBLE) == 0)
+				BorderPatrol(display, BORDER_ON, TRUE);
+			SetFlag(display->CursorFlags, CURSOR_MOVED);
+			Unlock(&display->DisplayLock);
+			break;
+		case SHOWBORDER_ITEM:
+			Lock(&display->DisplayLock);
+			BorderPatrol(display, BORDER_ON, TRUE);
+			if (FlagIsSet(display->Modes, PAL_PRESENCE))
+				SetFlag(display->Modes, SQUELCH_NEWSIZE);
+			SetFlag(display->CursorFlags, CURSOR_MOVED);
+			Unlock(&display->DisplayLock);
+			break;
+		case HIDEBORDER_ITEM:
+			if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				Alert(ALERT_FROZEN_BORDER, display);
+				break;
+				}
+
+			Lock(&display->DisplayLock);
+			BorderPatrol(display, BORDER_OFF, TRUE);
+			SetFlag(display->CursorFlags, CURSOR_MOVED);
+			Unlock(&display->DisplayLock);
+			break;
+		case FREEZE_ITEM:
+			if (SUBNUM(code))
+				{
+				SetFlag(superwindow->Flags, FROZEN_HOSEHEAD);
+				if (FlagIsSet(display->Modes, COLOR_DISPLAY))
+					{
+					SetWindowTitles(superwindow->DisplayWindow,
+							&ColorFreezeTitle[0], -1);
+					superwindow->DisplayBorder.Title = &ColorFreezeTitle[0];
+					}
+				else
+					{
+					SetWindowTitles(superwindow->DisplayWindow,
+							&MonoFreezeTitle[0], -1);
+					superwindow->DisplayBorder.Title = &MonoFreezeTitle[0];
+					}
+				}
+			else if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				ClearFlag(superwindow->Flags, FROZEN_HOSEHEAD);
+				GetCRTSetUp(display, TRUE, TRUE);
+				if (FlagIsSet(display->Modes, COLOR_DISPLAY))
+					{
+					SetWindowTitles(superwindow->DisplayWindow,
+							&ColorActiveTitle[0], -1);
+					superwindow->DisplayBorder.Title = &ColorActiveTitle[0];
+					}
+				else
+					{
+					SetWindowTitles(superwindow->DisplayWindow,
+							&MonoActiveTitle[0], -1);
+					superwindow->DisplayBorder.Title = &MonoActiveTitle[0];
+					}
+				RenderWindow(display, TRUE, TRUE, TRUE, TRUE);
+				}
+			break;
+		case LOCALE_ITEM:
+			if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				Alert(ALERT_FROZEN_TEXT, display);
+				break;
+				}
+
+			if (SUBNUM(code))
+				WantsPrivacy(display);
+			else
+				WantsCommunity(display);
+			break;
+/*???		case MOUSEOWNER_ITEM:*/
+			/* MOUSE */
+/*???			TalkWithZaphod(display, TOGGLE_PCMOUSE, FALSE);*/
+/*???			break;*/
+		case COLOR_ITEM:
+			DoColorWindow(display);
+			break;
+		case CURSOR_ITEM:
+			/* Stupid stupid stupid compiler */
+			seconds = 0;
+			micros = 0;
+			switch (SUBNUM(code))
+				{
+				case 3:
+					seconds = 1;
+					break;
+				case 2:
+					micros = 1000000 / 2;
+					break;
+				case 1:
+					micros = 1000000 / 4;
+					break;
+				case 0:
+					micros = 1000000 / 8;
+					break;
+				}
+			superwindow->CursorSeconds = seconds;
+			superwindow->CursorMicros = micros;
+			break;
+		case NEWWINDOW_ITEM:
+			Lock(&display->DisplayLock);
+			GetNewSuperWindow(display, FALSE);
+			GetCRTSetUp(display, TRUE, FALSE);
+			OpenDisplay(display);
+			while ((port = FindPort(INPUT_PORT_NAME)) 
+					== NULL)
+				WaitTOF();
+			OpenDisplayWindow(display, port, 
+					DISPLAY_IDCMP_FLAGS);
+			Unlock(&display->DisplayLock);
+			break;
+		case REFRESH_ITEM:
+			if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				Alert(ALERT_FROZEN_TEXT, display);
+				break;
+				}
+
+			RefreshDisplay(display);
+			break;
+		case DEPTH_ITEM:
+			if (FlagIsSet(superwindow->Flags, FROZEN_HOSEHEAD))
+				{
+				Alert(ALERT_FROZEN_TEXT, display);
+				break;
+				}
+
+			i = 4 - SUBNUM(code);
+			if ((display->Modes & COLOR_DISPLAY) == 0) i -= 2;
+			else DefaultColorTextDepth = i;
+
+			Lock(&display->DisplayLock);
+			superwindow->TextDepth = i;
+			if (display->Modes & TEXT_MODE)
+				{
+				/* We're currently in text mode.  If this depth is 
+				 * different from the current depth, we have to close the
+				 * screen and open a new one, ala Crt().
+				 */
+				if (superwindow->TextDepth != 
+						superwindow->DisplayDepth)
+					RevampDisplay(display, display->Modes, 
+							FALSE, FALSE);
+				}
+
+			Unlock(&display->DisplayLock);
+			break;
+		case PRIORITY_ITEM:
+			switch (SUBNUM(code))
+				{
+				case 4:
+					i = 10;
+					break;
+				case 3:
+					i = 5;
+					break;
+				case 2:
+					i = 0;
+					break;
+				case 1:
+					i = -5;
+					break;
+				case 0:
+				default:
+					i = -10;
+					break;
+				}
+			SetTaskPri(FindTask(0), i);
+			DisplayPriority = i;
+			CursorPriority = i + CURSORPRIORITY_OFFSET;
+			PutNewPriority(display, i);
+			break;
+		case INTERLACE_ITEM:
+			if (SUBNUM(code)) SetFlag(GfxBase->system_bplcon0, INTERLACE);
+			else ClearFlag(GfxBase->system_bplcon0, INTERLACE);
+			RemakeDisplay();
+			break;
+		}
+}
+
+
+PasteClip()
+{
+	UBYTE *ptr;
+
+	ptr = ExamineTextClip();
+	SendTextToPC(ptr);
+}
+
+
+TestDoubleMenu(seconds, micros)
+LONG seconds, micros;
+{
+	if (DoubleClick(OldMenuSeconds, OldMenuMicros, seconds, micros))
+		{
+		PasteClip();
+		OldMenuSeconds = 0;
+		OldMenuMicros = 0;
+		}
+	else
+		{ 
+		OldMenuSeconds = seconds;
+		OldMenuMicros = micros;
+		}
+}
+

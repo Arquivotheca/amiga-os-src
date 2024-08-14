@@ -1,0 +1,756 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.7
+date     93.05.26.13.50.40;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.08.24.15.02.38;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.07.29.09.06.33;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.07.14.11.53.22;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.06.19.03.55.39;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.03.13.47.10;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.02.11.10.31;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.01.16.25.47;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.7
+log
+@optimizations
+@
+text
+@/* putilbm.c
+ *
+ */
+
+#include "classbase.h"
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+/* This macro computes the worst case packed size of a "row" of bytes. */
+#define MaxPackedSize(rowSize)  ( (rowSize) + ( ((rowSize)+127) >> 7 ) )
+
+/*****************************************************************************/
+
+/* Given POINTERS to POINTER variables, packs one row, updating the source
+ * and destination pointers. Returns the size in bytes of the packed row.
+ * ASSUMES destination buffer is large enough for the packed row.
+ * See MaxPackedSize. */
+extern LONG PackRow (BYTE ** pSource, BYTE ** pDest, LONG rowSize);
+
+/*****************************************************************************/
+
+/* Given POINTERS to POINTER variables, unpacks one row, updating the source
+ * and destination pointers until it produces dstBytes bytes (i.e., the
+ * rowSize that went into PackRow).
+ * If it would exceed the source's limit srcBytes or if a run would overrun
+ * the destination buffer size dstBytes, it stops and returns TRUE.
+ * Otherwise, it returns FALSE (no error). */
+extern BOOL UnPackRow (BYTE ** pSource, BYTE ** pDest, WORD srcBytes, WORD dstBytes);
+
+/*****************************************************************************/
+
+static LONG PackRow (BYTE **, BYTE **, LONG);
+static BOOL UnPackRow (BYTE **, BYTE **, WORD, WORD);
+
+/*****************************************************************************/
+
+static BYTE *PutDump (BYTE *, int);
+static BYTE *PutRun (BYTE *, int, int);
+
+/*****************************************************************************/
+
+#define DUMP	0
+#define RUN	1
+
+/*****************************************************************************/
+
+#define MinRun 3
+#define MaxRun 128
+#define MaxDat 128
+
+/*****************************************************************************/
+
+/* When used on global definitions, static means private.
+ * This keeps these names, which are only referenced in this
+ * module, from conficting with same-named objects in your program.
+ */
+static LONG putSize;
+static char buf[256];		/* [TBD] should be 128?  on stack? */
+
+/*****************************************************************************/
+
+#define GetByte()	(*source++)
+#define PutByte(c)	{ *dest++ = (c);   ++putSize; }
+
+
+/*****************************************************************************/
+
+static BYTE *PutDump (BYTE * dest, int nn)
+{
+    int i;
+
+    PutByte (nn - 1);
+    for (i = 0; i < nn; i++)
+	PutByte (buf[i]);
+    return (dest);
+}
+
+/*****************************************************************************/
+
+static BYTE *PutRun (BYTE * dest, int nn, int cc)
+{
+
+    PutByte (-(nn - 1));
+    PutByte (cc);
+    return (dest);
+}
+
+/*****************************************************************************/
+
+#define OutDump(nn)   dest = PutDump(dest, nn)
+#define OutRun(nn,cc) dest = PutRun(dest, nn, cc)
+
+/*****************************************************************************/
+
+/*----------- packrow --------------------------------------------------*/
+/* Given POINTERS TO POINTERS, packs one row, updating the source and
+ * destination pointers.  RETURNs count of packed bytes.
+ */
+static LONG packrow (BYTE ** pSource, BYTE ** pDest, LONG rowSize)
+{
+    BYTE *source, *dest;
+    char c, lastc = '\0';
+    BOOL mode = DUMP;
+    short nbuf = 0;		/* number of chars in buffer */
+    short rstart = 0;		/* buffer index current run starts */
+
+    source = *pSource;
+    dest = *pDest;
+    putSize = 0;
+    buf[0] = lastc = c = GetByte ();	/* so have valid lastc */
+    nbuf = 1;
+    rowSize--;			/* since one byte eaten. */
+
+    for (; rowSize; --rowSize)
+    {
+	buf[nbuf++] = c = GetByte ();
+	switch (mode)
+	{
+	    case DUMP:
+		/* If the buffer is full, write the length byte, then the data */
+		if (nbuf > MaxDat)
+		{
+		    OutDump (nbuf - 1);
+		    buf[0] = c;
+		    nbuf = 1;
+		    rstart = 0;
+		    break;
+		}
+
+		if (c == lastc)
+		{
+		    if (nbuf - rstart >= MinRun)
+		    {
+			if (rstart > 0)
+			    OutDump (rstart);
+			mode = RUN;
+		    }
+		    else if (rstart == 0)
+			mode = RUN;	/* no dump in progress, so can't lose by making these 2 a run. */
+		}
+		else
+		    rstart = nbuf - 1;	/* first of run */
+		break;
+
+	    case RUN:
+		if ((c != lastc) || (nbuf - rstart > MaxRun))
+		{
+		    /* output run */
+		    OutRun (nbuf - 1 - rstart, lastc);
+		    buf[0] = c;
+		    nbuf = 1;
+		    rstart = 0;
+		    mode = DUMP;
+		}
+		break;
+	}
+
+	lastc = c;
+    }
+
+    switch (mode)
+    {
+	case DUMP:
+	    OutDump (nbuf);
+	    break;
+	case RUN:
+	    OutRun (nbuf - rstart, lastc);
+	    break;
+    }
+    *pSource = source;
+    *pDest = dest;
+    return (putSize);
+}
+
+/*****************************************************************************/
+
+/*---------- putbody ---------------------------------------------------*/
+/* NOTE: This implementation could be a LOT faster if it used more of the
+ * supplied buffer. It would make far fewer calls to IFFWriteBytes (and
+ * therefore to DOS Write). */
+static BOOL PutBody (struct ClassBase * cb, struct IFFHandle * iff,
+	      struct BitMapHeader * bmhd, struct BitMap * bm)
+{
+    LONG rowBytes = (LONG) bm->BytesPerRow;
+    UBYTE compression = bmhd->bmh_Compression;
+    register LONG packedRowBytes;
+    int depth = bmhd->bmh_Depth;
+    register int plane, row;
+    BOOL retval = FALSE;
+    BOOL error = FALSE;
+    BYTE *planes[25];
+    STRPTR buffer;
+    ULONG bufsize;
+    BYTE *buf;
+
+    DB (kprintf ("BytesPerRow=%ld, Rows=%ld, Depth=%ld, Flags=%02lx\n",
+	     (ULONG) bm->BytesPerRow, (ULONG) bm->Rows, (ULONG)bm->Depth, (ULONG)bm->Flags));
+
+    bufsize = MaxPackedSize (rowBytes) + 2;
+    if (buffer = AllocMem (bufsize, MEMF_CLEAR))
+    {
+	/* Copy the pointers to the bit planes into the local array */
+	for (plane = 0; plane < depth; plane++)
+	    planes[plane] = (BYTE *) bm->Planes[plane];
+
+	/* Write out a BODY chunk header */
+	if (PushChunk (iff, NULL, ID_BODY, IFFSIZE_UNKNOWN) == 0)
+	{
+	    /* Write out the BODY contents */
+	    for (row = bmhd->bmh_Height; (row > 0) && !error; row--)
+	    {
+		for (plane = 0; (plane < depth) && !error; plane++)
+		{
+		    /* Write next row. */
+		    if (compression == cmpNone)
+		    {
+			if (WriteChunkBytes (iff, planes[plane], rowBytes) != rowBytes)
+			    error = TRUE;
+			planes[plane] += rowBytes;
+		    }
+		    /* Compress and write next row. */
+		    else if (compression == cmpByteRun1)
+		    {
+			buf = buffer;
+			packedRowBytes = packrow (&planes[plane], &buf, rowBytes);
+			if (WriteChunkBytes (iff, buffer, packedRowBytes) != packedRowBytes)
+			    error = TRUE;
+		    }
+		}
+	    }
+	    /* Finish the chunk */
+	    if (!error && (PopChunk (iff) == 0))
+		retval = TRUE;
+	}
+
+	/* Free the line buffer */
+	FreeMem (buffer, bufsize);
+    }
+    return (retval);
+}
+
+/*****************************************************************************/
+
+static BOOL PutColors (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd, struct ColorRegister * cmap, ULONG modeid)
+{
+    UWORD numcolors = 1 << bmhd->bmh_Depth;
+
+    if (cmap == NULL)
+	return TRUE;
+
+    if (modeid & 0x800)
+	numcolors = 1 << (bmhd->bmh_Depth - 2);
+    if (PushChunk (iff, 0, ID_CMAP, IFFSIZE_UNKNOWN) == 0L)
+	if ((WriteChunkRecords (iff, cmap, sizeof (struct ColorRegister), numcolors)) == numcolors)
+	    if ((PopChunk (iff)) == 0L)
+		return TRUE;
+    return FALSE;
+}
+
+/*****************************************************************************/
+
+static BOOL WriteBMHD (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd)
+{
+    ULONG msize = sizeof (struct BitMapHeader);
+
+    if (PushChunk (iff, 0, ID_BMHD, msize) == 0)
+	if (WriteChunkBytes (iff, bmhd, msize) == msize)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+static BOOL WriteCAMG (struct ClassBase * cb, struct IFFHandle * iff, ULONG modeid)
+{
+    ULONG msize = sizeof (ULONG);
+
+    if (PushChunk (iff, 0, ID_CAMG, msize) == 0)
+	if (WriteChunkBytes (iff, (char *) &modeid, msize) == msize)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+static BOOL WriteNAME (struct ClassBase * cb, struct IFFHandle * iff, STRPTR name)
+{
+    ULONG msize;
+
+    if (!name)
+	return (TRUE);
+    msize = strlen (name) + 1;
+
+    if (PushChunk (iff, 0, ID_NAME, msize) == 0)
+	if (WriteChunkBytes (iff, name, msize) == msize)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+BOOL writeObject (struct ClassBase * cb, struct IFFHandle * iff, Object * o, struct localData * lod)
+{
+    struct BitMapHeader bmhd;
+    BOOL success = FALSE;
+    STRPTR title = NULL;
+    struct BitMap *bm;
+    struct IBox *sel;
+
+    GetAttr (DTA_SelectDomain, o, (ULONG *) & sel);
+    GetAttr (DTA_ObjName, o, (ULONG *) & title);
+
+    /* Copy the bitmap */
+    bmhd = *(&lod->lod_BMHD);
+
+    /* Set it up */
+    bmhd.bmh_Left = bmhd.bmh_Top = 0;
+    if (sel)
+    {
+	bmhd.bmh_Left = sel->Left;
+	bmhd.bmh_Top = sel->Top;
+	bmhd.bmh_Width = sel->Width;
+	bmhd.bmh_Height = sel->Height;
+    }
+
+    /* Compress that baby */
+    bmhd.bmh_Compression = cmpByteRun1;
+
+    /* Create a temporary bitmap */
+    if (bm = AllocBitMap ((ULONG) bmhd.bmh_Width, (ULONG) bmhd.bmh_Height, (ULONG) bmhd.bmh_Depth, NULL, NULL))
+    {
+	/* Clip to it */
+	BltBitMap (lod->lod_SourceBMap, bmhd.bmh_Left, bmhd.bmh_Top,
+		   bm, 0, 0, bmhd.bmh_Width, bmhd.bmh_Height,
+		   0xC0, 0xFF, NULL);
+	WaitBlit ();
+
+	if (OpenIFF (iff, IFFF_WRITE) == 0)
+	{
+	    if (PushChunk (iff, ID_ILBM, ID_FORM, IFFSIZE_UNKNOWN) == 0)
+	    {
+		/* Write the title of the object */
+		WriteNAME (cb, iff, title);
+
+		if (WriteBMHD (cb, iff, &bmhd))
+		    if (WriteCAMG (cb, iff, lod->lod_ModeID))
+			if (PutColors (cb, iff, &bmhd, lod->lod_Colors, lod->lod_ModeID))
+			    success = PutBody (cb, iff, &bmhd, bm);
+		PopChunk (iff);
+	    }
+	    CloseIFF (iff);
+	}
+	FreeBitMap (bm);
+    }
+
+    return (success);
+}
+@
+
+
+39.6
+log
+@using incorrect number for numcolors for HAM
+@
+text
+@d36 2
+a37 2
+LONG PackRow (BYTE **, BYTE **, LONG);
+BOOL UnPackRow (BYTE **, BYTE **, WORD, WORD);
+d103 1
+a103 1
+LONG packrow (BYTE ** pSource, BYTE ** pDest, LONG rowSize)
+d185 1
+a185 1
+BOOL PutBody (struct ClassBase * cb, struct IFFHandle * iff,
+d248 1
+a248 1
+BOOL PutColors (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd, struct ColorRegister * cmap, ULONG modeid)
+d266 1
+a266 1
+BOOL WriteBMHD (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd)
+d279 1
+a279 1
+BOOL WriteCAMG (struct ClassBase * cb, struct IFFHandle * iff, ULONG modeid)
+d292 1
+a292 1
+BOOL WriteNAME (struct ClassBase * cb, struct IFFHandle * iff, STRPTR name)
+@
+
+
+39.5
+log
+@temporary bitmap allocated wrong.
+@
+text
+@d248 1
+a248 1
+BOOL PutColors (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd, struct ColorRegister * cmap)
+d250 1
+d255 2
+d258 1
+a258 1
+	if ((WriteChunkRecords (iff, cmap, sizeof (struct ColorRegister), (1 << bmhd->bmh_Depth))) == (1 << bmhd->bmh_Depth))
+d354 1
+a354 1
+			if (PutColors (cb, iff, &bmhd, lod->lod_Colors))
+@
+
+
+39.4
+log
+@now compresses the body. also saves a name
+@
+text
+@d7 6
+d16 2
+d24 2
+d34 2
+d39 2
+d44 2
+d49 2
+d55 2
+d64 2
+d70 2
+d82 2
+d92 2
+d97 2
+d124 1
+a124 4
+
+		/*
+		 * If the buffer is full, write the length byte, then the data
+		 */
+d179 2
+d186 1
+a186 1
+	      struct BitMapHeader * bmhd, struct BitMap * bitmap)
+d188 1
+a189 1
+    LONG rowBytes = bitmap->BytesPerRow;
+d200 4
+a203 1
+    bufsize = MaxPackedSize (bitmap->BytesPerRow) + 2;
+d208 1
+a208 1
+	    planes[plane] = (BYTE *) bitmap->Planes[plane];
+d291 1
+a291 1
+    ULONG msize = strlen (name) + 1;
+d293 4
+d329 2
+d334 1
+a334 1
+    if (bm = AllocBitMap ((ULONG) bmhd.bmh_Width, (ULONG) bmhd.bmh_Height, (ULONG) bmhd.bmh_Depth, BMF_DISPLAYABLE | BMF_STANDARD | BMF_CLEAR, NULL))
+@
+
+
+39.3
+log
+@now outputs a proper CAMG chunk
+@
+text
+@a6 3
+#if 0
+#include <exec/types.h>
+
+a87 1
+
+d156 2
+a157 2
+long putbody (struct IFFHandle * iff, struct BitMap * bitmap, BYTE * mask,
+	       struct BitMapHeader * bmhd, BYTE * buffer, LONG bufsize)
+d159 1
+a159 1
+    long error;
+a160 4
+    int dstDepth = bmhd->nPlanes;
+    UBYTE compression = bmhd->compression;
+    int planeCnt;		/* number of bit planes including mask */
+    register int iPlane, iRow;
+d162 7
+a169 3
+    BYTE *planes[MAXSAVEDEPTH + 1];	/* array of ptrs to planes & mask */
+
+    D (bug ("In PutBODY\n"));
+d171 2
+a172 22
+    if (bufsize < MaxPackedSize (rowBytes) ||	/* Must buffer a comprsd row */
+	compression > cmpByteRun1 ||	/* bad arg */
+	bitmap->Rows != bmhd->h ||	/* inconsistent */
+	rowBytes != RowBytes (bmhd->w) ||	/* inconsistent */
+	bitmap->Depth < dstDepth ||	/* inconsistent */
+	dstDepth > MAXSAVEDEPTH)/* too many for this routine */
+	return (CLIENT_ERROR);
+
+    planeCnt = dstDepth + (mask == NULL ? 0 : 1);
+
+    /* Copy the ptrs to bit & mask planes into local array "planes" */
+    for (iPlane = 0; iPlane < dstDepth; iPlane++)
+	planes[iPlane] = (BYTE *) bitmap->Planes[iPlane];
+    if (mask != NULL)
+	planes[dstDepth] = mask;
+
+    /* Write out a BODY chunk header */
+    if (error = PushChunk (iff, NULL, ID_BODY, IFFSIZE_UNKNOWN))
+	return (error);
+
+    /* Write out the BODY contents */
+    for (iRow = bmhd->h; iRow > 0; iRow--)
+d174 3
+a176 19
+	for (iPlane = 0; iPlane < planeCnt; iPlane++)
+	{
+
+	    /* Write next row. */
+	    if (compression == cmpNone)
+	    {
+		if (WriteChunkBytes (iff, planes[iPlane], rowBytes) != rowBytes)
+		    error = IFFERR_WRITE;
+		planes[iPlane] += rowBytes;
+	    }
+
+	    /* Compress and write next row. */
+	    else
+	    {
+		buf = buffer;
+		packedRowBytes = packrow (&planes[iPlane], &buf, rowBytes);
+		if (WriteChunkBytes (iff, buffer, packedRowBytes) != packedRowBytes)
+		    error = IFFERR_WRITE;
+	    }
+d178 2
+a179 21
+	    if (error)
+		return (error);
+	}
+    }
+
+    /* Finish the chunk */
+    error = PopChunk (iff);
+    return (error);
+}
+#endif
+
+/*****************************************************************************/
+
+BOOL PutBody (struct ClassBase * cb, struct IFFHandle * iff, struct BitMapHeader * bmhd, struct BitMap * bitmap)
+{
+    UBYTE p, *pptr;
+    UWORD i;
+
+    if ((PushChunk (iff, 0, ID_BODY, IFFSIZE_UNKNOWN)) == 0L)
+    {
+	for (i = 0; i < bmhd->bmh_Height; i++)
+d181 2
+a182 1
+	    for (p = 0; p < bmhd->bmh_Depth; p++)
+d184 18
+a201 3
+		pptr = (UBYTE *) bitmap->Planes[p];
+
+		WriteChunkBytes (iff, &pptr[i * bitmap->BytesPerRow], 2 * ((bmhd->bmh_Width + 15) / 16));
+d203 3
+d208 2
+a209 4
+	if ((PopChunk (iff)) == 0L)
+	{
+	    return (TRUE);
+	}
+d211 1
+a211 2
+
+    return (FALSE);
+d218 1
+d231 1
+a231 1
+BOOL WriteBMHD (struct ClassBase *cb, struct IFFHandle *iff, struct BitMapHeader *bmhd)
+d244 1
+a244 1
+BOOL WriteCAMG (struct ClassBase *cb, struct IFFHandle *iff, ULONG modeid)
+d249 1
+a249 1
+	if (WriteChunkBytes (iff, (char *)&modeid, msize) == msize)
+d257 13
+d274 1
+d279 1
+d288 3
+a290 3
+	bmhd.bmh_Left   = sel->Left;
+	bmhd.bmh_Top    = sel->Top;
+	bmhd.bmh_Width  = sel->Width;
+d293 1
+a293 1
+    bmhd.bmh_Compression = 0;
+d302 2
+d308 3
+a310 1
+		WaitBlit ();
+@
+
+
+39.2
+log
+@writing with height instead of width.
+@
+text
+@d261 4
+a264 2
+    if ((cmap != NULL) && (PushChunk (iff, 0, ID_CMAP, IFFSIZE_UNKNOWN) == 0L))
+    {
+a265 1
+	{
+d267 13
+a279 1
+	    {
+d281 8
+a288 3
+	    }
+	}
+    }
+d290 4
+a304 1
+    ULONG msize;
+a328 1
+
+d333 5
+a337 6
+		msize = sizeof (struct BitMapHeader);
+		if (PushChunk (iff, 0, ID_BMHD, msize) == 0)
+		    if (WriteChunkBytes (iff, &bmhd, msize) == msize)
+			if (PopChunk (iff) == 0)
+			    if (PutColors (cb, iff, &bmhd, lod->lod_Colors))
+				success = PutBody (cb, iff, &bmhd, bm);
+@
+
+
+39.1
+log
+@revised BitMapHeader structure
+@
+text
+@d244 1
+a244 1
+		WriteChunkBytes (iff, &pptr[i * bitmap->BytesPerRow], 2 * ((bmhd->bmh_Height + 15) / 16));
+a260 1
+
+d294 3
+a296 3
+	bmhd.bmh_Left = sel->Left;
+	bmhd.bmh_Top = sel->Top;
+	bmhd.bmh_Width = sel->Width;
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d238 1
+a238 1
+	for (i = 0; i < bmhd->h; i++)
+d240 1
+a240 1
+	    for (p = 0; p < bmhd->nplanes; p++)
+d244 1
+a244 1
+		WriteChunkBytes (iff, &pptr[i * bitmap->BytesPerRow], 2 * ((bmhd->w + 15) / 16));
+d264 1
+a264 1
+	if ((WriteChunkRecords (iff, cmap, sizeof (struct ColorRegister), (1 << bmhd->nplanes))) == (1 << bmhd->nplanes))
+d292 1
+a292 1
+    bmhd.x = bmhd.y = 0;
+d295 4
+a298 4
+	bmhd.x = sel->Left;
+	bmhd.y = sel->Top;
+	bmhd.w = sel->Width;
+	bmhd.h = sel->Height;
+d300 1
+a300 1
+    bmhd.Compression = 0;
+d303 1
+a303 1
+    if (bm = AllocBitMap ((ULONG) bmhd.w, (ULONG) bmhd.h, (ULONG) bmhd.nplanes, BMF_DISPLAYABLE | BMF_STANDARD | BMF_CLEAR, NULL))
+d306 2
+a307 2
+	BltBitMap (lod->lod_SourceBMap, bmhd.x, bmhd.y,
+		   bm, 0, 0, bmhd.w, bmhd.h,
+@

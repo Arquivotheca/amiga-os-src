@@ -1,0 +1,109 @@
+Article 1024 of net.unix:
+Relay-Version: version B 2.10.3 4.3bsd-beta 6/6/85; site unisoft.UUCP
+Path: unisoft!lll-lcc!qantel!ihnp4!ncr-sd!greg
+From: greg@ncr-sd.UUCP (Greg Noel)
+Newsgroups: net.unix,net.unix-wizards
+Subject: Re: need help with multi-reel cpio
+Message-ID: <461@ncr-sd.UUCP>
+Date: 29 Apr 86 05:10:48 GMT
+Date-Received: 29 Apr 86 16:19:01 GMT
+References: <520@sdcc13.UUCP>
+Reply-To: greg@ncr-sd.UUCP (Greg Noel)
+Organization: NCR Corporation, San Diego
+Lines: 91
+Keywords: cpio tape backup
+Xref: unisoft net.unix:1024 net.unix-wizards:1614
+
+In article <520@sdcc13.UUCP> bparent@sdcc13.UUCP (Brian Parent) writes:
+>I'm having trouble with cpio going to multiple reels.  It seems to 
+>write to the additional reels fine, but I have yet to successfully 
+>read the second reel.
+>  ..... [An extended description of the problem.  He's doing it right.]
+
+Although there are some bugs in cpio having to do with multiple volumes, this
+isn't one of them.  This particular problem happens to be brain damage in the
+way Unix tape drivers work, and is also one of my pet peeves, so excuse me for
+a moment while I dig out my soapbox.  (BTW, I'll bet that you have some sort
+of buffered tape drive, possibly a streamer.  The problem occurs on unbuffered
+drives, but it happens much more often on buffered drives.)
+
+The problem is this:  if the tape drive asserts EOT while writing or reading
+a record, the driver returns an error.  That's it; that's the whole problem.
+
+The actual senario goes like this:  cpio writes a block that crosses the EOT
+marker, so it gets an error back.  (Bug: cpio doesn't close the file at this
+point, so there aren't even any EOF marks on the end of tape, either!)  Note
+that the block is actually written on the tape.  After you have mounted the
+new tape, the block is written \again/ at the beginning of the new reel.  (Also
+note that the file is closed at this point, so if you specified a no-rewind tape
+device, it puts the EOF markers at the \beginning/ of the new tape before it
+starts to write.)  When you read these tapes back, you are depending upon the
+fact that reading the block that crosses the EOT will also get the error so
+that you swap tapes at exactly the same point.
+
+Well, tain't so.  On unbuffered tape drives, if the EOT mark happens to be in
+the inter-record gap, tape drives will differ as to which which block gets the
+EOT indication -- it seems to be a matter of timing and I don't understand it.
+Sometimes it shows up as getting a duplicated block, and sometimes as a dropped
+block.  Different brands of tape drives seem to be somewhat internally
+consistant, but you can't even depend upon that.  On a buffered tape drive, the
+problem is worse, since the EOT indication is typically given several blocks
+\after/ the block that actually writes across the marker; on these drives, it
+is not possible to read back the blocks at the end, since the EOT is detected
+synchronously on reads.  In any case, the missing or extra block(s) cause a
+phase error at some later point.
+
+Now, if you are considering flaming about poor hardware implementations, don't.
+The hardware designers have a \standard/ to abide by, and they did so.  That
+standard doesn't say that the EOT marker has to be synchronous with the actual
+block that caused it, it only says that it has to happen.  It is intended as a
+warning that the tape is nearly out; there are still (typically) several tens
+of feet left on the tape; that's a lot of room.  Making the reporting of the
+EOT only semi-synchronous is a good engineering compromise.  Writing after the
+EOT is not an error, but you need to be careful that you don't write a lot --
+in fact, almost all standard-compliant implementations routinely write several
+blocks past the EOT (due to buffering considerations) before writing the EOV
+labels and switching to a new reel.
+
+No, the problem is with Unix's treatment of tape volumes.  Note that as it
+stands, Unix cannot even read a multi-volume tape produced on, say, an IBM
+system -- several blocks at the end of each reel are simply inaccessible.
+And files produced by cpio, where the last block on the tape has no EOF after
+it, are difficult to read on an IBM machine, which expects one.
+
+So, what are we to do?  The cure is surprising -- and surprisingly simple:
+make Unix comply with the standard.  I don't know why it hasn't been done --
+although it would break any existing multi-reel cpio volumes (as far as I know,
+that's about the only program that ever creates multi-volume tapes by looking
+for an EOT), it won't break any other existing code (or it shouldn't), and new
+tapes would be guaranteed to be consistant across all possible machines.  It
+shouldn't be any problem to change, since multi-volume tapes don't seem very
+common -- notice the dearth of replies to this article since it was posted;
+there can't be many people who encounter this problem.
+
+The mods are simple: when writing a tape, if you get an EOT, backspace the
+record ("unwrite the record"), write a EOF marker (so you can't read it back),
+backspace again (in front of the EOF, so a close (or a shorter write) will
+work as expected), and return an error.  If you look closely, this is exactly
+what happens if you try to write across the end of a filesystem -- if you try
+to cross the boundry on a write, the entire request is rejected (i.e., it is
+not turned into a partial write) so that if you follow with a shorter write
+that happens to fit, it will succeed.  This actually brings the tape semantics
+in closer alignment with that of the disks.
+
+On a read that crosses an EOT marker, you do \nothing/.  You've made sure by
+the change above that there should always be an EOF somewhere near the EOT, so
+the logic for EOF will keep you from running off the end of the tape.  And now
+you can read industry-standard multi-reel tapes.......
+
+I don't expect that this will ever happen.  Unless some statment specificly
+requiring this is placed in one of the Unix standards (SVID, /usr/group, or
+P1003 (or is it P1006?  Something like that, anyway)), nobody will be motivated
+to actually go to the work of modifying the device drivers to fix this.  And
+Unix will continue to be a ghetto, at least as far as tape compatibility with
+the rest of the world is concerned.......  Are there any standards folks out
+there who will accept this gauntlet and prove me wrong?
+-- 
+-- Greg Noel, NCR Rancho Bernardo    Greg@ncr-sd.UUCP or Greg@nosc.ARPA
+
+

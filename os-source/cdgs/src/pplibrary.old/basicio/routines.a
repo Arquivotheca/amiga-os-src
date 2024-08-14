@@ -1,0 +1,200 @@
+; :ts=8 
+*
+*       misc.a -- Misc ML routines
+*
+*       William A. Ware                 AB21
+*
+*************************************************************************
+*   This information is CONFIDENTIAL and PROPRIETARY                    *
+*   Copyright (C) 1990, Silent Software Incorporated.                   *
+*   All Rights Reserved.                                                *
+*************************************************************************
+
+CDTV_CR equ     1
+                
+                include "exec/types.i"
+                include "exec/ables.i"
+                include "exec/memory.i" 
+                include "exec/io.i"
+                include "exec/nodes.i"
+                include "exec/ports.i"
+                
+                include "graphics/view.i"
+                include "graphics/gfxbase.i"
+
+                include "cdtv/debox.i"
+                include "internal/deboxfunc.i"
+                
+                include "/playerprefs.i"
+
+                SECTION "misc",code
+
+                xref    _LVODebug
+DDEBUG          MACRO
+                        move.l  a6,-(sp)
+                        movea.l (4).w,a6
+                        jsr     _LVODebug(a6)
+                        movea.l (sp)+,a6
+                ENDM
+
+
+LSYSBASE        MACRO
+                        movea.l (4).w,a6
+                ENDM
+;--------------------------------------------------------------
+; CheckData
+;       a0 - data1
+;       a1 - data2
+;       d0 - size:16
+                xdef _CheckData
+
+_CheckData:     
+                move.w  d0,d1
+                
+                asr.w   #2,d1
+                bra.s   1$
+0$              cmpm.l  (a0)+,(a1)+
+                bne.s   notsame
+1$              dbra    d1,0$
+
+                and.w   #3,d0
+                bra.s   3$
+2$              cmpm.b  (a0)+,(a1)+
+                bne.s   notsame
+3$              dbra    d0,2$
+
+                moveq   #1,d0
+                rts
+notsame         moveq   #0,d0
+                rts
+                
+
+
+;-------------------------------------------------------------------
+; altLoadView
+;
+; patch to loadview while screen blanker is on
+;
+
+        xref    _LVOLoadView
+        xref    _LVOEnable
+        xref    _LVODisable
+        xref    _LVOAllocMem
+        xref    _LVOFreeMem
+        xref    _LVOSetFunction
+
+ STRUCTURE      altLoadView_data,0
+        APTR    alv_View
+        APTR    alv_OldFunc
+        APTR    alv_GfxBase
+
+
+altLoadView_Start:
+                ds.l    1               ; address of where the view gets stored
+                ds.l    1               ; address of the old function.
+                ds.l    1               ; address of gfxbase
+altLoadView:
+                move.l  a6,-(sp)
+                LSYSBASE
+                jsr     _LVODisable(a6)
+                lea     altLoadView_Start(pc),a0
+                move.l  a1,(a0)
+                jsr     _LVOEnable(a6)
+                movea.l (sp)+,a6
+                rts
+altLoadView_End:
+
+ALTLOADVIEW_SIZE        equ     (altLoadView_End-altLoadView_Start)
+
+                xdef _TrapLoadView
+                xref _LVODebug
+_TrapLoadView:
+        ;a1 - GfxBase
+                movem.l a2-a3/a6,-(sp)
+                move.l  #ALTLOADVIEW_SIZE,d0
+                move.l  d0,d2                   ; save size for later use
+                movea.l a1,a3
+                move.l  #MEMF_PUBLIC,d1
+                LSYSBASE
+                jsr     _LVOAllocMem(a6)
+                tst.l   d0
+                beq.s   2$
+                
+        ;copy into allocated space
+                lea     altLoadView_Start,a0
+                movea.l d0,a2
+                move.l  d2,d1
+                bra.s   1$
+0$              move.b  (a0)+,(a2)+
+1$              dbra    d1,0$
+                
+                movea.l d0,a2
+        ;now set up the command 
+                jsr     _LVODisable(a6)
+                move.l  a2,d0                   ; function
+                movea.l a3,a1                   ; gfxbase
+                move.l  gb_ActiView(a1),(a2)    ; current actiview gets stored
+                move.l  a1,alv_GfxBase(a2)      ; store GfxBase
+                movea.w #_LVOLoadView,a0        ; offset
+                add.l   #altLoadView-altLoadView_Start,d0
+                                
+                jsr     _LVOSetFunction(a6)
+                                
+                move.l  d0,alv_OldFunc(a2)      ; save old function
+                jsr     _LVOEnable(a6)
+                move.l  a2,d0           ; return the address of area
+2$              movem.l (sp)+,a2-a3/a6          
+                rts
+
+
+                xdef _UntrapLoadView
+_UntrapLoadView
+        ; a0 - altloadview
+                movem.l a2-a3/a6,-(sp)
+                movea.l a0,a2
+                
+        ;---------------------------------
+                LSYSBASE                
+                jsr     _LVODisable(a6)
+                
+                movea.l alv_GfxBase(a2),a1      ;gfxbase
+                movea.w #_LVOLoadView,a0
+                move.l  alv_OldFunc(a2),d0      ; the old function
+                
+                jsr     _LVOSetFunction(a6)
+                
+                jsr     _LVOEnable(a6)
+        ;----------------------------------
+                movea.l alv_GfxBase(a2),a6      ; gfxbase
+                movea.l (a2),a1                 ; old view
+                jsr     _LVOLoadView(a6)
+                LSYSBASE
+                movea.l a2,a1
+                move.l  #ALTLOADVIEW_SIZE,d0
+                jsr     _LVOFreeMem(a6)
+1$              movem.l (sp)+,a2-a3/a6
+                rts     
+
+                xdef _OrgLoadView
+_OrgLoadView:
+        ; a0 - altloadview
+        ; a1 - newview
+        
+                move.l  -(sp),a6
+                movea.l 8(a0),a6
+                move.l  4(a0),a0                ; get the function
+                jsr     (a0)
+                move.l  (sp)+,a6
+                rts
+
+
+        xdef _getloadview
+_getloadview
+                move.l  _LVOLoadView+2(a0),d0
+                rts
+
+        xdef _prstack
+_prstack        move.l  sp,d0
+                rts
+
+                END

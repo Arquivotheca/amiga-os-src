@@ -1,0 +1,835 @@
+head     1.12;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.12
+date     90.12.30.15.36.50;  author Unknown;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     90.11.06.05.57.26;  author J_Toebes;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.10.11.19.30.12;  author Unknown;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.09.25.00.09.59;  author Unknown;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.09.24.23.23.05;  author Unknown;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.06.19.00.07.07;  author andy;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.06.18.23.30.37;  author andy;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.05.26.16.36.45;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.05.25.15.09.34;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.05.25.14.00.18;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.03.01.19.32.05;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.01.22.19.52.47;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.35.31;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Join command for cdos
+@
+
+
+1.12
+log
+@Modified 30-Dec-90, bug fixes
+@
+text
+@; /*
+lc -d -j73 -O -oJoin.o -i//include -v -csf join
+blink join.o to join.ld sc sd nd batch
+protect /bin/join +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                             BBS: (919) 471-6436    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/*---------------------------------------------------------------------------*/
+/* Command: Join                                                             */
+/* Author:  Andrew N. Mercier, Jr.                                           */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 19MAR89  John Toebes   Initial Creation                                   */
+/* 04APR89  Andy Mercier  Created buffering.                                 */
+/* 29OCT89  Andy Mercier  Updated to DOS V1.4                                */
+/* 05DEC89  Andy Mercier  Tested and touched up code                         */
+/* 13DEC89  Andy Mercier  Removed last traces of bad code.                   */
+/* 17DEC89  Andy Mercier  Worked on pattern matching and multiargs           */
+/* 23MAR90  Andy Mercier  Cleared up return codes, avoided joining           */
+/*                        directories                                        */
+/* 24SEP90  Andy Mercier  Changed template to make more sense                */
+/* 06NOV90  John Toebes   Corrected directory checking code to only apply    */
+/*                        when doing a wildcard.                             */
+/*                                                                           */
+/* Notes:                                                                    */
+/*       Join can act as a file copier if you specify one file to join TO/AS */
+/*       another file, preferably TO to match the copy command, it's much,   */
+/*       much smaller.                                                       */
+/*---------------------------------------------------------------------------*/
+
+#include "internal/commands.h"
+#include "join_rev.h"
+#include <stdlib.h>
+
+#define min __builtin_min
+extern int min(int, int);
+
+#define MSG_CANT_OPEN    "Can't open %s\n"
+#define MSG_DEST_REMOVED "Destination file \"%s\" removed\n"
+
+#define TEMPLATE  "FILE/M/A,AS=TO/K/A" CMDREV
+#define OPT_FILE  0
+#define OPT_AS    1
+#define OPT_COUNT OPT_AS+1
+
+#define BUFSAFE    100
+#define BUFSIZE    102400     /* 100K buffer */
+
+#define DELETE_FILE_FLAG 30   /* Using unique rc for flag telling us
+                                 to delete the output file */
+
+/* Prototype for join subroutine */
+int joinfile(BPTR infh, BPTR outfh, void *buff, long buffsize, struct DosLibrary *DOSBase);
+
+
+int cmd_join(void)
+{
+struct Library *SysBase = (*((struct Library **) 4));
+struct DosLibrary *DOSBase;
+int rc,rc2=0;
+char *msg;
+long opts[OPT_COUNT], buffsize=BUFSIZE, scratch[1];
+BPTR infile, outfile;
+BPTR lock;
+void *buff;
+char *curarg, **argptr;
+struct RDArgs *rdargs;
+struct AnchorPath *ua;
+
+infile = NULL;
+outfile = NULL;
+msg = NULL;
+rc = RETURN_FAIL;
+
+if ((DOSBase = (struct DosLibrary *) OpenLibrary(DOSLIB, DOSVER))) {
+   memset((char *) opts, 0, sizeof(opts));
+
+   if ((rdargs = ReadArgs(TEMPLATE, opts, NULL)) == NULL) {
+      PrintFault(IoErr(), NULL);
+   }
+   else {
+      /*-------------------------------------------------------------*/
+      /* Allocate memory to use with the pattern match stuff.        */
+      /*-------------------------------------------------------------*/
+      if ((ua = AllocVec(sizeof(struct AnchorPath)+255,
+                         MEMF_CLEAR)) == NULL) {
+            PrintFault(IoErr(), NULL);
+      }
+      else {
+         /*----------------------------------------------------------*/
+         /* Now we have to set up the pattern match structure.       */
+         /*                                                          */
+         /* Tell the pattern routines that we want them to return up */
+         /* to 255 chars of the full path to any matches.            */
+         /*----------------------------------------------------------*/
+         ua->ap_Strlen = 255;
+         /*----------------------------------------------------------*/
+         /* Set the flag which tells the pattern matcher to decode   */
+         /* wild cards.                                              */
+         /*----------------------------------------------------------*/
+         ua->ap_Flags = 0;
+         /*----------------------------------------------------------*/
+         /* Tell the matcher to stop if the user presses Ctrl-C.     */
+         /*----------------------------------------------------------*/
+         ua->ap_BreakBits = SIGBREAKF_CTRL_C;
+
+         /* This opens the output file                               */
+         if (!(outfile = Open((char *) opts[OPT_AS], MODE_NEWFILE))) {
+            PrintFault(IoErr(), (char *) opts[OPT_AS]);
+            rc2=0;
+            goto done;
+         }
+
+         /*-------------------------------------------------------------*/
+         /* Try to get our standard buffer size, if we can't, get the   */
+         /* biggest that we can, safely                                 */
+         /*-------------------------------------------------------------*/
+         if ((buff = AllocVec(BUFSIZE, MEMF_PUBLIC)) == NULL) {
+            Forbid();
+            buffsize = AvailMem(MEMF_LARGEST) - BUFSAFE;
+            buff = AllocVec(buffsize, MEMF_PUBLIC);
+            Permit();
+            if (buff == NULL) {
+               rc2=IoErr();
+               goto done;
+            }
+         }
+
+         argptr = (char **) opts[OPT_FILE];
+      if (opts[OPT_FILE] != NULL) {
+         msg = MSG_CANT_OPEN;
+         rc2 = 0;
+
+         /*-------------------------------------------------------------*/
+         /* The following while loop handles the MultiArgs spec.        */
+         /*-------------------------------------------------------------*/
+         while (curarg = *argptr++) {
+            msg = MSG_CANT_OPEN;
+            /*----------------------------------------------------------*/
+            /* Next we process the wild cards                           */
+            /*----------------------------------------------------------*/
+            if (rc = MatchFirst(curarg, ua)) {
+               rc2 = IoErr();
+            }
+            scratch[0] = (long) curarg;
+            while (!rc) {
+               /*-------------------------------------------------*/
+               /* Set up a default message for when we can't find */
+               /* the input file                                  */
+               /*-------------------------------------------------*/
+               msg = MSG_CANT_OPEN;
+
+               /*-------------------------------------------------*/
+               /* Let's see if this is a directory, if so skip it */
+               /*-------------------------------------------------*/
+               if ((ua->ap_Info.fib_DirEntryType > 0) &&
+	            (ua->ap_Flags & APF_ITSWILD))
+               {
+                 if (rc = MatchNext(ua)) {
+            	     rc2 = IoErr();
+                 }
+                 msg = NULL;
+                 continue;
+               }
+               /*-------------------------------------------------*/
+               /* Locate and open the input source file.          */
+               /*-------------------------------------------------*/
+               lock = CurrentDir(ua->ap_Current->an_Lock);
+               if ((infile = Open((char *)ua->ap_Info.fib_FileName,
+                                  MODE_OLDFILE)) == NULL) {
+                  rc2 = IoErr();
+               }
+               CurrentDir(lock);
+               /*-------------------------------------------------*/
+               /* Check to make sure that we could open the input */
+               /* file.                                           */
+               /*-------------------------------------------------*/
+               if (infile == NULL) {
+                  /*----------------------------------------------*/
+                  /* No, give them a message and fall through     */
+                  /*----------------------------------------------*/
+                  scratch[0] = (long)ua->ap_Info.fib_FileName;
+                  VPrintf(msg, scratch);
+                  rc = RETURN_FAIL;    /* 29-Dec-90 */
+                  msg = NULL;
+                  /*----------------------------------------------*/
+                  /* Note:  RC2 is set above                      */
+                  /*----------------------------------------------*/
+                  break;
+               }
+               /*-------------------------------------------------*/
+               /* By some miracle we have succeeded, start joins  */
+               /*-------------------------------------------------*/
+               rc = joinfile(infile, outfile, buff, buffsize, DOSBase);
+               Close(infile);
+               infile = NULL;
+               if (rc) {
+                  if (rc == DELETE_FILE_FLAG) {
+                     Close(outfile);
+                     DeleteFile((char *) opts[OPT_AS]);
+                     outfile = NULL;
+                     VPrintf(MSG_DEST_REMOVED, &opts[OPT_AS]);  /* 29-Dec-90 */
+                  }
+                  rc = RETURN_FAIL;
+                  scratch[0] = (long) ua->ap_Info.fib_FileName;
+                  break;
+               }
+
+               /*-------------------------------------------------*/
+               /* Advance to the next file that might match       */
+               /*-------------------------------------------------*/
+               if (rc = MatchNext(ua))
+                  rc2 = IoErr();
+               msg = NULL;
+            }
+            scratch[0] = (long) curarg;
+            MatchEnd(ua);
+            if (rc2 != ERROR_NO_MORE_ENTRIES) break;
+         }      /* End of while for multi-args stuff */
+      } /* End of if to keep from advancing NULL pointer */
+      FreeVec(buff);
+      FreeVec(ua);
+      }         /* End of else for pattern match stuff */
+   }    /* End of else for handling valid options */
+
+done:
+   if (infile) Close(infile);
+   if (outfile) Close(outfile);
+
+   if (msg || rc) {
+      /*-------------------------------------------------------*/
+      /* Not a ^C, how about a normal exit of no more entries  */
+      /*-------------------------------------------------------*/
+      if (rc2 == ERROR_NO_MORE_ENTRIES) {
+         rc = RETURN_OK;
+      }
+
+      else if (msg || (rc2 == ERROR_OBJECT_IN_USE)) {
+         if (rc2 == ERROR_OBJECT_IN_USE) {
+             msg = MSG_CANT_OPEN;
+         }
+         rc = RETURN_FAIL;    /* 29-Dec-90 */
+         VPrintf(msg, scratch);
+      }
+
+      else {
+         if (rc2) PrintFault(rc2, NULL);
+         if (rc2 == ERROR_BREAK)rc = RETURN_WARN;  /* 29-Dec-90 */
+         else rc = RETURN_FAIL;
+         }
+   }
+   FreeArgs(rdargs);
+   CloseLibrary((struct Library *) DOSBase);
+} 
+else {OPENFAIL;}
+return(rc);
+}
+
+
+int joinfile(BPTR infh,BPTR outfh,void *buff,long buffsize,struct DosLibrary *DOSBase)
+{
+LONG pos, len;
+int rc;
+
+rc = RETURN_OK;
+
+if (IsInteractive(infh)) {
+   pos = buffsize;
+}
+else {
+   if (Seek(infh, 0, OFFSET_END) < 0) {
+      return(IoErr());
+   }
+   if ((pos = Seek(infh, 0, OFFSET_BEGINNING)) < 0) {
+      return(IoErr());
+   }
+}
+
+do {
+   len = min(pos, buffsize);
+   if ((len = Read(infh, buff, len)) <= 0) {
+      /*----------------------------------------------------*/
+      /* This will occur on EOF in Interactive mode         */
+      /*----------------------------------------------------*/
+      PrintFault(IoErr(), NULL);
+      if (!IsInteractive(infh))
+         rc = RETURN_FAIL;
+      break;          /* Read failure when not Interactive mode */
+   }
+   /*--------------------------------------------------------*/
+   /* Check to see if all the bytes read were written        */
+   /*--------------------------------------------------------*/
+   if (Write(outfh, buff, len) != len) {
+      PrintFault(IoErr(), NULL);
+      /*---------------------------------------------------*/
+      /* Using rc as a flag, there is no return code 30    */
+      /* This flag is used to separate other failures from */
+      /* this one, since this one requires that the file   */
+      /* be removed.                                       */
+      /*---------------------------------------------------*/
+      rc = DELETE_FILE_FLAG;
+      break;
+   }
+   if (CheckSignal(SIGBREAKF_CTRL_C)) {
+      PrintFault(ERROR_BREAK, NULL);
+      rc = RETURN_WARN;
+      break;
+   }
+} while ( (pos-= len) > 0);
+
+return(rc);
+}
+
+
+#if 0
+int aprintf( fmt, args )
+char *fmt, *args;
+{
+struct Library *SysBase = (*((struct Library **) 4));
+   struct Library *DOSBase; 
+   DOSBase=OpenLibrary("dos.library",36);
+   VFPrintf( Output(), fmt, (LONG *)&args );
+   CloseLibrary(DOSBase);
+   return(0);
+}
+#endif
+@
+
+
+1.11
+log
+@Corrected directory checking code to only apply when doing a wildcard.  THis
+logic originally was put in to allow:
+    join #? as ram:output
+and automatically skip the directories in the process.  Unfortunately if
+a single argument was a directory it just ignored it.  Note that join will
+not produce a message if you give the command:
+    join a#? as ram:output
+if there are no files in the current directory that start with an A.
+@
+text
+@d195 1
+d213 1
+a213 1
+                     msg = MSG_DEST_REMOVED;
+d252 2
+a253 2
+             rc = RETURN_FAIL;
+	 }
+d259 1
+a259 1
+         if (rc == ERROR_BREAK)rc = RETURN_WARN;
+@
+
+
+1.10
+log
+@B8681,B9750,B9819,B8639,B10111 all fixed
+@
+text
+@d33 2
+d167 3
+a169 1
+               if (ua->ap_Info.fib_DirEntryType > 0) {
+@
+
+
+1.9
+log
+@Fixed B8639
+@
+text
+@d58 2
+d141 1
+d151 3
+a153 2
+            rc= MatchFirst(curarg, ua);
+            rc2 = IoErr();
+d155 1
+a155 1
+            while (rc==NULL) {
+d163 2
+a164 2
+	       /* Let's see if this is a directory, if so skip it */
+	       /*-------------------------------------------------*/
+d166 3
+a168 2
+                 rc = MatchNext(ua);
+            	  rc2 = IoErr();
+d176 2
+a177 2
+               if (infile = Open((char *)ua->ap_Info.fib_FileName,
+                                 MODE_OLDFILE) == NULL) {
+d192 3
+d204 6
+d218 1
+a218 1
+               if (rc = MatchNext(ua) == FALSE)
+d224 1
+a224 1
+            if (rc2 != ERROR_NO_MORE_ENTRIES)break;
+d253 1
+a253 1
+         if(rc2)PrintFault(rc2, NULL);
+d273 2
+a274 2
+if (Seek(infh, 0, OFFSET_END) < 0) {
+   return(IoErr());
+d276 7
+a282 2
+if ((pos = Seek(infh, 0, OFFSET_BEGINNING)) < 0) {
+   return(IoErr());
+a284 1
+
+d289 1
+a289 1
+      /* This should never occur                            */
+d292 3
+a294 2
+      rc = RETURN_FAIL;
+      break;          /* Read failure */
+d307 1
+a307 1
+      rc = 30;
+@
+
+
+1.8
+log
+@Template change: FILE/M/A... was FILE/M...
+@
+text
+@d137 1
+d171 4
+a174 2
+               infile = Open((char *)ua->ap_Info.fib_FileName,MODE_OLDFILE);
+               rc2 = IoErr();
+d204 2
+a205 2
+               rc = MatchNext(ua);
+               rc2 = IoErr();
+d212 1
+@
+
+
+1.7
+log
+@fixed buffer logic so it joins file larger than buffer
+@
+text
+@d32 1
+d50 1
+a50 1
+#define TEMPLATE  "FILE/M,AS=TO/K/A" CMDREV
+d117 1
+a117 1
+	    rc2=0;		
+d131 1
+a131 1
+		rc2=IoErr();
+d149 1
+a149 1
+	    scratch[0] = (long) curarg;
+d161 1
+a161 1
+		  rc = MatchNext(ua);
+d163 2
+a164 2
+	          msg = NULL;
+                  continue;
+d201 2
+a202 2
+               rc=MatchNext(ua);
+	       rc2 = IoErr();
+@
+
+
+1.6
+log
+@fixed out of memory problem...was using wrong buffer size!
+@
+text
+@d249 1
+a249 1
+int pos, len;
+a259 1
+len = min(pos, buffsize);
+d261 1
+d263 1
+d291 1
+a291 1
+} while (len = pos -= len);
+@
+
+
+1.5
+log
+@fixed up return codes so it actually works
+@
+text
+@d59 1
+a59 1
+int joinfile(BPTR infh, BPTR outfh, void *buff, struct DosLibrary *DOSBase);
+d68 1
+a68 1
+long opts[OPT_COUNT], buffsize, scratch[1];
+d188 1
+a188 1
+               rc = joinfile(infile, outfile, buff, DOSBase);
+d247 1
+a247 1
+int joinfile(BPTR infh, BPTR outfh, void *buff, struct DosLibrary *DOSBase)
+d260 1
+a260 1
+len = min(pos, BUFSIZE);
+@
+
+
+1.4
+log
+@now stashes SysBase
+@
+text
+@d66 1
+a66 1
+int rc;
+d116 1
+d130 1
+a130 1
+               PrintFault(IoErr(), NULL);
+d146 2
+a147 2
+            MatchFirst(curarg, ua);
+            rc = IoErr();
+d149 1
+a149 1
+            while (rc == DOSTRUE) {
+d161 1
+d169 2
+a170 5
+
+               if ((infile = Open((char *)ua->ap_Info.fib_FileName,
+                             MODE_OLDFILE)) == NULL) {
+                    rc = IoErr();
+               }
+a171 1
+
+d176 1
+a176 1
+               if (rc != NULL) {
+a188 1
+
+d200 2
+a201 2
+               MatchNext(ua);
+	       rc = IoErr();
+d206 1
+a206 2
+            if (rc != ERROR_NO_MORE_ENTRIES)
+               break;
+d214 4
+a217 12
+   if (infile)
+      Close(infile);
+   if (outfile)
+      Close(outfile);
+   if (msg || (rc == ERROR_OBJECT_IN_USE)) {
+      if (rc == ERROR_OBJECT_IN_USE) {
+         msg = MSG_CANT_OPEN;
+         rc = RETURN_FAIL;
+      }
+      VPrintf(msg, scratch);
+   }
+   else if (rc) {
+d221 1
+a221 1
+      if (rc == ERROR_NO_MORE_ENTRIES) {
+d224 9
+d234 3
+a236 4
+         if (rc != 30) {
+            PrintFault(rc, NULL);
+            if (rc == ERROR_BREAK)
+               rc = RETURN_WARN;
+a237 7
+      }
+
+      if (rc == 30) {
+         rc = RETURN_FAIL;
+         DeleteFile((char *) opts[OPT_AS]);
+         VPrintf(MSG_DEST_REMOVED, &opts[OPT_AS]);
+      }
+d241 2
+a242 5
+}   /* end of the outer if */
+else {
+   OPENFAIL;
+}
+/* SetIoErr(rc); */
+d295 13
+@
+
+
+1.3
+log
+@new version from the Software Distillery
+@
+text
+@d64 1
+@
+
+
+1.2
+log
+@version update
+@
+text
+@d30 2
+d144 4
+a147 3
+            rc = MatchFirst(curarg, ua);
+            scratch[0] = (long) curarg;
+            while (rc == 0) {
+d155 8
+d167 4
+a170 3
+               infile = Open((char *)ua->ap_Info.fib_FileName,
+                             MODE_OLDFILE);
+               rc = IoErr();
+d194 1
+d202 2
+a203 1
+               rc = MatchNext(ua);
+d222 1
+a222 1
+      if (rc == ERROR_OBJECT_IN_USE)
+d224 2
+d236 5
+a240 3
+         PrintFault(rc, NULL);
+         if (rc == ERROR_BREAK)
+            rc = RETURN_WARN;
+d268 1
+a268 2
+   rc = IoErr();
+   return(rc);
+d271 1
+a271 2
+   rc = IoErr();
+   return(rc);
+a306 1
+
+@
+
+
+1.1
+log
+@new version of command
+@
+text
+@d2 2
+a3 2
+lc -d -j73 -O -o/obj/Join.o -i/include -v -csf join
+blink /obj/join.o to /bin/join sc sd nd
+d11 5
+a15 5
+/* | .	| || the authors:			      BBS: (919) 382-8265    */
+/* | o	| ||   Dave Baker      Alan Beale	  Jim Cooper		     */
+/* |  . |//    Jay Denebeim    Bruce Drake	  Gordon Keener 	     */
+/* ======      John Mainwaring Andy Mercier	  Jack Rouse		     */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker   Mike Witcher */
+d31 1
+a31 1
+/* Notes:	                                                             */
+d44 1
+a44 1
+#define MSG_CANT_OPEN	 "Can't open %s\n"
+d49 1
+a49 1
+#define OPT_AS	  1
+d56 1
+d65 1
+a65 1
+long opts[OPT_COUNT], buffsize;
+d110 1
+d112 2
+a113 2
+	    PrintFault(IoErr(), (char *) opts[OPT_AS]);
+	    goto done;
+d143 1
+a143 1
+            opts[0] = (long) &ua->ap_Info.fib_FileName;
+d156 1
+a156 1
+               infile = Open(ua->ap_Info.fib_FileName,
+d169 2
+a170 2
+                  opts[0] = (long) &ua->ap_Info.fib_FileName;
+                  VPrintf(msg, opts);
+d182 1
+a182 1
+                  opts[0] = (long) &ua->ap_Info.fib_FileName;
+d192 1
+a192 1
+	    opts[0] = (long) &ua->ap_Info.fib_FileName;
+d194 2
+a195 2
+	    if (rc != ERROR_NO_MORE_ENTRIES)
+	       break;
+d210 1
+a210 1
+      VPrintf(msg, opts);
+d222 1
+a222 3
+	    rc = RETURN_WARN;
+         else
+            rc = RETURN_ERROR;
+d237 1
+a237 1
+SetIoErr(rc);
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d11 5
+a15 5
+/* | .  | || the authors:                             BBS: (919) 471-6436    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+d38 1
+d47 1
+a47 1
+#define TEMPLATE  "FILE/M,AS=TO/K/A"
+@

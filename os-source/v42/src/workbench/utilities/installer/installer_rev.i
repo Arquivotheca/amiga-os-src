@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	27
+DATE	MACRO
+		dc.b	'24.10.93'
+	ENDM
+VERS	MACRO
+		dc.b	'installer 1.27'
+	ENDM
+VSTRING	MACRO
+		dc.b	'installer 1.27 (24.10.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: installer 1.27 (24.10.93)',0
+	ENDM

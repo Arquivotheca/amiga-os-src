@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'27.7.92'
+	ENDM
+VERS	MACRO
+		dc.b	'config 37.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'config 37.9 (27.7.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: config 37.9 (27.7.92)',0
+	ENDM

@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'7.4.92'
+	ENDM
+VERS	MACRO
+		dc.b	'norsk 38.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'norsk 38.4 (7.4.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: norsk 38.4 (7.4.92)',0
+	ENDM

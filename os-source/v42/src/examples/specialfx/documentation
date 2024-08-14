@@ -1,0 +1,351 @@
+REQUIREMENTS
+
+V40.3 of specialfx.library requires graphics.library V39. Future versions may be
+written for graphics.library V37.
+
+Specialfx.library will work on all versions of the Amiga chip sets.
+
+PROGRAMMING
+
+Each SpecialFX is controlled by the programmer through a structure associated
+with the effect. Each structure is composed of two parts: a visible part, and an
+invisible part. The visible part is initialised by the programmer to control the
+colour, the scroll offset, line repetition or whatever. The invisible part is a
+cache used by the library for optimising the animation code. 
+
+As each element is of an unknown size, the memory for each effect has to be
+allocated by the library with AllocFX(), which returns a handle to this effect
+for later use, and fills in an array of pointers to the visible part of each
+effect structure.
+
+[The Autodocs that have been written so far are at the end of the document]
+
+For example, if we are using a ColorRange effect to modify the colour of one pen
+over NUMLINES scanlines:
+
+APTR ColourHandle;			/* just a handle */
+ULONG Error;
+
+if (ColourHandle = AllocFX(ViewPort, SFX_ColorRange, NUMLINES, &Error))
+{
+    struct ColorControl **cc = (struct ColorControl **)ColourHandle;
+    int i;
+
+    for (i = 0; i < y; i++)
+    {
+	/* Do the sky colours accross the whole screen */
+	(*cc)->cc_Pen = 0;
+	(*cc)->cc_Line = i;
+	(*cc)->cc_Red = RGBSky[0];
+	(*cc)->cc_Green = RGBSky[1];
+	(*cc)->cc_Blue = RGBSky[2];
+	(*cc)->cc_Flags = 0;
+	cc++;
+    }
+    etc...
+}
+
+Once the memory and handle have been obtained, and the data in the effects
+structures initialised, we need to install the effect using InstallFX().  This
+is a tag-based function that builds UserCopperlists to create the changes
+required.  The tags are a list of the pointers to the allocated handles.
+InstallFX() returns a handle to this Effect which is later used by AnimateFX()
+to animate the effect.  Therefore, with InstallFX(), it is possible to mix
+together ColorRange effects, ScrollRange effects etc into one SuperEffect.
+
+Note that after calling InstallFX(), the programmer needs to remake the display
+in the usual way to actually show the changes.
+
+After this, changes can be made to the data in the visible parts of the Effects
+structures, and calling AnimateFX() will cause the changes to be made on screen
+"immediately"; in other words, AnimateFX() does not remake the copperlists, but
+modifies those already in place. AnimateFX() respects the VideoControl() tag
+VC_IntermediateCLUpdate for even faster animation time.
+
+To clean up, use RemoveFX() to remove the UserCopperlist associated with the
+effect, and FreeFX() to free the effect's memory.
+
+It is possible to combine different SuperEffects in combination. For example,
+SuperEffect1 is a handle from InstallFX() that consists of a ColorRange and a
+ScrollLines. SuperEffect2 is another handle that consists of a RepeatLines
+effect. They are both shown on screen together. Now, I can animate both
+SuperEffects separately with AnimateFX(), but half way through I want to remove
+the SuperEffect1, just leaving SuperEffect2 on screen. I can do this with
+RemoveFX(SuperEffect1), and remake the display, continue animating SuperEffect2,
+and then later display just the ColorRange again with InstallFX(), just leaving
+the ColorRange and LineRepeat effects on screen.
+
+
+LIMITATIONS
+
+A limitation of the SpecialFX.library is that the SpecialFX and normal
+UserCopperlists cannot be mixed in the same ViewPort. This is because SpecialFX
+builds UserCopperlists, and links them together off ViewPort->UCopList. When a
+programmer's UserCopperlist is freed with FreeUCopList(), the SpecialFX
+UCopLists would be freed as well.
+
+Obviously, there is a limit to the number of effects you can use on a single
+display line because of the number of copper instructions needed.
+
+
+EFFECTS
+
+SFX_ColorControl	(horrible spelling)
+
+SFX_ColorControl will modify pen(s) on a given scan line to a given 24 bit RGB
+value. The library will use the most significant bits of the RGB value, so for
+example, it will set 24 bits of RGB on AA machines, and 12 bits on ECS or A
+machines.
+
+A place holder has been put in the ColorControl structure for horizontal
+control, although this is ignored under V40. Maybe a future chip set will
+support accurate horizontal copper control.
+
+The colour change for the pen will remain on screen until the same pen is
+changed with another ColorControl, or until the end of the ViewPort. If you only
+want the change on one line, and then have the pen restored to its original RGB
+value, set the CCB_RESTORE bit in the cc_Flags field before calling
+InstallFX().
+
+struct ColorControl
+{
+    LONG cc_Pen;		/* Pen number to change */
+    WORD cc_Horizontal;		/* X Wait position - ignored for V40 */
+    WORD cc_Line;		/* Y Wait position */
+    ULONG cc_Red;		/* 32 bit red value */
+    ULONG cc_Green;		/* 32 bit green value */
+    ULONG cc_Blue;		/* 32 bit blue value */
+    UWORD cc_Flags;
+    UWORD cc_Pad;
+};
+
+#define CCB_MODIFY 0		/* When used with AnimateFXA(), this colour
+				 * entry is modified to the RGB value.
+				 */
+#define CCF_MODIFY (1 << CCB_MODIFY)
+#define CCB_RESTORE 1		/* if set, then restore the pen number to its
+				 * original value. This needs to be set only
+				 * once for the pen number, and is used by
+				 * InstallFXA()
+				 */
+#define CCF_RESTORE (1 << CCB_RESTORE)
+
+The RGB values of the pen at the various lines can be modified by changing the
+cc_Red/Green/Blue values in the ColorControl, setting CCF_MODIFY in the cc_Flags
+field, and calling AnimateFX().
+
+SFX_InterruptControl
+
+SFX_InterruptControl will cause a copper interrupt on the specified line. It is
+up to the application program to install a Copper interrupt server using the
+standard exec.library AddIntServer() function.
+
+If the application is using a custom ViewPort, or it has opened an SA_Exclusive
+screen, then the application knows that the only copper interrupt was generated
+by it's SFX_InterruptControl. However, in a multitasking environment this is not
+desirable, so the Copper interrupt can call specialfx.library's FindVP()
+function which returns the address of the ViewPort that the interrupt occured
+in.
+
+The interrupt can be toggled on or off by setting the ICF_TOGGLE flag in the
+ic_Flags field, and calling AnimateFX().
+
+struct InterruptControl
+{
+    UWORD ic_Line;		/* Cause the interrupt at the start of this
+    				 * line.
+    				 */
+    UWORD ic_Flags;		/* See below */
+};
+
+#define ICB_TOGGLE 0		/* When used with AnimateFXA(), the interrupt
+				 * bit of this line are toggled on/off
+				 */
+#define ICF_TOGGLE (1 << ICB_TOGGLE)
+
+
+SFX_FineVideoControl
+
+SFX_FineVideoControl allows some of the features of graphics.library's
+VideoControl() function to operate over a range of lines in the ViewPort, rather
+than over the entire ViewPort that VideoControl() operates over.
+
+struct FineVideoControl
+{
+    struct TagItem *fvc_TagList;
+    				/* A pointer to a taglist of VideoControl()
+    				 * tags. Only a subset of VC() tags will be
+    				 * supported, listed below.
+    				 */
+    UWORD fvc_Line;		/* line number the VideoControl() should
+				 * start on.
+				 */
+    WORD fvc_Count;		/* VideoControl() lasts for this many lines,
+    				 * and then the previous settings are restored.
+    				 * If == -1, then maintain this to the end of
+    				 * the ViewPort.
+    				 */
+    UWORD fvc_Flags;		/* See below */
+    UWORD fvc_Pad;
+};
+
+#define FVCB_MODIFY 0		/* When used with AnimateFXA(), the video
+				 * features are replaced for this range of
+				 * lines with the new features of the
+				 * fvc_TagList.
+				 */
+#define FVCF_MODIFY (1 << FVCB_MODIFY)
+
+After installing the effect, the effects can be modified over the range to a
+new set of VideoControl effects by modifying the fvc_TagList pointer to point to
+a new TagList, setting the FVCF_MODIFY flag in fvc_Flags, and calling
+AnimateFX().
+
+The VideoControl() effects supported are:
+
+VTAG_CHROMAKEY_CLR/SET
+VTAG_BITPLANEKEY_CLR/SET
+VTAG_BORDERBLANK_CLR/SET
+VTAG_BORDERNOTRANS_CLR/SET
+VTAG_CHROMA_PLANE_SET
+VTAG_PF1_BASE_SET		
+VTAG_PF2_BASE_SET		
+VTAG_SPEVEN_BASE_SET		
+VTAG_SPODD_BASE_SET		
+VTAG_BORDERSPRITE_CLR/SET
+VTAG_SPRITERESN_SET		
+VTAG_PF1_TO_SPRITEPRI_SET
+VTAG_PF2_TO_SPRITEPRI_SET
+Also, some additional effects are available in FineVideoControl which are not
+available to VideoControl():
+VTAG_SFX_DEPTH_SET	(changes the display depth)
+VTAG_SFX_HAM_SET	(changes the display mode to HAM)
+VTAG_SFX_EHB_SET	(changes the display mode to ExtraHalfBright)
+VTAG_NORM_SET		(clears HAM and ExtraHalfBright)
+VTAG_SFX_MAKEDPF	(enable dual playfield)
+VTAG_SFX_PF1PRI		(playfield 1 has priority over playfield 2)
+VTAG_SFX_PF2PRI		(playfield 2 has priority over playfield 1)
+
+
+SFX_SpriteControl
+
+SFX_SpriteControl allows sprites to be moved within a specified area of the
+ViewPort, but reused in each area. This is similar to graphics.library's VSprite
+system, only SFX_SpriteControl can handle AA 32 and 64 bit wide sprites, and
+does not need the display to be remade each time the sprite is moved.
+
+struct SpriteControl
+{
+    struct ExtSprite *sc_ExtSprite;
+    				/* Pointer to an initialised
+				 * ExtSprite structure. The
+				 * sc_ExtSprite.es_SimpleSprite
+				 * structure should be initialised as
+				 * normal for the graphics.library
+				 * sprite functions.
+				 */
+    struct TagItem *sc_TagList;	/* Pointer to a TagList of ChangeExtSpriteA()
+				 * tags. As of V40, ChangeExtSpriteA() has no
+				 * tags defined, so this should be NULL. There
+				 * is no guarantee that SpriteControl will
+				 * support all or any of the future
+				 * ChangeExtSpriteA() tags.
+				 */
+    UWORD sc_Line;		/* First line of the range in which the
+				 * sprite is to be used.
+				 */
+    UWORD sc_Flags;		/* See below */
+};
+
+#define SCB_MODIFY 0		/* When used with AnimateFX(), replace
+				 * the sprite image with that in
+				 * sc_ExtSprite.
+				 */
+#define SCF_MODIFY (1 << SCB_MODIFY)
+
+The application needs to call graphics.library's AllocSpriteData() for each
+ExtSprite image that will be used, and GetExtSprite() for each sprite number
+that will be used in the ViewPort. The sprite can be reused throughout the
+ViewPort, so long as the range of the sprite
+(sc_ExtSprite.es_SimpleSprite.y + sc_ExtSprite.es_SimpleSprite.height) < the
+value of the next lower sc_Line.
+
+The sprites can be moved within their limited range after calling InstallFX() by
+modifying the sc_ExtSprite.es_SimpleSprite.x,y,height and even num values,
+setting the SCF_MODIFY bit in sc_Flags, and calling AnimateFX(). To change the
+image of the sprite in the range, replace the sc_ExtSprite pointer to a properly
+initialised ExtSprite pointer instead.
+
+
+SFX_LineControl
+
+SFX_LineControl allows you to scroll different parts of the ViewPort
+independantly from the rest, much like parallax scrolling seen in many of todays
+games. Specialfx.library allows you to specify which part of the display is to
+be scrolled, where the data for that area is to come from (so you can define a
+larger bitmap than is visible and display the parts outside of the visible
+range), repeat a line of the bitmap over a number of lines on the screen (for
+those "flow" fades), and independantly control even and odd playfields.
+
+struct LineControl
+{
+    struct RasInfo *lc_RasInfo;	/* Pointer to an initialised RasInfo structure.
+    				 * Set the RxOffset for the scroll value (+ve
+    				 * is to the left, -ve to the right) of this area,
+    				 * and the RyOffset to the line number in the
+    				 * ViewPort's BitMap to start the effect with.
+    				 *
+    				 * If lc_RasInfo->Next is not NULL, then
+    				 * lc_RasInfo will control the even bitplanes, and
+    				 * lc_RasInfo->Next the odd bitplanes.
+    				 *
+    				 * Note that the RasInfo->BitMap->Planes are ignored.
+    				 * All operations are on the ViewPort's RasInfo(s)
+    				 * BitMap(s) Plane(s).
+    				 *
+    				 */
+    UWORD lc_Line;		/* Start the effect at this line */
+    UWORD lc_Count;		/* Effect is over this many lines */
+    UWORD lc_Flags;		/* See below */
+    UWORD lc_Pad;
+};
+
+#define LCB_MODIFY 0		/* Set for the changes to be made by
+				 * AnimateFX().
+				 */
+#define LCF_MODIFY (1 << LCB_MODIFY)
+#define LCB_REPEATLINE_EVEN 1	/* Set to repeat line number
+				 * lc_RasInfo->RyOffset of the bitmap
+				 * from lc_Line in the ViewPort over lc_Count
+				 * lines.
+				 */
+#define LCF_REPEATLINE_EVEN (1 << LCB_REPEATLINE_EVEN)
+#define LCB_REPEATLINE_ODD 2	/* As LCB_REPEATLINE_EVEN, but for odd planes
+				 * (if lc_RasInfo->Next is not NULL).
+				 */
+#define LCF_REPEATLINE_ODD (1 << LCB_REPEATLINE_ODD)
+
+There are some restrictions with this effect though.
+1) The calculted modulo value must be in the range -32768 - +32767. That
+   may mean some lines in interleaved bitmaps may be out of range!
+2) In interlaced modes, lc_Line and lc_Count must both be even values,
+   else results are unpredictable. 
+   Future releases may try to alleviate these problems as best it can.
+3) lc_Line must not = 0. I need to WAIT(-1,0) to set up the first modulo,
+   and there may not be enough coppercycles to do so.
+
+
+
+KNOWN BUGS
+
+As of specialfx.library V40.2:
+
+In SFX_LineControl:
+1) Lores 4x and Lores 2x do not scroll properly if pushed to the left of
+   the screen.
+2) The dualplayfield feature (if lc_RasInfo->Next is not NULL) does not
+   yet work.
+
+General:
+Handling display coercion has not yet been implemented.
+ScanDouble modes may have problems.

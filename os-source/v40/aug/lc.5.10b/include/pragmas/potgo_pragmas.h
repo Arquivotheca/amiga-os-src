@@ -1,0 +1,1 @@
+€…†PotgoBase AllocPotBits 6 001…†PotgoBase FreePotBits C 001…†PotgoBase WritePotgo 12¶

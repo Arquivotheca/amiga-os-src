@@ -1,0 +1,9 @@
+€ˆGRAPHICS_GRAPHINT_H€GRAPHICS_GRAPHINT_HˆµŒ<exec/nodes.h>‡
+ƒIsrvstr
+{
+ƒ¬is_Node;
+ƒIsrvstr*Iptr;
+‚(*code)();
+‚(*ccode)();
+‚Carg;
+};‡

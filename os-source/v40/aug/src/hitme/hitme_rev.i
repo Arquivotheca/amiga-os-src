@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'21.8.91'
+	ENDM
+VERS	MACRO
+		dc.b	'hitme 37.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'hitme 37.1 (21.8.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: hitme 37.1 (21.8.91)',0
+	ENDM

@@ -1,0 +1,3760 @@
+	CODE
+	XDEF	_start
+_start:
+.L5:
+	LINK	A6,#-604
+	MOVEM.L	D2/A2,-(SP)
+.L8:
+	MOVE.L	#_tostream,A2
+.L4:
+	PEA	-604(A6)
+*			STACK OFFSET 4
+	JSR	_F0000_initialise_and_read_arguments
+	JSR	_F002F_dop1
+	JSR	_F0048_o_map_and_xref
+	TST.L	_to_file
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BEQ.S	.L2
+.L3:
+	PEA	1
+*			STACK OFFSET 4
+	CLR.L	-(SP)
+*			STACK OFFSET 8
+	PEA	.L6
+*			STACK OFFSET 12
+	MOVE.L	_to_file,-(SP)
+*			STACK OFFSET 16
+	JSR	_F000B_open
+	MOVE.L	D0,(A2)
+	MOVE.L	(A2),-(SP)
+*			STACK OFFSET 20
+	JSR	_selectoutput
+	JSR	_F0052_dop2
+	JSR	_endwrite
+	CLR.L	(A2)
+	MOVE.L	_verstream,-(SP)
+*			STACK OFFSET 24
+	JSR	_selectoutput
+*			STACK OFFSET 0
+	LEA	24(SP),SP
+.L2:
+	MOVE.L	_max_total_size,D2
+	ASL.L	#2,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	_max_total_size,D2
+	ASL.L	#2,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	PEA	.L7
+*			STACK OFFSET 12
+	JSR	_writef
+	JSR	_F000A_tidy_up_and_stop
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L1:
+	MOVEM.L	(SP)+,D2/A2
+	UNLK	A6
+	RTS	
+	DATA
+.L6:	DC.B	2
+	DC.B	'TO'
+	DC.B	0
+.L7:	DC.B	'7Linking complete '
+	DC.B	45
+	DC.B	' maximum code size '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'n '
+	DC.B	40,36,37
+	DC.B	'X8'
+	DC.B	41
+	DC.B	' bytes'
+	DC.B	10,0
+	DCB.B	1,0
+* ALLOCATIONS FOR _start
+*	-600(FP)	_argv
+	CODE
+	XDEF	_error
+_error:
+.L11:
+	MOVEM.L	D2/D3/D4,-(SP)
+.L14:
+	MOVE.L	16(A7),D4
+	MOVE.L	20(A7),D3
+	MOVE.L	24(A7),D2
+.L10:
+	MOVE.L	_verstream,-(SP)
+*			STACK OFFSET 4
+	JSR	_selectoutput
+	PEA	.L12
+*			STACK OFFSET 8
+	JSR	_writes
+	MOVE.L	40(A7),-(SP)
+*			STACK OFFSET 12
+	MOVE.L	40(A7),-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 20
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 24
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 28
+	JSR	_F0029_mess
+	PEA	.L13
+*			STACK OFFSET 32
+	JSR	_writes
+	MOVEQ	#20,D2
+	MOVE.L	D2,_rcode
+	JSR	_F000A_tidy_up_and_stop
+*			STACK OFFSET 0
+	LEA	32(SP),SP
+.L9:
+	MOVEM.L	(SP)+,D2/D3/D4
+	RTS	
+	DATA
+.L12:	DC.B	15,10
+	DC.B	'Linker error'
+	DC.B	58
+	DC.B	' '
+	DC.B	0
+	DCB.B	1,0
+.L13:	DC.B	21
+	DC.B	' '
+	DC.B	45
+	DC.B	' linking abandoned'
+	DC.B	10,0
+	DCB.B	1,0
+* ALLOCATIONS FOR _error
+*	8(FP)	_code
+*	12(FP)	_a1
+*	16(FP)	_a2
+*	20(FP)	_a3
+*	24(FP)	_a4
+	CODE
+	XDEF	_warn
+_warn:
+.L19:
+	MOVEM.L	D2/D3/D4/D5,-(SP)
+.L21:
+	MOVE.L	20(A7),D4
+	MOVE.L	24(A7),D3
+	MOVE.L	28(A7),D2
+.L18:
+	JSR	_output
+	MOVE.L	D0,D5
+	MOVE.L	_verstream,-(SP)
+*			STACK OFFSET 4
+	JSR	_selectoutput
+	PEA	.L20
+*			STACK OFFSET 8
+	JSR	_writes
+	MOVE.L	44(A7),-(SP)
+*			STACK OFFSET 12
+	MOVE.L	44(A7),-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 20
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 24
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 28
+	JSR	_F0029_mess
+	JSR	_newline
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 32
+	JSR	_selectoutput
+	TST.L	_rcode
+*			STACK OFFSET 0
+	LEA	32(SP),SP
+	BNE.S	.L15
+.L17:
+	MOVEQ	#5,D0
+	MOVE.L	D0,_rcode
+.L15:
+	MOVEM.L	(SP)+,D2/D3/D4/D5
+	RTS	
+	DATA
+.L20:	DC.B	17,10
+	DC.B	'Linker warning'
+	DC.B	58
+	DC.B	' '
+	DC.B	0
+	DCB.B	1,0
+* ALLOCATIONS FOR _warn
+*	D5	_o
+*	8(FP)	_code
+*	12(FP)	_a1
+*	16(FP)	_a2
+*	20(FP)	_a3
+*	24(FP)	_a4
+	CODE
+	XDEF	_F000A_tidy_up_and_stop
+_F000A_tidy_up_and_stop:
+.L42:
+	MOVEM.L	A2/A3/A4,-(SP)
+.L43:
+	MOVE.L	#_endwrite,A3
+	MOVE.L	#_selectoutput,A2
+	MOVE.L	#_vector_chain,A4
+.L40:
+	TST.L	(A4)
+	BEQ	.L38
+.L39:
+	MOVE.L	(A4),A0
+	MOVE.L	(A0),(A4)
+	MOVE.L	A0,-(SP)
+*			STACK OFFSET 4
+	JSR	_freevec
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L40
+.L38:
+	TST.L	_fromstream
+	BEQ.S	.L36
+.L37:
+	MOVE.L	_fromstream,-(SP)
+*			STACK OFFSET 4
+	JSR	_selectinput
+	JSR	_endread
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L36:
+	TST.L	_tostream
+	BEQ.S	.L34
+.L35:
+	MOVE.L	_tostream,-(SP)
+*			STACK OFFSET 4
+	JSR	(A2)
+	JSR	(A3)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L34:
+	TST.L	_verstream
+	BEQ.S	.L31
+.L33:
+	MOVE.L	_sysprint,D0
+	CMP.L	_verstream,D0
+	BEQ.S	.L31
+.L32:
+	MOVE.L	_verstream,-(SP)
+*			STACK OFFSET 4
+	JSR	(A2)
+	JSR	(A3)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L31:
+	TST.L	_withstream
+	BEQ.S	.L29
+.L30:
+	MOVE.L	_withstream,-(SP)
+*			STACK OFFSET 4
+	JSR	_selectinput
+	JSR	_endread
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L29:
+	TST.L	_mapstream
+	BEQ.S	.L26
+.L28:
+	MOVE.L	_sysprint,D0
+	CMP.L	_mapstream,D0
+	BEQ.S	.L26
+.L27:
+	MOVE.L	_mapstream,-(SP)
+*			STACK OFFSET 4
+	JSR	(A2)
+	JSR	(A3)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L26:
+	TST.L	_xrefstream
+	BEQ.S	.L23
+.L25:
+	MOVE.L	_sysprint,D0
+	CMP.L	_xrefstream,D0
+	BEQ.S	.L23
+.L24:
+	MOVE.L	_xrefstream,-(SP)
+*			STACK OFFSET 4
+	JSR	(A2)
+	JSR	(A3)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L23:
+	MOVE.L	_rcode,-(SP)
+*			STACK OFFSET 4
+	JSR	_stop
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L22:
+	MOVEM.L	(SP)+,A2/A3/A4
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F000A_tidy_up_and_stop
+*	A0	_v
+	CODE
+	XDEF	_F000B_open
+_F000B_open:
+.L51:
+	MOVEM.L	D2/D3/D4,-(SP)
+.L52:
+	MOVE.L	16(A7),D2
+	MOVE.L	20(A7),D3
+	MOVE.L	24(A7),D0
+.L50:
+	TST.L	D0
+	BEQ.S	.L49
+.L48:
+	MOVE.L	28(A7),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	JSR	_findinput
+	MOVE.L	D0,D4
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BRA.S	.L47
+.L49:
+	MOVE.L	28(A7),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	JSR	_findoutput
+	MOVE.L	D0,D4
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L47:
+	MOVE.L	D4,D4
+	BNE.S	.L45
+.L46:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	PEA	30
+*			STACK OFFSET 12
+	JSR	_error
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L45:
+	MOVE.L	D4,D0
+.L44:
+	MOVEM.L	(SP)+,D2/D3/D4
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F000B_open
+*	D4	_s
+*	8(FP)	_file
+*	12(FP)	_name
+*	16(FP)	_input
+*	20(FP)	_rawflag
+	CODE
+	XDEF	_F000C_read_descendents
+_F000C_read_descendents:
+.L65:
+	LINK	A6,#-4
+	MOVEM.L	D2/D3/D4/D5/D6/D7/A2,-(SP)
+.L67:
+	MOVE.L	8(A6),D0
+	MOVE.L	12(A6),D4
+	MOVE.L	16(A6),D3
+.L64:
+	MOVE.L	D0,A0
+	ADDQ.L	#4,A0
+	MOVE.L	(A0),D5
+	BNE.S	.L62
+.L57:
+	CMP.L	_max_total_size,D3
+	BLE	.L53
+.L56:
+	MOVE.L	D3,_max_total_size
+	BRA	.L53
+.L62:
+.L68:
+	MOVEQ	#1,D6
+.L61:
+	TST.L	D5
+	BEQ	.L53
+.L59:
+.L69:
+	MOVEQ	#0,D7
+	MOVE.L	D7,A1
+	MOVE.L	D3,-4(A6)
+	MOVE.L	_e_hunklist,A2
+	MOVE.L	20(A6),-(SP)
+*			STACK OFFSET 4
+	PEA	_e_hunklist
+*			STACK OFFSET 8
+	PEA	-4(A6)
+*			STACK OFFSET 12
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D6,-(SP)
+*			STACK OFFSET 20
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 24
+	PEA	.L66
+*			STACK OFFSET 28
+	MOVE.L	D5,A0
+	MOVE.L	(A0),-(SP)
+*			STACK OFFSET 32
+	JSR	_F000D_files_rd
+	MOVE.L	D0,A1
+	MOVE.L	D5,A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A2),(A0)
+	MOVE.L	D5,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	MOVE.L	A1,(A0)
+	MOVE.L	20(A6),D2
+	ADD.L	A1,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 36
+	MOVE.L	-4(A6),-(SP)
+*			STACK OFFSET 40
+	MOVE.L	D4,D2
+	ADDQ.L	#1,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 44
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 48
+	JSR	_F000C_read_descendents
+	ADDQ.L	#1,D6
+	MOVE.L	D5,A0
+	ADDQ.L	#8,A0
+	MOVE.L	(A0),D5
+*			STACK OFFSET 0
+	LEA	48(SP),SP
+	BRA	.L61
+.L53:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/D7/A2
+	UNLK	A6
+	RTS	
+	DATA
+.L66:	DC.B	7
+	DC.B	'overlay'
+	DC.B	0
+	DCB.B	1,0
+* ALLOCATIONS FOR _F000C_read_descendents
+*	D5	_d
+*	D6	_ord
+*	A1	_count
+*	0(FP)	_size
+*	A2	_hptr
+*	8(FP)	_tree
+*	12(FP)	_ov_level
+*	16(FP)	_total_size
+*	20(FP)	_number
+	CODE
+	XDEF	_F000D_files_rd
+_F000D_files_rd:
+.L75:
+	MOVEM.L	D2/D3/D4/D5/D6/A2,-(SP)
+.L76:
+	MOVE.L	28(A7),A2
+	MOVE.L	32(A7),D4
+	MOVE.L	36(A7),D3
+	MOVEQ	#0,D5
+.L73:
+	EXG	A2,D6
+	TST.L	D6
+	EXG	A2,D6
+	BEQ	.L71
+.L72:
+	MOVE.L	56(A7),D2
+	ADD.L	D5,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	60(A7),-(SP)
+*			STACK OFFSET 12
+	MOVE.L	60(A7),-(SP)
+*			STACK OFFSET 16
+	CLR.L	-(SP)
+*			STACK OFFSET 20
+	MOVE.L	64(A7),-(SP)
+*			STACK OFFSET 24
+	MOVE.L	64(A7),-(SP)
+*			STACK OFFSET 28
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 32
+	MOVE.L	A2,D2
+	ADDQ.L	#4,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 36
+	JSR	_F0010_file_rd
+	MOVE.L	D0,D2
+	ADD.L	D2,D5
+	MOVE.L	(A2),A2
+*			STACK OFFSET 0
+	LEA	36(SP),SP
+	BRA.S	.L73
+.L71:
+	MOVE.L	D5,D0
+.L70:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F000D_files_rd
+*	D5	_n
+*	8(FP)	_files
+*	12(FP)	_name
+*	16(FP)	_ov_level
+*	20(FP)	_ov_ord
+*	24(FP)	_files_node
+*	28(FP)	_lv_size_total
+*	32(FP)	_lv_list_end
+*	36(FP)	_number
+	CODE
+	XDEF	_F000E_handle_hunk_name
+_F000E_handle_hunk_name:
+.L99:
+	MOVEM.L	D2/D3/D4/D5/D6/A2/A3,-(SP)
+.L102:
+	MOVE.L	#_hunkname,A3
+.L98:
+	JSR	_getword
+	MOVE.L	D0,D5
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0023_vec_get
+	MOVE.L	D0,(A3)
+	MOVEQ	#0,D3
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L97
+.L78:
+	MOVE.L	D3,D2
+	ASL.L	#2,D2
+	MOVE.L	D2,A2
+	ADDA.L	(A3),A2
+	JSR	_getword
+	MOVE.L	D0,(A2)
+.L77:
+	ADDQ.L	#1,D3
+.L97:
+	MOVE.L	D5,D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D3
+	BLE	.L78
+.L96:
+	JSR	_getword
+	MOVE.L	D0,D6
+	MOVE.L	D6,D2
+	ANDI.L	#-1073741824,D2
+	MOVE.L	D6,_myresult2
+	CMPI.L	#-1073741824,D2
+	BNE.S	.L95
+.L80:
+	MOVEQ	#6,D0
+	BRA	.L79
+.L95:
+	MOVE.L	D6,D0
+	ANDI.L	#1073741823,D0
+*			STACK OFFSET 0
+	EXG	D0,A1
+	CMPA.W	#998,A1
+	EXG	D0,A1
+	BLT.S	.L81
+	EXG	D0,A1
+	CMPA.W	#1003,A1
+	EXG	D0,A1
+	BGT.S	.L81
+	MOVE.L	D0,A1
+	LEA	-998(A1),A1
+	MOVE.L	A1,D0
+	MOVE.L	D0,A1
+	ADDA.L	D0,A1
+	MOVE.L	A1,D0
+	MOVE.W	.L100(PC,D0.W),D0
+	JMP	.L101(PC,D0.W)
+.L101:
+.L100:
+	DC.W	.L91-.L101
+	DC.W	.L81-.L101
+	DC.W	.L81-.L101
+	DC.W	.L93-.L101
+	DC.W	.L92-.L101
+	DC.W	.L94-.L101
+.L94:
+	MOVE.L	D2,D3
+	MOVEQ	#5,D0
+	OR.L	D0,D3
+	BRA.S	.L90
+.L93:
+	MOVE.L	D2,D3
+	MOVEQ	#3,D0
+	OR.L	D0,D3
+	BRA.S	.L90
+.L92:
+	MOVE.L	D2,D3
+	MOVEQ	#4,D0
+	OR.L	D0,D3
+	BRA.S	.L90
+.L91:
+	MOVEQ	#2,D3
+	BRA.S	.L90
+.L81:
+	MOVEQ	#6,D0
+	BRA	.L79
+.L90:
+	MOVEQ	#6,D0
+	CMP.L	D3,D0
+	BNE.S	.L89
+.L82:
+	MOVEQ	#6,D0
+	BRA	.L79
+.L89:
+	PEA	8
+*			STACK OFFSET 4
+	JSR	_F0025_getblk
+	MOVE.L	D0,D4
+	MOVE.L	D4,A0
+	MOVEQ	#20,D2
+	ADDA.L	D2,A0
+	MOVE.L	D5,(A0)
+	MOVE.L	D4,A0
+	MOVEQ	#24,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A3),(A0)
+	MOVE.L	D4,A0
+	MOVEQ	#28,D2
+	ADDA.L	D2,A0
+	MOVE.L	D3,(A0)
+	MOVE.L	D4,A0
+	ADDQ.L	#8,A0
+	CLR.L	(A0)
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 12
+	JSR	_F0012_lookup
+	MOVE.L	D0,D2
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+	BNE.S	.L88
+.L87:
+	MOVE.L	D4,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	CLR.L	(A0)
+	MOVE.L	D4,A0
+	ADDQ.L	#8,A0
+	CLR.L	(A0)
+	MOVE.L	D4,A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	CLR.L	(A0)
+	MOVE.L	D4,A0
+	CLR.L	(A0)
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0013_insert
+	MOVE.L	D4,(A3)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L86
+.L88:
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0026_freesymbol
+	MOVE.L	D2,(A3)
+	MOVEQ	#1,D0
+	MOVE.L	D0,_conthunk
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L86:
+	MOVEQ	#2,D0
+	CMP.L	D3,D0
+	BNE.S	.L85
+.L84:
+	MOVE.L	D3,D0
+	BRA.S	.L83
+.L85:
+	MOVE.L	D6,D0
+.L83:
+.L79:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2/A3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F000E_handle_hunk_name
+*	D3	_i
+*	D5	_namesize
+*	D6	_hunktype
+*	D3	_type
+*	D2	_memtype
+*	D4	_s
+*	D2	_t
+	CODE
+	XDEF	_F000F_read_resident_library
+_F000F_read_resident_library:
+.L120:
+	MOVEM.L	D2/D3/D4/A2/A3,-(SP)
+.L127:
+	MOVE.L	24(A7),D2
+	MOVE.L	28(A7),D3
+	MOVE.L	#_e_completelist,A2
+.L119:
+	TST.L	_conthunk
+	BEQ	.L118
+.L117:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	_hunkname,-(SP)
+*			STACK OFFSET 8
+	PEA	33
+*			STACK OFFSET 12
+	JSR	_warn
+	JSR	_getword
+	MOVE.L	D0,D3
+	CMPI.L	#1007,D3
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+	BEQ	.L114
+.L116:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	PEA	1
+*			STACK OFFSET 12
+	JSR	_error
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L114:
+	JSR	_getword
+	MOVE.L	D0,D4
+.L113:
+.L128:
+	MOVEQ	#0,D3
+	TST.L	D4
+	BEQ	.L103
+.L112:
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0016_symtype
+	MOVE.L	D0,D2
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	EXG	D2,A3
+	CMPA.W	#3,A3
+	EXG	D2,A3
+	BLT.S	.L121
+	BGT.S	.L122
+	BRA.S	.L111
+.L121:
+	EXG	D2,A3
+	CMPA.W	#1,A3
+	EXG	D2,A3
+	BLT.S	.L114
+	BGT.S	.L123
+	BRA.S	.L111
+.L123:
+	EXG	D2,A3
+	CMPA.W	#2,A3
+	EXG	D2,A3
+	BNE.S	.L114
+	BRA.S	.L111
+.L122:
+	EXG	D2,A3
+	CMPA.W	#129,A3
+	EXG	D2,A3
+	BLT.S	.L114
+	EXG	D2,A3
+	CMPA.W	#132,A3
+	EXG	D2,A3
+	BGT.S	.L114
+	MOVE.L	D2,A3
+	LEA	-129(A3),A3
+	MOVE.L	A3,D2
+	MOVE.L	D2,A3
+	ADDA.L	D2,A3
+	MOVE.L	A3,D2
+	MOVE.W	.L125(PC,D2.W),D2
+	JMP	.L126(PC,D2.W)
+.L126:
+.L125:
+	DC.W	.L109-.L126
+	DC.W	.L110-.L126
+	DC.W	.L109-.L126
+	DC.W	.L109-.L126
+.L111:
+	MOVE.L	D4,D2
+	ANDI.L	#16777215,D2
+	ADDQ.L	#1,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F001F_discard_words
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA	.L114
+.L110:
+	MOVEQ	#1,D3
+.L109:
+	MOVE.L	D4,D2
+	ANDI.L	#16777215,D2
+	ADD.L	D3,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F001F_discard_words
+	JSR	_getword
+	MOVE.L	D0,-(SP)
+*			STACK OFFSET 8
+	JSR	_F001F_discard_words
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BRA	.L114
+.L118:
+	CLR.L	-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 12
+	CLR.L	-(SP)
+*			STACK OFFSET 16
+	CLR.L	-(SP)
+*			STACK OFFSET 20
+	CLR.L	-(SP)
+*			STACK OFFSET 24
+	PEA	998
+*			STACK OFFSET 28
+	JSR	_F0033_pass1_read_hunk
+	ADDQ.L	#1,_resident_hunk_count
+	MOVE.L	D0,A1
+	MOVE.L	(A2),A0
+	MOVE.L	(A0),(A1)
+	MOVE.L	(A2),A0
+	MOVE.L	D0,(A0)
+	MOVE.L	D0,(A2)
+*			STACK OFFSET 0
+	LEA	28(SP),SP
+.L103:
+	MOVEM.L	(SP)+,D2/D3/D4/A2/A3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F000F_read_resident_library
+*	D3	_h
+*	D0	_hp
+*	D4	_w
+*	D3	_n
+*	8(FP)	_file
+*	12(FP)	_library
+	CODE
+	XDEF	_F0010_file_rd
+_F0010_file_rd:
+.L168:
+	LINK	A6,#-32
+	MOVEM.L	D2/D3/D4/D5/D6/D7/A2/A3/A4/A5,-(SP)
+.L171:
+	MOVE.L	8(A6),D3
+	MOVE.L	12(A6),D4
+	MOVE.L	16(A6),D5
+	CLR.L	-32(A6)
+	CLR.L	-24(A6)
+	CLR.L	-8(A6)
+	CLR.L	-16(A6)
+	MOVEQ	#-1,D7
+	MOVE.L	D7,-12(A6)
+	CLR.L	-28(A6)
+	MOVE.L	#_hunkname,A3
+	MOVE.L	#_error,A2
+	MOVE.L	#_pos_in_pu,A4
+.L167:
+	LEA	-32(A6),A0
+	MOVE.L	A0,D6
+	CLR.L	_filemark
+	MOVEQ	#1,D2
+	MOVE.L	D2,_simplepoint
+	MOVEQ	#-1,D2
+	MOVE.L	D2,(A4)
+	PEA	1
+*			STACK OFFSET 4
+	PEA	1
+*			STACK OFFSET 8
+	MOVE.L	36(A6),-(SP)
+*			STACK OFFSET 12
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 16
+	JSR	_F000B_open
+	MOVE.L	D0,_fromstream
+	MOVE.L	D3,_from_file
+	MOVE.L	_fromstream,-(SP)
+*			STACK OFFSET 20
+	JSR	_selectinput
+	JSR	_F001E_replenish_input
+	TST.L	_pass1
+*			STACK OFFSET 0
+	LEA	20(SP),SP
+	BEQ.S	.L163
+.L166:
+	JSR	_F001C_exhausted
+	TST.L	D0
+	BEQ.S	.L163
+.L165:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	36(A6),-(SP)
+*			STACK OFFSET 8
+	PEA	34
+*			STACK OFFSET 12
+	JSR	_warn
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L163:
+	JSR	_F001C_exhausted
+	MOVEQ	#1,D2
+	CMP.L	D0,D2
+	BEQ	.L136
+.L162:
+	JSR	_getword
+	MOVE.L	D0,-4(A6)
+	CLR.L	(A3)
+	CLR.L	_conthunk
+	MOVE.L	-4(A6),D2
+	ANDI.L	#1073741823,D2
+*			STACK OFFSET 0
+	EXG	D2,A5
+	CMPA.W	#999,A5
+	EXG	D2,A5
+	BLT.S	.L161
+	EXG	D2,A5
+	CMPA.W	#1010,A5
+	EXG	D2,A5
+	BGT.S	.L161
+	MOVE.L	D2,A5
+	LEA	-999(A5),A5
+	MOVE.L	A5,D2
+	MOVE.L	D2,A5
+	ADDA.L	D2,A5
+	MOVE.L	A5,D2
+	MOVE.W	.L169(PC,D2.W),D2
+	JMP	.L170(PC,D2.W)
+.L170:
+.L169:
+	DC.W	.L160-.L170
+	DC.W	.L159-.L170
+	DC.W	.L158-.L170
+	DC.W	.L158-.L170
+	DC.W	.L158-.L170
+	DC.W	.L161-.L170
+	DC.W	.L161-.L170
+	DC.W	.L161-.L170
+	DC.W	.L161-.L170
+	DC.W	.L161-.L170
+	DC.W	.L161-.L170
+	DC.W	.L138-.L170
+.L161:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	-4(A6),-(SP)
+*			STACK OFFSET 8
+	PEA	1
+*			STACK OFFSET 12
+	JSR	(A2)
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L160:
+	ADDQ.L	#1,-12(A6)
+	MOVE.L	24(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	-12(A6),-(SP)
+*			STACK OFFSET 8
+	JSR	_F0028_handle_pu
+	MOVEQ	#-1,D2
+	MOVE.L	D2,(A4)
+	CLR.L	-8(A6)
+	MOVEQ	#1,D7
+	MOVE.L	D7,-16(A6)
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BRA	.L163
+.L159:
+	JSR	_F000E_handle_hunk_name
+	MOVE.L	D0,-4(A6)
+.L158:
+	TST.L	-16(A6)
+	BNE.S	.L156
+.L157:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	CLR.L	-(SP)
+*			STACK OFFSET 8
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L156:
+	MOVE.L	-4(A6),D2
+	ANDI.L	#-1073741824,D2
+	CMPI.L	#-1073741824,D2
+	BNE.S	.L154
+.L155:
+	MOVE.L	-4(A6),_myresult2
+	MOVEQ	#6,D7
+	MOVE.L	D7,-4(A6)
+.L154:
+	MOVEQ	#6,D2
+	CMP.L	-4(A6),D2
+	BNE.S	.L152
+.L153:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	_myresult2,-(SP)
+*			STACK OFFSET 8
+	PEA	1
+*			STACK OFFSET 12
+	JSR	(A2)
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L152:
+	MOVEQ	#2,D2
+	CMP.L	-4(A6),D2
+	BNE.S	.L151
+.L139:
+	MOVE.L	24(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	JSR	_F000F_read_resident_library
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BRA	.L163
+.L151:
+	ADDQ.L	#1,(A4)
+	TST.L	_conthunk
+	BNE.S	.L149
+.L150:
+	ADDQ.L	#1,-24(A6)
+.L149:
+	TST.L	-8(A6)
+	BEQ.S	.L147
+.L148:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	PEA	15
+*			STACK OFFSET 8
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L147:
+	JSR	_getword
+	MOVE.L	D0,-20(A6)
+	MOVE.L	_filemark,_mark
+	MOVE.L	28(A6),A0
+	MOVE.L	-20(A6),D2
+	ADD.L	D2,(A0)
+	TST.L	(A3)
+	BEQ.S	.L145
+.L146:
+	MOVE.L	(A3),A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A3),A1
+	MOVEQ	#12,D0
+	ADDA.L	D0,A1
+	MOVE.L	(A1),(A0)
+	MOVE.L	(A3),A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	MOVE.L	-20(A6),D0
+	ADD.L	D0,(A0)
+.L145:
+	MOVE.L	40(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	24(A6),-(SP)
+*			STACK OFFSET 8
+	MOVE.L	20(A6),-(SP)
+*			STACK OFFSET 12
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 20
+	MOVE.L	-20(A6),-(SP)
+*			STACK OFFSET 24
+	MOVE.L	-4(A6),-(SP)
+*			STACK OFFSET 28
+	JSR	_F0033_pass1_read_hunk
+	MOVE.L	D0,A1
+	TST.L	_conthunk
+*			STACK OFFSET 0
+	LEA	28(SP),SP
+	BNE.S	.L143
+.L144:
+	MOVE.L	D6,A5
+	MOVE.L	A1,(A5)
+	MOVE.L	A1,D6
+	MOVE.L	A1,A0
+	MOVEQ	#40,D2
+	ADDA.L	D2,A0
+	MOVE.L	-24(A6),(A0)
+	ADDQ.L	#1,40(A6)
+.L143:
+	TST.L	(A4)
+	BNE.S	.L142
+.L141:
+	MOVE.L	_pu_current,A0
+	MOVEQ	#28,D2
+	ADDA.L	D2,A0
+	MOVE.L	A1,(A0)
+	BRA.S	.L140
+.L142:
+	MOVE.L	-28(A6),A0
+	MOVEQ	#56,D2
+	ADDA.L	D2,A0
+	MOVE.L	A1,(A0)
+.L140:
+	MOVE.L	A1,-28(A6)
+	MOVEQ	#1,D7
+	MOVE.L	D7,-8(A6)
+	BRA	.L163
+.L138:
+	CLR.L	-8(A6)
+	BRA	.L163
+.L136:
+	TST.L	-8(A6)
+	BEQ.S	.L134
+.L135:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	PEA	16
+*			STACK OFFSET 8
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L134:
+	TST.L	-32(A6)
+	BEQ.S	.L130
+.L133:
+	CMP.L	_max_level,D4
+	BLE.S	.L131
+.L132:
+	MOVE.L	D4,_max_level
+.L131:
+	MOVE.L	32(A6),A0
+	MOVE.L	(A0),A0
+	MOVE.L	D6,A5
+	MOVE.L	(A0),(A5)
+	MOVE.L	32(A6),A0
+	MOVE.L	(A0),A0
+	MOVE.L	-32(A6),(A0)
+	MOVE.L	32(A6),A0
+	MOVE.L	D6,(A0)
+.L130:
+	JSR	_endread
+	CLR.L	_fromstream
+	MOVE.L	-24(A6),D0
+.L129:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/D7/A2/A3/A4/A5
+	UNLK	A6
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0010_file_rd
+*	-16(FP)	_size
+*	-28(FP)	_list
+*	D6	_liste
+*	-20(FP)	_hunk_count
+*	-4(FP)	_hunk_read
+*	-12(FP)	_pufound
+*	-8(FP)	_pucount
+*	-24(FP)	_oldhunk
+*	0(FP)	_type
+*	A1	_h
+*	8(FP)	_file
+*	12(FP)	_ov_level
+*	16(FP)	_ov_ord
+*	20(FP)	_files_node
+*	24(FP)	_library
+*	28(FP)	_lv_size_total
+*	32(FP)	_lv_list_end
+*	36(FP)	_name
+*	40(FP)	_number
+	CODE
+	XDEF	_F0011_read_extblock
+_F0011_read_extblock:
+.L207:
+	LINK	A6,#-24
+	MOVEM.L	D2/D3/D4/D5/D6/A2/A3/A4/A5,-(SP)
+.L214:
+	MOVE.L	8(A6),D3
+	MOVE.L	12(A6),A2
+	MOVE.L	16(A6),D4
+	CLR.L	-24(A6)
+	MOVE.L	#_getword,A3
+.L206:
+	LEA	-24(A6),A4
+	JSR	(A3)
+	MOVE.L	D0,D6
+.L205:
+	TST.L	D6
+	BEQ	.L203
+.L199:
+	MOVE.L	D6,D2
+	ANDI.L	#16777215,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0023_vec_get
+	MOVE.L	D0,-12(A6)
+	MOVE.L	D6,-(SP)
+*			STACK OFFSET 8
+	JSR	_F0016_symtype
+	MOVE.L	D0,-4(A6)
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 12
+	MOVE.L	-12(A6),-(SP)
+*			STACK OFFSET 16
+	JSR	_F001D_getwrds
+	JSR	(A3)
+	MOVE.L	D0,-8(A6)
+	TST.L	_pass2
+*			STACK OFFSET 0
+	LEA	16(SP),SP
+	BEQ.S	.L196
+.L198:
+	CMPI.L	#130,-4(A6)
+	BNE.S	.L196
+.L197:
+	JSR	(A3)
+	MOVE.L	D0,-8(A6)
+	MOVE.L	#129,-4(A6)
+.L196:
+	TST.L	_pass1
+	BNE	.L193
+.L195:
+	CMPI.L	#128,-4(A6)
+	BGE	.L193
+.L194:
+	TST.L	_loading_ovly_supervisor
+	BEQ	.L172
+.L193:
+	PEA	8
+*			STACK OFFSET 4
+	JSR	_F0025_getblk
+	MOVE.L	D0,D5
+	MOVE.L	D5,A0
+	MOVEQ	#20,D2
+	ADDA.L	D2,A0
+	MOVE.L	D6,(A0)
+	MOVE.L	D5,A0
+	MOVEQ	#24,D2
+	ADDA.L	D2,A0
+	MOVE.L	-12(A6),(A0)
+	MOVE.L	D5,(A4)
+	MOVE.L	D5,A4
+	CLR.L	(A4)
+	MOVE.L	D5,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	CLR.L	(A0)
+	MOVE.L	D5,A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	MOVEQ	#-1,D2
+	MOVE.L	D2,(A0)
+	MOVE.L	D5,A0
+	ADDQ.L	#8,A0
+	CLR.L	(A0)
+	TST.L	D3
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BEQ.S	.L192
+.L191:
+	MOVEQ	#7,D0
+	BRA.S	.L190
+.L192:
+	MOVEQ	#1,D0
+.L190:
+	MOVE.L	D5,A0
+	MOVEQ	#28,D2
+	ADDA.L	D2,A0
+	MOVE.L	D0,(A0)
+	MOVE.L	-4(A6),D0
+*			STACK OFFSET 0
+	EXG	D0,A5
+	CMPA.W	#3,A5
+	EXG	D0,A5
+	BLT.S	.L208
+	BGT.S	.L209
+	BRA	.L176
+.L208:
+	EXG	D0,A5
+	CMPA.W	#1,A5
+	EXG	D0,A5
+	BLT	.L175
+	BGT.S	.L210
+	BRA	.L176
+.L210:
+	EXG	D0,A5
+	CMPA.W	#2,A5
+	EXG	D0,A5
+	BNE	.L175
+	BRA	.L176
+.L209:
+	EXG	D0,A5
+	CMPA.W	#129,A5
+	EXG	D0,A5
+	BLT	.L175
+	EXG	D0,A5
+	CMPA.W	#132,A5
+	EXG	D0,A5
+	BGT	.L175
+	MOVE.L	D0,A5
+	LEA	-129(A5),A5
+	MOVE.L	A5,D0
+	MOVE.L	D0,A5
+	ADDA.L	D0,A5
+	MOVE.L	A5,D0
+	MOVE.W	.L212(PC,D0.W),D0
+	JMP	.L213(PC,D0.W)
+.L213:
+.L212:
+	DC.W	.L188-.L213
+	DC.W	.L189-.L213
+	DC.W	.L188-.L213
+	DC.W	.L188-.L213
+.L189:
+	MOVE.L	D5,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	MOVE.L	-8(A6),(A0)
+	JSR	(A3)
+	MOVE.L	D0,-8(A6)
+.L188:
+	TST.L	_pass2
+	BNE	.L182
+.L187:
+	TST.L	_xrefing
+	BNE	.L182
+.L186:
+	TST.L	_overlaying
+	BEQ.S	.L184
+.L185:
+	CMPI.L	#130,-4(A6)
+	BEQ.S	.L184
+.L182:
+.L215:
+	CLR.L	-20(A6)
+	MOVEQ	#1,D6
+	BRA.S	.L181
+.L178:
+	PEA	4
+*			STACK OFFSET 4
+	JSR	_F0025_getblk
+	MOVE.L	D0,-16(A6)
+	JSR	(A3)
+	MOVE.L	D0,A1
+	MOVE.L	-16(A6),A0
+	ADDQ.L	#4,A0
+	MOVE.L	D4,D2
+	ADD.L	A1,D2
+	MOVE.L	D2,(A0)
+	MOVE.L	-16(A6),A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	MOVE.L	-20(A6),(A0)
+	MOVE.L	-16(A6),A0
+	ADDQ.L	#8,A0
+	MOVE.L	-4(A6),(A0)
+	MOVE.L	-16(A6),-20(A6)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L177:
+	ADDQ.L	#1,D6
+.L181:
+	CMP.L	-8(A6),D6
+	BLE	.L178
+.L180:
+	MOVE.L	D5,A0
+	ADDQ.L	#8,A0
+	MOVE.L	-20(A6),(A0)
+	BRA.S	.L172
+.L184:
+	MOVE.L	-8(A6),-(SP)
+*			STACK OFFSET 4
+	JSR	_F001F_discard_words
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L172
+.L176:
+	MOVE.L	D5,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	MOVE.L	-8(A6),(A0)
+	BRA.S	.L172
+.L175:
+	MOVE.L	_from_file,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	-4(A6),-(SP)
+*			STACK OFFSET 12
+	PEA	41
+*			STACK OFFSET 16
+	JSR	_error
+*			STACK OFFSET 0
+	LEA	16(SP),SP
+.L172:
+	JSR	(A3)
+	MOVE.L	D0,D6
+	BRA	.L205
+.L203:
+	TST.L	(A2)
+	BEQ	.L201
+.L202:
+	MOVE.L	(A2),A2
+	BRA.S	.L203
+.L201:
+	MOVE.L	-24(A6),(A2)
+	MOVE.L	-24(A6),D0
+.L200:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2/A3/A4/A5
+	UNLK	A6
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0011_read_extblock
+*	-20(FP)	_chain
+*	A4	_chaine
+*	D6	_w1
+*	D2	_namesize
+*	-8(FP)	_name
+*	-4(FP)	_value
+*	0(FP)	_t
+*	D5	_s
+*	D6	_j
+*	-16(FP)	_refs
+*	-12(FP)	_r
+*	A1	_offset
+*	8(FP)	_library
+*	12(FP)	_asymbols
+*	16(FP)	_bytebase
+	CODE
+	XDEF	_F0012_lookup
+_F0012_lookup:
+.L235:
+	MOVEM.L	D2/D3/D4/D5/D6/D7/A2/A3,-(SP)
+.L236:
+	MOVE.L	36(A7),D2
+	MOVE.L	40(A7),D3
+.L234:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0015_hashval
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	_symbol_table,A0
+	MOVE.L	(A0),D5
+	MOVE.L	D2,A0
+	MOVEQ	#20,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D7
+	ANDI.L	#16777215,D7
+	MOVE.L	D7,A1
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L233:
+	TST.L	D5
+	BEQ	.L217
+.L232:
+	MOVE.L	D5,A0
+	MOVEQ	#20,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D4
+	ANDI.L	#16777215,D4
+.L231:
+.L237:
+	MOVEQ	#1,D1
+	MOVE.L	D5,A0
+	MOVEQ	#28,D0
+	ADDA.L	D0,A0
+	CMP.L	(A0),D3
+	BNE.S	.L219
+.L229:
+	CMP.L	A1,D4
+	BNE.S	.L219
+.L227:
+	MOVE.L	D5,A0
+	MOVEQ	#24,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),A3
+	MOVE.L	D2,A0
+	MOVEQ	#24,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),A2
+	MOVE.L	D4,D6
+	SUBQ.L	#1,D6
+	BRA.S	.L226
+.L225:
+	MOVE.L	D6,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	A2,A0
+	MOVE.L	(A0),D0
+	MOVE.L	D6,D4
+	ASL.L	#2,D4
+	MOVE.L	D4,A0
+	ADDA.L	A3,A0
+	CMP.L	(A0),D0
+	BEQ.S	.L223
+.L222:
+	MOVEQ	#0,D1
+	BRA.S	.L221
+.L223:
+	SUBQ.L	#1,D6
+.L226:
+	TST.L	D6
+	BGE	.L225
+.L221:
+	TST.L	D1
+	BEQ.S	.L219
+.L218:
+	MOVE.L	D5,D0
+	BRA.S	.L216
+.L219:
+	MOVE.L	D5,A0
+	MOVE.L	(A0),D5
+	BRA	.L233
+.L217:
+	MOVEQ	#0,D0
+.L216:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/D7/A2/A3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0012_lookup
+*	D5	_t
+*	A1	_len_s
+*	D4	_len_t
+*	D1	_same
+*	D6	_i
+*	A3	_name_t
+*	A2	_name_s
+*	8(FP)	_s
+*	12(FP)	_type
+	CODE
+	XDEF	_F0013_insert
+_F0013_insert:
+.L240:
+	MOVE.L	D2,-(SP)
+.L241:
+	MOVE.L	8(A7),D2
+.L239:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0015_hashval
+	ASL.L	#2,D0
+	ADD.L	_symbol_table,D0
+	MOVE.L	D0,A1
+	MOVE.L	D2,A0
+	MOVE.L	(A1),(A0)
+	MOVE.L	D2,(A1)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L238:
+	MOVE.L	(SP)+,D2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0013_insert
+*	A1	_a
+*	8(FP)	_s
+	CODE
+	XDEF	_F0014_delete
+_F0014_delete:
+.L249:
+	MOVE.L	D2,-(SP)
+.L250:
+	MOVE.L	8(A7),D2
+.L248:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0015_hashval
+	ASL.L	#2,D0
+	ADD.L	_symbol_table,D0
+	MOVE.L	D0,A1
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L247:
+	TST.L	(A1)
+	BEQ	.L242
+.L246:
+	MOVE.L	D2,D0
+	CMP.L	(A1),D0
+	BNE.S	.L245
+.L244:
+	MOVE.L	D2,A0
+	MOVE.L	(A0),(A1)
+	MOVE.L	D2,A0
+	CLR.L	(A0)
+	BRA.S	.L242
+.L245:
+	MOVE.L	(A1),A1
+	BRA.S	.L247
+.L242:
+	MOVE.L	(SP)+,D2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0014_delete
+*	A1	_p
+*	8(FP)	_s
+	CODE
+	XDEF	_F0015_hashval
+_F0015_hashval:
+.L257:
+	MOVEM.L	D2/D3/D4,-(SP)
+.L258:
+	MOVE.L	16(A7),D0
+.L256:
+	MOVE.L	D0,A0
+	MOVEQ	#20,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D1
+	ANDI.L	#16777215,D1
+	MOVE.L	D1,D3
+	MOVE.L	D0,A0
+	MOVEQ	#24,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D4
+	MOVEQ	#0,D2
+	BRA.S	.L255
+.L252:
+	MOVE.L	D2,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	D4,A0
+	MOVE.L	(A0),D0
+	EOR.L	D0,D3
+.L251:
+	ADDQ.L	#1,D2
+.L255:
+	MOVE.L	D1,D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D2
+	BLE	.L252
+.L254:
+	MOVE.L	#200,D1
+	MOVE.L	D3,D0
+	JSR	lmodt
+	MOVE.L	D0,-(SP)
+*			STACK OFFSET 4
+	JSR	_abs
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L253:
+	MOVEM.L	(SP)+,D2/D3/D4
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0015_hashval
+*	D2	_i
+*	D1	_len
+*	D3	_hash
+*	D4	_name
+*	8(FP)	_s
+	CODE
+	XDEF	_F0016_symtype
+_F0016_symtype:
+.L261:
+.L262:
+	MOVE.L	4(A7),D0
+.L260:
+	MOVE.L	D0,D1
+	MOVEQ	#24,D0
+	LSR.L	D0,D1
+	MOVE.L	D1,D0
+.L259:
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0016_symtype
+*	8(FP)	_w
+	CODE
+	XDEF	_F0017_scan
+_F0017_scan:
+.L273:
+	MOVEM.L	D2/D3/D4/D5/D6,-(SP)
+.L274:
+	MOVE.L	24(A7),D4
+	MOVE.L	28(A7),D3
+	MOVE.L	32(A7),D2
+.L272:
+	MOVEQ	#0,D6
+.L271:
+	MOVE.L	D6,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	_symbol_table,A0
+	MOVE.L	(A0),D5
+.L270:
+	TST.L	D5
+	BEQ	.L265
+.L269:
+	MOVE.L	D5,A0
+	MOVEQ	#28,D0
+	ADDA.L	D0,A0
+	MOVEQ	#1,D0
+	CMP.L	(A0),D0
+	BNE.S	.L267
+.L268:
+	MOVE.L	36(A7),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 12
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D4,A0
+	JSR	(A0)
+*			STACK OFFSET 0
+	LEA	16(SP),SP
+.L267:
+	MOVE.L	D5,A0
+	MOVE.L	(A0),D5
+	BRA.S	.L270
+.L265:
+	ADDQ.L	#1,D6
+	CMPI.L	#199,D6
+	BLE	.L271
+.L264:
+	MOVE.L	36(A7),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 12
+	CLR.L	-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D4,A0
+	JSR	(A0)
+*			STACK OFFSET 0
+	LEA	16(SP),SP
+.L263:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0017_scan
+*	D6	_j
+*	D5	_s
+*	8(FP)	_f
+*	12(FP)	_a1
+*	16(FP)	_a2
+*	20(FP)	_a3
+	CODE
+	XDEF	_writeoct
+_writeoct:
+.L293:
+	MOVEM.L	D2/D3/D4/D5/D6/A2,-(SP)
+.L294:
+	MOVE.L	28(A7),D1
+	MOVE.L	32(A7),D2
+.L292:
+	MOVE.L	D1,A0
+	MOVEQ	#20,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D6
+	ANDI.L	#16777215,D6
+	MOVE.L	D1,A0
+	MOVEQ	#24,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),A2
+	MOVE.L	D6,D3
+	MOVEQ	#1,D0
+	CMP.L	D2,D0
+	BEQ	.L287
+.L291:
+	MOVEQ	#8,D0
+	CMP.L	D6,D0
+	BGE.S	.L290
+.L289:
+	MOVEQ	#8,D2
+	BRA.S	.L288
+.L290:
+	MOVEQ	#9,D1
+	MOVE.L	D6,D0
+	JSR	lmodt
+	MOVE.L	D0,D2
+.L288:
+	MOVE.L	D2,D6
+	MOVEQ	#8,D3
+.L287:
+	MOVE.L	D6,D5
+	ASL.L	#2,D5
+	SUBQ.L	#1,D5
+	MOVE.L	D3,D4
+	SUB.L	D6,D4
+	ASL.L	#2,D4
+	MOVEQ	#0,D3
+	BRA.S	.L286
+.L279:
+	MOVE.L	D3,A0
+	ADDA.L	A2,A0
+	TST.B	(A0)
+	BNE.S	.L278
+.L277:
+	MOVEQ	#32,D2
+	BRA.S	.L276
+.L278:
+	MOVE.L	D3,A0
+	ADDA.L	A2,A0
+	MOVE.B	(A0),D2
+	EXT.W	D2
+	EXT.L	D2
+.L276:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_wrch
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L275:
+	ADDQ.L	#1,D3
+.L286:
+	CMP.L	D5,D3
+	BLE	.L279
+.L285:
+	MOVEQ	#1,D3
+	BRA.S	.L284
+.L281:
+	PEA	32
+*			STACK OFFSET 4
+	JSR	_wrch
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L280:
+	ADDQ.L	#1,D3
+.L284:
+	CMP.L	D4,D3
+	BLE	.L281
+.L282:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _writeoct
+*	D3	_i
+*	D6	_len
+*	A2	_name
+*	D3	_maxlen
+*	D5	_letters
+*	D4	_spaces
+*	8(FP)	_s
+*	12(FP)	_n
+	CODE
+	XDEF	_getword
+_getword:
+.L301:
+	MOVE.L	A2,-(SP)
+.L302:
+	MOVE.L	#_i_ptr,A2
+.L300:
+	ADDQ.L	#1,(A2)
+	ADDQ.L	#1,_filemark
+	MOVE.L	(A2),D0
+	CMP.L	_i_end,D0
+	BGE.S	.L299
+.L296:
+	MOVE.L	(A2),D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	_i_buffer,A0
+	MOVE.L	(A0),D0
+	BRA.S	.L295
+.L299:
+	JSR	_F001E_replenish_input
+	TST.L	D0
+	BNE.S	.L297
+.L298:
+	MOVE.L	_from_file,-(SP)
+*			STACK OFFSET 4
+	PEA	17
+*			STACK OFFSET 8
+	JSR	_error
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L297:
+	CLR.L	(A2)
+	MOVE.L	_i_buffer,A0
+	MOVE.L	(A0),D0
+.L295:
+	MOVE.L	(SP)+,A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _getword
+	CODE
+	XDEF	_F001A_getoptword
+_F001A_getoptword:
+.L309:
+	MOVEM.L	A2/A3,-(SP)
+.L310:
+	MOVE.L	#_i_ptr,A2
+	MOVE.L	#_i_buffer,A3
+.L308:
+	ADDQ.L	#1,(A2)
+	ADDQ.L	#1,_filemark
+	MOVE.L	(A2),D0
+	CMP.L	_i_end,D0
+	BGE.S	.L307
+.L304:
+	MOVE.L	(A2),D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	(A3),A0
+	MOVE.L	(A0),D0
+	BRA.S	.L303
+.L307:
+	JSR	_F001E_replenish_input
+	TST.L	D0
+	BNE.S	.L305
+.L306:
+	MOVE.L	(A3),A0
+	CLR.L	(A0)
+.L305:
+	CLR.L	(A2)
+	MOVE.L	(A3),A0
+	MOVE.L	(A0),D0
+.L303:
+	MOVEM.L	(SP)+,A2/A3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001A_getoptword
+	CODE
+	XDEF	_F001B_ungetword
+_F001B_ungetword:
+.L313:
+.L314:
+.L312:
+	SUBQ.L	#1,_i_ptr
+	SUBQ.L	#1,_filemark
+.L311:
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001B_ungetword
+	CODE
+	XDEF	_F001C_exhausted
+_F001C_exhausted:
+.L322:
+.L323:
+.L321:
+	MOVE.L	_i_ptr,D0
+	ADDQ.L	#1,D0
+	CMP.L	_i_end,D0
+	BGE.S	.L320
+.L316:
+	MOVEQ	#0,D0
+	BRA.S	.L315
+.L320:
+	JSR	_F001E_replenish_input
+	MOVEQ	#1,D1
+	CMP.L	D0,D1
+	BNE.S	.L319
+.L318:
+	MOVEQ	#0,D0
+	BRA.S	.L317
+.L319:
+	MOVEQ	#1,D0
+.L317:
+.L315:
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001C_exhausted
+	CODE
+	XDEF	_F001D_getwrds
+_F001D_getwrds:
+.L336:
+	MOVEM.L	D2/D3/D4/D5/D6/D7/A2,-(SP)
+.L337:
+	MOVE.L	32(A7),D4
+	MOVE.L	36(A7),D3
+	MOVE.L	#_i_ptr,A2
+.L335:
+	MOVE.L	_i_end,D5
+	SUB.L	(A2),D5
+	SUBQ.L	#1,D5
+	MOVE.L	D3,D0
+	ADD.L	D0,_filemark
+	CMP.L	D3,D5
+	BLE.S	.L333
+.L334:
+	MOVE.L	D3,D5
+.L333:
+	MOVEQ	#0,D1
+	BRA.S	.L332
+.L325:
+	MOVE.L	D1,D2
+	ASL.L	#2,D2
+	MOVE.L	D2,A1
+	ADDA.L	D4,A1
+	MOVE.L	(A2),D0
+	ADD.L	D1,D0
+	ADDQ.L	#1,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	_i_buffer,A0
+	MOVE.L	(A0),(A1)
+.L324:
+	ADDQ.L	#1,D1
+.L332:
+	MOVE.L	D5,D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D1
+	BLE	.L325
+.L331:
+	MOVE.L	D5,D0
+	ADD.L	D0,(A2)
+	CMP.L	D3,D5
+	BGE.S	.L326
+.L330:
+	MOVE.L	D3,D6
+	SUB.L	D5,D6
+	MOVE.L	D6,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D5,D7
+	ASL.L	#2,D7
+	MOVE.L	D7,D2
+	ADD.L	D4,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	JSR	_readwords
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	MOVE.L	D0,-(SP)
+*			STACK OFFSET 4
+	JSR	_abs
+	CMP.L	D0,D6
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BEQ.S	.L326
+.L329:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	_from_file,-(SP)
+*			STACK OFFSET 8
+	PEA	18
+*			STACK OFFSET 12
+	JSR	_error
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L326:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/D7/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001D_getwrds
+*	D1	_j
+*	D5	_got
+*	D6	_left
+*	8(FP)	_v
+*	12(FP)	_n
+	CODE
+	XDEF	_F001E_replenish_input
+_F001E_replenish_input:
+.L340:
+	MOVE.L	D2,-(SP)
+.L341:
+.L339:
+	MOVEQ	#-1,D2
+	MOVE.L	D2,_i_ptr
+	PEA	200
+*			STACK OFFSET 4
+	MOVE.L	_i_buffer,-(SP)
+*			STACK OFFSET 8
+	JSR	_readwords
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	MOVE.L	D0,-(SP)
+*			STACK OFFSET 4
+	JSR	_abs
+	MOVE.L	D0,_i_end
+	MOVEQ	#0,D2
+	TST.L	_i_end
+	SGT.B	D2
+	NEG.B	D2
+	MOVE.L	D2,D0
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L338:
+	MOVE.L	(SP)+,D2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001E_replenish_input
+	CODE
+	XDEF	_F001F_discard_words
+_F001F_discard_words:
+.L344:
+	MOVEM.L	D2/D3,-(SP)
+.L345:
+	MOVE.L	12(A7),D3
+.L343:
+	MOVE.L	_filemark,D2
+	ADD.L	D3,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_mypointword
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L342:
+	MOVEM.L	(SP)+,D2/D3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F001F_discard_words
+*	8(FP)	_n
+	CODE
+	XDEF	_F0020_putword
+_F0020_putword:
+.L350:
+	MOVEM.L	D2/A2,-(SP)
+.L351:
+	MOVE.L	12(A7),D2
+	MOVE.L	#_o_ptr,A2
+.L349:
+	MOVE.L	(A2),D0
+	ADDQ.L	#1,D0
+	CMPI.L	#200,D0
+	BNE.S	.L347
+.L348:
+	JSR	_F0022_deplete_output
+.L347:
+	ADDQ.L	#1,(A2)
+	MOVE.L	(A2),D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	_o_buffer,A0
+	MOVE.L	D2,(A0)
+.L346:
+	MOVEM.L	(SP)+,D2/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0020_putword
+*	8(FP)	_w
+	CODE
+	XDEF	_F0021_putwrds
+_F0021_putwrds:
+.L361:
+	MOVEM.L	D2/D3/A2,-(SP)
+.L362:
+	MOVE.L	16(A7),D3
+	MOVE.L	20(A7),D2
+	MOVE.L	#_o_ptr,A2
+.L360:
+	MOVE.L	#200,D0
+	SUB.L	(A2),D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D2
+	BLE.S	.L359
+.L354:
+	JSR	_F0022_deplete_output
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	JSR	_writewords
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BRA.S	.L352
+.L359:
+	MOVEQ	#0,D1
+	BRA.S	.L358
+.L356:
+	MOVE.L	(A2),D0
+	ADD.L	D1,D0
+	ADDQ.L	#1,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A1
+	ADDA.L	_o_buffer,A1
+	MOVE.L	D1,D0
+	ASL.L	#2,D0
+	MOVE.L	D0,A0
+	ADDA.L	D3,A0
+	MOVE.L	(A0),(A1)
+.L355:
+	ADDQ.L	#1,D1
+.L358:
+	MOVE.L	D2,D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D1
+	BLE	.L356
+.L357:
+	MOVE.L	D2,D0
+	ADD.L	D0,(A2)
+.L352:
+	MOVEM.L	(SP)+,D2/D3/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0021_putwrds
+*	D0	_left
+*	D1	_j
+*	8(FP)	_v
+*	12(FP)	_n
+	CODE
+	XDEF	_F0022_deplete_output
+_F0022_deplete_output:
+.L367:
+	MOVEM.L	D2/A2,-(SP)
+.L368:
+	MOVE.L	#_o_ptr,A2
+.L366:
+	TST.L	(A2)
+	BLT.S	.L364
+.L365:
+	MOVE.L	(A2),D2
+	ADDQ.L	#1,D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	_o_buffer,-(SP)
+*			STACK OFFSET 8
+	JSR	_writewords
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L364:
+	MOVEQ	#-1,D0
+	MOVE.L	D0,(A2)
+.L363:
+	MOVEM.L	(SP)+,D2/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0022_deplete_output
+	CODE
+	XDEF	_F0023_vec_get
+_F0023_vec_get:
+.L375:
+	MOVEM.L	D2/D3/A2,-(SP)
+.L376:
+	MOVE.L	16(A7),D2
+.L374:
+	MOVEQ	#1,D0
+	MOVE.L	D0,_dummyfree
+	BEQ.S	.L373
+.L370:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0025_getblk
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L369
+.L373:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_getvec
+	MOVE.L	D0,A2
+	EXG	A2,D3
+	TST.L	D3
+	EXG	A2,D3
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BNE.S	.L371
+.L372:
+	PEA	23
+*			STACK OFFSET 4
+	JSR	_error
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L371:
+	MOVE.L	_vector_chain,(A2)
+	MOVE.L	A2,_vector_chain
+	MOVE.L	A2,D0
+	ADDQ.L	#4,D0
+.L369:
+	MOVEM.L	(SP)+,D2/D3/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0023_vec_get
+*	A2	_v
+*	8(FP)	_size
+	CODE
+	XDEF	_vec_get1
+_vec_get1:
+.L381:
+	MOVEM.L	D2/D3/A2,-(SP)
+.L382:
+	MOVE.L	16(A7),D2
+.L380:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_getvec
+	MOVE.L	D0,A2
+	EXG	A2,D3
+	TST.L	D3
+	EXG	A2,D3
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BNE.S	.L378
+.L379:
+	PEA	23
+*			STACK OFFSET 4
+	JSR	_error
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L378:
+	MOVE.L	_vector_chain,(A2)
+	MOVE.L	A2,_vector_chain
+	MOVE.L	A2,D0
+	ADDQ.L	#4,D0
+.L377:
+	MOVEM.L	(SP)+,D2/D3/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _vec_get1
+*	A2	_v
+*	8(FP)	_size
+	CODE
+	XDEF	_F0024_vec_free
+_F0024_vec_free:
+.L392:
+.L393:
+	MOVE.L	4(A7),A0
+.L391:
+	MOVE.L	#_vector_chain,A1
+	MOVEQ	#1,D0
+	MOVE.L	D0,_dummyfree
+	BNE	.L383
+.L390:
+	MOVE.L	A0,D0
+	SUBQ.L	#4,D0
+	MOVE.L	D0,A0
+.L389:
+	TST.L	(A1)
+	BEQ	.L385
+.L388:
+	MOVE.L	A0,D0
+	CMP.L	(A1),D0
+	BNE.S	.L387
+.L386:
+	MOVE.L	(A0),(A1)
+	MOVE.L	A0,-(SP)
+*			STACK OFFSET 4
+	JSR	_freevec
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L383
+.L387:
+	MOVE.L	(A1),A1
+	BRA.S	.L389
+.L385:
+	PEA	21
+*			STACK OFFSET 4
+	JSR	_error
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L383:
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0024_vec_free
+*	A1	_c
+*	8(FP)	_v
+	CODE
+	XDEF	_F0025_getblk
+_F0025_getblk:
+.L406:
+	MOVEM.L	D2/A2/A3,-(SP)
+.L407:
+	MOVE.L	16(A7),D2
+	MOVE.L	#_heapptr,A2
+	MOVE.L	#_work_vector,A3
+	MOVE.L	#_free_symbol_chain,A1
+.L405:
+	MOVEQ	#4,D0
+	CMP.L	D2,D0
+	BNE.S	.L403
+.L404:
+	TST.L	_free_reference_chain
+	BEQ.S	.L403
+.L395:
+	MOVE.L	_free_reference_chain,D1
+	MOVE.L	D1,A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),_free_reference_chain
+	MOVE.L	D1,D0
+	BRA.S	.L394
+.L403:
+	MOVEQ	#8,D0
+	CMP.L	D2,D0
+	BNE.S	.L401
+.L402:
+	TST.L	(A1)
+	BEQ.S	.L401
+.L396:
+	MOVE.L	(A1),D0
+	MOVE.L	D0,A0
+	MOVE.L	(A0),(A1)
+	BRA.S	.L394
+.L401:
+	MOVE.L	(A2),D1
+	MOVE.L	(A2),D0
+	ADD.L	D2,D0
+	CMPI.L	#200,D0
+	BLE.S	.L400
+.L399:
+	CMPI.L	#200,D2
+	BLE.S	.L398
+.L397:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_vec_get1
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L394
+.L398:
+	PEA	200
+*			STACK OFFSET 4
+	JSR	_vec_get1
+	MOVE.L	D0,(A3)
+	MOVE.L	D2,(A2)
+	MOVE.L	(A3),D0
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L394
+.L400:
+	MOVE.L	D0,(A2)
+	MOVE.L	(A3),A0
+	MOVE.L	D1,D0
+	ASL.L	#2,D0
+	ADDA.L	D0,A0
+	MOVE.L	A0,D0
+.L394:
+	MOVEM.L	(SP)+,D2/A2/A3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0025_getblk
+*	D1	_result
+*	D0	_result
+*	D1	_h
+*	D0	_nh
+*	8(FP)	_size
+	CODE
+	XDEF	_F0026_freesymbol
+_F0026_freesymbol:
+.L410:
+	MOVEM.L	D2/D3,-(SP)
+.L411:
+	MOVE.L	12(A7),D3
+.L409:
+	MOVE.L	D3,A0
+	ADDQ.L	#8,A0
+	MOVE.L	(A0),-(SP)
+*			STACK OFFSET 4
+	JSR	_F0027_freereferences
+	MOVE.L	D3,A0
+	MOVEQ	#24,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),-(SP)
+*			STACK OFFSET 8
+	JSR	_F0024_vec_free
+	MOVE.L	D3,A0
+	MOVE.L	_free_symbol_chain,(A0)
+	MOVE.L	D3,_free_symbol_chain
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L408:
+	MOVEM.L	(SP)+,D2/D3
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0026_freesymbol
+*	8(FP)	_s
+	CODE
+	XDEF	_F0027_freereferences
+_F0027_freereferences:
+.L419:
+	MOVE.L	D2,-(SP)
+.L420:
+	MOVE.L	8(A7),D1
+.L418:
+	TST.L	D1
+	BEQ.S	.L412
+.L417:
+	MOVE.L	D1,D2
+.L416:
+	MOVE.L	D1,A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	TST.L	(A0)
+	BEQ	.L414
+.L415:
+	MOVE.L	D1,A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D1
+	BRA.S	.L416
+.L414:
+	MOVE.L	D1,A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	MOVE.L	_free_reference_chain,(A0)
+	MOVE.L	D2,_free_reference_chain
+.L412:
+	MOVE.L	(SP)+,D2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0027_freereferences
+*	D2	_r1
+*	8(FP)	_r
+	CODE
+	XDEF	_F0028_handle_pu
+_F0028_handle_pu:
+.L428:
+	MOVEM.L	D2/D3/D4/D5/D6/A2,-(SP)
+.L429:
+	MOVE.L	28(A7),D3
+	MOVE.L	32(A7),D2
+	MOVEQ	#0,D5
+	MOVE.L	#_pu_current,A2
+.L427:
+	JSR	_getword
+	MOVE.L	D0,D4
+	BEQ	.L425
+.L426:
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_F0023_vec_get
+	MOVE.L	D0,D5
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 12
+	JSR	_F001D_getwrds
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+.L425:
+	MOVE.L	(A2),D6
+	PEA	8
+*			STACK OFFSET 4
+	JSR	_F0025_getblk
+	MOVE.L	D0,(A2)
+	MOVE.L	D6,A0
+	MOVE.L	(A2),(A0)
+	MOVE.L	(A2),A0
+	CLR.L	(A0)
+	MOVE.L	(A2),A0
+	ADDQ.L	#4,A0
+	MOVE.L	D3,(A0)
+	MOVE.L	(A2),A0
+	MOVEQ	#16,D0
+	ADDA.L	D0,A0
+	CLR.L	(A0)
+	MOVE.L	(A2),A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	CLR.L	(A0)
+	MOVE.L	(A2),A0
+	MOVEQ	#20,D0
+	ADDA.L	D0,A0
+	MOVE.L	D4,(A0)
+	MOVE.L	(A2),A0
+	MOVEQ	#24,D0
+	ADDA.L	D0,A0
+	MOVE.L	D5,(A0)
+	TST.L	D2
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BEQ.S	.L424
+.L423:
+	MOVEQ	#0,D0
+	BRA.S	.L422
+.L424:
+	MOVEQ	#2,D0
+.L422:
+	MOVE.L	(A2),A0
+	ADDQ.L	#8,A0
+	MOVE.L	D0,(A0)
+.L421:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2
+	RTS	
+	DATA
+* ALLOCATIONS FOR _F0028_handle_pu
+*	D4	_len
+*	D5	_name
+*	D6	_temp
+*	8(FP)	_count
+*	12(FP)	_library
+	CODE
+	XDEF	_F0029_mess
+_F0029_mess:
+.L478:
+	LINK	A6,#-28
+	MOVEM.L	D2/D3/D4/D5/D6/D7/A2/A3/A4/A5,-(SP)
+.L512:
+	MOVE.L	8(A6),D2
+	MOVE.L	12(A6),D0
+	MOVE.L	16(A6),D1
+	MOVEQ	#0,D3
+	MOVEQ	#0,D4
+	MOVEQ	#0,D7
+	MOVE.L	D7,A1
+	CLR.L	-20(A6)
+	MOVEQ	#0,D6
+	MOVEQ	#0,D7
+	MOVE.L	D7,A3
+	CLR.L	-12(A6)
+	CLR.L	-16(A6)
+	MOVEQ	#0,D7
+	MOVE.L	D7,A4
+	CLR.L	-4(A6)
+	CLR.L	-24(A6)
+	CLR.L	-28(A6)
+	MOVE.L	#_newline,A2
+	MOVE.L	#_hunkinfo,-8(A6)
+	MOVE.L	#_symbol_info,A0
+.L477:
+	MOVE.L	D2,D5
+*			STACK OFFSET 0
+	EXG	D5,A5
+	CMPA.W	#0,A5
+	EXG	D5,A5
+	BLT	.L476
+	EXG	D5,A5
+	CMPA.W	#43,A5
+	EXG	D5,A5
+	BGT	.L476
+	MOVE.L	D5,A5
+	MOVE.L	A5,D5
+	MOVE.L	D5,A5
+	ADDA.L	D5,A5
+	MOVE.L	A5,D5
+	MOVE.W	.L510(PC,D5.W),D5
+	JMP	.L511(PC,D5.W)
+.L511:
+.L510:
+	DC.W	.L461-.L511
+	DC.W	.L460-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L459-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L458-.L511
+	DC.W	.L457-.L511
+	DC.W	.L457-.L511
+	DC.W	.L457-.L511
+	DC.W	.L457-.L511
+	DC.W	.L456-.L511
+	DC.W	.L449-.L511
+	DC.W	.L475-.L511
+	DC.W	.L471-.L511
+	DC.W	.L469-.L511
+	DC.W	.L469-.L511
+	DC.W	.L468-.L511
+	DC.W	.L467-.L511
+	DC.W	.L466-.L511
+	DC.W	.L462-.L511
+	DC.W	.L448-.L511
+	DC.W	.L447-.L511
+	DC.W	.L446-.L511
+	DC.W	.L445-.L511
+	DC.W	.L444-.L511
+	DC.W	.L443-.L511
+	DC.W	.L442-.L511
+	DC.W	.L441-.L511
+	DC.W	.L440-.L511
+	DC.W	.L472-.L511
+	DC.W	.L470-.L511
+.L476:
+	MOVE.L	D2,D3
+	MOVE.L	#.L479,D2
+	BRA	.L439
+.L475:
+	MOVE.L	D0,D3
+	MOVE.L	-8(A6),D6
+	MOVE.L	D1,A4
+	TST.L	20(A6)
+	BEQ.S	.L473
+.L474:
+	MOVE.L	-8(A6),A3
+.L473:
+	MOVE.L	20(A6),-4(A6)
+	MOVE.L	#.L480,D2
+	BRA	.L439
+.L472:
+	MOVE.L	D0,D3
+	MOVE.L	A0,D6
+	MOVE.L	D1,A4
+	MOVE.L	#_ref_info,A3
+	MOVE.L	20(A6),-4(A6)
+	MOVE.L	#.L481,D2
+	BRA	.L439
+.L471:
+	MOVE.L	D0,D3
+	MOVE.L	24(A6),D4
+	MOVE.L	-8(A6),D6
+	MOVE.L	D1,A4
+	MOVE.L	-8(A6),A3
+	MOVE.L	20(A6),-4(A6)
+	MOVE.L	#.L482,D2
+	BRA	.L439
+.L470:
+	MOVE.L	D0,D3
+	MOVE.L	24(A6),D4
+	MOVE.L	A0,D6
+	MOVE.L	D1,A4
+	MOVE.L	#_ref_info,A3
+	MOVE.L	20(A6),-4(A6)
+	MOVE.L	#.L483,D2
+	BRA	.L439
+.L469:
+	MOVE.L	#.L484,D2
+	BRA	.L439
+.L468:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L485,D2
+	BRA	.L439
+.L467:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L486,D2
+	BRA	.L439
+.L466:
+	TST.L	_pass2
+	BEQ.S	.L465
+.L464:
+	MOVE.L	#.L487,D0
+	BRA.S	.L463
+.L465:
+	MOVE.L	#.L488,D0
+.L463:
+	MOVE.L	D0,D3
+	MOVE.L	#.L489,D2
+	BRA	.L439
+.L462:
+	MOVE.L	D0,D3
+	MOVE.L	#.L490,D2
+	BRA	.L439
+.L461:
+	MOVE.L	D0,D3
+	MOVE.L	#.L491,D2
+	BRA	.L439
+.L460:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L492,D2
+	BRA	.L439
+.L459:
+	MOVE.L	D0,D3
+	MOVE.L	D1,A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D4
+	MOVE.L	20(A6),A0
+	MOVEQ	#12,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),A1
+	MOVE.L	#.L493,D2
+	BRA	.L439
+.L458:
+	MOVE.L	D2,D3
+	MOVE.L	#.L494,D2
+	BRA	.L439
+.L457:
+	MOVE.L	D2,D3
+	MOVE.L	#.L495,D2
+	BRA	.L439
+.L456:
+	TST.L	_pass1
+	BEQ.S	.L455
+.L451:
+	MOVE.L	#.L496,D0
+	BRA.S	.L450
+.L455:
+	TST.L	_pass2
+	BEQ.S	.L454
+.L453:
+	MOVE.L	#.L497,D0
+	BRA.S	.L452
+.L454:
+	MOVE.L	#.L498,D0
+.L452:
+.L450:
+	MOVE.L	D0,D3
+	MOVE.L	#.L499,D2
+	BRA	.L439
+.L449:
+	MOVE.L	D0,D3
+	MOVE.L	#.L500,D2
+	BRA	.L439
+.L448:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L501,D2
+	BRA	.L439
+.L447:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L502,D2
+	BRA.S	.L439
+.L446:
+	MOVE.L	#.L503,D2
+	BRA.S	.L439
+.L445:
+	MOVE.L	A0,D6
+	MOVE.L	D0,A4
+	MOVE.L	A0,A3
+	MOVE.L	D1,-4(A6)
+	MOVE.L	#.L504,D2
+	BRA.S	.L439
+.L444:
+	MOVE.L	D0,D3
+	MOVE.L	#.L505,D2
+	BRA.S	.L439
+.L443:
+	MOVE.L	D0,D3
+	MOVE.L	#.L506,D2
+	BRA.S	.L439
+.L442:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	20(A6),A1
+	MOVE.L	#.L507,D2
+	BRA.S	.L439
+.L441:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	#.L508,D2
+	BRA.S	.L439
+.L440:
+	MOVE.L	D0,D3
+	MOVE.L	D1,D4
+	MOVE.L	20(A6),A1
+	MOVE.L	#.L509,D2
+.L439:
+	MOVE.L	-20(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	A1,-(SP)
+*			STACK OFFSET 8
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 12
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 16
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 20
+	JSR	_writef
+	JSR	(A2)
+	TST.L	D6
+*			STACK OFFSET 0
+	LEA	20(SP),SP
+	BEQ	.L437
+.L438:
+	MOVE.L	A4,-(SP)
+*			STACK OFFSET 4
+	MOVE.L	D6,A0
+	JSR	(A0)
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L437:
+	EXG	A3,D7
+	TST.L	D7
+	EXG	A3,D7
+	BEQ	.L435
+.L436:
+	MOVE.L	-4(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	A3,A0
+	JSR	(A0)
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L435:
+	TST.L	-12(A6)
+	BEQ	.L433
+.L434:
+	MOVE.L	-24(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	-12(A6),A0
+	JSR	(A0)
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L433:
+	TST.L	-16(A6)
+	BEQ	.L430
+.L432:
+	MOVE.L	-28(A6),-(SP)
+*			STACK OFFSET 4
+	MOVE.L	-16(A6),A0
+	JSR	(A0)
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L430:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/D7/A2/A3/A4/A5
+	UNLK	A6
+	RTS	
+	DATA
+.L479:	DC.B	21
+	DC.B	'Unknown error code '
+	DC.B	37
+	DC.B	'n'
+	DC.B	0
+	DCB.B	1,0
+.L480:	DC.B	'I'
+	DC.B	37
+	DC.B	'n bit relocation only allowed between named sectio'
+	DC.B	'ns '
+	DC.B	10
+	DC.B	'with the same name'
+	DC.B	0
+	DCB.B	1,0
+.L481:	DC.B	'I'
+	DC.B	37
+	DC.B	'n bit references only allowed between named sectio'
+	DC.B	'ns '
+	DC.B	10
+	DC.B	'with the same name'
+	DC.B	0
+	DCB.B	1,0
+.L482:	DC.B	'5Value for '
+	DC.B	37
+	DC.B	'n bit relocation out of range'
+	DC.B	46
+	DC.B	' Value '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'X8'
+	DC.B	0
+	DCB.B	1,0
+.L483:	DC.B	'3Value out of range for '
+	DC.B	37
+	DC.B	'n bit reference'
+	DC.B	46
+	DC.B	' Value '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'X8'
+	DC.B	0
+.L484:	DC.B	'cUsage is'
+	DC.B	58
+	DC.B	' alink '
+	DC.B	91,91
+	DC.B	'from'
+	DC.B	93
+	DC.B	' '
+	DC.B	60
+	DC.B	'file'
+	DC.B	62,91,91,44,124,43,93,60
+	DC.B	'file'
+	DC.B	62,93,93
+	DC.B	' '
+	DC.B	91
+	DC.B	'with '
+	DC.B	60
+	DC.B	'file'
+	DC.B	62,93,91
+	DC.B	'library '
+	DC.B	60
+	DC.B	'file'
+	DC.B	62,91,91,43,124,44,93,60
+	DC.B	'file'
+	DC.B	62,93,93
+	DC.B	' '
+	DC.B	91
+	DC.B	'to '
+	DC.B	60
+	DC.B	'file'
+	DC.B	62,93,0
+	DCB.B	1,0
+.L485:	DC.B	36
+	DC.B	'error in WITH file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34
+	DC.B	' near line '
+	DC.B	37
+	DC.B	'N'
+	DC.B	0
+.L486:	DC.B	23
+	DC.B	'can'
+	DC.B	39
+	DC.B	't open '
+	DC.B	37
+	DC.B	'S file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34,0
+	DCB.B	1,0
+.L487:	DC.B	6
+	DC.B	'second'
+	DC.B	0
+.L488:	DC.B	5
+	DC.B	'first'
+	DC.B	0
+	DCB.B	1,0
+.L489:	DC.B	20
+	DC.B	'BREAK during '
+	DC.B	37
+	DC.B	'S pass'
+	DC.B	0
+.L490:	DC.B	29
+	DC.B	'empty primary input file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34,0
+	DCB.B	1,0
+.L491:	DC.B	27
+	DC.B	'No Program unit in file '
+	DC.B	37
+	DC.B	'S'
+	DC.B	10,0
+	DCB.B	1,0
+.L492:	DC.B	36
+	DC.B	'invalid object type '
+	DC.B	37
+	DC.B	'X8 in file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34,0
+.L493:	DC.B	'Tinvalid overlay reference of symbol '
+	DC.B	37
+	DC.B	'O1 '
+	DC.B	10
+	DC.B	'              ref in file '
+	DC.B	37
+	DC.B	's def in file '
+	DC.B	37
+	DC.B	's'
+	DC.B	0
+.L494:	DC.B	29
+	DC.B	'Invalid Object Module code '
+	DC.B	37
+	DC.B	'n'
+	DC.B	0
+	DCB.B	1,0
+.L495:	DC.B	17
+	DC.B	'Internal Error '
+	DC.B	37
+	DC.B	'n'
+	DC.B	0
+	DCB.B	1,0
+.L496:	DC.B	5
+	DC.B	'pass1'
+	DC.B	0
+	DCB.B	1,0
+.L497:	DC.B	5
+	DC.B	'pass2'
+	DC.B	0
+	DCB.B	1,0
+.L498:	DC.B	14
+	DC.B	'initialisation'
+	DC.B	0
+.L499:	DC.B	28
+	DC.B	'insufficient store during '
+	DC.B	37
+	DC.B	'S'
+	DC.B	0
+.L500:	DC.B	39
+	DC.B	'overlay supervisor file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34
+	DC.B	' is invalid'
+	DC.B	0
+	DCB.B	1,0
+.L501:	DC.B	45
+	DC.B	'Resident Library '
+	DC.B	37
+	DC.B	'o1 defined again in file '
+	DC.B	37
+	DC.B	's'
+	DC.B	0
+	DCB.B	1,0
+.L502:	DC.B	21,37
+	DC.B	'S file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34
+	DC.B	' is empty'
+	DC.B	0
+	DCB.B	1,0
+.L503:	DC.B	27
+	DC.B	'no overlay references found'
+	DC.B	0
+	DCB.B	1,0
+.L504:	DC.B	29
+	DC.B	'multiple definition of symbol'
+	DC.B	0
+	DCB.B	1,0
+.L505:	DC.B	40
+	DC.B	'can'
+	DC.B	39
+	DC.B	't open MAP file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34
+	DC.B	' '
+	DC.B	45
+	DC.B	' map abandoned'
+	DC.B	0
+.L506:	DC.B	'5can'
+	DC.B	39
+	DC.B	't open XREF file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34
+	DC.B	' '
+	DC.B	45
+	DC.B	' cross reference abandoned'
+	DC.B	0
+	DCB.B	1,0
+.L507:	DC.B	'0invalid '
+	DC.B	37
+	DC.B	'S value found near line '
+	DC.B	37
+	DC.B	'N in file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34,0
+.L508:	DC.B	21
+	DC.B	'invalid '
+	DC.B	37
+	DC.B	'S value '
+	DC.B	40,37
+	DC.B	'S'
+	DC.B	41,0
+	DCB.B	1,0
+.L509:	DC.B	39
+	DC.B	'invalid type '
+	DC.B	37
+	DC.B	'X8 for '
+	DC.B	34,37
+	DC.B	'O1'
+	DC.B	34
+	DC.B	' in file '
+	DC.B	34,37
+	DC.B	'S'
+	DC.B	34,0
+	DCB.B	1,0
+* ALLOCATIONS FOR _F0029_mess
+*	D2	_s
+*	D3	_a1
+*	D4	_a2
+*	A1	_a3
+*	-16(FP)	_a4
+*	D6	_f1
+*	A3	_f2
+*	-8(FP)	_f3
+*	-12(FP)	_f4
+*	A4	_f1a
+*	0(FP)	_f2a
+*	-20(FP)	_f3a
+*	-24(FP)	_f4a
+*	8(FP)	_code
+*	12(FP)	_arg1
+*	16(FP)	_arg2
+*	20(FP)	_arg3
+*	24(FP)	_arg4
+	CODE
+	XDEF	_symbol_info
+_symbol_info:
+.L517:
+	MOVEM.L	D2/D3/D4/D5,-(SP)
+.L520:
+	MOVE.L	20(A7),D3
+.L516:
+	MOVE.L	D3,A0
+	MOVEQ	#20,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),-(SP)
+*			STACK OFFSET 4
+	JSR	_F0016_symtype
+	MOVE.L	D0,D5
+	MOVE.L	D3,A0
+	ADDQ.L	#4,A0
+	MOVE.L	(A0),D4
+	MOVE.L	D3,A0
+	MOVEQ	#16,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D2
+	JSR	_newline
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 8
+	PEA	.L518
+*			STACK OFFSET 12
+	JSR	_writef
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 16
+	JSR	_writetype
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 20
+	PEA	.L519
+*			STACK OFFSET 24
+	JSR	_writef
+	TST.L	D4
+*			STACK OFFSET 0
+	LEA	24(SP),SP
+	BEQ	.L513
+.L515:
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_hunkinfo
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L513:
+	MOVEM.L	(SP)+,D2/D3/D4/D5
+	RTS	
+	DATA
+.L518:	DC.B	13
+	DC.B	'symbol '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'o1'
+	DC.B	10,0
+	DCB.B	1,0
+.L519:	DC.B	13
+	DC.B	'value  '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'X8'
+	DC.B	10,0
+	DCB.B	1,0
+* ALLOCATIONS FOR _symbol_info
+*	D5	_type
+*	D4	_hunk
+*	D2	_value
+*	8(FP)	_symbol
+	CODE
+	XDEF	_ref_info
+_ref_info:
+.L525:
+	MOVEM.L	D2/D3/D4,-(SP)
+.L527:
+	MOVE.L	16(A7),D2
+.L524:
+	MOVE.L	D2,A0
+	ADDQ.L	#8,A0
+	MOVE.L	(A0),D4
+	MOVE.L	D2,A0
+	MOVE.L	(A0),D3
+	MOVE.L	D2,A0
+	ADDQ.L	#4,A0
+	MOVE.L	(A0),D2
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 4
+	JSR	_writetype
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 8
+	PEA	.L526
+*			STACK OFFSET 12
+	JSR	_writef
+	TST.L	D3
+*			STACK OFFSET 0
+	LEA	12(SP),SP
+	BEQ	.L521
+.L523:
+	MOVE.L	D3,-(SP)
+*			STACK OFFSET 4
+	JSR	_hunkinfo
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L521:
+	MOVEM.L	(SP)+,D2/D3/D4
+	RTS	
+	DATA
+.L526:	DC.B	12
+	DC.B	'offset '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'n'
+	DC.B	10,0
+* ALLOCATIONS FOR _ref_info
+*	D4	_type
+*	D3	_hunk
+*	D2	_offset
+*	8(FP)	_ref
+	CODE
+	XDEF	_writetype
+_writetype:
+.L539:
+	MOVE.L	D2,-(SP)
+.L555:
+	MOVE.L	8(A7),D0
+.L538:
+*			STACK OFFSET 0
+	EXG	D0,A1
+	CMPA.W	#3,A1
+	EXG	D0,A1
+	BLT.S	.L549
+	BGT.S	.L550
+	BRA	.L534
+.L549:
+	EXG	D0,A1
+	CMPA.W	#1,A1
+	EXG	D0,A1
+	BLT.S	.L537
+	BGT.S	.L551
+	BRA.S	.L536
+.L551:
+	EXG	D0,A1
+	CMPA.W	#2,A1
+	EXG	D0,A1
+	BEQ	.L535
+	BRA.S	.L537
+.L550:
+	EXG	D0,A1
+	CMPA.W	#129,A1
+	EXG	D0,A1
+	BLT.S	.L537
+	EXG	D0,A1
+	CMPA.W	#132,A1
+	EXG	D0,A1
+	BGT.S	.L537
+	MOVE.L	D0,A1
+	LEA	-129(A1),A1
+	MOVE.L	A1,D0
+	MOVE.L	D0,A1
+	ADDA.L	D0,A1
+	MOVE.L	A1,D0
+	MOVE.W	.L553(PC,D0.W),D0
+	JMP	.L554(PC,D0.W)
+.L554:
+.L553:
+	DC.W	.L533-.L554
+	DC.W	.L530-.L554
+	DC.W	.L532-.L554
+	DC.W	.L531-.L554
+.L537:
+	MOVE.L	#.L540,D2
+	BRA.S	.L529
+.L536:
+	MOVE.L	#.L541,D2
+	BRA.S	.L529
+.L535:
+	MOVE.L	#.L542,D2
+	BRA.S	.L529
+.L534:
+	MOVE.L	#.L543,D2
+	BRA.S	.L529
+.L533:
+	MOVE.L	#.L544,D2
+	BRA.S	.L529
+.L532:
+	MOVE.L	#.L545,D2
+	BRA.S	.L529
+.L531:
+	MOVE.L	#.L546,D2
+	BRA.S	.L529
+.L530:
+	MOVE.L	#.L547,D2
+.L529:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	PEA	.L548
+*			STACK OFFSET 8
+	JSR	_writef
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L528:
+	MOVE.L	(SP)+,D2
+	RTS	
+	DATA
+.L540:	DC.B	7
+	DC.B	'Unknown'
+	DC.B	0
+	DCB.B	1,0
+.L541:	DC.B	22
+	DC.B	'Relocatable definition'
+	DC.B	0
+.L542:	DC.B	19
+	DC.B	'Absolute definition'
+	DC.B	0
+	DCB.B	1,0
+.L543:	DC.B	27
+	DC.B	'Resident library definition'
+	DC.B	0
+	DCB.B	1,0
+.L544:	DC.B	16
+	DC.B	'32 bit reference'
+	DC.B	0
+.L545:	DC.B	16
+	DC.B	'16 bit reference'
+	DC.B	0
+.L546:	DC.B	15
+	DC.B	'8 bit reference'
+	DC.B	0
+	DCB.B	1,0
+.L547:	DC.B	16
+	DC.B	'Common reference'
+	DC.B	0
+.L548:	DC.B	9
+	DC.B	'Type'
+	DC.B	58
+	DC.B	' '
+	DC.B	37
+	DC.B	's'
+	DC.B	10,0
+	DCB.B	1,0
+* ALLOCATIONS FOR _writetype
+*	D2	_s
+*	8(FP)	_type
+	CODE
+	XDEF	_hunkinfo
+_hunkinfo:
+.L561:
+	MOVEM.L	D2/D3/D4/D5/D6/A2/A3/A4,-(SP)
+.L567:
+	MOVE.L	36(A7),D3
+	MOVE.L	#_writef,A2
+.L560:
+	MOVE.L	D3,A0
+	ADDQ.L	#4,A0
+	MOVE.L	(A0),D4
+	ASL.L	#2,D4
+	MOVE.L	D3,A0
+	MOVEQ	#60,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D5
+	ASL.L	#2,D5
+	MOVE.L	D3,A0
+	MOVEQ	#28,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),A4
+	MOVE.L	D3,A0
+	MOVEQ	#32,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D6
+	MOVE.L	D3,A0
+	MOVEQ	#48,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),A3
+	MOVE.L	D3,A0
+	MOVEQ	#12,D2
+	ADDA.L	D2,A0
+	MOVE.L	(A0),D2
+	PEA	.L562
+*			STACK OFFSET 4
+	JSR	_writes
+	MOVE.L	A3,-(SP)
+*			STACK OFFSET 8
+	JSR	_F002E_writepuname
+	TST.L	D6
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+	BNE.S	.L559
+.L558:
+	PEA	.L563
+*			STACK OFFSET 4
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L557
+.L559:
+	MOVE.L	D6,-(SP)
+*			STACK OFFSET 4
+	PEA	.L564
+*			STACK OFFSET 8
+	JSR	(A2)
+*			STACK OFFSET 0
+	ADDQ.L	#8,SP
+.L557:
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	PEA	.L565
+*			STACK OFFSET 8
+	JSR	(A2)
+	MOVE.L	D4,-(SP)
+*			STACK OFFSET 12
+	MOVE.L	D5,-(SP)
+*			STACK OFFSET 16
+	MOVE.L	A4,-(SP)
+*			STACK OFFSET 20
+	PEA	.L566
+*			STACK OFFSET 24
+	JSR	(A2)
+*			STACK OFFSET 0
+	LEA	24(SP),SP
+.L556:
+	MOVEM.L	(SP)+,D2/D3/D4/D5/D6/A2/A3/A4
+	RTS	
+	DATA
+.L562:	DC.B	19
+	DC.B	'Program unit name'
+	DC.B	58
+	DC.B	' '
+	DC.B	0
+	DCB.B	1,0
+.L563:	DC.B	16
+	DC.B	'No section name'
+	DC.B	10,0
+.L564:	DC.B	12
+	DC.B	'Section '
+	DC.B	37
+	DC.B	'o1'
+	DC.B	10,0
+.L565:	DC.B	9
+	DC.B	'File'
+	DC.B	58
+	DC.B	' '
+	DC.B	37
+	DC.B	's'
+	DC.B	10,0
+	DCB.B	1,0
+.L566:	DC.B	'6Hunk Number'
+	DC.B	58
+	DC.B	' '
+	DC.B	37
+	DC.B	'n'
+	DC.B	10
+	DC.B	'Base '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'X8 '
+	DC.B	40
+	DC.B	'bytes'
+	DC.B	41,10
+	DC.B	'size '
+	DC.B	61
+	DC.B	' '
+	DC.B	37
+	DC.B	'X8 '
+	DC.B	40
+	DC.B	'bytes'
+	DC.B	41,10,0
+* ALLOCATIONS FOR _hunkinfo
+*	D4	_size
+*	D5	_base
+*	A4	_num
+*	D6	_hname
+*	A3	_pu
+*	D2	_file
+*	8(FP)	_hunk
+	CODE
+	XDEF	_F002E_writepuname
+_F002E_writepuname:
+.L577:
+	MOVEM.L	D2/D3/D4/D5,-(SP)
+.L579:
+	MOVE.L	20(A7),D1
+.L576:
+	MOVE.L	D1,A0
+	MOVEQ	#20,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D4
+	MOVE.L	D1,A0
+	MOVEQ	#24,D0
+	ADDA.L	D0,A0
+	MOVE.L	(A0),D5
+	TST.L	D4
+	BNE.S	.L575
+.L570:
+	PEA	.L578
+*			STACK OFFSET 4
+	JSR	_writes
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+	BRA.S	.L569
+.L575:
+	MOVEQ	#0,D3
+	BRA.S	.L574
+.L572:
+	MOVE.L	D3,A0
+	ADDA.L	D5,A0
+	MOVE.B	(A0),D2
+	EXT.W	D2
+	EXT.L	D2
+	MOVE.L	D2,-(SP)
+*			STACK OFFSET 4
+	JSR	_wrch
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L571:
+	ADDQ.L	#1,D3
+.L574:
+	MOVE.L	D4,D0
+	SUBQ.L	#1,D0
+	CMP.L	D0,D3
+	BLE	.L572
+.L569:
+	PEA	10
+*			STACK OFFSET 4
+	JSR	_wrch
+*			STACK OFFSET 0
+	ADDQ.L	#4,SP
+.L568:
+	MOVEM.L	(SP)+,D2/D3/D4/D5
+	RTS	
+	DATA
+.L578:	DC.B	4
+	DC.B	'None'
+	DC.B	0
+* ALLOCATIONS FOR _F002E_writepuname
+*	D4	_len
+*	D5	_name
+*	D3	_i
+*	8(FP)	_pu
+	CODE
+	XDEF	_swap
+_swap:
+.L582:
+	LINK	A6,#-4
+.L583:
+	MOVE.L	8(A6),A0
+.L581:
+	MOVE.B	3(A0),-4(A6)
+	MOVE.B	2(A0),-3(A6)
+	MOVE.B	1(A0),-2(A6)
+	MOVE.B	(A0),-1(A6)
+	MOVE.L	-4(A6),D0
+.L580:
+	UNLK	A6
+	RTS	
+	DATA
+* ALLOCATIONS FOR _swap
+*	0(FP)	_temp
+*	8(FP)	_val
+	CODE
+	DATA
+	XREF	lmodt
+	XREF	_findinput
+	XREF	_findoutput
+	XREF	_getvec
+	XREF	_output
+	XREF	_readwords
+	XREF	_writewords
+	XREF	_F0000_initialise_and_read_arguments
+	XREF	_F002F_dop1
+	XREF	_F0033_pass1_read_hunk
+	XREF	_F0048_o_map_and_xref
+	XREF	_F0052_dop2
+	XREF	_from_file
+	XREF	_to_file
+	XREF	_sysprint
+	XREF	_verstream
+	XREF	_fromstream
+	XREF	_tostream
+	XREF	_withstream
+	XREF	_mapstream
+	XREF	_xrefstream
+	XREF	_conthunk
+	XREF	_overlaying
+	XREF	_xrefing
+	XREF	_pass1
+	XREF	_pass2
+	XREF	_loading_ovly_supervisor
+	XREF	_hunkname
+	XREF	_vector_chain
+	XREF	_work_vector
+	XREF	_heapptr
+	XREF	_free_reference_chain
+	XREF	_free_symbol_chain
+	XREF	_pu_current
+	XREF	_e_hunklist
+	XREF	_e_completelist
+	XREF	_i_buffer
+	XREF	_o_buffer
+	XREF	_symbol_table
+	XREF	_rcode
+	XREF	_mark
+	XREF	_filemark
+	XREF	_resident_hunk_count
+	XREF	_max_total_size
+	XREF	_max_level
+	XREF	_pos_in_pu
+	XREF	_i_ptr
+	XREF	_i_end
+	XREF	_o_ptr
+	XREF	_myresult2
+	XREF	_simplepoint
+	XREF	_dummyfree
+	XREF	_selectoutput
+	XREF	_endwrite
+	XREF	_writef
+	XREF	_writes
+	XREF	_newline
+	XREF	_freevec
+	XREF	_selectinput
+	XREF	_endread
+	XREF	_stop
+	XREF	_abs
+	XREF	_wrch
+	XREF	_mypointword
+* ALLOCATIONS FOR MODULE
+*	IMPORT	_wrch_fn
+*	IMPORT	_rdch_fn
+*	IMPORT	_unrdch_fn
+*	IMPORT	_result2
+*	IMPORT	_from_file
+*	IMPORT	_to_file
+*	IMPORT	_with_file
+*	IMPORT	_map_file
+*	IMPORT	_xref_file
+*	IMPORT	_width_string
+*	IMPORT	_sysprint
+*	IMPORT	_verstream
+*	IMPORT	_fromstream
+*	IMPORT	_tostream
+*	IMPORT	_withstream
+*	IMPORT	_mapstream
+*	IMPORT	_xrefstream
+*	IMPORT	_conthunk
+*	IMPORT	_any_relocatable_symbols
+*	IMPORT	_overlaying
+*	IMPORT	_mapping
+*	IMPORT	_xrefing
+*	IMPORT	_root_given
+*	IMPORT	_lib_given
+*	IMPORT	_ovly_given
+*	IMPORT	_pass1
+*	IMPORT	_pass2
+*	IMPORT	_mangled
+*	IMPORT	_loading_ovly_supervisor
+*	IMPORT	_root_files
+*	IMPORT	_lib_files
+*	IMPORT	_hunkname
+*	IMPORT	_vector_chain
+*	IMPORT	_work_vector
+*	IMPORT	_heapptr
+*	IMPORT	_free_reference_chain
+*	IMPORT	_free_symbol_chain
+*	IMPORT	_pulist
+*	IMPORT	_pu_current
+*	IMPORT	_currentfile
+*	IMPORT	_hunklist
+*	IMPORT	_e_hunklist
+*	IMPORT	_completelist
+*	IMPORT	_e_completelist
+*	IMPORT	_rootliste
+*	IMPORT	_commonlistptr
+*	IMPORT	_ovly_tree
+*	IMPORT	_ovly_symbol_table
+*	IMPORT	_i_buffer
+*	IMPORT	_o_buffer
+*	IMPORT	_symbol_table
+*	IMPORT	_width
+*	IMPORT	_line_number
+*	IMPORT	_rcode
+*	IMPORT	_mark
+*	IMPORT	_filemark
+*	IMPORT	_root_hunk_count
+*	IMPORT	_resident_hunk_count
+*	IMPORT	_comm_count
+*	IMPORT	_max_hunk_number
+*	IMPORT	_max_total_size
+*	IMPORT	_max_level
+*	IMPORT	_lib_count
+*	IMPORT	_total_root_count
+*	IMPORT	_pos_in_pu
+*	IMPORT	_refcount
+*	IMPORT	_ovly_count
+*	IMPORT	_i_ptr
+*	IMPORT	_i_end
+*	IMPORT	_o_ptr
+*	IMPORT	_freehunkchain
+*	IMPORT	_myresult2
+*	IMPORT	_simplepoint
+*	IMPORT	_gcodevec
+*	IMPORT	_maxsize
+*	IMPORT	_dummyfree
+	CODE
+	END

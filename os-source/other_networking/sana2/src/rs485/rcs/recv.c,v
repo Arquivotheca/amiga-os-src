@@ -1,0 +1,532 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    kcd:1.7; strict;
+comment  @ * @;
+
+
+1.7
+date     91.12.30.18.33.30;  author dlarson;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.12.13.11.52.53;  author dlarson;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.12.03.14.28.52;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.12.03.14.05.18;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.27.15.49.03;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.11.19.09.50.09;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.21.15.41.53;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Original snapshot from Ameristar
+@
+
+
+1.7
+log
+@Includes various optimizations and the long packet Christmas fix.  Probably
+last working version before enhancements and Novell "ARCNET Packet Header
+Definition Standard."
+@
+text
+@/*
+** recv() - read incoming packet out of packet buffer, match with with pending
+**	    read/readorphan request.  This function is called by the listener
+**	    task, as well as startxmit to echo packets to local readers.
+*/
+
+#ifndef RS485_H
+#include "rs485.h"
+#endif
+
+
+void recv(struct rs485Unit *up, int bn)
+{
+unsigned int count, offset;
+struct IOSana2Req *iob, *oiob;
+struct TrackedType *ttp, tp;
+struct pkthdr ph;
+int tlength;
+ULONG type;
+
+/*
+**  pull header off interface into struct pkthdr
+*/
+DPRINT(("Recv called!!!\n"));
+	ADDRH(up) = (bn << 1) | ADH_AUTOINC | ADH_RDDATA;
+	ADDRL(up) = 0;
+	ph.sid = DATA(up);
+	ph.did = DATA(up);
+	offset = DATA(up);
+	if(offset == 0)
+	{
+		/* long packet */
+		offset = DATA(up);
+		count = 512 - offset;
+DPRINT(("long packet -- offset=%ld, count=%ld.\n", (long)offset, (long)count));
+	} else
+	{
+		count = 256 - offset;
+	}
+	ADDRL(up) = offset;
+	ph.type[0] = DATA(up);
+	tlength = 1;
+	type = (ULONG) ph.type[0];
+	if(TWOBYTECODE(&ph))
+	{
+		tlength = 2;
+		ph.type[1] = DATA(up);
+		type = *(UWORD *)ph.type;
+DPRINT(("I might have the type backwards...\n"));
+	}
+	count -= tlength;
+
+DPRINT(("Count=%ld  tlength=%ld  offset=%ld type=%ld\n", count, tlength, offset, (long)ph.type[0]));
+
+/*
+**  find stats buffer, if any
+*/
+	ttp = 0;
+	if(!ISEMPTY(&up->trackedtype))
+	{
+		ttp = findtracked(up, type);
+	}
+	if(!ttp)
+	{
+		ttp = &tp; /* null stats buffer */
+	}
+/*
+**  search queued requests; pull iob that wants this packet
+*/
+	oiob = 0;
+	FORALL(&up->read_q, iob, struct IOSana2Req *)
+	{
+		if(iob->ios2_Req.io_Command == S2_READORPHAN)
+		{
+			if(!oiob)
+			{
+				oiob = iob;
+			}
+			continue;
+		}
+		if(iob->ios2_PacketType == type)
+		{
+			break;
+		}
+	}
+	if(!iob->ios2_Req.io_Message.mn_Node.ln_Succ)
+	{
+		up->stats.UnknownTypesReceived++;
+		if(!oiob)
+		{
+			ttp->stats.PacketsDropped++;
+DPRINT(("bailing because type %ld has no queued requests.\n", type));
+			return;
+		}
+		iob = oiob;
+	}
+	Remove(&iob->ios2_Req.io_Message.mn_Node);
+/*
+**  Adjust things for raw
+*/
+	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW)
+	{
+DPRINT(("Eat it RAW!!!\n"));
+		ADDRL(up) = 0;
+		if(count > 253)
+		{
+			count = 512;
+DPRINT(("Long packet.\n"));
+		} else
+		{
+			count = 256;
+		}
+	}
+	iob->ios2_DataLength = count;
+/*
+** push packet data field into iob
+*/
+	copyin(&DATA(up), UNIT(iob)->temp[bn], iob->ios2_DataLength);
+DPRINT(("copyin'd (%s) %ld\n", UNIT(iob)->temp[bn], iob->ios2_DataLength));
+	CopyToBuff(iob->ios2_Data, UNIT(iob)->temp[bn], iob->ios2_DataLength);
+/*
+**  update iob fields to reflect transaction
+*/
+	iob->ios2_SrcAddr[0] = ph.sid;
+	iob->ios2_DstAddr[0] = ph.did;
+	if(ph.did == BROADCASTADDR)
+	{
+		iob->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+	}
+	iob->ios2_Req.io_Flags &= ~SANA2IOF_MCAST;
+/*
+**  update stats, set flags to reflect packet type
+*/
+	ttp->stats.BytesReceived += iob->ios2_DataLength;
+	ttp->stats.PacketsReceived++;
+	up->stats.PacketsReceived++;
+/*
+**  reply to message
+*/
+reply:	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR)
+	{
+		ttp->stats.PacketsDropped++;
+	}
+	ReplyMsg(&iob->ios2_Req.io_Message);
+DPRINT(("recv() exiting in civilized fashion (%s)\n", UNIT(iob)->temp[bn]));
+DPRINT(("DataLength=%ld SrcAddr=%ld  DstAddr=%ld\n", iob->ios2_DataLength,
+(long)iob->ios2_SrcAddr[0], (long)iob->ios2_DstAddr[0]));
+}
+@
+
+
+1.6
+log
+@raw reads and writes work now.
+@
+text
+@d24 1
+a24 1
+KPrintF("Recv called!!!\n");
+d35 1
+a35 1
+KPrintF("long packet -- offset=%ld, count=%ld.\n", (long)offset, (long)count);
+d49 1
+a49 1
+KPrintF("I might have the type backwards...\n");
+d53 1
+a53 1
+KPrintF("Count=%ld  tlength=%ld  offset=%ld type=%ld\n", count, tlength, offset, (long)ph.type[0]);
+d92 1
+a92 1
+KPrintF("bailing because type %ld has no queued requests.\n", type);
+d103 1
+a103 1
+KPrintF("Eat it RAW!!!\n");
+d108 1
+a108 1
+KPrintF("Long packet.\n");
+d119 1
+a119 1
+KPrintF("copyin'd (%s) %ld\n", UNIT(iob)->temp[bn], iob->ios2_DataLength);
+d145 3
+a147 3
+KPrintF("recv() exiting in civilized fashion (%s)\n", UNIT(iob)->temp[bn]);
+KPrintF("DataLength=%ld SrcAddr=%ld  DstAddr=%ld\n", iob->ios2_DataLength,
+(long)iob->ios2_SrcAddr[0], (long)iob->ios2_DstAddr[0]);
+@
+
+
+1.5
+log
+@doesn't print debugging messages...  (bad programmer)
+@
+text
+@d99 1
+a99 1
+**  prepare iob to receive data from this packet
+a100 1
+	iob->ios2_DataLength = count;
+d104 9
+a112 1
+		iob->ios2_DataLength += tlength + 2;
+d114 1
+a114 10
+/*
+**  push header into iob if SANA2IOF_RAW request
+*/
+	offset = 0;
+	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW)
+	{
+KPrintF("Eat it RAW!!!\n");
+		offset = tlength + 2;
+		memcpy(UNIT(iob)->temp[bn], &ph, offset)
+	}
+d118 1
+a118 1
+	copyin(&DATA(up), UNIT(iob)->temp[bn]+offset, iob->ios2_DataLength);
+a119 1
+	iob->ios2_DataLength += offset;
+a120 1
+//	CopyToBuff(UNIT(iob)->temp[bn], iob->ios2_Data, iob->ios2_DataLength);
+@
+
+
+1.4
+log
+@Fixed online/offline/onevent.
+@
+text
+@@
+
+
+1.3
+log
+@First version which works with inet.library!!!
+@
+text
+@d35 1
+@
+
+
+1.2
+log
+@Getting it up to current spec...
+@
+text
+@a0 1
+
+d2 4
+a5 4
+ * recv() - read incoming packet out of packet buffer, match with with pending
+ *	    read/readorphan request.  This function is called by the listener
+ *	    task, as well as startxmit to echo packets to local readers.
+ */
+d7 2
+a8 2
+#ifndef AMIGANET_H
+#include "amiganet.h"
+a10 5
+/*
+ * Macro used to match packet types.  Parked up here to make the FORALL() code
+ * a lot easier to read
+ */
+#define SPT(p) ((p)->ios2_PacketType)
+d12 1
+a12 15
+#define MATCH(iob, spt)								  \
+   	(SPT(iob)->Match[0] == spt.Match[0] 					  \
+        && SPT(iob)->Length == spt.Length					  \
+        && (spt.Length==1 || (spt.Length==2 && SPT(iob)->Match[1]==spt.Match[1])) \
+	&& SPT(iob)->Magic == spt.Magic)
+void recv(up, bn)
+	struct AmiganetUnit *up;
+	int bn;
+{
+	;
+}
+#if 0
+void recv(up, bn)
+	struct AmiganetUnit *up;
+	int bn;
+d14 6
+a19 6
+	unsigned int count, offset, n;
+	struct IOSana2Req *iob, *oiob;
+	struct TrackedType *ttp, tp;
+	struct NetBuffSegment *nsp;
+	struct Sana2PacketType spt;
+	struct pkthdr ph;
+d21 4
+a24 1
+	/* pull header off interface into struct pkthdr */
+d30 3
+a32 1
+	if(offset == 0){	/* long packet */
+d35 2
+a36 1
+	} else {
+d41 5
+a45 2
+	spt.Length = 1;
+	if(TWOBYTECODE(&ph)){
+d47 2
+a48 1
+		spt.Length = 2;
+d50 1
+a50 1
+	count -= spt.Length;
+d52 1
+a52 5
+	/* build packet type struct to match incoming with iob */
+	spt.CanonicalType = 0;
+	spt.Magic = S2MAGIC_ARCNET;
+	spt.Match = ph.type;
+	spt.Mask = 0;
+d54 3
+a56 1
+	/* find stats buffer, if any */
+d58 3
+a60 2
+	if(!ISEMPTY(&up->trackedtype)){
+		ttp = findtracked(up, &spt);
+d62 2
+a63 1
+	if(!ttp){
+d66 3
+a68 2
+
+	/* search queued requests; pull iob that wants this packet */
+d70 6
+a75 3
+	FORALL(&up->read_q, iob, struct IOSana2Req *){
+		if(iob->ios2_Req.io_Command == S2_READORPHAN){
+			if(!oiob){
+d80 2
+a81 2
+
+		if(MATCH(iob, spt)){
+d85 5
+a89 3
+	if(!iob->ios2_Req.io_Message.mn_Node.ln_Succ){
+		up->stats.unknown_types_received++;
+		if(!oiob){
+d91 1
+d97 3
+a99 2
+
+	/* prepare iob to receive data from this packet */
+d101 4
+a104 2
+	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW){
+		iob->ios2_DataLength += spt.Length + 2;
+d106 3
+a108 7
+	if(ReadyNetBuff(&iob->ios2_Body, iob->ios2_DataLength)){
+		iob->ios2_Req.io_Error = S2ERR_SOFTWARE;
+		iob->ios2_WireError = S2WERR_NETBUFF_ERROR;
+		goto reply;
+	}
+
+	/* push header into iob if SANA2IOF_RAW request */
+d110 5
+a114 7
+	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW){
+		if(CopyToNetBuff(&iob->ios2_Body, 0, (UBYTE *)&ph, spt.Length+2)){
+			iob->ios2_Req.io_Error = S2ERR_SOFTWARE;
+			iob->ios2_WireError = S2WERR_NETBUFF_ERROR;
+			goto reply;
+		}
+		offset = spt.Length + 2;
+d116 11
+a126 23
+
+	/* push packet data field into iob */
+	nsp = (struct NetBuffSegment *)iob->ios2_Body.List.mlh_Head;
+	while(count != 0){
+		if(!nsp->Node.mln_Succ){
+			break;
+		}
+
+		if(nsp->DataCount <= offset){
+			offset -= nsp->DataCount;
+			nsp = (struct NetBuffSegment *)nsp->Node.mln_Succ;
+			continue;
+		}
+
+		n = min(count, nsp->DataCount - offset);
+		copyin(&DATA(up), nsp->Buffer+nsp->DataOffset+offset, n);
+		count -= n;
+		offset = 0;
+
+		nsp = (struct NetBuffSegment *)nsp->Node.mln_Succ;
+	}
+
+	/* update iob fields to reflect transaction */
+d129 2
+a130 1
+	if(ph.did == BROADCASTADDR){
+d134 3
+a136 2
+
+	/* update stats, set flags to reflect packet type */
+d139 6
+a144 4
+	up->stats.packets_received++;
+
+	/* reply to message */
+reply:	if(iob->ios2_Req.io_Error != S2ERR_NO_ERROR){
+d148 3
+a151 1
+#endif
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ *	    read/readorphan request.  This function is called by the listener 
+d16 1
+a16 1
+#define SPT(p) ((p)->S2io_PacketType)
+d23 7
+a29 1
+
+d80 1
+a80 1
+		if(iob->S2io_Command == SANA2CMD_READORPHAN){
+d91 1
+a91 1
+	if(!iob->S2io_Message.mn_Node.ln_Succ){
+d99 1
+a99 1
+	Remove(&iob->S2io_Message.mn_Node);
+d102 3
+a104 3
+	iob->S2io_DataLength = count;
+	if(iob->S2io_Flags & SANA2IOF_RAW){
+		iob->S2io_DataLength += spt.Length + 2;
+d106 3
+a108 3
+	if(ReadyNetBuff(&iob->S2io_Body, iob->S2io_DataLength)){
+		iob->S2io_Error = S2ERR_SOFTWARE;
+		iob->S2io_WireError = S2WERR_NETBUFF_ERROR;
+d114 4
+a117 4
+	if(iob->S2io_Flags & SANA2IOF_RAW){
+		if(CopyToNetBuff(&iob->S2io_Body, 0, (UBYTE *)&ph, spt.Length+2)){
+			iob->S2io_Error = S2ERR_SOFTWARE;
+			iob->S2io_WireError = S2WERR_NETBUFF_ERROR;
+d124 1
+a124 1
+	nsp = (struct NetBuffSegment *)iob->S2io_Body.List.mlh_Head;
+d145 2
+a146 2
+	iob->S2io_SrcAddr[0] = ph.sid;
+	iob->S2io_DstAddr[0] = ph.did;
+d148 1
+a148 1
+		iob->S2io_Flags |= SANA2IOF_BCAST;
+d150 1
+a150 1
+	iob->S2io_Flags &= ~SANA2IOF_MCAST;
+d153 1
+a153 1
+	ttp->stats.BytesReceived += iob->S2io_DataLength;
+d158 1
+a158 1
+reply:	if(iob->S2io_Error != S2ERR_NO_ERROR){
+d161 1
+a161 1
+	ReplyMsg(&iob->S2io_Message);
+d163 1
+@

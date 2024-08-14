@@ -1,0 +1,179 @@
+ISM is the Intuition State Machine.  In the middle of 2.0 development,
+Jimm replaced the old state-machine (which was very ugly) with a much
+improved cleaner one.  In the new scheme, it's much easier to figure
+out what the behavior will be in any particular situation, and where
+to go to fix a bug.
+
+The structure:
+
+The basic unit of transaction for the state-machine is called an
+InputToken.  It's not unlike a device IORequest.  Here are some
+examples of InputToken (see ism.h for all of them):
+
+	itMOUSEMOVE:	from an input.device mouse motion
+	itACTIVATEGAD:  activate the specified gadget
+	itCLOSESCREEN:	close the specified screen
+
+As can be seen, certain tokens are slightly massaged input events.
+Many other tokens are used to sequence and single-thread core
+Intuition requests.
+
+Tokens may be submitted synchronously (via doISM()), or asynchronously
+(via sendISM()).  Normally, the calling task is used to run the token.
+However, if the processing of a token can't be completed immediately
+(typically, certain tokens are deferred in certain states (for example,
+the request to open a screen is deferred if another screen is being
+dragged), the token is placed on a "deferred queue".  The calling
+task either blocks (if doISM()) or continues (if sendISM()).
+
+Intuition itself doesn't have a task, but the input.device tasks makes
+a good substitute.  Input.device calls Intuition with every input
+event.  In an idle system, this typically includes little else than
+IECLASS_TIMER events, which happen ten times a second.  In an active
+system, there may be keystrokes and mouse moves (IECLASS_RAWMOUSE
+events normally happen no faster than VBlank.)  That's why they say
+Intuition typically runs from 10-60 times per second.
+
+One of the things that Intuition does when input.device wakes it up is
+to take all the deferred tokens and attempt to run them through the
+state machine again, until they're acted upon, or discarded.  Tokens
+can continue to be deferred.
+
+An important consequence of this is that the task that actually carries
+out the token's work may be the caller's, or it may be the input.device
+task.  This has important implications on where allocations must be
+done (think of a task signal bit for example).  That's why in
+OpenScreen() you see code structured like:
+
+	perform all allocations and initializations
+	doISM( itOPENSCREEN ) (eventually gets to the IOpenScreen function)
+		IOpenScreen - links screen into system and return
+	clean up and return to caller
+
+So where are the token-handling functions?
+
+ism.c contains the various token dispatch and cleanup functions such
+as doISM(), sendISM(), beginToken(), dispatchToken(), etc.
+
+dispatchToken() looks at Intuition's current state and calls the
+handler for that state, passing the token.  The Intuition states
+are:
+
+State:		sNoWindow
+Meaning:	System has no open windows.
+Handler:	snowindow.c/dNoWindow()
+
+State:		sIdleWindow
+Meaning:	System has one or more windows, nothing unusual happening.
+Handler:	sidlewindow.c/dIdleWindow()
+
+State:		sGadget
+Meaning:	A gadget is active (either the user is holding a button/prop,
+		or a string gadget is sitting active -- boopsi gadgets can be
+		like either model)
+Handler:	sgadget.c/dGadget()
+
+State:		sWSizeDrag
+Meaning:	User is sizing or dragging a window (draggy-boxes on screen).
+Handler:	swsizedrag.c/dWSizeDrag().
+
+State:		sScreenDrag
+Meaning:	User is dragging a screen (by drag bar or through Amiga-drag).
+		Programmatic MoveScreen() does NOT cause a state transition.
+Handler:	sscreendrag.c/dScreenDrag().
+
+State:		sMenu
+Meaning:	User is accessing menus.  Menu-keystrokes do pass through here.
+Handler:	smenu.c/dMenu()
+
+State:		sRequester
+Meaning:	The active window contains one or more requesters.
+Handler:	srequester.c/dRequester().
+
+State:		sVerify
+Meaning:	System is waiting to resolve an IDCMP_xxxVERIFY situation.
+Handler:	dverify.c/dVerify()
+
+State:		sDMRTimeout
+Meaning:	System is waiting for the timeout between menu clicks to see
+		whether to bring up a double-menu requester.
+Handler:	sdmrtimeout.c/dDMRTimeout().
+
+There's another function which looks like one of these dispatchers,
+and it's isdefault.c/doDefault().  This function handles the "default"
+behavior for each token.  There's no strict rule for what constitutes
+a default behavior, but it's usually the one that applies in the
+majority of states.
+
+Let's look at a few state-actions:
+
+If in idle-window state, we get a menu-button up event, all we want
+to do is send that event along.  Thus, the code in sidlewindow.c
+shows:
+
+    case itMENUUP:	/* send event */
+	activeEvent( IECLASS_RAWMOUSE, IECODE_RBUTTON | IECODE_UP_PREFIX );
+	return;
+
+How about a menu-button down event?  Well, if the window has RMBTRAP,
+then just send along the MENUDOWN input event, else begin menu state
+(which takes care of windows with no menus, etc.) (NB:  I've removed
+menu-lending code to simplify the example).
+
+    case itMENUDOWN:	/* send event or start menus */
+	if ( TESTFLAG( IBase->ActiveWindow->Flags, RMBTRAP ) )
+	{
+	    activeEvent( IECLASS_RAWMOUSE, MENUDOWN );
+	}
+	else
+	{
+	    startMenu();
+	}
+	return;
+
+(NB: activeEvent() sends the specified event class/code to the active
+window.  The event may appear as an input event or an IDCMP event,
+and this is handled later).
+
+State transitions are achieved by calling a startState() function for
+that state (e.g., startMenu()).  Those functions handle certain
+decisions and initializations that need to be done before entering the
+state.  For example, startIdleWindow() checks to see whether the
+specified window has a requester up.  If so, it calls
+startRequester(), since we need to be in requester state.
+
+In fact, startIdleWindow() is one of the more interesting startXXX()
+functions since all mouse clicks are handled here (since any click
+has the potential to change the active window).  This means that
+this function detects clicks on a window, checks if that window
+has a requester (forcing us to requester-state), checks if the
+click was over a gadget (taking us to gadget-state), etc.
+
+
+
+Simpler or more germane code to handle a particular case tends to be
+in-lined in each state's dispatcher's case statement.  More complex
+code, code that needs to be repeated, or code which is better grouped
+by topic (e.g.  screens, windows) than by state tends to be broken out
+into functions.  Usually, a function to handle the state-machine
+synchronous part of a token has a similar name beginning with "I".
+For example, the itOPENSCREEN token calls IOpenScreen() during
+normal handling.
+
+Each "case" statement of each dispatcher has a short comment beside it.
+This means you can do useful searching to query the behavior.  In
+Unix, you can type "grep 'case itMENUDOWN' *.c" and get:
+
+sdmrtimeout.c:    case itMENUDOWN:      /* Do DMR */
+sgadget.c:    case itMENUDOWN:  /* let gadget hear it */
+sidlewindow.c:    case itMENUDOWN:      /* lend menus, send event or start menus */
+smenu.c:    case itMENUDOWN:    /* shouldn't happen     */
+snowindow.c:    case itMENUDOWN:        /* do default */
+srequester.c:    case itMENUDOWN:       /* pass input if NOISYREQ */
+sscreendrag.c:    case itMENUDOWN:      /* do default */
+sverify.c:    case itMENUDOWN:  /* do default */
+swsizedrag.c:    case itMENUDOWN:       /* done, erase frame */
+isdefault.c:    case itMENUDOWN:        /* skip */
+
+Which is a pretty good summary of the actions triggered by a downpress
+of the menu button, depending on Intuition's state.

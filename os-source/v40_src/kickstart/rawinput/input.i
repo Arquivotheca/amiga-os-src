@@ -1,0 +1,27 @@
+	IFND	DEVICES_INPUT_I
+DEVICES_INPUT_I SET	1
+**
+**	$Id: input.i,v 36.0 90/05/01 11:16:04 kodiak Exp $
+**
+**	input device command definitions 
+**
+**	(C) Copyright 1985,1986,1987,1988 Commodore-Amiga, Inc.
+**	    All Rights Reserved
+**
+
+   IFND	    EXEC_IO_I
+   INCLUDE     "exec/io.i"
+   ENDC
+
+   DEVINIT
+
+   DEVCMD	IND_ADDHANDLER
+   DEVCMD	IND_REMHANDLER
+   DEVCMD	IND_WRITEEVENT
+   DEVCMD	IND_SETTHRESH
+   DEVCMD	IND_SETPERIOD
+   DEVCMD	IND_SETMPORT
+   DEVCMD	IND_SETMTYPE
+   DEVCMD	IND_SETMTRIG
+
+	ENDC	; DEVICES_INPUT_I

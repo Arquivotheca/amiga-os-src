@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	7
+DATE	MACRO
+		dc.b	'16.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'disk 1.7'
+	ENDM
+VSTRING	MACRO
+		dc.b	'disk 1.7 (16.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: disk 1.7 (16.2.94)',0
+	ENDM

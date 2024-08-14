@@ -1,0 +1,312 @@
+head     36.2;
+branch   ;
+access   ;
+symbols  V37_10:36.2 V37_9:36.2 V37_7:36.2 V37_6:36.2 V37_5:36.2 V37_4:36.2 V37_3:36.2 V37_2:36.2 V37_1:36.2 V36_9:36.2 V36_7:36.1 V36_5:36.0 L33_4:32.1 L33_3:32.1 L33_2:32.1 L32_1:1.1;
+locks    ; strict;
+comment  @* @;
+
+
+36.2
+date     90.08.29.17.50.43;  author mks;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.05.17.16.33.59;  author kodiak;  state Exp;
+branches ;
+next     36.0;
+
+36.0
+date     89.01.06.18.00.49;  author kodiak;  state Exp;
+branches ;
+next     32.1;
+
+32.1
+date     86.01.14.21.22.08;  author sam;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     86.01.14.20.30.12;  author sam;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@placed under source control
+@
+
+
+36.2
+log
+@Changed revision to 36...  Change ownership to MKS...
+Changed $Header to $Id
+@
+text
+@/*********************************************************************
+*                                                                    *
+*   Copyright 1986, Commodore-Amiga Inc.   All rights reserved.      *
+*   No part of this program may be reproduced, transmitted,          *
+*   transcribed, stored in retrieval system, or translated into      *
+*   any language or computer language, in any form or by any         *
+*   means, electronic, mechanical, magnetic, optical, chemical,      *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030                                     *
+*                                                                    *
+**********************************************************************
+*
+* $Id$
+*
+* $Locker: mks $
+*
+* $Log:	cdevice.c,v $
+* Revision 36.1  89/05/17  16:33:59  kodiak
+* fix Expunge
+*
+* Revision 36.0  89/01/06  18:00:49  kodiak
+* remove expunge capability for workbench version
+*
+* Revision 32.1  86/01/14  21:22:08  sam
+* revision set to 32
+*
+* Revision 1.1  86/01/14  20:30:12  sam
+* Initial revision
+*
+*
+*********************************************************************/
+
+#include "exec/types.h"
+#include "exec/lists.h"
+#include "exec/nodes.h"
+#include "exec/ports.h"
+#include "exec/io.h"
+#include "exec/libraries.h"
+#include "exec/interrupts.h"
+#include "exec/memory.h"
+#include "exec/errors.h"
+#include "hardware/custom.h"
+#include "hardware/intbits.h"
+#include "hardware/dmabits.h"
+#include "hardware/adkbits.h"
+#include "audio.h"
+#include "device.h"
+
+extern struct Interrupt *SetIntVector();
+extern VOID AudioInterrupt();
+extern VOID SoftInterrupt();
+extern TEXT *ADName;
+extern struct AudChannel aud[];
+extern UWORD adkcon;
+extern UWORD dmacon;
+extern UWORD intena;
+extern UWORD intenar;
+extern UWORD intreq;
+extern UWORD intreqr;
+
+UBYTE bitNum[] = { 0, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0 };
+
+/* functions */
+
+CADOpen(num, ioa, flags, ad)
+UWORD num;
+struct IOAudio *ioa;
+UWORD flags;
+struct AudioDevice *ad;
+{
+    ++(ad->ad_Library.lib_OpenCnt);
+    ioa->ioa_Request.io_Command = ADCMD_ALLOCATE;
+    ioa->ioa_Request.io_Flags = ADIOF_NOWAIT | IOF_QUICK;
+    BeginIO(ioa);
+    WaitIO(ioa);
+    ioa->ioa_Request.io_Flags = 0;
+    if (ioa->ioa_Request.io_Error)
+	CADClose(ioa, ad);
+    else
+	ad->ad_Flags &= ~ADDEVF_EXPUNGE;
+}
+
+CADClose(ioa, ad)
+struct IOAudio *ioa;
+struct AudioDevice *ad;
+{
+    UBYTE saveCommand, saveFlags, saveError;
+    saveCommand = ioa->ioa_Request.io_Command;
+    saveFlags = ioa->ioa_Request.io_Flags;
+    saveError = ioa->ioa_Request.io_Error;
+    ioa->ioa_Request.io_Unit = (struct Unit *)((1 << ADHARD_CHANNELS) - 1);
+    ioa->ioa_Request.io_Command = ADCMD_FREE;
+    DoIO(ioa);
+    ioa->ioa_Request.io_Command = saveCommand;
+    ioa->ioa_Request.io_Flags = saveFlags;
+    ioa->ioa_Request.io_Error = saveError;
+    ioa->ioa_Request.io_Device = (struct Device *)-1;
+    if (!(--ad->ad_Library.lib_OpenCnt) && (ad->ad_Flags & ADDEVF_EXPUNGE))
+	return(CADExpunge(ad));
+    return(0);
+}
+
+CADExpunge(ad)
+struct AudioDevice *ad;
+{
+    if (ad->ad_Library.lib_OpenCnt) {
+	ad->ad_Flags |= ADDEVF_EXPUNGE;
+	return(0);
+    } {
+	struct AudioUnit *chan;
+	short i;
+
+	for (i = 0; i < ADHARD_CHANNELS; i++) {
+	    chan = ad->ad_Chan[1<<i];
+	    SetIntVector(chan->au_IntBit, chan->au_DefaultInterrupt);
+	}
+    } {
+	LONG segList;
+
+    	segList = ad->ad_SegList;
+	Remove(ad);
+	FreeMem((LONG)ad - ad->ad_Library.lib_NegSize,
+		ad->ad_Library.lib_NegSize + ad->ad_Library.lib_PosSize);
+	return(segList);
+    }
+}
+
+CADExtFunc()
+{
+}
+
+struct AudioDevice *CADInit(ad, segList)
+struct AudioDevice *ad;
+LONG segList;
+{
+    dmacon = DMAF_AUD0 | DMAF_AUD1 | DMAF_AUD2 | DMAF_AUD3;
+    ad->ad_SegList = segList;
+    NewList(&ad->ad_ReplyQueue);
+    NewList(&ad->ad_LockList);
+    NewList(&ad->ad_BackgroundList);
+    ad->ad_LevelPrec[0] = ADALLOC_MAXPREC;
+    ad->ad_SoftInterrupt.is_Node.ln_Type = NT_INTERRUPT;
+    ad->ad_SoftInterrupt.is_Node.ln_Name = &ADName;
+    ad->ad_SoftInterrupt.is_Data = (APTR)&ad->ad_ReplyQueue;
+    ad->ad_SoftInterrupt.is_Code = SoftInterrupt;
+    {
+	UWORD i;
+	struct AudioUnit *chan = ad->ad_Unit;
+	struct AudChannel *regs = aud;
+	WORD *allocKey = ad->ad_AllocKey;
+	WORD *prec = ad->ad_Prec;
+	for (i = 0; i < sizeof(bitNum); ++i) {
+	    ad->ad_Chan[i] = &ad->ad_Unit[bitNum[i]];
+	    if (i < ADHARD_CHANNELS) {
+		NewList(&chan->au_WriteQueue);
+		NewList(&chan->au_WaitList);
+		chan->au_AudioInterrupt.is_Node.ln_Type = NT_INTERRUPT;
+		chan->au_AudioInterrupt.is_Node.ln_Name = &ADName;
+		chan->au_AudioInterrupt.is_Data = (APTR)chan;
+		chan->au_AudioInterrupt.is_Code = AudioInterrupt;
+		chan->au_AudioDevice = ad;
+		chan->au_SoftInterrupt = &ad->ad_SoftInterrupt;
+		chan->au_ReplyQueueTail = &ad->ad_ReplyQueue.lh_Tail;
+		chan->au_IntFlag = (chan->au_ChanFlag =
+			1 << (chan->au_ChanBit = i)) << INTB_AUD0;
+		chan->au_DefaultInterrupt = SetIntVector(chan->au_IntBit =
+			INTB_AUD0 + i, &chan->au_AudioInterrupt);
+		*prec = ADALLOC_MINPREC - 1;
+		chan->au_Prec = prec++;
+		*allocKey = -1;
+		chan->au_AllocKey = allocKey++;
+		chan->au_Regs = regs++;
+		reset(chan++, ad);
+	    }
+	}
+	return(ad);
+    }
+}
+@
+
+
+36.1
+log
+@fix Expunge
+@
+text
+@d14 1
+a14 1
+* $Header: cdevice.c,v 36.0 89/01/06 18:00:49 kodiak Exp $
+d16 1
+a16 1
+* $Locker: kodiak $
+d19 3
+d24 1
+a24 1
+* 
+d27 1
+a27 1
+* 
+d30 1
+a30 1
+* 
+@
+
+
+36.0
+log
+@remove expunge capability for workbench version
+@
+text
+@d14 1
+a14 1
+* $Header: cdevice.c,v 32.1 86/01/14 21:22:08 sam Exp $
+d19 3
+d104 1
+a104 11
+    /*
+     * the audio.device never expunges,
+     * since it doesn't know if audio is outstanding
+     *
+     * if that sounds lame, how 'bout,
+     * since it doesn't work
+     *
+     * - Kodiak
+     */
+    return(0);
+    if (!ad->ad_Library.lib_OpenCnt) {
+d109 4
+a112 1
+	for (chan = ad->ad_Chan; chan < &ad->ad_Chan[ADHARD_CHANNELS]; ++chan)
+d114 1
+d117 1
+@
+
+
+32.1
+log
+@revision set to 32
+@
+text
+@d14 1
+a14 1
+* $Header: cdevice.c,v 1.1 86/01/14 20:30:12 sam Exp $
+d16 1
+a16 1
+* $Locker: sam $
+d19 3
+d101 10
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d14 1
+a14 1
+* $Header$
+d16 1
+a16 1
+* $Locker$
+d18 4
+a21 1
+* $Log$
+@

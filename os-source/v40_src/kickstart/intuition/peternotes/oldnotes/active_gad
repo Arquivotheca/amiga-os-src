@@ -1,0 +1,216 @@
+
+	Notes on handing off boopsi gadgets
+	from discussions Nov 13, 1990,
+	peter, davidj, jimm
+
+Topics to cover:
+
+    "Handing off" activation between boopsi gadgets, 
+    specifically, among string gadgets components of
+    a TextForm class.
+
+    Other uses of gadgets "sending a deferred message",
+    to be explored.
+
+    Other activation issues in groups:
+	"graphic equalizer" model
+	keyboard driven menu list, enter
+
+    Replacing public class
+
+    Layout, Relayout
+
+    Disabled gadget ghosting (IDS_DISABLED not passed through)
+
+Handoff Activation
+    Framework: there is a text form object (TF) which
+    maintains a list of string gadgets.
+
+    Possibilities for HANDLEINPUT, when "tab" is heard:
+    1) String gadgets says "me no active", and TF activates
+      the correct next gadget
+    2) The TF sniffs out tabs, tells the string "you no active"
+      and activates the next gadget
+    3) The string gadget calls "make next guy active" itself
+
+    Number 3) probably can't work, and number 1 allows the most
+    intelligence, if necessary, in the string gadgets themselves.
+
+    There must be both simple and fully flexible ways of cycling
+    activation among the string gadgets.  The simplest ways would
+    probably include using the text form group list order, but then
+    some more provisions would be helpful to ADDMEMBER gadgets
+    in the desired order.
+
+    The next gadget in list order can be determined easily by
+    either the string gadgets or the parent TF.
+
+    More flexible methods can include:
+    - "external bookkeeping", such as maintaining a separate list
+      (or matrix!) of nodes which contain pointers to the gadgets
+      in the form.
+
+    - "per gadget" bookkeeping, maintaining several pointers in
+      each gadget for tab, backtab, up arrow, down arrow.
+
+    - geometric determination (by TF) of the best gadget to the
+      right, above, below, ...
+
+Passing activation between members of different groups
+
+    We determined that we'd like to model the flow of control after
+    the method GM_HITTEST.  That is, once the "next active" contestant
+    is identified, then a new method GM_HANDOFFTEST would be passed
+    around to other gadgets in the text form, looking for the primitive
+    gadget which we want to activate.  The processing for primitive
+    gadgets would be simple.  The processing for gadget groups would
+    mirror the GM_HITTEST processing: propagated down to members,
+    depth-first.
+
+Implementation
+    It's always important to keep in mind that good solutions which do
+    not require changes in the Intuition ROM classes would be best now.
+
+Some late-night thoughts on the subject:
+
+    Breaking down the details of GM_HANDOFFTEST, we have the following
+    questions:
+
+    (1) How in the return value of GM_HANDLEINPUT does a gadget indicate
+        that it wants to handoff activation?
+	(possible answer: set new flag GMR_HANDOFF, in addition to
+	GMR_REUSE)
+     
+    (2) How is the handoff contestant specified?  There should be
+	both "easy and hard" ways of doing this (where "hard" means
+	"flexible").  (possible answer: specified using new pointer
+	added to HANDLEINPUT parameter packet.)
+
+    (3) How is the contestant searched for?  (see below for proposal)
+
+   It dawned on me that interlinking a huge matrix of gadgets *by pointer*
+   may be a daunting task.  Almost unavoidably, gadgets will want to
+   "link" to other gadgets which have not yet been created when
+   NewObject() is called.
+
+   At the time (late night) I thought it sounded like a Real Good Idea
+   to use id-tags rather than pointers to handoff activation.  That is
+   to say, a string gadget going inactive would indicate an ID of the
+   gadget it wants to activate next, call it a "handoff code", and
+   gadget lists would be searched to find a gadget with a matching
+   "handoff ID".  So, in effect, you hand off activation "by label"
+   not by pointer.
+
+    The parameter of GM_HANDOFFTEST would be the handoff code, and
+    the primitive implementation in the root GadgetClass would be
+    to return ( handoff_code == my_handoff_id );.  Code for group
+    gadgetclass would be:
+
+	for ( each member )
+	{
+	    if ( DoMethod( member, GM_HANDOFFTEST, handoff_code ) )
+		return ( TRUE );
+	}
+	return ( FALSE );
+
+    The search order for GM_HANDOFFTEST should be "siblings-first,
+    depth-first recursion with bubble-up."  ;^)  A picture really
+    helps, but the code for dealing with GMR_HANDOFF returned from
+    GM_HANDLEINPUT in the TextForm group gadget would be something
+    like this:
+
+    input_retval = DM( gg_Active, handleinputmsg );
+    if ( input_retval & GMR_HANDOFF )
+	handoff_code = getHandoffCode();	/* to be determined */
+    else
+	go do other stuff
+
+    /* this is "point A", see below, where we might want to GM_GOINACTIVE */
+
+    /* check *siblings* to gg_Active: don't recheck it	*/
+    for ( each member )		/* don't recheck gg_Active */
+    {
+	if ( member != gg_Active )	/* siblings, not self	*/
+	{
+	    result = DoMethod( member, GM_HANDOFFTEST, handoff_code );
+
+	    if ( result )
+	    {
+		DoMethod( gg_Active, GM_GOINACTIVE );
+		/* could have been above at "point A"	*/
+
+		goactivemsg =  (input_retval & GMR_REUSE )? handleinputmsg:0;
+		
+		/* ask sibling, which may pass it down to its members	*/
+		DoMethod( member, GM_GOACTIVE, goactivemsg );
+		gg_Active = member;
+		
+		/* keep activation change all in the family, tell
+		 * parent that we're still happily active
+		 */
+		return ( GMR_MEACTIVE );
+	    }
+	}
+    }
+    /* not handed off to sibling, so "bubble up" and
+     * our siblings will be checked.
+     */
+    return ( input_retval );
+
+Code for GM_HANDOFFTEST method in textform group:
+
+    for ( each member )
+    {
+	if ( DM( member, handoffmsg ) ) return ( TRUE );
+    }
+    return ( FALSE );
+
+New things needed for this scheme, and open questions:
+    GM_HANDOFFTEST method, groups and root gadgetclass
+    handoff_code passed back by string gadgets
+	(how determined, how passed back?)
+    handoff_id specified in gadgets (how?  GadgetID?)
+    textform group handling of GMR_HANDOFF, above.
+    Same group-style handling for Intuition, among main gadget list?
+    Buttons do GMR_HANDOFF? (buttons in file requester return activation
+    to the appropriate string gadgets)
+
+Models of handing off keyboard focus:
+    1) Text Form
+    2) file requester: always activate last string gadget
+    3) graphic equalizer (no handoff, just a real smart group)
+    4) Menus by keyboard
+    5) Hypercard (kind of pushing it now)
+    6) Timer gadgets, and state machine (really pushing it)
+
+How can fancy methods be implemented for groups, while still doing
+all the things that groupgadclass does?
+    layout of members, relative positions, and bounding box
+    propagate GMR_HITTEST
+
+Would like to be able to subclass groupgadclass, and be able to
+rework activation model, propagation of input and hittest.
+Should groupgadlist and gg_Active be "priveleged" in the C++ sense?
+
+Ways of specifying handoff links:
+
+Easy 1:
+    All siblings have the same handoff_id, 
+    sibling search is in list order *starting with gg_Active*
+    result is "list order" search for next gadget
+    list order can be manipulated in "auxilliary list" if you
+      augment GM_ADDTAIL with GM_INSERT (but you don't need to
+      also augment GM_ADDMEMBER with GM_INSERTMEMBER).
+    
+Easy 2:
+    NewObject( "stringgclass",
+	GA_HANDOFFID,	id,
+	GA_HANDOFFNEXT,	id + 1,
+	GA_HANDOFFPREV,	id - 1 );
+    id++;
+
+Smart-group links:
+    1) List order
+    2) geometric relationship (tab means "to the right")
+    3) external bookkeeping
+	

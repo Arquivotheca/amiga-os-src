@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'25.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'SetJoyPortAttrs 1.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'SetJoyPortAttrs 1.3 (25.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: SetJoyPortAttrs 1.3 (25.5.93)',0
+	ENDM

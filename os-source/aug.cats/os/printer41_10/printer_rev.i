@@ -1,0 +1,14 @@
+VERSION		EQU	41
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'8.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'printer 41.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'printer 41.10 (8.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: printer 41.10 (8.2.94)',0
+	ENDM

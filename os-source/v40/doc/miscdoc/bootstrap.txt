@@ -1,0 +1,181 @@
+Amiga BootStrap
+
+    At priority -40 in the system module initialization sequence, after
+    most other modules are initialized, appropriate expansion boards
+    are configured.  Appropriate boards will match a
+    FindConfigDev(, -1, -1) -- these are all boards on the expansion
+    library board list.  Furthermore, they will meet all of the
+    following conditions:
+
+	1.  CDB_CONFIGME set in cd_Flags,
+	2.  ERTB_DIAGVALID set in cd_Rom er_Type,
+	3.  diagnostic area pointer (in cd_Rom er_Reserved0c) is
+	    non-zero,
+	4.  DAC_CONFIGTIME set in da_Config, and
+	5.  at least one valid resident tag within the diagnostic area,
+	    the first of which is used by InitResident() below.  This
+	    resident structure was patched to be valid during the rom
+	    diagnostic routine run when the expansion library first
+	    initialized the board.
+
+    Boards meeting all these conditions are initialized with the
+    standard InitResident() mechanism, with a null seglist.  The board
+    initialization code can find it's ConfigDev structure with the
+    expansion library's GetCurrentBinding() function.  This is an
+    appropriate time for drivers to Enqueue() a boot node on the
+    expansion library's eb_MountList for use by the strap module below,
+    and clear CDB_CONFIGME so a BindDrivers command will not try to
+    initialize the board a second time.
+
+    This module will also enqueue nodes for 3.5" trackdisk.device
+    units.  These nodes will be at the following priorities:
+
+	pri	drive
+	---	-----
+	  5	df0:
+	-10	df1:
+	-20	df2:
+	-30	df3:
+
+
+    Next, at priority -60 in the system module initialization sequence,
+    the strap module is invoked.  Nodes from the prioritized
+    eb_MountList list is used in priority order in attempts to boot.
+    An item on the list is given a chance to boot via one of two
+    different mechanisms, depending on whether it it uses boot code
+    read in off the disk ("BootBlocks"), or uses boot code provided in
+    the device ConfigDev diagnostic area ("BootPoint").  Floppies
+    always use the BootBlocks.  Other entries put on the eb_MountList
+    (e.g. hard disk partitions) used the BootPoint mechanism for 1.3,
+    but can use either for 1.4.
+
+    The eb_MountList is modified before each boot attempt, and then
+    restored and re-modified for the next attempt if the boot fails:
+
+	1.  the node associated with the current boot attempt is
+	    placed at the head of the eb_MountList.
+	2.  nodes marked as unusable under AmigaDOS are removed from
+	    the list.  Nodes that are unusable are marked by the
+	    longword bn_DeviceNode->dn_Handler having the most
+	    significant bit set.  This is used, for example, to keep
+	    UNIX partitions off the AmigaDOS device list when booting
+	    AmigaDOS instead of UNIX.
+
+    The selection of which of the two different boot mechanisms
+    proceeds as follows:
+
+	1.  the node must be valid boot node, i.e. meet both of the
+	    following conditions:
+	    a.  ln_Type is NT_BOOTNODE,
+	    b.  bn_DeviceNode is non-zero,
+
+	2.  The type of boot is determined by looking at the DosEnvec
+	    pointed to by fssm_Environ pointed to by the dn_Startup in
+	    the bn_DeviceNode:
+	    a.  if the de_TableSize is less than DE_BOOTBLOCKS, or the
+		de_BootBlocks entry is zero, BootPoint booting is
+		specified, otherwise
+	    b.  de_BootBlocks contains the number of blocks to read
+		in from the beginning of the partition, checksum, and
+		try to boot from.
+    
+    For BootBlocks booting:
+	1.  The disk device must contain valid boot blocks:
+	    a.  the device and unit from dn_Startup opens successfully,
+	    b.  memory is available for the <de_BootBlocks> *
+		<de_SizeBlock> * 4 bytes of boot block code,
+	    c.  the device commands CMD_CLEAR, TD_CHANGENUM, and
+		CMD_READ of the boot blocks execute without error,
+	    d.  the boot blocks start with the three characters 'DOS'
+		and pass the longword checksum (with carry wraparound),
+		and
+	    e.  memory is available to construct a boot node on the
+		eb_MountList to describe the floppy.
+	    If a device error is reported in 1.c., or if memory is not
+	    available for 1.b. or 1.e., a recoverable alert is
+	    presented before continuing.
+	2.  The boot code in the boot blocks is invoked as follows:
+	    a.  The address of the entry point for the boot code is
+		offset BB_ENTRY into the boot blocks in memory.
+	    b.  The boot code is invoked with the IO Request used to
+		issue the device commands in 1.c. above in register
+		A1, with the io_Offset pointing to the beginning of
+		the partition (the origin of the boot blocks) and
+		SysBase in A6.
+	3.  The boot code returns with results in both D0 and A0.
+	    a.  Non-zero D0 indicates boot failure.  The recoverable
+		alert AN_BootError is presented before continuing.
+	    b.  Zero D0 indicates A0 contains a pointer to the function
+		to complete the boot.  This completion function is
+		chained to with SysBase in A6 after the strap module
+		frees all it's resources.  It is usually the dos
+		library initialization function, from the dos.library
+		resident tag.  Return from this function is identical
+		to return from the strap module itself.
+
+
+    For BootPoint booting:
+	1.  The eb_MountList node must contain a valid BootPoint:
+	    a.  ConfigDev pointer (in ln_Name) is non-zero,
+	    b.  diagnostic area pointer (in cd_Rom er_Reserved0c) is
+		non-zero,
+	    c.  DAC_CONFIGTIME set in da_Config.
+	2.  The boot routine of valid boot node is invoked as follows:
+	    a.  The address of the boot routine is calculated from
+		da_BootPoint.
+	    b.  The resulting boot routine is invoked with the
+		ConfigDev pointer on the stack in C fashion: i.e.
+		    (*boot)(configDev);
+		Moreover, register A2 will contain the address of
+		the associated eb_MountList node.
+	3.  Return from the boot routine indicates failure to boot.
+
+
+    If all entries fail to boot, the user is prompted to put a bootable
+    disk into a floppy drive with the "strap screen".  The BootBlocks
+    style devices are polled for new disks.  When one appears, the
+    "strap screen" is removed and the BootBlocks boot mechanism is
+    applied as described above.  The process of prompting and trying
+    continues till a successful boot occurs.
+
+    Note that if all entries falied to boot, typically only floppies
+    have BootBlocks.  Other devices which use BootPoint booting are not
+    polled for new disks.
+
+
+    Late note - new for (V37):
+
+    ExpansionBase has a new bit in the eb_Flags field; see libraries/
+    expansionbase.i/h.  This new bit is used to determine if opening of
+    the initial shell window should be delayed until the first output
+    to the shell.  If the bit (EBB_SILENTSTART) is set, opening
+    the initial shell window will be delayed.
+
+    By default, strap sets this bit for BootPoint booting, and clears
+    this bit for BootBlock booting.  Therefore BootBlock style
+    boot code has to open Expansion library, and explicitly set this
+    bit if silent startup is desired.
+
+Changes from 1.3
+----------------
+    The following modules have changed:
+	romboot          -- romboot is no longer an exec library:
+			    RomBoot() is no longer public.  A module at
+			    priority -40 still exists to do the same
+			    diagnostic area configuration.  Floppies
+			    are explicitly put on the eb_MountList
+	strap            -- Strap presents a new strap screen (i.e.
+			    changed the hand screen).  Strap can boot
+			    from any floppy.  Code is fixed to boot
+			    from non-floppy at a priority higher than
+			    5.  BootBlocks support for eb_MountList
+			    entries added.  BootPoint eb_MountList
+			    node parameter in A2 made official.
+	dos		 -- Dos no longer has special code to start up
+			    non-boot floppies.
+
+    The following include files have changed:
+	dos/filehandler.[hi]		 -- de_BootBlocks added
+	libraries/expansionbase.[hi]	 -- fields privatized
+	libraries/romboot_base.[hi]      -- no longer exists: BootNode
+					    now in expansionbase.[hi]

@@ -1,0 +1,719 @@
+head     1.17;
+branch   ;
+access   ;
+symbols  V39_3:1.17 V39_2:1.17 V39_1:1.17;
+locks    ; strict;
+comment  @*   @;
+
+
+1.17
+date     91.05.07.20.23.13;  author andy;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     91.04.16.10.50.57;  author andy;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     91.03.15.11.59.55;  author andy;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     91.03.13.10.36.25;  author andy;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     91.03.05.12.12.15;  author andy;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     91.03.01.10.25.55;  author andy;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     91.01.25.23.15.30;  author andy;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.01.21.20.52.24;  author andy;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.01.14.22.35.30;  author andy;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.11.13.45.01;  author andy;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.12.28.21.59.00;  author andy;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.12.26.20.15.34;  author andy;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.05.29.02.50.33;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.01.30.14.24.13;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.11.29.14.00.56;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.10.16.11.23.24;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.10.10.17.28.33;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     89.09.19.10.06.34;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@packet handling functions for con-handler
+@
+
+
+1.17
+log
+@changed spacing
+@
+text
+@/* misc.c ... Miscellaneous support routines */
+
+#include "con-handler.h"
+#include "devices/timer.h"
+
+/* AmigaDOS uses task signal bit 8 for message signaling */
+#define DOS_SIGNAL              8
+#define DOS_MASK                ( 1 << DOS_SIGNAL )
+
+
+
+/* append() will add a packet to a singlely linked list of packets
+ * it will use the dp_Link for next pointer and save the
+ * previous value of dp_Link in the dp_Res1 field
+ * Arguments:
+ *  plist - is the address of a pointer to a DosPacket. Initially
+ *          set to zero
+ *  pkt   - the packet to add to the list.
+ *
+ * Example:
+ *  struct DosPacket *pkts=0,*pkt;
+ *
+ *  pkt = taskwait();
+ *  append(&pkts,pkt);
+ *
+ */
+
+VOID __regargs append(plist,pkt)
+struct DosPacket **plist;
+struct DosPacket *pkt;
+{
+ register struct DosPacket *cpkt;
+
+ if(!(cpkt = *plist))*plist = pkt;
+ else {
+   for(;cpkt->dp_Link;cpkt=(struct DosPacket *)cpkt->dp_Link);
+   cpkt->dp_Link=(struct Message *)pkt;
+ }
+ pkt->dp_Res1 = (long) pkt->dp_Link;
+ pkt->dp_Link = NULL;
+}
+
+
+VOID __regargs dSendIO(iob,packet,command,buffer,length)
+struct IOStdReq *iob;
+struct DosPacket *packet;
+LONG command;
+APTR buffer;
+LONG length;
+{
+   iob->io_Command = command;
+   iob->io_Length = length;
+   /* special for timer , because timer uses a short IOR */
+   iob->io_Data = (APTR)buffer;
+   if(buffer)iob->io_Offset = 0;
+
+   iob->io_Message.mn_Node.ln_Name = (UBYTE *)packet;
+   packet->dp_Link = (struct Message *)iob;
+   SendIO(iob);
+}
+
+
+void __regargs StartPaste(gv)
+struct Global *gv;
+{
+    struct MsgPort *pasteport, *cutport;
+    struct cmdMsg cm={0};
+
+    gv->pcount=0;
+    pasteport=CreateMsgPort();
+    cm.cm_Msg.mn_Node.ln_Type=0;
+    cm.cm_Msg.mn_Length=(long)sizeof(struct cmdMsg);
+    cm.cm_Msg.mn_ReplyPort=pasteport;
+    cm.cm_type=TYPE_READ;
+
+    Forbid();
+    if(cutport=FindPort("ConClip.rendezvous")) {
+	PutMsg(cutport,(struct Message *)&cm);
+	Permit();
+	WaitPort(pasteport);
+	if(!cm.cm_error && cm.cm_type==TYPE_REPLY) {
+	    struct MinNode *node;
+	    /* pull paste node off the conclip list and add them to ours */
+	    node=RemHead((struct List *)&cm.cm_Chunks);
+	    while (node) {
+		AddTail((struct List *)&gv->paste,(struct Node *)node);
+		node=RemHead((struct List *)&cm.cm_Chunks);	    
+	    }
+	    /* start the paste by connecting the first item to the port */
+	    gv->node=(struct MinNode *)RemHead((struct List *)&gv->paste);
+	}
+    }
+    else Permit();
+    DeleteMsgPort(pasteport);
+}
+
+void __regargs KillPaste(gv)
+struct Global *gv;
+{
+    while(gv->node) {
+	if( ((struct CHRSChunk *)gv->node)->freeme)
+		FreeVec(((struct CHRSChunk *)gv->node)->freeme);
+	FreeVec(gv->node);
+	gv->node=(struct MinNode *)RemHead((struct List *)&gv->paste);
+    }
+    gv->pcount=0;
+}
+
+UBYTE __regargs GetPaste(gv,flag)
+struct Global *gv;
+int flag; /* indicates whether to get just one line */
+{
+    UBYTE ch;
+
+    ch=((struct CHRSChunk *)gv->node)->text[gv->pcount++];
+    if(gv->pcount>((struct CHRSChunk *)gv->node)->size) {
+	if( ((struct CHRSChunk *)gv->node)->freeme)
+		FreeVec(((struct CHRSChunk *)gv->node)->freeme);
+	FreeVec(gv->node);
+	/* normally, keep going */
+	if(!flag)gv->node=(struct MinNode *)RemHead((struct List *)&gv->paste);
+	else gv->node = 0;
+	gv->pcount=0;
+    }
+    return(ch);
+}
+
+int __regargs PutPaste(gv,action,string,len)
+struct Global *gv;
+int action;
+UBYTE *string;
+LONG len;
+{
+    struct CHRSChunk *chrs;
+
+    if(!len)return(-1);	/* nothing to do */
+    chrs=(struct CHRSChunk *)AllocVec(len+1+sizeof(struct CHRSChunk),
+		MEMF_PUBLIC|MEMF_CLEAR);
+    if(chrs) {
+	memcpy(chrs->data,string,len);
+	chrs->size = len;
+	chrs->text=&chrs->data[0];
+	chrs->freeme=0;
+	if(action == ACTION_QUEUE) {
+	    AddTail((struct List *)&gv->paste,(struct Node *)&chrs->mn);
+	}
+	else {
+	    AddHead((struct List *)&gv->paste,(struct Node *)&chrs->mn);
+
+	}
+	/* start things off unless there's a paste in progress */
+	if((action == ACTION_FORCE) && (!gv->node)) {
+	    gv->node=(struct MinNode *)RemHead((struct List *)&gv->paste);
+	    gv->pcount=0;
+	}
+	return(len);
+    }
+    return(-1);
+}
+@
+
+
+1.16
+log
+@waitforchar 999999 fix
+@
+text
+@d10 2
+d34 2
+a35 4
+ if(!(cpkt = *plist))
+  *plist = pkt;
+ else
+  {
+d38 1
+a38 1
+  }
+@
+
+
+1.15
+log
+@push and queue work
+@
+text
+@d4 1
+d52 2
+d55 2
+a56 2
+   iob->io_Length = length;
+   iob->io_Offset = 0;
+@
+
+
+1.14
+log
+@paste logic could miss a needed permit
+if conclip wasn't running
+@
+text
+@a111 1
+
+d119 1
+@
+
+
+1.13
+log
+@change to putpaste to fix push and queue
+@
+text
+@a82 4
+		/* mark node as a paste node */
+#if 0
+		((struct CHRSChunk *)node)->UserLink = 0;
+#endif
+d84 1
+a84 1
+		node=RemHead((struct List *)&cm.cm_Chunks);
+d86 1
+a88 2
+        else Permit();
+        DeleteMsgPort(pasteport);
+d90 2
+a140 4
+#if 0
+	if(action == ACTION_FORCE)chrs->UserLink = 0;
+	else chrs->UserLink = 1; /* mark it as a quiet one */
+#endif
+a156 1
+
+@
+
+
+1.12
+log
+@*** empty log message ***
+@
+text
+@a7 8
+#if 0
+/* GetProcess() will take a taskid (&pr_MsgPort) and return that process */
+
+struct Process * __regargs GetProcess(taskid)
+struct MsgPort *taskid;
+{
+  return((struct Process *) ((ULONG)taskid - (ULONG)sizeof(struct Task)));  
+}
+a8 1
+#endif
+a49 3
+/*
+struct Library *SysBase = (*((struct Library **) 4));
+*/
+d55 2
+a56 3
+packet->dp_Link = (struct Message *)iob;
+SendIO(iob);
+
+a62 3
+/*
+    struct Library *SysBase = (*((struct Library **) 4));
+*/
+d84 1
+d86 1
+a99 3
+/*
+    struct Library *SysBase = (*((struct Library **) 4));
+*/
+d109 1
+a109 1
+UBYTE __regargs GetPaste(gv)
+d111 1
+a112 3
+/*
+    struct Library *SysBase = (*((struct Library **) 4));
+*/
+d121 2
+a122 1
+	gv->node=(struct MinNode *)RemHead((struct List *)&gv->paste);
+a133 3
+/*
+    struct Library *SysBase = (*((struct Library **) 4));
+*/
+d144 1
+d147 1
+d156 1
+a156 1
+	if(!gv->node) {
+@
+
+
+1.11
+log
+@switchd to exec_old_pragmas
+@
+text
+@d183 1
+@
+
+
+1.10
+log
+@*** empty log message ***
+@
+text
+@d59 1
+d61 1
+a61 1
+
+d76 1
+d78 1
+d114 1
+d116 1
+a116 1
+
+d129 1
+d131 1
+d152 1
+d154 1
+@
+
+
+1.9
+log
+@switched to regargs
+@
+text
+@d8 1
+a8 1
+
+d17 1
+a17 1
+
+@
+
+
+1.8
+log
+@moved some variables off stack to conbase
+@
+text
+@d11 1
+a11 2
+struct Process *GetProcess(taskid)
+
+d34 1
+a34 1
+VOID append(plist,pkt)
+d52 1
+a52 1
+VOID dSendIO(iob,packet,command,buffer,length)
+d72 1
+a72 1
+void StartPaste(gv)
+d108 1
+a108 1
+void KillPaste(gv)
+d122 1
+a122 1
+UBYTE GetPaste(gv)
+d140 1
+a140 1
+PutPaste(gv,action,string,len)
+d142 1
+@
+
+
+1.7
+log
+@Now that all paste functions are gathered...
+zero the count on a putpaste.
+the quiet paste functions are now working
+@
+text
+@d53 2
+a54 2
+VOID dSendIO(IOB,packet,command,buffer,length)
+struct IOStdReq *IOB;
+d62 7
+a68 7
+   IOB->io_Command = command;
+   IOB->io_Data = (APTR)buffer;
+   IOB->io_Length = length;
+   IOB->io_Offset = 0;
+   IOB->io_Message.mn_Node.ln_Name = (UBYTE *)packet;
+packet->dp_Link = (struct Message *)IOB;
+SendIO(IOB);
+@
+
+
+1.6
+log
+@revised paste code; now a list is kept at all times
+paste functions moved into misc.c
+@
+text
+@d109 14
+d129 1
+d131 1
+a131 1
+    if(gv->pcount>=((struct CHRSChunk *)gv->node)->size) {
+d157 4
+a160 3
+	chrs->UserLink = 1;	/* mark it as one of mine */
+	if(action == ACTION_STACK) {
+	    AddHead((struct List *)&gv->paste,(struct Node *)&chrs->mn);
+d163 2
+a164 1
+	    AddTail((struct List *)&gv->paste,(struct Node *)&chrs->mn);
+d166 1
+d169 1
+@
+
+
+1.5
+log
+@switched to 2.0 DOS functions for packet work
+@
+text
+@d1 1
+a1 1
+/* misc.c ... Handler support routines */
+d3 1
+a3 21
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/ports.h>
+#include <exec/libraries.h>
+#include <exec/devices.h>
+#include <exec/execbase.h>
+#include <exec/io.h>
+#include <devices/serial.h>
+#include <intuition/intuition.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+
+#include "string.h"
+
+#include "clib/dos_protos.h"
+#include "clib/exec_protos.h"
+
+#include "pragmas/intuition_pragmas.h"
+#include "pragmas/exec_pragmas.h"
+#include "pragmas/dos_pragmas.h"
+a4 2
+#include "handler.h"
+
+a8 66
+#if 0 
+
+/* returnpkt() ... returns packet to sender */
+/* This is modeled just like a BCPL routine */
+
+int returnpkt(packet,res1,res2)
+
+struct DosPacket *packet;
+LONG  res1,res2;
+{
+ if(!packet) {
+	return(0);
+ }
+ packet->dp_Res1 = res1;
+ packet->dp_Res2 = res2; 
+ return(qpkt(packet));
+}
+
+
+int qpkt(packet)
+struct DosPacket *packet;
+{
+ struct Library *SysBase = (*((struct Library **) 4));
+ struct Message *message;
+ struct MsgPort *replyport;
+ struct Process *proc = THISPROC;
+
+ if(!packet) {
+	return(0);
+ }
+ replyport = packet->dp_Port;
+ message = packet->dp_Link;
+
+  if((!replyport)) {
+      return(0);
+  }
+ packet->dp_Port =  &proc->pr_MsgPort;
+ message->mn_Node.ln_Name    = (UBYTE *)packet;
+ message->mn_Node.ln_Succ    = NULL;
+ message->mn_Node.ln_Pred    = NULL;
+ PutMsg(replyport,message);
+ return(TRUE);
+}
+
+/* taskwait() ... Waits for a message to arrive at your port and *
+ *   extracts the packet address which is returned to you.       */
+
+struct DosPacket *taskwait()
+{
+ struct Process *process;
+ struct MsgPort *port;
+ struct Message *message;
+
+ process = (struct Process *)FindTask(0);
+ port = &(process->pr_MsgPort);
+ WaitPort(port); /* wait for packet */
+ message = (struct Message *) GetMsg(port);
+
+/* give them the pointer to the packet */
+return((struct DosPacket *) message->mn_Node.ln_Name);
+}
+
+#endif
+
+
+
+d72 84
+@
+
+
+1.4
+log
+@changed debugging
+@
+text
+@d9 1
+d13 2
+a14 2
+#include <libraries/dos.h>
+#include <libraries/dosextens.h>
+d16 1
+a16 1
+#include <proto/exec.h>
+d18 7
+d31 2
+a32 1
+ 
+a41 3
+#ifdef ADEBUG
+	kprintf("WARNING: null packet to return\n");
+#endif
+d49 1
+d53 1
+d56 1
+a56 1
+ struct Process *proc = (struct Process *)FindTask(0);
+a58 3
+#ifdef ADEBUG
+	kprintf("WARNING: NULL packet to be queued\n");
+#endif
+a64 3
+#ifdef ADEBUG
+      kprintf("ERROR- no replyport!!!\n");
+#endif
+a74 1
+
+d93 4
+d141 1
+a141 1
+VOID dSendIO(IOB,packet)
+d144 3
+d148 7
+a154 1
+IOB->io_Message.mn_Node.ln_Name = (UBYTE *)packet;
+d157 1
+@
+
+
+1.3
+log
+@
+@
+text
+@d33 3
+a35 1
+/*	kprintf("WARNING: null packet to return\n"); */
+d51 3
+a53 1
+/*	kprintf("WARNING: NULL packet to be queued\n"); */
+d60 3
+a62 1
+/*      kprintf("ERROR- no replyport!!!\n"); */
+d144 1
+@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.1
+log
+@fixed diskinfo packet problem
+now opens char mapped console
+
+@
+text
+@@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@@

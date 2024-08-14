@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'28.9.92'
+	ENDM
+VERS	MACRO
+		dc.b	'SetRequest 37.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'SetRequest 37.1 (28.9.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: SetRequest 37.1 (28.9.92)',0
+	ENDM

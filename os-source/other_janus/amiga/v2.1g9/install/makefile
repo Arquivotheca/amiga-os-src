@@ -1,0 +1,48 @@
+# NATIVE BUILD ONLY
+
+SU    =
+CC    = lc
+
+#CCF   = -cafstk -q500w1e -b0
+CCF   = -cafstk -q500w1e -b0 -d5
+
+LN    = blink
+
+#LNF   = NODEBUG SMALLCODE SMALLDATA DEFINE __main=__tinymain
+LNF   = SMALLCODE SMALLDATA
+
+LIBS  = lib:lc.lib+lib:amiga.lib+lib:debug.lib
+
+SRC   = intui.c gadgets.c images.c init.c install.c
+
+OBJ   = intui.o gadgets.o images.o init.o install.o
+
+.c.o:
+   $(CC) $(CCF) $*.c
+
+install: install.ld
+   blink from install.ld to install nodebug
+
+install.ld: $(OBJ) makefile
+   $(LN) FROM lib:c.o $(OBJ) TO install.ld LIBRARY $(LIBS) $(LNF)
+
+intui.o: intui.c gadgets.h display.h install.h intui.h
+
+gadgets.o: gadgets.c gadgets.h display.h
+
+images.o: images.c
+
+init.o: init.c install.h intui.h display.h init.h
+
+install.o: install.c init.h intui.h install.h
+
+release:
+   copy \#?          Other:janus/amiga/cur/install
+   spat "chmod 775"  Other:janus/amiga/cur/install/\#?
+   delete            Other:janus/amiga/cur/install/\#?.o
+
+disk:
+   copy install PCInstall:Install
+
+clean:
+   delete \#?.(o|obj|bak)

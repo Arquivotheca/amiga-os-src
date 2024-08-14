@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'17.9.92'
+	ENDM
+VERS	MACRO
+		dc.b	'envoy 40.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'envoy 40.4 (17.9.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: envoy 40.4 (17.9.92)',0
+	ENDM

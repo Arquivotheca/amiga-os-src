@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'8.4.92'
+	ENDM
+VERS	MACRO
+		dc.b	'display 38.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'display 38.9 (8.4.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: display 38.9 (8.4.92)',0
+	ENDM

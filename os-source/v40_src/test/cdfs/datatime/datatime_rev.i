@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'21.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'DataTime 1.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'DataTime 1.2 (21.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: DataTime 1.2 (21.5.93)',0
+	ENDM

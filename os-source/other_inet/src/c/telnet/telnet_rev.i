@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'15.1.91'
+	ENDM
+VERS	MACRO
+		dc.b	'telnet 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'telnet 37.2 (15.1.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: telnet 37.2 (15.1.91)',0
+	ENDM

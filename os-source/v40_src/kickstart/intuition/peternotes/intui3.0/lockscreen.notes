@@ -1,0 +1,110 @@
+Notes on creating a function which is basically an Intuition-friendly
+LockLayerInfo/LockLayers, useful before trans-window rendering such
+as icon-dragging.
+
+
+LockScreenBits() / UnlockScreenBits()
+
+Need a new state: slock.c
+
+LockScreenBits( s ) must:
+
+	LockLayers( &s->LayerInfo );
+	
+
+
+LSB() cannot be allowed to occur (begin?) in certain states,
+eg. when that would cause a deadlock.
+
+If Intuition is holding any layer-locks, then you calling LSB() would
+have you waiting for Intuition.  Therefore LSB() cannot be allowed if
+Intuition might be waiting for you, which is sverify.
+
+startVerify() comes from
+smenu.c:
+	returnMenuDMR( returnDMROK )
+	returnAllButMenuOK( returnAllButMenuOK )
+	startMenu( returnMenuOK )
+	startMenuKey( returnMenuKey )
+
+sidlewindow.c:
+	dIdleWindow( returnIdleZoom )
+
+srequester.c:
+	dRequester( returnRequesterZoom )
+
+
+The one in sidlewindow.c is handled, since we'd be in slock.c instead,
+and we'd defer itZOOMWIN.
+
+The one in srequester.c is the same.
+
+
+
+    sNoWindow	-> sLock
+    sIdleWindow	-> sLock
+    sRequester	-> sLock
+    sMenu	-> defer
+    sDMRTimeout -> defer (should be no problem)
+    sScreenDrag	-> defer
+    sVerify	-> defer (relies on verify-timeout or button-release cancel
+		   since it makes caller block)
+    sGadget	-> ???	relevant to boopsi
+    sWSizeDrag	-> defer
+
+Mike suggested that you have to wait for a IDCMP_NOWLOCKED before
+you're cool.
+
+What sucks is that to do boopsi pop-ups, sLock would have to be a
+sub-state (!) of sGadget.  The tokens that matter to a gadget seem to
+be:  itMOUSEMOVE, itTIMER, itMENUDOWN, itMENUUP, itSELECTDOWN,
+itSELECTUP, and itRAWKEY.  For these, we could do:
+	reuseToken(), startGadget(), and return ???
+
+Q: Should boopsi pop-ups go through this mechanism?  It seems to me
+that things are already pretty-well arbitrated there.  If the boopsi
+gadget got the locks itself (may be an order problem tho) then all
+should be sweet.  Perhaps it's a new boopsi gadget attribute, which
+is "grab layers".
+
+
+
+ISTATELOCK, LAYERINFOLOCK, GADGETSLOCK, LAYERROMLOCK, IBASELOCK, VIEWLOCK, RPLOCK
+
+LockLayerInfo() (temporary)
+LOCKGADGETS()
+LockLayerRom(one or both)
+
+
+
+NB:  Currently investigating possible unusual situation:  while in VERIFY-state,
+app calls OpenWindow(), which does doISM( itOPENWIN ).  This token is deferred
+by sverify, thus a deadlock occurs until timeout.  Pretty yucky.  Also curious
+to what 1.3 behavior is.  This may have some bearing on LockScreenBits()...
+
+Answer: 2.0 OW() does block and then verify-timeout occurs.
+	1.3 OW() happens anyways
+
+-> It's "OK" (i.e. not too bad, and no worse than OpenWindow()) to defer
+itLOCKSCREEN during sverify.
+
+
+We may need as many as four locked states, names:
+
+sLockedIdleWindow
+sLockedNoWindow
+sLockedRequester (maybe)
+sLockedGadget (maybe, valuable, hard)
+
+we can "sub-class" a state a bit like this:
+
+	case itMENUDOWN:
+	   if ( TESTFLAG( IBase->ActiveWindow->Flags, RMBTRAP ) )
+	       dIdleWindow();
+	   else do nothing
+
+	case other special stuff:
+
+	default:
+	       dIdleWindow();
+

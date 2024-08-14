@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'14.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'protect 42.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'protect 42.2 (14.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: protect 42.2 (14.9.93)',0
+	ENDM

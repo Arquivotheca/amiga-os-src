@@ -1,0 +1,1294 @@
+head     38.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.4
+date     92.04.07.09.48.44;  author davidj;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.02.07.11.51.41;  author davidj;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.03.24.17.02.56;  author kodiak;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     91.03.11.14.21.53;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.4
+log
+@changed strcmp to Stricmp
+@
+text
+@/*
+**	$Id: bullet.c,v 38.3 92/02/07 11:51:41 davidj Exp Locker: davidj $
+**
+**	Fountain/bullet.c -- access bullet index files
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+*/
+
+#include "fountain.h"
+
+#define	DB(x)	;
+
+extern struct Library *SysBase;
+extern struct Library *DiskfontBase;
+extern struct Library *DOSBase;
+extern struct Library *IntuitionBase;
+extern struct Library *UtilityBase;
+
+extern struct Process *Process;
+extern struct Window *Window;
+
+extern BOOL ValidateOnly;
+extern union StaticPool S;
+
+extern ULONG DeviceDPI;
+extern ULONG DotSize;
+extern UWORD SymbolSet;
+
+struct MinList FontsList =
+{
+    (struct MinNode *) & FontsList.mlh_Tail, 0,
+    (struct MinNode *) & FontsList.mlh_Head
+};
+
+char *GDDirNames[MAXDDIRS + 4];
+
+int LastDDirIndex;
+int CurrDDirIndex;
+struct FontsEntry *CurrDDir;
+
+installChk (buffer, name)
+    char *buffer, *name;
+{
+    BPTR lock;
+
+    DBG2 ("installChk %s %s\n", buffer, name);
+    strcpy (buffer, name);
+    if (!(lock = Lock (S.t.TempBuffer, SHARED_LOCK)))
+	EndGame (RETURN_ERROR, ENDGAME_BadInstallation, S.t.TempBuffer);
+    UnLock (lock);
+}
+
+
+int validateRequester (formatIndex, gadgetIndex, args)
+    int formatIndex, gadgetIndex;
+    char *args;
+{
+    struct EasyStruct ez;
+
+    ez.es_StructSize = sizeof (struct EasyStruct);
+    ez.es_Flags = 0;
+    ez.es_Title = LzS[TITLE_Validate];
+    ez.es_TextFormat = LzS[formatIndex];
+    ez.es_GadgetFormat = LzS[gadgetIndex];
+
+    return (EasyRequestArgs (Window, &ez, 0, &args));
+}
+
+
+void validateEntry (fFlags, ae, fe, oe, te)
+    BYTE fFlags;
+    struct FontsEntry *ae;
+    struct FontEntry *fe;
+    struct OTagEntry *oe;
+    struct TypeEntry *te;
+{
+    char *name, *path;
+    int result;
+
+    name = 0;
+    if (fe)
+    {
+	name = fe->amigaName;
+	path = fe->fontPath;
+	if (!oe)
+	    oe = fe->oe;
+	if (!te)
+	    te = fe->te;
+    }
+    if (oe && !te)
+    {
+	name = oe->amigaName;
+	path = oe->otagPath;
+	te = oe->te;
+    }
+    if (!name)
+    {
+	name = te->amigaName;
+	path = te->typePath;
+    }
+
+    switch (fFlags & FFLAG_COMPLETE)
+    {
+	case FFLAG_FONT | FFLAG_TYPE:
+	    /* conflict between Amiga font & partial typeface */
+	case FFLAG_OTAG | FFLAG_FONT | FFLAG_TYPE:
+	    /* conflict between Amiga font & partial typeface, maybe old FixFonts */
+	    if (ValidateOnly)
+		result = 0;
+	    else
+		result = validateRequester (VALIDATE_Conflict,
+					    VALIDATE_DelAddIgnore, name, path);
+	    break;
+
+	case FFLAG_OFONT | FFLAG_FONT:
+	    /* orphan OFC_ID .font, convert to Amiga font */
+	    if (ValidateOnly)
+		result = 1;
+	    else
+		result = validateRequester (VALIDATE_Partial,
+					    VALIDATE_DeleteIgnore, name, path);
+	    break;
+
+	case FFLAG_OTAG | FFLAG_OFONT | FFLAG_FONT:
+	    /* orphan .otag and OFC_ID .font, maybe an aspect kludge */
+	    result = 0;
+	    break;
+
+	case FFLAG_TYPE:
+	    /* missing .otag and .font, offer to install typeface */
+	case FFLAG_OFONT | FFLAG_FONT | FFLAG_TYPE:
+	    /* missing .otag, offer to install typeface */
+	case FFLAG_OTAG | FFLAG_TYPE:
+	    /* missing .font, offer to install typeface */
+	    if (ValidateOnly)
+		result = 2;
+	    else
+		result = validateRequester (VALIDATE_Install,
+					    VALIDATE_DelAddIgnore, name, path);
+	    break;
+
+	case FFLAG_OTAG:
+	    /* orphan .otag, delete */
+	case FFLAG_OTAG | FFLAG_FONT:
+	    /* orphan .otag, delete */
+	    if (ValidateOnly)
+		result = 1;
+	    else
+		result = validateRequester (VALIDATE_Partial,
+					    VALIDATE_DeleteIgnore, name, path);
+	    break;
+
+	default:
+	    /* AOK */
+	    result = 3;
+    }
+    DBG1 ("result %ld\n", result);
+
+    switch (result)
+    {
+	case 0:
+	    /* ignore inconsistancies */
+	    if (fe && (fe->fFlags & FFLAG_OFONT))
+	    {
+		Remove ((struct Node *) fe);
+		free (fe);
+	    }
+	    if (oe)
+	    {
+		Remove ((struct Node *) oe);
+		free (oe);
+	    }
+	    if (te)
+	    {
+		Remove ((struct Node *) te);
+		free (te);
+	    }
+	    break;
+	case 1:
+	    /* delete inconsistancies */
+	    if (fe)
+	    {
+		if (fe->fFlags & FFLAG_OFONT)
+		    fe->fFlags = FFLAG_DELETE;
+		else
+		    fe->fFlags = FFLAG_CREATE;
+	    }
+	    if (oe)
+		oe->fFlags = FFLAG_DELETE;
+	    if (te)
+		te->fFlags = FFLAG_DELETE;
+	    break;
+	case 2:
+	    /* install */
+	    CreateInstall (ae, &fe, &oe, te);
+	    break;
+	case 3:
+	    /* do nothing */
+	    ;
+    }
+
+    if (fe)
+	fe->fFlags |= FFLAG_TAG;
+    if (oe)
+	oe->fFlags |= FFLAG_TAG;
+    if (te)
+	te->fFlags |= FFLAG_TAG;
+}
+
+
+struct FontsEntry *AddFontsEntry (BPTR lock, BOOL fontsFlag)
+{
+    struct MyDir *md;
+    struct FontsEntry *ae;
+    struct TypeEntry *te, *te2;
+    struct FontEntry *fe, *fe2;
+    struct OTagEntry *oe, *oe2;
+    struct SizeEntry *se;
+    struct FontContentsHeader fch;
+    struct TFontContents tfc;
+    struct TagItem tagItem, *ti;
+    FILE *f;
+    char *s, *t;
+    short n, *ySizes;
+    int size, actual;
+
+    if (!(ae = malloc (sizeof (struct FontsEntry))))
+	EndGame (RETURN_ERROR, ENDGAME_NoMemory, sizeof (struct FontsEntry));
+
+    if (!NameFromLock (lock, ae->assignPath, PATHNAMELEN))
+    {
+	DBG1 ("NameFromLock $%lx failed\n", lock);
+	free (ae);
+	return (0);
+    }
+
+    DBG1 ("AddFontsEntry %s\n", ae->assignPath);
+
+    if (fontsFlag && (LastDDirIndex < (MAXDDIRS - 1)))
+    {
+	LastDDirIndex++;
+	sprintf (ae->indexName, LzS[GADGET_RDirNext], LastDDirIndex + 1);
+	GDDirNames[LastDDirIndex] = ae->indexName;
+    }
+
+    AddTail ((struct List *) & FontsList, (struct Node *) ae);
+    NewList ((struct List *) & ae->otList);
+    NewList ((struct List *) & ae->fcList);
+    NewList ((struct List *) & ae->tfList);
+
+    /* find all .otag, and .font files */
+    if (!(md = MyDirStart (ae->assignPath)))
+    {
+	DBG1 ("MyDirStart %s failed\n", ae->assignPath);
+	free (ae);
+	return (0);
+    }
+
+    DBG1 ("while MyDirNext 0x%lx\n", md);
+    while (MyDirNext (md))
+    {
+	if (md->md_FIB.fib_DirEntryType >= 0)
+	{
+	    /* this is a directory, see if it is a _Bullet_Outline directory */
+	    if (Stricmp (md->md_File, DIR_OUTLINES))
+		continue;
+	    /* search here for all .type files */
+	    LIBInfo (md->md_Path, &ae->tfList, 0);
+	}
+
+	/* this is a file: see if it has an interesting suffix */
+	s = strrchr (md->md_File, '.');
+	if (!s)
+	    continue;
+
+	if ((!strcmp (s, SUFFIX_FONT)) && (f = fopen (md->md_File, "r")))
+	{
+	    /* this is a potential .font file */
+	    DBG1("fopen [%s]\n", md->md_File);
+	    if ((fread ((char *) &fch, sizeof (fch), 1, f) == 1) &&
+		((fch.fch_FileID & 0xfff0) == FCH_ID))
+	    {
+		/* it *is* a .font file */
+		if (!(fe = malloc (sizeof (struct FontEntry))))
+		    EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+			     sizeof (struct FontEntry));
+		NewList ((struct List *) & fe->sizes);
+		fe->oe = 0;
+		fe->te = 0;
+		if (fch.fch_FileID == OFCH_ID)
+		    fe->fFlags = FFLAG_FONT | FFLAG_OFONT;
+		else
+		    fe->fFlags = FFLAG_FONT;
+		*s = '\0';
+		strcpy (fe->amigaName, md->md_File);
+		*s = '.';
+		strcpy (fe->fontPath, ae->assignPath);
+
+		/* read in any sizes */
+		for (n = 0; n < fch.fch_NumEntries; n++)
+		{
+		    if ((fread ((char *) &tfc, sizeof (tfc), 1, f) != 1) ||
+			(strlen (tfc.tfc_FileName) > (FONTFILELEN - 1)))
+			EndGame (RETURN_ERROR, ENDGAME_BadFontContents,
+				 md->md_Path);
+		    if (!(se = malloc (sizeof (struct SizeEntry))))
+			EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+				 sizeof (struct SizeEntry));
+		    se->ref.fe = fe;
+		    se->ySize = tfc.tfc_YSize;
+		    if ((fch.fch_FileID >= TFCH_ID) && tfc.tfc_TagCount)
+		    {
+			ti = (struct TagItem *) & tfc.tfc_FileName[MAXFONTPATH -
+								   (tfc.tfc_TagCount * sizeof (struct TagItem))];
+			DBG2 ("tfc_TagCount %ld, ti $%lx\n", tfc.tfc_TagCount, ti);
+			se->dpi = GetTagData (OT_DeviceDPI, DeviceDPI, ti);
+			se->dotSize = GetTagData (OT_DotSize, DotSize, ti);
+			se->symbolSet = GetTagData (OT_SymbolSet, SymbolSet, ti);
+		    }
+		    else
+		    {
+			se->dpi = DeviceDPI;
+			se->dotSize = DotSize;
+			se->symbolSet = SymbolSet;
+		    }
+		    se->fFlags = 0;
+		    strcpy (se->fontFile, tfc.tfc_FileName);
+		    AddTail ((struct List *) & fe->sizes, (struct Node *) se);
+		}
+		AddTail ((struct List *) & ae->fcList, (struct Node *) fe);
+	    }
+	    DBG1 ("fclose 0x%lx\n", f);
+	    fclose (f);
+	}
+	else if ((!strcmp (s, SUFFIX_OTAG)) &&
+		 (size = MyFileSize (md->md_File)) &&
+		 (f = fopen (md->md_File, "r")))
+	{
+	    /* this is a potential .otag file */
+	    if ((fread ((char *) &tagItem, sizeof (tagItem), 1, f) == 1) &&
+		(tagItem.ti_Tag == OT_FileIdent) &&
+		(tagItem.ti_Data == size))
+	    {
+		/* it *is* an .otag file */
+		DB (kprintf(".otag : %s (tags=%ld)\n", md->md_File, (LONG)(size)));
+		if (!(oe = malloc (sizeof (struct OTagEntry))))
+		    EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+			     sizeof (struct OTagEntry));
+		if (!(ti = (struct TagItem *) malloc (size)))
+		    EndGame (RETURN_ERROR, ENDGAME_NoMemory, size);
+		if ((actual = fread ((char *) (ti + 1), 1,
+				     size - sizeof (struct TagItem), f))
+		    != (size - sizeof (struct TagItem)))
+		    EndGame (RETURN_ERROR, ENDGAME_FileRead, md->md_Path,
+			     size - sizeof (struct TagItem), actual, ferror (f));
+
+		*ti = tagItem;
+		NewList ((struct List *) & oe->sizes);
+		oe->symbolSet = GetTagData (OT_SymbolSet, SymbolSet, ti);
+
+		/* Get the sizes */
+		if (ySizes = (UWORD *) GetTagPtr (OT_AvailSizes, ti))
+		{
+		    DB (kprintf ("%ld sizes available\n", (LONG)ySizes));
+		    for (n = *ySizes++; n > 0; n--)
+		    {
+			if (!(se = malloc (sizeof (struct SizeEntry))))
+			    EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+				     sizeof (struct SizeEntry));
+			se->ref.oe = oe;
+			se->ySize = *ySizes++;
+			se->dpi = DeviceDPI;
+			se->dotSize = DotSize;
+			se->symbolSet = oe->symbolSet;
+			se->fFlags = 0;
+			AddTail ((struct List *) &oe->sizes, (struct Node *) se);
+		    }
+		}
+		else
+		{
+		    DB (kprintf("No sizes available\n"));
+		}
+
+		oe->bDef = oe->iDef = oe->biDef = 0;
+		oe->bRef = oe->iRef = oe->biRef = 0;
+		oe->te = 0;
+		oe->fFlags = FFLAG_OTAG;
+		*s = '\0';
+		strcpy (oe->amigaName, md->md_File);
+		*s = '.';
+		oe->bRefName[0] = oe->iRefName[0] = oe->biRefName[0] = '\0';
+		if (t = (char *) GetTagPtr (OT_Engine, ti))
+		{
+		    DB (kprintf ("OT_Engine=%s\n", t));
+		}
+		if (t = (char *) GetTagPtr (OT_BName, ti))
+		{
+		    DB (kprintf ("OT_BName=%s\n", t));
+		    strcpy (oe->bRefName, t);
+		}
+		if (t = (char *) GetTagPtr (OT_IName, ti))
+		{
+		    DB (kprintf ("OT_IName=%s\n", t));
+		    strcpy (oe->iRefName, t);
+		}
+		if (t = (char *) GetTagPtr (OT_BIName, ti))
+		{
+		    DB (kprintf ("OT_BIName=%s\n", t));
+		    strcpy (oe->biRefName, t);
+		}
+		strcpy (oe->otagPath, ae->assignPath);
+		free (ti);
+		AddTail ((struct List *) & ae->otList, (struct Node *) oe);
+	    }
+	    else
+		DBG2 (".otag fail $%08lx, %ld\n", tagItem.ti_Tag,
+		      tagItem.ti_Data);
+	    fclose (f);
+	}
+    }
+    DBG1 ("calling MyDirEnd 0x%lx\n", md);
+    MyDirEnd (md);
+
+#ifdef  DEBUG
+    DBG ("ae->fcList...\n");
+    for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+	 fe->node.mln_Succ;
+	 fe = (struct FontEntry *) fe->node.mln_Succ)
+    {
+	DBG3 ("name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName,
+	      fe->fontPath, fe->fFlags);
+	for (se = (struct SizeEntry *) fe->sizes.mlh_Head;
+	     se->node.mln_Succ;
+	     se = (struct SizeEntry *) se->node.mln_Succ)
+	{
+	    DBG6 ("  Size %ld DPI %ld %ld DotSize %ld %ld SymbolSet %.2s\n",
+		  se->ySize, se->dpi >> 16, se->dpi & 0xffff, se->dotSize >> 16,
+		  se->dotSize & 0xffff, &se->symbolSet);
+	}
+    }
+    DBG ("ae->otList...\n");
+    for (oe = (struct OTagEntry *) ae->otList.mlh_Head;
+	 oe->node.mln_Succ;
+	 oe = (struct OTagEntry *) oe->node.mln_Succ)
+    {
+	DBG3 ("name \"%s\" path \"%s\" fFlags $%02lx\n", oe->amigaName,
+	      oe->otagPath, oe->fFlags);
+	DBG1 ("  otag SymbolSet %.2s\n", &oe->symbolSet);
+	for (se = (struct SizeEntry *) oe->sizes.mlh_Head;
+	     se->node.mln_Succ;
+	     se = (struct SizeEntry *) se->node.mln_Succ)
+	{
+	    DBG6 ("  Size %ld DPI %ld %ld DotSize %ld %ld SymbolSet %.2s\n",
+		  se->ySize, se->dpi >> 16, se->dpi & 0xffff, se->dotSize >> 16,
+		  se->dotSize & 0xffff, &se->symbolSet);
+	}
+	DBG3 ("  b \"%s\" i \"%s\" bi \"%s\"\n", oe->bRefName, oe->iRefName,
+	      oe->biRefName);
+    }
+    DBG ("ae->tfList...\n");
+    for (te = (struct TypeEntry *) ae->tfList.mlh_Head;
+	 te->node.mln_Succ;
+	 te = (struct TypeEntry *) te->node.mln_Succ)
+    {
+	DBG4 ("font id %ld name \"%s\" path \"%s\" fFlags $%02lx\n",
+	      te->typefaceID, te->amigaName, te->typePath, te->fFlags);
+	DBG5 ("  fhOff $%lx fhCnt $%lx bucket %ld family \"%s\" spaceReq %ld\n",
+	      te->faceheaderOffset, te->faceheaderCount, te->bucketBits,
+	      te->family, te->spaceReq);
+	DBG3 ("  ySize %ld / %ld space %ld\n",
+	      te->ySizeNumerator, te->ySizeFactor, te->spaceWidth);
+	DBG5 ("  serif %ld weight %ld slant %ld horiz %ld fixed %ld\n",
+	      te->serifFlag, te->stemWeight, te->slantStyle, te->horizStyle,
+	      te->isFixed);
+	DBG1 ("  source \"%s\".\n", te->sourceFile);
+    }
+#endif
+
+    /* validate the fonts */
+    /* .otag nodes are at the center of the links */
+    for (oe = (struct OTagEntry *) ae->otList.mlh_Head;
+	 oe->node.mln_Succ;
+	 oe = (struct OTagEntry *) oe->node.mln_Succ)
+    {
+	/* look for associated .otag family entries */
+	for (oe2 = (struct OTagEntry *) ae->otList.mlh_Head;
+	     oe2->node.mln_Succ;
+	     oe2 = (struct OTagEntry *) oe2->node.mln_Succ)
+	{
+	    if (FontMatch (oe->otagPath, oe->bRefName,
+			   oe2->otagPath, oe2->amigaName))
+	    {
+#ifdef  DEBUG
+		if (oe->bRef)
+		    DBG1 ("*** oe->bRef already $%lx\n", oe->bRef);
+		if (oe2->bDef)
+		    DBG1 ("*** oe2->bDef already $%lx\n", oe2->bDef);
+#endif
+		oe->bRef = oe2;
+		oe2->bDef = oe;
+	    }
+	    if (FontMatch (oe->otagPath, oe->iRefName,
+			   oe2->otagPath, oe2->amigaName))
+	    {
+#ifdef  DEBUG
+		if (oe->iRef)
+		    DBG1 ("*** oe->iRef already $%lx\n", oe->iRef);
+		if (oe2->iDef)
+		    DBG1 ("*** oe2->iDef already $%lx\n", oe2->iDef);
+#endif
+		oe->iRef = oe2;
+		oe2->iDef = oe;
+	    }
+	    if (FontMatch (oe->otagPath, oe->biRefName,
+			   oe2->otagPath, oe2->amigaName))
+	    {
+#ifdef  DEBUG
+		if (oe->biRef)
+		    DBG1 ("*** oe->biRef already $%lx\n", oe->biRef);
+		if (oe2->biDef)
+		    DBG1 ("*** oe2->biDef already $%lx\n",
+			  oe2->biDef);
+#endif
+		oe->biRef = oe2;
+		oe2->biDef = oe;
+	    }
+	}
+	/* look for associated .font entry */
+	for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+	     fe->node.mln_Succ;
+	     fe = (struct FontEntry *) fe->node.mln_Succ)
+	{
+	    if (FontMatch (fe->fontPath, fe->amigaName,
+			   oe->otagPath, oe->amigaName))
+	    {
+		fe->oe = oe;
+		fe->fFlags |= oe->fFlags;
+		oe->fFlags |= fe->fFlags;
+		break;
+	    }
+	}
+	if (!fe->node.mln_Succ)
+	    fe = 0;
+	/* look for associated .type entry */
+	for (te = (struct TypeEntry *) ae->tfList.mlh_Head;
+	     te->node.mln_Succ;
+	     te = (struct TypeEntry *) te->node.mln_Succ)
+	{
+	    if (FontMatch (te->typePath, te->amigaName,
+			   oe->otagPath, oe->amigaName))
+	    {
+		te->fFlags |= oe->fFlags;
+		oe->fFlags |= te->fFlags;
+		if (fe)
+		{
+		    fe->fFlags |= te->fFlags;
+		    fe->te = te;
+		}
+		oe->te = te;
+		break;
+	    }
+	}
+    }
+    /* pick up any .font/.type combos missing .otags */
+    for (te = (struct TypeEntry *) ae->tfList.mlh_Head;
+	 te->node.mln_Succ;
+	 te = (struct TypeEntry *) te->node.mln_Succ)
+    {
+	for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+	     fe->node.mln_Succ;
+	     fe = (struct FontEntry *) fe->node.mln_Succ)
+	{
+	    if (FontMatch (te->typePath, te->amigaName,
+			   fe->fontPath, fe->amigaName))
+	    {
+		fe->fFlags |= te->fFlags;
+		te->fFlags |= fe->fFlags;
+		fe->te = te;
+		break;
+	    }
+	}
+    }
+
+
+    /* validate relationships between .otag, .font and /.type entries */
+    DBG ("ae->fcList...\n");
+    for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+	 fe2 = (struct FontEntry *) fe->node.mln_Succ;
+	 fe = fe2)
+    {
+	DBG3 ("name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName,
+	      fe->fontPath, fe->fFlags);
+	if (!(fe->fFlags & FFLAG_TAG))
+	{
+	    validateEntry (fe->fFlags, ae, fe, 0, 0);
+	}
+    }
+    DBG ("ae->otList...\n");
+    for (oe = (struct OTagEntry *) ae->otList.mlh_Head;
+	 oe2 = (struct OTagEntry *) oe->node.mln_Succ;
+	 oe = oe2)
+    {
+	DBG4 ("$%lx name \"%s\" path \"%s\" fFlags $%02lx\n", oe, oe->amigaName,
+	      oe->otagPath, oe->fFlags);
+	DBG3 ("  bDef $%lx iDef $%lx biDef $%lx\n",
+	      oe->bDef, oe->iDef, oe->biDef);
+	DBG3 ("  bRef $%lx iRef $%lx biRef $%lx\n",
+	      oe->bRef, oe->iRef, oe->biRef);
+	if (!(oe->fFlags & FFLAG_TAG))
+	{
+	    validateEntry (oe->fFlags, ae, 0, oe, 0);
+	}
+    }
+    DBG ("ae->tfList...\n");
+    for (te = (struct TypeEntry *) ae->tfList.mlh_Head;
+	 te2 = (struct TypeEntry *) te->node.mln_Succ;
+	 te = te2)
+    {
+	DBG4 ("font id %ld name \"%s\" path \"%s\" fFlags $%02lx\n",
+	      te->typefaceID, te->amigaName, te->typePath, te->fFlags);
+	if (!(te->fFlags & FFLAG_TAG))
+	{
+	    validateEntry (te->fFlags, ae, 0, 0, te);
+	}
+    }
+    FindOMatches (ae);
+    Update (ae, 0);
+
+    return (ae);
+}
+
+
+OpenBullet ()
+{
+    APTR oldPRWindowPtr;
+    struct DosList *lock, *fonts;
+    struct AssignList *alist;
+    char *s;
+    short i;
+
+    DBG ("OpenBullet\n");
+    for (i = 0; i <= MAXDDIRS + 2; i++)
+	GDDirNames[i] = "";
+    GDDirNames[MAXDDIRS] = LzS[GADGET_NotFontsPath];
+    GDDirNames[MAXDDIRS + 1] = LzS[GADGET_NotValidPath];
+    GDDirNames[MAXDDIRS + 3] = 0;
+
+    strcpy (S.t.TempBuffer, VOL_FONTS ":" DIR_BULLET "/");
+    s = S.t.TempBuffer + strlen (S.t.TempBuffer);
+
+    /* check existance of invariant files */
+    installChk (s, FILE_IFFNT);
+    installChk (s, FILE_PLUGIN);
+    if (DiskfontBase->lib_Version == 37)
+	installChk (s, FILE_IFSS);
+    else
+	/* must be 38 or greater or OpenLibrary would have failed */
+	installChk (s, FILE_IFUC);
+
+    oldPRWindowPtr = Process->pr_WindowPtr;
+    Process->pr_WindowPtr = (APTR) - 1;
+
+    lock = LockDosList (LDF_ALL | LDF_READ);
+    fonts = FindDosEntry (lock, "FONTS", LDF_ALL);
+    LastDDirIndex = -1;
+    if (fonts)
+    {
+	AddFontsEntry (fonts->dol_Lock, TRUE);
+	if (fonts->dol_Type == DLT_DIRECTORY)
+	{
+	    for (alist = fonts->dol_misc.dol_assign.dol_List; alist;
+		 alist = alist->al_Next)
+		AddFontsEntry (alist->al_Lock, TRUE);
+	}
+    }
+    UnLockDosList (LDF_ALL | LDF_READ);
+    Process->pr_WindowPtr = oldPRWindowPtr;
+
+    if (LastDDirIndex < 0)
+    {
+	EndGame (RETURN_ERROR, ENDGAME_NoFontsAssign);
+    }
+
+    CurrDDirIndex = 0;
+    CurrDDir = (struct FontsEntry *) FontsList.mlh_Head;
+
+    if (ValidateOnly)
+	EndGame (RETURN_OK, 0);
+    DBG ("OpenBullet done.\n");
+}
+@
+
+
+38.3
+log
+@bug fixes
+@
+text
+@d2 1
+a2 1
+**	$Id: bullet.c,v 38.2 91/03/24 17:02:56 kodiak Exp Locker: davidj $
+d266 1
+a266 1
+	    if (strcmp (md->md_File, DIR_OUTLINES))
+@
+
+
+38.2
+log
+@check for if.ss or if.uc depending on diskfont 37 or 38+
+@
+text
+@d2 1
+a2 1
+**	$Id: bullet.c,v 37.6 91/03/11 14:21:53 kodiak Exp Locker: kodiak $
+d12 2
+d30 4
+a33 3
+struct MinList FontsList = {
+    (struct MinNode *) &FontsList.mlh_Tail, 0,
+    (struct MinNode *) &FontsList.mlh_Head
+d36 1
+a36 1
+char *GDDirNames[MAXDDIRS+4];
+d42 2
+a43 2
+installChk(buffer, name)
+char *buffer, *name;
+d47 5
+a51 5
+    DBG2("installChk %s %s\n", buffer, name);
+    strcpy(buffer, name);
+    if (!(lock = Lock(S.t.TempBuffer, SHARED_LOCK)))
+	EndGame(RETURN_ERROR, ENDGAME_BadInstallation, S.t.TempBuffer);
+    UnLock(lock);
+d55 3
+a57 3
+int validateRequester(formatIndex, gadgetIndex, args)
+int formatIndex, gadgetIndex;
+char *args;
+d61 1
+a61 1
+    ez.es_StructSize = sizeof(struct EasyStruct);
+d67 1
+a67 1
+    return(EasyRequestArgs(Window, &ez, 0, &args));
+d71 6
+a76 6
+void validateEntry(fFlags, ae, fe, oe, te)
+BYTE fFlags;
+struct FontsEntry *ae;
+struct FontEntry *fe;
+struct OTagEntry *oe;
+struct TypeEntry *te;
+d82 2
+a83 1
+    if (fe) {
+d91 2
+a92 1
+    if (oe && !te) {
+d97 2
+a98 1
+    if (!name) {
+d103 24
+a126 6
+    switch (fFlags & FFLAG_COMPLETE) {
+      case FFLAG_FONT|FFLAG_TYPE:
+	/* conflict between Amiga font & partial typeface */
+      case FFLAG_OTAG|FFLAG_FONT|FFLAG_TYPE:
+	/* conflict between Amiga font & partial typeface, maybe old FixFonts */
+	if (ValidateOnly)
+d128 14
+a141 4
+	else
+	    result = validateRequester(VALIDATE_Conflict,
+		    VALIDATE_DelAddIgnore, name, path);
+	break;
+d143 6
+a148 65
+      case FFLAG_OFONT|FFLAG_FONT:
+	/* orphan OFC_ID .font, convert to Amiga font */
+	if (ValidateOnly)
+	    result = 1;
+	else
+	    result = validateRequester(VALIDATE_Partial,
+		    VALIDATE_DeleteIgnore, name, path);
+	break;
+
+      case FFLAG_OTAG|FFLAG_OFONT|FFLAG_FONT:
+	/* orphan .otag and OFC_ID .font, maybe an aspect kludge */
+	result = 0;
+	break;
+
+      case FFLAG_TYPE:
+	/* missing .otag and .font, offer to install typeface */
+      case FFLAG_OFONT|FFLAG_FONT|FFLAG_TYPE:
+	/* missing .otag, offer to install typeface */
+      case FFLAG_OTAG|FFLAG_TYPE:
+	/* missing .font, offer to install typeface */
+	if (ValidateOnly)
+	    result = 2;
+	else
+	    result = validateRequester(VALIDATE_Install,
+		    VALIDATE_DelAddIgnore, name, path);
+	break;
+
+      case FFLAG_OTAG:
+	/* orphan .otag, delete */
+      case FFLAG_OTAG|FFLAG_FONT:
+	/* orphan .otag, delete */
+	if (ValidateOnly)
+	    result = 1;
+	else
+	    result = validateRequester(VALIDATE_Partial,
+		    VALIDATE_DeleteIgnore, name, path);
+	break;
+
+      default:
+	/* AOK */
+	result = 3;
+    }
+    DBG1("result %ld\n", result);
+
+    switch (result) {
+      case 0:
+	/* ignore inconsistancies */
+	if (fe && (fe->fFlags & FFLAG_OFONT)) {
+	    Remove((struct Node *) fe);
+	    free(fe);
+	}
+	if (oe) {
+	    Remove((struct Node *) oe);
+	    free(oe);
+	}
+	if (te) {
+	    Remove((struct Node *) te);
+	    free(te);
+	}
+	break;
+      case 1:
+	/* delete inconsistancies */
+	if (fe) {
+	    if (fe->fFlags & FFLAG_OFONT)
+		fe->fFlags = FFLAG_DELETE;
+d150 51
+a200 14
+		fe->fFlags = FFLAG_CREATE;
+	}
+	if (oe)
+	    oe->fFlags = FFLAG_DELETE;
+	if (te)
+	    te->fFlags = FFLAG_DELETE;
+	break;
+      case 2:
+	/* install */
+	CreateInstall(ae, &fe, &oe, te);
+	break;
+      case 3:
+	/* do nothing */
+	;
+d212 1
+a212 2
+struct FontsEntry *
+AddFontsEntry(BPTR lock, BOOL fontsFlag)
+d228 2
+a229 2
+    if (!(ae = malloc(sizeof(struct FontsEntry))))
+	EndGame(RETURN_ERROR, ENDGAME_NoMemory, sizeof(struct FontsEntry));
+d231 6
+a236 5
+    if (!NameFromLock(lock, ae->assignPath, PATHNAMELEN)) {
+	DBG1("NameFromLock $%lx failed\n", lock);
+	free(ae);
+	return(0);
+    }
+d238 1
+a238 1
+    DBG1("AddFontsEntry %s\n", ae->assignPath);
+d240 2
+a241 1
+    if (fontsFlag && (LastDDirIndex < (MAXDDIRS-1))) {
+d243 1
+a243 1
+	sprintf(ae->indexName, LzS[GADGET_RDirNext], LastDDirIndex+1);
+d247 4
+a250 4
+    AddTail((struct List *) &FontsList, (struct Node *) ae);
+    NewList((struct List *) &ae->otList);
+    NewList((struct List *) &ae->fcList);
+    NewList((struct List *) &ae->tfList);
+d253 12
+a264 8
+    if (!(md = MyDirStart(ae->assignPath))) {
+	DBG1("MyDirStart %s failed\n", ae->assignPath);
+	free(ae);
+	return(0);
+    }
+
+    while (MyDirNext(md)) {
+	if (md->md_FIB.fib_DirEntryType >= 0) {
+d266 1
+a266 1
+	    if (strcmp(md->md_File, DIR_OUTLINES))
+d269 1
+a269 1
+	    LIBInfo(md->md_Path, &ae->tfList, 0);
+d273 1
+a273 1
+	s = strrchr(md->md_File, '.');
+d277 2
+a278 2
+	if ((!strcmp(s, SUFFIX_FONT)) &&
+		(f = fopen(md->md_File, "r"))) {
+d280 4
+a283 2
+	    if ((fread((char *) &fch, sizeof(fch), 1, f) == 1) &&
+		    ((fch.fch_FileID & 0xfff0) == FCH_ID)) {
+d285 4
+a288 4
+		if (!(fe = malloc(sizeof(struct FontEntry))))
+		    EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+			    sizeof(struct FontEntry));
+		NewList((struct List *) &fe->sizes);
+d296 1
+a296 1
+		strcpy(fe->amigaName, md->md_File);
+d298 1
+a298 1
+		strcpy(fe->fontPath, ae->assignPath);
+d301 9
+a309 8
+		for (n = 0; n < fch.fch_NumEntries; n++) {
+		    if ((fread((char *) &tfc, sizeof(tfc), 1, f) != 1) ||
+			    (strlen(tfc.tfc_FileName) > (FONTFILELEN-1)))
+			EndGame(RETURN_ERROR, ENDGAME_BadFontContents,
+				md->md_Path);
+		    if (!(se = malloc(sizeof(struct SizeEntry))))
+			EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+				sizeof(struct SizeEntry));
+d312 8
+a319 8
+		    if ((fch.fch_FileID >= TFCH_ID) && tfc.tfc_TagCount) {
+			ti = (struct TagItem *) &tfc.tfc_FileName[MAXFONTPATH-
+				(tfc.tfc_TagCount*sizeof(struct TagItem))];
+			DBG2("tfc_TagCount %ld, ti $%lx\n", tfc.tfc_TagCount,
+				ti);
+			se->dpi = GetTagData(OT_DeviceDPI, DeviceDPI, ti);
+			se->dotSize = GetTagData(OT_DotSize, DotSize, ti);
+			se->symbolSet = GetTagData(OT_SymbolSet, SymbolSet, ti);
+d321 2
+a322 1
+		    else {
+d328 2
+a329 2
+		    strcpy(se->fontFile, tfc.tfc_FileName);
+		    AddTail((struct List *) &fe->sizes, (struct Node *) se);
+d331 1
+a331 1
+		AddTail((struct List *) &ae->fcList, (struct Node *) fe);
+d333 2
+a334 1
+	    fclose(f);
+d336 4
+a339 3
+	else if ((!strcmp(s, SUFFIX_OTAG)) &&
+		(size = MyFileSize(md->md_File)) &&
+		(f = fopen(md->md_File, "r"))) {
+d341 4
+a344 3
+	    if ((fread((char *) &tagItem, sizeof(tagItem), 1, f) == 1) &&
+		    (tagItem.ti_Tag == OT_FileIdent) &&
+		    (tagItem.ti_Data == size)) {
+d346 12
+a357 10
+		if (!(oe = malloc(sizeof(struct OTagEntry))))
+		    EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+			    sizeof(struct OTagEntry));
+		if (!(ti = (struct TagItem *) malloc(size)))
+		    EndGame(RETURN_ERROR, ENDGAME_NoMemory, size);
+		if ((actual = fread((char *)(ti+1), 1,
+			size-sizeof(struct TagItem), f))
+			!= (size-sizeof(struct TagItem)))
+		    EndGame(RETURN_ERROR, ENDGAME_FileRead, md->md_Path,
+			    size-sizeof(struct TagItem), actual, ferror(f));
+d359 12
+a370 7
+		NewList((struct List *) &oe->sizes);
+		oe->symbolSet = GetTagData(OT_SymbolSet, SymbolSet, ti);
+		if (ySizes = (UWORD *) GetTagPtr(OT_AvailSizes, ti)) {
+		    for (n = *ySizes++; n > 0; n--) {
+			if (!(se = malloc(sizeof(struct SizeEntry))))
+			    EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+				    sizeof(struct SizeEntry));
+d377 1
+a377 2
+			AddTail((struct List *) &oe->sizes,
+				(struct Node *) se);
+d380 4
+d390 1
+a390 1
+		strcpy(oe->amigaName, md->md_File);
+d393 3
+a395 2
+		if (t = (char *) GetTagPtr(OT_BName, ti)) {
+		    strcpy(oe->bRefName, t);
+d397 14
+a410 5
+		if (t = (char *) GetTagPtr(OT_IName, ti)) {
+		    strcpy(oe->iRefName, t);
+		}
+		if (t = (char *) GetTagPtr(OT_BIName, ti)) {
+		    strcpy(oe->biRefName, t);
+d412 3
+a414 3
+		strcpy(oe->otagPath, ae->assignPath);
+		free(ti);
+		AddTail((struct List *) &ae->otList, (struct Node *) oe);
+d417 3
+a419 3
+		DBG2(".otag fail $%08lx, %ld\n", tagItem.ti_Tag,
+			tagItem.ti_Data);
+	    fclose(f);
+d422 2
+a423 1
+    MyDirEnd(md);
+d426 1
+a426 1
+    DBG("ae->fcList...\n");
+d428 5
+a432 4
+	    fe->node.mln_Succ;
+	    fe = (struct FontEntry *) fe->node.mln_Succ) {
+	DBG3("name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName,
+		fe->fontPath, fe->fFlags);
+d434 6
+a439 5
+		se->node.mln_Succ;
+		se = (struct SizeEntry *) se->node.mln_Succ) {
+	    DBG6("  Size %ld DPI %ld %ld DotSize %ld %ld SymbolSet %.2s\n",
+		    se->ySize, se->dpi>>16, se->dpi&0xffff, se->dotSize>>16,
+		    se->dotSize&0xffff, &se->symbolSet);
+d442 1
+a442 1
+    DBG("ae->otList...\n");
+d444 6
+a449 5
+	    oe->node.mln_Succ;
+	    oe = (struct OTagEntry *) oe->node.mln_Succ) {
+	DBG3("name \"%s\" path \"%s\" fFlags $%02lx\n", oe->amigaName,
+		oe->otagPath, oe->fFlags);
+	DBG1("  otag SymbolSet %.2s\n", &oe->symbolSet);
+d451 6
+a456 5
+		se->node.mln_Succ;
+		se = (struct SizeEntry *) se->node.mln_Succ) {
+	    DBG6("  Size %ld DPI %ld %ld DotSize %ld %ld SymbolSet %.2s\n",
+		    se->ySize, se->dpi>>16, se->dpi&0xffff, se->dotSize>>16,
+		    se->dotSize&0xffff, &se->symbolSet);
+d458 2
+a459 2
+	DBG3("  b \"%s\" i \"%s\" bi \"%s\"\n", oe->bRefName, oe->iRefName,
+		oe->biRefName);
+d461 1
+a461 1
+    DBG("ae->tfList...\n");
+d463 14
+a476 13
+	    te->node.mln_Succ;
+	    te = (struct TypeEntry *) te->node.mln_Succ) {
+	DBG4("font id %ld name \"%s\" path \"%s\" fFlags $%02lx\n",
+		te->typefaceID, te->amigaName, te->typePath, te->fFlags);
+	DBG5("  fhOff $%lx fhCnt $%lx bucket %ld family \"%s\" spaceReq %ld\n",
+		te->faceheaderOffset, te->faceheaderCount, te->bucketBits,
+		te->family, te->spaceReq);
+	DBG3("  ySize %ld / %ld space %ld\n",
+		te->ySizeNumerator, te->ySizeFactor, te->spaceWidth);
+	DBG5("  serif %ld weight %ld slant %ld horiz %ld fixed %ld\n",
+		te->serifFlag, te->stemWeight, te->slantStyle, te->horizStyle,
+		te->isFixed);
+	DBG1("  source \"%s\".\n", te->sourceFile);
+d481 1
+a481 1
+    /*   .otag nodes are at the center of the links */
+d483 3
+a485 2
+	    oe->node.mln_Succ;
+	    oe = (struct OTagEntry *) oe->node.mln_Succ) {
+d488 6
+a493 4
+		oe2->node.mln_Succ;
+		oe2 = (struct OTagEntry *) oe2->node.mln_Succ) {
+	    if (FontMatch(oe->otagPath, oe->bRefName,
+		    oe2->otagPath, oe2->amigaName)) {
+d495 4
+a498 2
+		if (oe->bRef) DBG1("*** oe->bRef already $%lx\n", oe->bRef);
+		if (oe2->bDef) DBG1("*** oe2->bDef already $%lx\n", oe2->bDef);
+d503 3
+a505 2
+	    if (FontMatch(oe->otagPath, oe->iRefName,
+		    oe2->otagPath, oe2->amigaName)) {
+d507 4
+a510 2
+		if (oe->iRef) DBG1("*** oe->iRef already $%lx\n", oe->iRef);
+		if (oe2->iDef) DBG1("*** oe2->iDef already $%lx\n", oe2->iDef);
+d515 3
+a517 2
+	    if (FontMatch(oe->otagPath, oe->biRefName,
+		    oe2->otagPath, oe2->amigaName)) {
+d519 5
+a523 3
+		if (oe->biRef) DBG1("*** oe->biRef already $%lx\n", oe->biRef);
+		if (oe2->biDef) DBG1("*** oe2->biDef already $%lx\n",
+			oe2->biDef);
+d531 6
+a536 4
+		fe->node.mln_Succ;
+		fe = (struct FontEntry *) fe->node.mln_Succ) {
+	    if (FontMatch(fe->fontPath, fe->amigaName,
+		    oe->otagPath, oe->amigaName)) {
+d547 6
+a552 4
+		te->node.mln_Succ;
+		te = (struct TypeEntry *) te->node.mln_Succ) {
+	    if (FontMatch(te->typePath, te->amigaName,
+		    oe->otagPath, oe->amigaName)) {
+d555 2
+a556 1
+		if (fe) {
+d565 1
+a565 1
+    /*   pick up any .font/.type combos missing .otags */
+d567 3
+a569 2
+	    te->node.mln_Succ;
+	    te = (struct TypeEntry *) te->node.mln_Succ) {
+d571 6
+a576 4
+		fe->node.mln_Succ;
+		fe = (struct FontEntry *) fe->node.mln_Succ) {
+	    if (FontMatch(te->typePath, te->amigaName,
+		    fe->fontPath, fe->amigaName)) {
+d587 1
+a587 1
+    DBG("ae->fcList...\n");
+d589 8
+a596 6
+	    fe2 = (struct FontEntry *) fe->node.mln_Succ;
+	    fe = fe2) {
+	DBG3("name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName,
+		fe->fontPath, fe->fFlags);
+	if (!(fe->fFlags & FFLAG_TAG)) {
+	    validateEntry(fe->fFlags, ae, fe, 0, 0);
+d599 1
+a599 1
+    DBG("ae->otList...\n");
+d601 12
+a612 10
+	    oe2 = (struct OTagEntry *) oe->node.mln_Succ;
+	    oe = oe2) {
+	DBG4("$%lx name \"%s\" path \"%s\" fFlags $%02lx\n", oe, oe->amigaName,
+		oe->otagPath, oe->fFlags);
+	DBG3("  bDef $%lx iDef $%lx biDef $%lx\n",
+		oe->bDef, oe->iDef, oe->biDef);
+	DBG3("  bRef $%lx iRef $%lx biRef $%lx\n",
+		oe->bRef, oe->iRef, oe->biRef);
+	if (!(oe->fFlags & FFLAG_TAG)) {
+	    validateEntry(oe->fFlags, ae, 0, oe, 0);
+d615 1
+a615 1
+    DBG("ae->tfList...\n");
+d617 9
+a625 7
+	    te2 = (struct TypeEntry *) te->node.mln_Succ;
+	    te = te2) {
+	DBG4("font id %ld name \"%s\" path \"%s\" fFlags $%02lx\n",
+		te->typefaceID, te->amigaName, te->typePath, te->fFlags);
+	if (!(te->fFlags & FFLAG_TAG)) {
+	    validateEntry(te->fFlags, ae, 0, 0, te);
+	}
+d627 2
+a628 2
+    FindOMatches(ae);
+    Update(ae, 0);
+d630 1
+a630 1
+    return(ae);
+d634 1
+a634 1
+OpenBullet()
+d642 2
+a643 2
+    DBG("OpenBullet\n");
+    for (i = 0; i <= MAXDDIRS+2; i++)
+d646 2
+a647 2
+    GDDirNames[MAXDDIRS+1] = LzS[GADGET_NotValidPath];
+    GDDirNames[MAXDDIRS+3] = 0;
+d649 2
+a650 2
+    strcpy(S.t.TempBuffer, VOL_FONTS ":" DIR_BULLET "/");
+    s = S.t.TempBuffer + strlen(S.t.TempBuffer);
+d653 2
+a654 2
+    installChk(s, FILE_IFFNT);
+    installChk(s, FILE_PLUGIN);
+d656 1
+a656 1
+	installChk(s, FILE_IFSS);
+d659 1
+a659 1
+	installChk(s, FILE_IFUC);
+d662 1
+a662 1
+    Process->pr_WindowPtr = (APTR) -1;
+d664 2
+a665 2
+    lock = LockDosList(LDF_ALL|LDF_READ);
+    fonts = FindDosEntry(lock, "FONTS", LDF_ALL);
+d667 5
+a671 3
+    if (fonts) {
+	AddFontsEntry(fonts->dol_Lock, TRUE);
+	if (fonts->dol_Type == DLT_DIRECTORY) {
+d673 2
+a674 2
+		    alist = alist->al_Next)
+		AddFontsEntry(alist->al_Lock, TRUE);
+d677 1
+a677 1
+    UnLockDosList(LDF_ALL|LDF_READ);
+d680 3
+a682 2
+    if (LastDDirIndex < 0) {
+	EndGame(RETURN_ERROR, ENDGAME_NoFontsAssign);
+d689 2
+a690 2
+	EndGame(RETURN_OK, 0);
+    DBG("OpenBullet done.\n");
+@
+
+
+37.6
+log
+@*** empty log message ***
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d13 1
+d580 5
+a584 1
+/*    installChk(s, FILE_SCREEN); */
+@

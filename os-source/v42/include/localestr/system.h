@@ -1,0 +1,335 @@
+#ifndef LOCALESTR_SYSTEM_H
+#define LOCALESTR_SYSTEM_H
+
+
+/****************************************************************************/
+
+
+/* This file was created automatically by CatComp.
+ * Do NOT edit by hand!
+ */
+
+
+#ifndef EXEC_TYPES_H
+#include <exec/types.h>
+#endif
+
+
+/****************************************************************************/
+
+
+#ifdef DISKCOPY
+#define MSG_DC_TITLE 4000
+#define MSG_DC_TITLE_STR "DiskCopy"
+
+#define MSG_DC_REQUEST_TITLE 4001
+#define MSG_DC_REQUEST_TITLE_STR "DiskCopy Request"
+
+#define MSG_DC_WRITEPROTECT 4002
+#define MSG_DC_WRITEPROTECT_STR "Disk in \ndevice %s\nis write-protected"
+
+#define MSG_DC_WRITEPROTECT_GAD 4003
+#define MSG_DC_WRITEPROTECT_GAD_STR "Retry|Cancel"
+
+#define MSG_DC_FAILED_TITLE 4004
+#define MSG_DC_FAILED_TITLE_STR "DiskCopy Failure"
+
+#define MSG_DC_CANCEL_GAD 4005
+#define MSG_DC_CANCEL_GAD_STR "Cancel"
+
+#define MSG_DC_INSERT_SOUR 4006
+#define MSG_DC_INSERT_SOUR_STR "Insert disk to copy from (SOURCE disk) in device %s\n"
+
+#define MSG_DC_INSERT_DEST 4007
+#define MSG_DC_INSERT_DEST_STR "Insert disk to copy to (DESTINATION disk) in device %s\n"
+
+#define MSG_DC_INSERT_NEXTDEST 4008
+#define MSG_DC_INSERT_NEXTDEST_STR "Insert next disk to copy to (DESTINATION disk) in device %s\n"
+
+#define MSG_DC_PRESSRETURN_1 4009
+#define MSG_DC_PRESSRETURN_1_STR "Press RETURN to begin copying or CTRL-C to abort: \0"
+
+#define MSG_DC_PRESSRETURN_2 4010
+#define MSG_DC_PRESSRETURN_2_STR "Press RETURN to continue or CTRL-C to abort: \0"
+
+#define MSG_DC_WBCOPY_GAD 4011
+#define MSG_DC_WBCOPY_GAD_STR "Continue|Cancel"
+
+#define MSG_DC_COPYEXPLAIN_1 4012
+#define MSG_DC_COPYEXPLAIN_1_STR "Copying on device %s.\n\nThis operation will require %ld disk swaps."
+
+#define MSG_DC_COPYEXPLAIN_2 4013
+#define MSG_DC_COPYEXPLAIN_2_STR "Copying from device %s\nto device %s."
+
+#define MSG_DC_WBINSERT_BOTH 4014
+#define MSG_DC_WBINSERT_BOTH_STR "Insert disk to copy from (SOURCE disk)\nin device %s.\n\nInsert disk to copy to (DESTINATION disk)\nin device %s."
+
+#define MSG_DC_WBINSERT_SOUR 4015
+#define MSG_DC_WBINSERT_SOUR_STR "Insert disk to copy from (SOURCE disk)\nin device %s."
+
+#define MSG_DC_WBINSERT_DEST 4016
+#define MSG_DC_WBINSERT_DEST_STR "Insert disk to copy to (DESTINATION disk)\nin device %s."
+
+#define MSG_DC_COPYING_HDR 4017
+#define MSG_DC_COPYING_HDR_STR "Copying disk..."
+
+#define MSG_DC_STOP_GAD 4018
+#define MSG_DC_STOP_GAD_STR "Stop"
+
+#define MSG_DC_READING 4019
+#define MSG_DC_READING_STR "\rReading   cylinder %ld, %ld to go  \0"
+
+#define MSG_DC_WRITING 4020
+#define MSG_DC_WRITING_STR "\rWriting   cylinder %ld, %ld to go  \0"
+
+#define MSG_DC_VERIFYING 4021
+#define MSG_DC_VERIFYING_STR "\rVerifying cylinder %ld, %ld to go  \0"
+
+#define MSG_DC_FAILED_INUSE 4022
+#define MSG_DC_FAILED_INUSE_STR "Volume\n%s\nis in use"
+
+#define MSG_DC_FAILED_BADCYL 4023
+#define MSG_DC_FAILED_BADCYL_STR "Couldn't write cylinder %lu"
+
+#define MSG_DC_FAILED_NODEVICE 4024
+#define MSG_DC_FAILED_NODEVICE_STR "Couldn't open device %s"
+
+#define MSG_DC_FAILED_DISKCHANGED 4025
+#define MSG_DC_FAILED_DISKCHANGED_STR "Couldn't access disk in device %s\n(disk was changed, or there was no disk)"
+
+#define MSG_DC_FAILED_DOS 4026
+#define MSG_DC_FAILED_DOS_STR "%s"
+
+#define MSG_DC_WBEXPLAIN 4027
+#define MSG_DC_WBEXPLAIN_STR "To duplicate a disk, select\nits icon and pick the Copy\nitem from the Icons menu."
+
+#define MSG_DC_VERIFYERROR 4028
+#define MSG_DC_VERIFYERROR_STR "Error verifying disk in device %s\n"
+
+#define MSG_DC_INCOMPATIBLEERROR 4029
+#define MSG_DC_INCOMPATIBLEERROR_STR "Disks in devices %s and %s are not of\nthe same size and cannot be copied to\none another.\n"
+
+#define MSG_DC_BADDEVICE 4030
+#define MSG_DC_BADDEVICE_STR "Couldn't find device %s"
+
+#define MSG_DC_FAILED_BADREAD 4031
+#define MSG_DC_FAILED_BADREAD_STR "Couldn't read cylinder %lu"
+
+#endif /* DISKCOPY */
+
+#ifdef FORMAT
+#define MSG_FMT_NOTHING 6000
+#define MSG_FMT_NOTHING_STR ""
+
+#define MSG_FMT_FORMAT_TITLE 6001
+#define MSG_FMT_FORMAT_TITLE_STR "Format"
+
+#define MSG_FMT_INFO_GAD 6002
+#define MSG_FMT_INFO_GAD_STR "Current Information:"
+
+#define MSG_FMT_DEVNAME 6003
+#define MSG_FMT_DEVNAME_STR "Device '%s'"
+
+#define MSG_FMT_VOLNAME 6004
+#define MSG_FMT_VOLNAME_STR "Volume '%s'"
+
+#define MSG_FMT_VOLUMENAME_GAD 6005
+#define MSG_FMT_VOLUMENAME_GAD_STR "New Volume Name:"
+
+#define MSG_FMT_TRASH_GAD 6006
+#define MSG_FMT_TRASH_GAD_STR "Put Trashcan:"
+
+#define MSG_FMT_FFS_GAD 6007
+#define MSG_FMT_FFS_GAD_STR "Fast File System:"
+
+#define MSG_FMT_INTL_GAD 6008
+#define MSG_FMT_INTL_GAD_STR "International Mode:"
+
+#define MSG_FMT_FORMAT_GAD 6009
+#define MSG_FMT_FORMAT_GAD_STR "Format"
+
+#define MSG_FMT_QFORMAT_GAD 6010
+#define MSG_FMT_QFORMAT_GAD_STR "Quick Format"
+
+#define MSG_FMT_CANCEL_GAD 6011
+#define MSG_FMT_CANCEL_GAD_STR "Cancel"
+
+#define MSG_FMT_REQUEST_TITLE 6012
+#define MSG_FMT_REQUEST_TITLE_STR "Format Request"
+
+#define MSG_FMT_CONFIRM_1 6013
+#define MSG_FMT_CONFIRM_1_STR "OK to format volume\n%s?\n\nWARNING!\n\nAll data will be lost!\n(%s)"
+
+#define MSG_FMT_CONFIRM_2 6014
+#define MSG_FMT_CONFIRM_2_STR "OK to format disk\nin device %s?\n\nWARNING!\n\nAll data will be lost!\n(%s)"
+
+#define MSG_FMT_CONFIRM_3 6015
+#define MSG_FMT_CONFIRM_3_STR "WARNING!\n\nDo you really wish to format the\ndisk in device %s (%s)\nand lose all its data?"
+
+#define MSG_FMT_CAPACITY_1 6016
+#define MSG_FMT_CAPACITY_1_STR "%lu%lc capacity, %lu%% used"
+
+#define MSG_FMT_CAPACITY_2 6017
+#define MSG_FMT_CAPACITY_2_STR "%lu%lc capacity"
+
+#define MSG_FMT_CONFIRM_GAD 6018
+#define MSG_FMT_CONFIRM_GAD_STR "Format|Cancel"
+
+#define MSG_FMT_WRITEPROTECT 6019
+#define MSG_FMT_WRITEPROTECT_STR "Disk in \ndevice %s\nis write-protected"
+
+#define MSG_FMT_WRITEPROTECT_GAD 6020
+#define MSG_FMT_WRITEPROTECT_GAD_STR "Retry|Cancel"
+
+#define MSG_FMT_FAILED_TITLE 6021
+#define MSG_FMT_FAILED_TITLE_STR "Format Failure"
+
+#define MSG_FMT_FAILED_INUSE 6022
+#define MSG_FMT_FAILED_INUSE_STR "Volume\n%s\nis in use"
+
+#define MSG_FMT_FAILED_BADCYL 6023
+#define MSG_FMT_FAILED_BADCYL_STR "Couldn't format cylinder %lu"
+
+#define MSG_FMT_FAILED_NODEVICE 6024
+#define MSG_FMT_FAILED_NODEVICE_STR "Couldn't open device %s"
+
+#define MSG_FMT_FAILED_DISKCHANGED 6025
+#define MSG_FMT_FAILED_DISKCHANGED_STR "Couldn't access disk in device %s\n(disk was changed, or there was no disk)"
+
+#define MSG_FMT_FAILED_TRASHCAN 6026
+#define MSG_FMT_FAILED_TRASHCAN_STR "Couldn't create trashcan on volume\n%s"
+
+#define MSG_FMT_FAILED_DOS 6027
+#define MSG_FMT_FAILED_DOS_STR "%s"
+
+#define MSG_FMT_PLEASEINSERT 6028
+#define MSG_FMT_PLEASEINSERT_STR "Insert disk to be formatted in device %s\nPress RETURN to begin formatting or CTRL-C to abort: \0"
+
+#define MSG_FMT_FORMATTING_HDR 6029
+#define MSG_FMT_FORMATTING_HDR_STR "Formatting disk..."
+
+#define MSG_FMT_INITING 6030
+#define MSG_FMT_INITING_STR "Initializing disk..."
+
+#define MSG_FMT_FORMATTING 6031
+#define MSG_FMT_FORMATTING_STR "\rFormatting cylinder %ld, %ld to go  \0"
+
+#define MSG_FMT_VERIFYING 6032
+#define MSG_FMT_VERIFYING_STR "\rVerifying  cylinder %ld, %ld to go  \0"
+
+#define MSG_FMT_STOP_GAD 6033
+#define MSG_FMT_STOP_GAD_STR "Stop"
+
+#define MSG_FMT_CONTINUE_GAD 6034
+#define MSG_FMT_CONTINUE_GAD_STR "Continue"
+
+#define MSG_FMT_SELECTDEV_GAD 6035
+#define MSG_FMT_SELECTDEV_GAD_STR "Select Device To Format"
+
+#define MSG_FMT_EMPTY_DISK 6036
+#define MSG_FMT_EMPTY_DISK_STR "Empty"
+
+#define MSG_FMT_DIRCACHE_GAD 6037
+#define MSG_FMT_DIRCACHE_GAD_STR "Directory Cache:"
+
+#endif /* FORMAT */
+
+
+/****************************************************************************/
+
+
+#ifdef STRINGARRAY
+
+struct AppString
+{
+    LONG   as_ID;
+    STRPTR as_Str;
+};
+
+struct AppString AppStrings[] =
+{
+#ifdef DISKCOPY
+    {MSG_DC_TITLE,(STRPTR)MSG_DC_TITLE_STR},
+    {MSG_DC_REQUEST_TITLE,(STRPTR)MSG_DC_REQUEST_TITLE_STR},
+    {MSG_DC_WRITEPROTECT,(STRPTR)MSG_DC_WRITEPROTECT_STR},
+    {MSG_DC_WRITEPROTECT_GAD,(STRPTR)MSG_DC_WRITEPROTECT_GAD_STR},
+    {MSG_DC_FAILED_TITLE,(STRPTR)MSG_DC_FAILED_TITLE_STR},
+    {MSG_DC_CANCEL_GAD,(STRPTR)MSG_DC_CANCEL_GAD_STR},
+    {MSG_DC_INSERT_SOUR,(STRPTR)MSG_DC_INSERT_SOUR_STR},
+    {MSG_DC_INSERT_DEST,(STRPTR)MSG_DC_INSERT_DEST_STR},
+    {MSG_DC_INSERT_NEXTDEST,(STRPTR)MSG_DC_INSERT_NEXTDEST_STR},
+    {MSG_DC_PRESSRETURN_1,(STRPTR)MSG_DC_PRESSRETURN_1_STR},
+    {MSG_DC_PRESSRETURN_2,(STRPTR)MSG_DC_PRESSRETURN_2_STR},
+    {MSG_DC_WBCOPY_GAD,(STRPTR)MSG_DC_WBCOPY_GAD_STR},
+    {MSG_DC_COPYEXPLAIN_1,(STRPTR)MSG_DC_COPYEXPLAIN_1_STR},
+    {MSG_DC_COPYEXPLAIN_2,(STRPTR)MSG_DC_COPYEXPLAIN_2_STR},
+    {MSG_DC_WBINSERT_BOTH,(STRPTR)MSG_DC_WBINSERT_BOTH_STR},
+    {MSG_DC_WBINSERT_SOUR,(STRPTR)MSG_DC_WBINSERT_SOUR_STR},
+    {MSG_DC_WBINSERT_DEST,(STRPTR)MSG_DC_WBINSERT_DEST_STR},
+    {MSG_DC_COPYING_HDR,(STRPTR)MSG_DC_COPYING_HDR_STR},
+    {MSG_DC_STOP_GAD,(STRPTR)MSG_DC_STOP_GAD_STR},
+    {MSG_DC_READING,(STRPTR)MSG_DC_READING_STR},
+    {MSG_DC_WRITING,(STRPTR)MSG_DC_WRITING_STR},
+    {MSG_DC_VERIFYING,(STRPTR)MSG_DC_VERIFYING_STR},
+    {MSG_DC_FAILED_INUSE,(STRPTR)MSG_DC_FAILED_INUSE_STR},
+    {MSG_DC_FAILED_BADCYL,(STRPTR)MSG_DC_FAILED_BADCYL_STR},
+    {MSG_DC_FAILED_NODEVICE,(STRPTR)MSG_DC_FAILED_NODEVICE_STR},
+    {MSG_DC_FAILED_DISKCHANGED,(STRPTR)MSG_DC_FAILED_DISKCHANGED_STR},
+    {MSG_DC_FAILED_DOS,(STRPTR)MSG_DC_FAILED_DOS_STR},
+    {MSG_DC_WBEXPLAIN,(STRPTR)MSG_DC_WBEXPLAIN_STR},
+    {MSG_DC_VERIFYERROR,(STRPTR)MSG_DC_VERIFYERROR_STR},
+    {MSG_DC_INCOMPATIBLEERROR,(STRPTR)MSG_DC_INCOMPATIBLEERROR_STR},
+    {MSG_DC_BADDEVICE,(STRPTR)MSG_DC_BADDEVICE_STR},
+    {MSG_DC_FAILED_BADREAD,(STRPTR)MSG_DC_FAILED_BADREAD_STR},
+#endif /* DISKCOPY */
+
+#ifdef FORMAT
+    {MSG_FMT_NOTHING,(STRPTR)MSG_FMT_NOTHING_STR},
+    {MSG_FMT_FORMAT_TITLE,(STRPTR)MSG_FMT_FORMAT_TITLE_STR},
+    {MSG_FMT_INFO_GAD,(STRPTR)MSG_FMT_INFO_GAD_STR},
+    {MSG_FMT_DEVNAME,(STRPTR)MSG_FMT_DEVNAME_STR},
+    {MSG_FMT_VOLNAME,(STRPTR)MSG_FMT_VOLNAME_STR},
+    {MSG_FMT_VOLUMENAME_GAD,(STRPTR)MSG_FMT_VOLUMENAME_GAD_STR},
+    {MSG_FMT_TRASH_GAD,(STRPTR)MSG_FMT_TRASH_GAD_STR},
+    {MSG_FMT_FFS_GAD,(STRPTR)MSG_FMT_FFS_GAD_STR},
+    {MSG_FMT_INTL_GAD,(STRPTR)MSG_FMT_INTL_GAD_STR},
+    {MSG_FMT_FORMAT_GAD,(STRPTR)MSG_FMT_FORMAT_GAD_STR},
+    {MSG_FMT_QFORMAT_GAD,(STRPTR)MSG_FMT_QFORMAT_GAD_STR},
+    {MSG_FMT_CANCEL_GAD,(STRPTR)MSG_FMT_CANCEL_GAD_STR},
+    {MSG_FMT_REQUEST_TITLE,(STRPTR)MSG_FMT_REQUEST_TITLE_STR},
+    {MSG_FMT_CONFIRM_1,(STRPTR)MSG_FMT_CONFIRM_1_STR},
+    {MSG_FMT_CONFIRM_2,(STRPTR)MSG_FMT_CONFIRM_2_STR},
+    {MSG_FMT_CONFIRM_3,(STRPTR)MSG_FMT_CONFIRM_3_STR},
+    {MSG_FMT_CAPACITY_1,(STRPTR)MSG_FMT_CAPACITY_1_STR},
+    {MSG_FMT_CAPACITY_2,(STRPTR)MSG_FMT_CAPACITY_2_STR},
+    {MSG_FMT_CONFIRM_GAD,(STRPTR)MSG_FMT_CONFIRM_GAD_STR},
+    {MSG_FMT_WRITEPROTECT,(STRPTR)MSG_FMT_WRITEPROTECT_STR},
+    {MSG_FMT_WRITEPROTECT_GAD,(STRPTR)MSG_FMT_WRITEPROTECT_GAD_STR},
+    {MSG_FMT_FAILED_TITLE,(STRPTR)MSG_FMT_FAILED_TITLE_STR},
+    {MSG_FMT_FAILED_INUSE,(STRPTR)MSG_FMT_FAILED_INUSE_STR},
+    {MSG_FMT_FAILED_BADCYL,(STRPTR)MSG_FMT_FAILED_BADCYL_STR},
+    {MSG_FMT_FAILED_NODEVICE,(STRPTR)MSG_FMT_FAILED_NODEVICE_STR},
+    {MSG_FMT_FAILED_DISKCHANGED,(STRPTR)MSG_FMT_FAILED_DISKCHANGED_STR},
+    {MSG_FMT_FAILED_TRASHCAN,(STRPTR)MSG_FMT_FAILED_TRASHCAN_STR},
+    {MSG_FMT_FAILED_DOS,(STRPTR)MSG_FMT_FAILED_DOS_STR},
+    {MSG_FMT_PLEASEINSERT,(STRPTR)MSG_FMT_PLEASEINSERT_STR},
+    {MSG_FMT_FORMATTING_HDR,(STRPTR)MSG_FMT_FORMATTING_HDR_STR},
+    {MSG_FMT_INITING,(STRPTR)MSG_FMT_INITING_STR},
+    {MSG_FMT_FORMATTING,(STRPTR)MSG_FMT_FORMATTING_STR},
+    {MSG_FMT_VERIFYING,(STRPTR)MSG_FMT_VERIFYING_STR},
+    {MSG_FMT_STOP_GAD,(STRPTR)MSG_FMT_STOP_GAD_STR},
+    {MSG_FMT_CONTINUE_GAD,(STRPTR)MSG_FMT_CONTINUE_GAD_STR},
+    {MSG_FMT_SELECTDEV_GAD,(STRPTR)MSG_FMT_SELECTDEV_GAD_STR},
+    {MSG_FMT_EMPTY_DISK,(STRPTR)MSG_FMT_EMPTY_DISK_STR},
+    {MSG_FMT_DIRCACHE_GAD,(STRPTR)MSG_FMT_DIRCACHE_GAD_STR},
+#endif /* FORMAT */
+};
+
+
+#endif /* STRINGARRAY */
+
+
+/****************************************************************************/
+
+
+#endif /* LOCALESTR_SYSTEM_H */

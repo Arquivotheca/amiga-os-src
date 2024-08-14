@@ -1,0 +1,40 @@
+/* fault.h */
+
+char * __asm getstring(register __d1 LONG code);
+
+#define STR_VOLUME		-100
+#define STR_IS_NOT_VALIDATED	-101
+#define STR_IS_WRITE_PROTECTED	-102
+#define STR_IS_FULL		-103
+#define STR_PLEASE_INSERT	-104
+#define STR_PLEASE_REPLACE	-105
+#define STR_IN_ANY_DRIVE	-106
+#define STR_NOT_A_DOS_DISK	-107
+#define STR_NO_DISK_PRESENT	-108
+#define STR_HAS_RW_ERROR	-109
+#define STR_MUST_REPLACE	-110
+#define STR_IN_UNIT		-111
+#define STR_IN_DEVICE		-112
+#define STR_WAIT_DISK		-113
+#define STR_TASK_FAILED		-114
+#define STR_DISK_CORRUPT	-115
+#define STR_UNUSED		-116	/* unused */
+#define STR_ERROR		-117
+
+#define STR_REDIRECTION		-118
+#define STR_SYNTAX_ERROR	-119
+#define STR_UNABLE_TO_LOAD	-120
+#define STR_UNKNOWN_COMMAND	-121
+#define STR_ERROR_COMMAND	-122
+#define STR_SHELL_ERROR		-123
+#define STR_COMMAND_TOO_LONG	-124
+#define STR_TOO_MANY_REDIR	-125
+#define STR_RETRY_CANCEL	-126
+#define STR_REBOOT_SUSPEND	-127
+#define STR_CANT_OPEN_FROM	-128
+#define STR_NEW_CLI_PROCESS	-129
+#define STR_CANT_CREATE_PROC	-130
+
+// added in v39
+#define STR_FAILED_RETURNCODE	-161
+#define STR_SOFTWARE_FAILURE	-162

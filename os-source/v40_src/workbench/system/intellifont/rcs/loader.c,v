@@ -1,0 +1,4485 @@
+head     37.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+37.11
+date     92.05.26.11.39.35;  author darren;  state Exp;
+branches ;
+next     37.10;
+
+37.10
+date     92.02.10.10.53.05;  author davidj;  state Exp;
+branches ;
+next     37.9;
+
+37.9
+date     92.02.07.11.56.45;  author davidj;  state Exp;
+branches ;
+next     37.8;
+
+37.8
+date     91.03.18.14.39.24;  author kodiak;  state Exp;
+branches ;
+next     37.7;
+
+37.7
+date     91.03.17.21.14.08;  author kodiak;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     91.03.11.14.22.53;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.11
+log
+@Fixed 2 bugs with HQ2/Intellifont data both in swapcharacters().
+1.) ptr.x used if intellifont data, hence test for HQ2 in fall
+through was busted.  2.) NYSK fetched without incrementing pointer -
+means if NLOP was even, the code was broken.  If ODD, by good luck
+the rounding code forced it to skip one more byte, and it worked.
+@
+text
+@/*
+**	$Id: loader.c,v 37.10 92/02/10 10:53:05 davidj Exp Locker: darren $
+**
+**	Fountain/loader.c -- load FAIS data
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	based on licensed code...
+**
+**	Intellifont Loader Version 2.1 Release 07-Oct-89
+**	Copyright (c) 1988 Compugraphic Corporation ALL RIGHTS RESERVED
+**
+**	Copyright (C) 1987,1988, All Rights Reserved, by
+**	Compugraphic Corporation, Wilmington, Ma.
+**
+**	This software is furnished under a license and may be used and copied
+**	only in accordance with the terms of such license and with the
+**	inclusion of the above copyright notice. This software or any other
+**	copies thereof may not be provided or otherwise made available to any
+**	other person. No title to and ownership of the software is hereby
+**	transferred.
+**
+**	The information in this software is subject to change without notice
+**	and should not be construed as a commitment by Compugraphic
+**	Corporation.
+**
+*/
+/*
+*  History:
+*  ---------
+*  06-Oct-89 Created.
+** File: LIB_LOAD.C
+** Current Status:
+**   1. Can not add characters to an exisiting library face.
+**   2. Can not handle multi-diskette FAIS volumes.
+*/
+
+/*  02-03-92 - TnC (Agfa) - Fixed non-Intellifont data bug and Fontalias swap */
+
+#include  "fountain.h"
+
+extern struct Library *DOSBase;
+
+extern union StaticPool S;
+
+#define  MIN_CHAR_SIZE                   12
+#define  MAX_CHAR_SIZE                 2000
+#define  MAX_FONT_FILES                  32
+#define  MAX_BUFFER                    8000	/* Must be greater or equal */
+ /* to MAX_CHAR_SIZE */
+#define  MAX_CHARS                      600
+#define  MAX_KEYS                        84	/* max number of keys for */
+ /* file headers and hiqdata1 */
+#define  MAX_HEADER        6 * MAX_KEYS + 8
+#define  MAX_INDEX                      256
+#define  MAX_LIBBUF                    2000
+
+
+/*  global defines */
+#define  HIQDATA1                       502
+#define  GLOBALCHDATA                  5001
+#define  CGCHARNUMS                    5002
+#define  GLOBINTDATA                   5003
+#define  DISPLAYHEADER                  301
+#define  CHARWIDTH                      201
+#define  ATTRIBUTEHEADER                102
+#define  CCHARMETRICS                   233
+#define  COMPLEMENTHEADER               104
+#define  COMPOUNDCHAR                   231
+#define  CCID                           234
+#define  DESIGNKERN                     212
+#define  FONTALIAS                      107
+#define  FONTHEADER                     101
+#define  TEXTKERN                       211
+#define  TRACKKERN                      213
+#define  TYPEFACEHEADER                 103
+#define  FILE_HEADER_SIZE                32
+#define  FACE_HEADER_SIZE                32
+#define  FILE_DIRECTORY_SIZE            128
+#define  DISK_ALIGN                      16
+#define  COPYRIGHTSIZE                   62
+#define  RASTERPARAMSIZE                 10
+#define  OK                               0
+
+#define  fileheader_key                   1
+#define  filedirectory_key                2
+#define  faceglobal_key                  10
+#define  globalintellifont_key          100
+#define  trackkern_key                  101
+#define  textkern_key                   102
+#define  designkern_key                 103
+#define  charwidth_key                  104
+#define  attributeheader_key            105
+#define  rasterparam_key                106
+#define  typefaceheader_key             107
+#define  compoundchar_key               108
+#define  displayheader_key              109
+#define  fontalias_key                  110
+#define  copyright_key                  111
+#define  cchartextkern_key              112
+#define  cchardesignkern_key            113
+#define  endofdir_key             MAX_UWORD
+#define  longendofdir_key               -1l
+#define  error_return                    -1
+#define  updmask                 0x80000000
+#define  limmask                 0x40000000
+#define  unvmask                 0x20000000
+#define  normask                 0x00000000
+#define  YLINES                           0
+#define  YCLASS                           1
+#define  YDIM                             2
+#define  XDIM                             3
+#define  YDIMFLAGS                        0
+#define  XDIMFLAGS                        1
+#define  HQ2FLAG                          2
+
+/*  structure definitions */
+union PointerUnion
+{
+    BYTE *b;
+    WORD *w;
+    ULONG *l;
+};
+
+typedef struct
+{
+    UWORD key;
+    ULONG offset;
+} keyoffset_type;
+
+typedef struct
+{
+    UWORD fileId;
+    ULONG fileLength;
+    UWORD NKEYS;
+    keyoffset_type keyOffsets[1];
+} fileheader_type;
+
+typedef struct
+{
+    UWORD blockID;
+    ULONG blockLength;
+    UWORD NBKEYS;
+    keyoffset_type keyOffsets[1];
+} hiqdata1_type;
+
+typedef struct
+{
+    UWORD NCHAR;
+    WORD fontSlant;
+    ULONG offsets[1];
+} globalchdata_type;
+
+typedef UWORD cgcharnums_type;
+
+typedef struct
+{
+    UWORD cg_num;
+    ULONG offset;
+    UWORD size;
+} char_type;
+
+typedef struct
+{
+    ULONG faceglobal_offset;
+    UWORD faceglobal_size;
+    char_type chars[1];
+} faceheader_type;
+
+typedef struct
+{
+    UWORD key;
+    ULONG offset;
+    UWORD size;
+} seg_dir_type;
+
+typedef struct
+{
+    ULONG face;
+    ULONG offset;
+    UWORD size;
+} file_dir_type;
+
+typedef struct
+{
+    UWORD NCHAR;
+    BYTE binaryFileName[12];
+    UWORD fontLimits[4];
+    UWORD reverseVideoLimits[4];
+    UWORD leftReference;
+    UWORD baselinePosition;
+    UWORD minimumPointSize;
+    UWORD maximumPointSize;
+    UWORD minimumSetSize;
+    UWORD maximumSetSize;
+    UBYTE controlCode[4];
+    UWORD masterPointSize;
+    UWORD scanDirection;
+    WORD italicAngle;
+    WORD xHeight;
+    UWORD scanResolutionY;
+    UWORD scanResolutionX;
+    UWORD outputEnable;
+} displayheader_type;
+
+typedef struct
+{
+    UWORD charWidth;
+    UWORD charFlags;
+} charwidth_type;
+
+typedef struct
+{
+    UBYTE data[4];
+} kerndata_type;
+
+typedef struct
+{
+    WORD kernSign;
+    UWORD kernUnit;
+    UWORD NSECT;
+    kerndata_type character[1];
+} packedkern_type;
+
+typedef struct
+{
+    UWORD data[8];
+} unpkerndata_type;
+
+typedef struct
+{
+    WORD kernSign;
+    UWORD kernUnit;
+    UWORD NSECT;
+    unpkerndata_type character[1];
+} unpackedkern_type;
+
+typedef struct
+{
+    UBYTE languageType;
+    UBYTE fontUsage;
+    UBYTE isFixedPitch;
+    UBYTE escapeUnit;
+    UWORD scaleFactor;
+    UWORD fixedSpaceRelWidths[3];
+    UWORD leftReference;
+    UWORD baselinePosition;
+    WORD windowTop;
+    WORD windowBottom;
+    struct
+    {
+	WORD zeroPoint;
+	WORD variablePoint;
+    } autoVarComp[3];
+    WORD ascender;
+    WORD descender;
+    WORD capHeight;
+    WORD xHeight;
+    WORD lcAccenHeight;
+    WORD ucAccentHeight;
+    UWORD charPica;
+    WORD leftAlign;
+    WORD rightAlign;
+    WORD uscoreDepth;
+    UWORD uscoreThickness;
+    WORD windowLeft;
+    WORD windowRight;
+    UWORD spaceBand;
+} attributeheader_type;
+
+typedef struct
+{
+    UWORD NFACES;
+    BYTE typeFaceName[50];
+    BYTE familyName[20];
+    BYTE weight[20];
+    LONG typeFaceSet[3];
+} typefaceheader_type;
+
+typedef struct
+{
+    UWORD key;
+    ULONG size;
+    seg_dir_type seg_dir;
+} faceglobal_type;
+
+typedef struct
+{
+    UWORD cg_num;
+    WORD xoffset;
+    WORD yoffset;
+} libpart_type;
+
+typedef struct
+{
+    UWORD cg_num;
+    WORD horiz_esc;
+    WORD vert_esc;
+    WORD NPCC;
+    libpart_type parts[1];
+} libcompoundchar_type;
+
+typedef struct
+{
+    UWORD ccCharCode;
+    WORDVECTOR offsets;
+} part_type;
+
+typedef struct
+{
+    UWORD ccCharCode;
+    UWORD NPCC;
+    part_type parts[1];
+} compoundchar_type;
+
+typedef struct
+{
+    UWORD isoCode;
+    LONG typeFace;
+    UWORD cgCode;
+} isocodetable_type;
+
+
+typedef struct
+{
+    BYTE typeFaceId[6];
+    BYTE complementId[6];
+    BYTE characterPlane[50];
+    UWORD substituteCode;
+    isocodetable_type table[1];
+} complementheader_type;
+
+typedef struct
+{
+    UWORD cg_num;
+    LONG face;
+} ccid_type;
+
+typedef struct
+{
+    WORD escapementX;
+    WORD escapementY;
+    BYTE amplified;
+    BYTE correction;
+    WORD leftExtent;
+    WORD rightExtent;
+    WORD ascent;
+    WORD descent;
+} ccharmetrics_type;
+
+/*
+**  Definition of Font Index File
+*/
+struct
+{
+    UWORD volId;
+    UWORD nVols;
+    UWORD volNo;
+    LONG volLength;
+    UWORD nFiles;
+    struct
+    {
+	BYTE face[6];
+	BYTE comp[6];
+	BYTE style[2];
+	BYTE pointSize[4];
+	BYTE setSize[4];
+	BYTE res[4];
+	BYTE orient[4];
+	BYTE fileId[5];
+	BYTE fileType[2];
+	BYTE fill[5];
+	UWORD dupCode;
+	UWORD nVol;
+	UWORD iVol;
+	BYTE fileName[8];
+    } font[MAX_FONT_FILES];
+} index_file;
+
+
+struct FaisLocals
+{
+    ULONG typeface;
+    ULONG complement;
+    LONG faceheaderoffset;
+    LONG globintdataoffset;
+    ULONG hiqdataoffset;
+    LONG globintdatasize;
+    LONG faceheadersizeoffset;
+    ULONG ySizeNumerator;
+    ULONG ySizeDenominator;
+    char *faisPath;
+    char *libName;
+    char *fontName;
+    FILE *FONTDISPLAY;
+    FILE *FONTATTRIBUTE;
+    FILE *LIB;
+    BYTE *updcompoundcharptr;
+    UWORD orThreshold;
+    UWORD nchar_in_lib;		/* number of valid characters to be put in lib */
+    UWORD nchar_in_font;	/* number of chars in font including missing and pi etc. */
+    UWORD faceheadersize;
+    WORD fontSlant;
+    UWORD spaceBand;
+    UBYTE isFixed;
+    char displayFile[9];
+    char attributeFile[9];
+};
+
+/* global buffers */
+BYTE faceheader[8 * MAX_CHARS + 14];
+BYTE designkern[16 * MAX_CHARS + 6];
+BYTE textkern[16 * MAX_CHARS + 6];
+BYTE dfileheader[MAX_HEADER];
+BYTE afileheader[MAX_HEADER];
+BYTE hiqdata[MAX_HEADER];
+BYTE updindextables[5][MAX_INDEX];
+BYTE limindextables[5][MAX_INDEX];
+BYTE unvindextables[5][MAX_INDEX];
+
+
+/* define Loader error code */
+#define ld_err_mem     100	/* Insufficient memory */
+#define ld_err_4       104	/* Maximum files limit exceeded */
+#define ld_err_5       105	/* Typeface/Complement number not found */
+#define ld_err_9       109	/* Global Character Data segment not found */
+#define ld_err_10      110	/* Cg Character Number Data segment not found */
+#define ld_err_11      111	/* Can't open Attribute file */
+#define ld_err_13      113	/* Font Header segment not found */
+#define ld_err_15      115	/* Character Width segment not found */
+
+/* define Loader warning code */
+#define ld_wrn_1      1001	/* Display Header segment not found */
+#define ld_wrn_4      1004	/* Attribute Header segment not found */
+#define ld_wrn_8      1008	/* Typeface Header segment not found */
+
+#define  TRUE	1
+#define  FALSE	0
+
+UWORD lib_load (WORD, BYTE **);
+ULONG align (ULONG);
+WORD directory_setup (struct FaisLocals *);
+WORD face_header_setup (struct FaisLocals *);
+WORD library_header_setup (struct FaisLocals *);
+WORD global_segment_setup (struct FaisLocals *);
+WORD write_characters (struct FaisLocals *);
+void sort (struct FaisLocals *, charwidth_type *, packedkern_type *, packedkern_type *);
+void pack_kerning (struct FaisLocals *, packedkern_type *, unpackedkern_type *);
+WORD assemblecompoundchar (struct FaisLocals * fl, WORD *, WORD *, complementheader_type *,
+			    ccharmetrics_type *, ccid_type *);
+    WORD code_to_cgnum (struct FaisLocals * fl, UWORD, isocodetable_type *);
+    void cleanup (struct FaisLocals *);
+    void swapcharwidth (struct FaisLocals * fl, BYTE *);
+    void swapattributeheader (struct FaisLocals * fl, BYTE *);
+    void swapdisplayheader (BYTE *);
+    void swaptypefaceheader (BYTE *);
+    void swaptrackkern (BYTE *);
+    void swapcharacters (BYTE *);
+
+#ifdef	DEBUG
+#undef	SWAPU
+#undef  SWAPW
+#define SWAPW	(WORD) SWAPU
+    UWORD swapbuffer[128] =
+    {0};
+    int dumpuctr = 0;
+    UWORD SWAPU (w)
+    UWORD w;
+{
+    UWORD r;
+    short i;
+
+    r = (UWORD) (((UWORD) w >> 8) + ((((UWORD) w & 0xff) << 8)));
+
+    for (i = 127; i > 0; i--)
+	swapbuffer[i] = swapbuffer[i - 1];
+    swapbuffer[0] = r;
+
+    if ((r == 0x2a71) || (r == 0x712a) || (r == 0x2975) || (r == 7529))
+    {
+	DBG ("vvv\n");
+	for (i = 127 - dumpuctr; i > 0; i--)
+	    DBG2 ("SWAPU 0x%04lx 0x%04lx\n",
+		  ((UWORD) swapbuffer[i] >> 8) + (((UWORD) swapbuffer[i] & 0xff) << 8),
+		  swapbuffer[i]);
+	dumpuctr = 128;
+    }
+    if (dumpuctr)
+    {
+	if (dumpuctr == 128)
+	{
+	    DBG2 ("SWAPU 0x%04lx 0x%04lx <<<\n", w, r);
+	}
+	else
+	{
+	    DBG2 ("SWAPU 0x%04lx 0x%04lx\n", w, r);
+	}
+	dumpuctr--;
+	if (!dumpuctr)
+	    DBG ("^^^\n");
+    }
+    return (r);
+}
+
+#endif
+
+int FAISLoad (typeEntry, libNameArg, orThreshArg)
+    struct TypeEntry *typeEntry;
+    char *libNameArg;
+    UWORD orThreshArg;
+{
+    struct FaisLocals fl;	/* shared local data */
+
+    DBG1 ("FAISLoad \"%s\"\n", libNameArg);
+    fl.faisPath = typeEntry->sourceFile;
+    fl.libName = libNameArg;
+    fl.fontName = typeEntry->amigaName;
+    fl.typeface = typeEntry->typefaceID;
+    fl.complement = typeEntry->complementID;
+    fl.orThreshold = orThreshArg;
+
+    fl.globintdataoffset = -1;
+    fl.updcompoundcharptr = NULL;
+    fl.nchar_in_lib = 0;
+    fl.nchar_in_font = 0;
+    fl.FONTDISPLAY = 0;
+    fl.FONTATTRIBUTE = 0;
+    fl.LIB = 0;
+
+/*  Process 1.2.2   Diskette Directory Setup */
+    DBG ("directory_setup...\n");
+    if (directory_setup (&fl))
+    {
+	cleanup (&fl);
+	return (FALSE);
+    }
+
+/*  Process 1.2.3   Face Header Setup */
+    DBG ("face_header_setup...\n");
+    if (face_header_setup (&fl))
+    {
+	cleanup (&fl);
+	return (FALSE);
+    }
+
+/*  Process 1.2.4   Library Header Setup */
+    DBG ("library_header_setup...\n");
+    if (library_header_setup (&fl))
+    {
+	cleanup (&fl);
+	return (FALSE);
+    }
+
+
+/*   Process 1.2.6   Global Segment Setup */
+    DBG ("global_segment_setup...\n");
+    if (global_segment_setup (&fl))
+    {
+	cleanup (&fl);
+	return (FALSE);
+    }
+
+/*   Process 1.2.7   Write Characters */
+    DBG ("write_characters...\n");
+    if (write_characters (&fl))
+    {
+	cleanup (&fl);
+	return (FALSE);
+    }
+
+    DBG ("cleanup...\n");
+    cleanup (&fl);
+    typeEntry->faceheaderOffset = fl.faceheaderoffset;
+    typeEntry->faceheaderCount = fl.faceheadersize;
+    typeEntry->ySizeNumerator = fl.ySizeNumerator;
+    typeEntry->ySizeFactor = fl.ySizeDenominator;
+    typeEntry->spaceWidth = fl.spaceBand;
+    typeEntry->isFixed = fl.isFixed;
+    return (TRUE);
+}
+
+BOOL faisRead (struct FaisLocals * fl, void *data, int length, BOOL equ, FILE * f)
+{
+    int actual;
+    char string[256];
+
+    if ((actual = fread ((char *) data, 1, length, f)) != length)
+    {
+	if ((!equ) && (actual > 0))
+	    return (SUCCESS);
+	if (f == fl->FONTDISPLAY)
+	    buildpath (string, fl->faisPath, fl->displayFile);
+	else
+	    buildpath (string, fl->faisPath, fl->attributeFile);
+	ErrRequester (ERROR_IFileRead, fl->fontName, string, length,
+		      actual, ferror (f));
+	return (FAILURE);
+    }
+    return (SUCCESS);
+}
+
+BOOL faisWrite (struct FaisLocals * fl, void *data, int length)
+{
+    int actual;
+
+    if ((actual = fwrite ((char *) data, 1, length, fl->LIB)) != length)
+    {
+	ErrRequester (ERROR_IFileWrite, fl->fontName, fl->libName, length,
+		      actual, ferror (fl->LIB));
+	fclose (fl->LIB);
+	fl->LIB = 0;
+	DeleteFile (fl->libName);
+	return (FAILURE);
+    }
+    return (SUCCESS);
+}
+
+
+/*
+**  Process 1.2.2
+*/
+WORD
+directory_setup (fl)
+    struct FaisLocals *fl;
+{
+    BYTE string[256];
+    WORD i, found;
+    LONG face;
+    LONG comp;
+    FILE *FONTINDEX;
+    int l;
+
+/*
+ *  Verify Font Disk on user-specified or default drive:
+ */
+    buildpath (string, fl->faisPath, "FONTINDX.FI");
+    if ((FONTINDEX = fopen (string, "r")) == NULL)
+    {
+	ErrRequester (ERROR_IOpenFail, fl->fontName, string);
+	return (FAILURE);
+    }
+/*
+ *  Read Font Index File
+ */
+    if ((l = fread ((char *) &index_file, 1, sizeof (index_file), FONTINDEX))
+	== -1)
+    {
+	ErrRequester (ERROR_IFileRead, fl->fontName, string, sizeof (index_file),
+		      l, ferror (fl->LIB));
+	return (FAILURE);
+    }
+/*
+**  Validate Font Diskette
+*/
+    fclose (FONTINDEX);
+    if (SWAPU (index_file.nFiles) > MAX_FONT_FILES)
+    {
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_4);
+	DBG ("Maximum files limit exceeded\n");
+	return (FAILURE);
+    }
+
+/*
+ *  Verify Font in Font Disk
+ */
+    found = FALSE;
+    for (i = 0; i < SWAPU (index_file.nFiles); i++)
+    {
+	if ((index_file.font[i].fileType[0] == 'F') &&
+	    (index_file.font[i].fileType[1] == 'D'))
+	{
+	    strncpy (string, index_file.font[i].face, 6);
+	    string[6] = '\0';
+	    face = atol (string);
+	    strncpy (string, index_file.font[i].comp, 6);
+	    string[6] = '\0';
+	    comp = atol (string);
+	    if ((fl->typeface == face) && (fl->complement == comp))
+	    {
+		found = TRUE;
+		break;
+	    }
+	}
+    }
+    if (!found)
+    {
+	DBG ("Typeface/Complement number not found\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_5);
+	return (ld_err_5);
+    }
+/*
+**  Open Font Display File
+*/
+    getString (fl->displayFile, index_file.font[i].fileName, 8);
+    buildpath (string, fl->faisPath, fl->displayFile);
+    if ((fl->FONTDISPLAY = fopen (string, "r")) == NULL)
+    {
+	ErrRequester (ERROR_IOpenFail, fl->fontName, string);
+	return (FAILURE);
+    }
+
+/*
+ *  Locate Attribute File on Font Disk
+ */
+    found = FALSE;
+    for (i = 0; i < SWAPU (index_file.nFiles); i++)
+    {
+	if ((index_file.font[i].fileType[0] == 'F') &&
+	    (index_file.font[i].fileType[1] == 'A'))
+	{
+	    strncpy (string, index_file.font[i].face, 6);
+	    string[6] = '\0';
+	    fl->typeface = atol (string);
+	    strncpy (string, index_file.font[i].comp, 6);
+	    string[6] = '\0';
+	    fl->complement = atol (string);
+	    if ((fl->typeface == face) && (fl->complement == comp))
+	    {
+		found = TRUE;
+		break;
+	    }
+	}
+    }
+    if (!found)
+    {
+	DBG ("Typeface/Complement number not found\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_5);
+	return (ld_err_5);
+    }
+/*
+**  Open Font Attribute File
+*/
+    getString (fl->attributeFile, index_file.font[i].fileName, 8);
+    buildpath (string, fl->faisPath, fl->attributeFile);
+    if ((fl->FONTATTRIBUTE = fopen (string, "r")) == NULL)
+    {
+	ErrRequester (ERROR_IOpenFail, fl->fontName, string);
+	return (FAILURE);
+    }
+    return (OK);
+}
+
+WORD
+face_header_setup (fl)
+    struct FaisLocals *fl;
+{
+    keyoffset_type *ptr;
+    UWORD i;
+    ULONG cgcharnumsoffset, globalchdataoffset;
+    globalchdata_type *globalchdata;
+    cgcharnums_type *cgcharnums;
+    char_type *charptr;
+    LONG *offsets, *nextoffset;
+    faceheader_type *faceheaderptr;
+    UWORD nkeys;
+
+    /* read display file header */
+    if (faisRead (fl, dfileheader, MAX_HEADER, FALSE, fl->FONTDISPLAY))
+	return (FAILURE);
+
+    /* locate hiqdata1 */
+    fl->hiqdataoffset = MAX_LONG;
+    ptr = (keyoffset_type *) (((fileheader_type *) dfileheader)->keyOffsets);
+    nkeys = SWAPU (((fileheader_type *) dfileheader)->NKEYS);
+    if (nkeys > MAX_KEYS)
+    {
+	DBG2 ("nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+	nkeys = MAX_KEYS;
+    }
+    for (i = 0; i < nkeys; i++)
+    {
+	if (SWAPU (ptr->key) == HIQDATA1)
+	{
+	    fl->hiqdataoffset = SWAPL (ptr->offset);
+	    break;
+	}
+	ptr++;
+    }
+
+    if (fl->hiqdataoffset == MAX_LONG)
+    {
+	DBG ("Error reading HIQDATA1 segment\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_9);
+	return (ld_err_9);
+    }
+
+    /* read hiqdata1 segment */
+    fseek (fl->FONTDISPLAY, fl->hiqdataoffset, 0);
+    if (faisRead (fl, hiqdata, MAX_HEADER, FALSE, fl->FONTDISPLAY))
+    {
+	DBG ("Error reading HIQDATA1 segment\n");
+	return (FAILURE);
+    }
+
+    /* locate cgcharnums and globalchdata */
+    cgcharnumsoffset = MAX_LONG;
+    globalchdataoffset = MAX_LONG;
+    fl->globintdataoffset = MAX_LONG;
+    ptr = (keyoffset_type *) (((hiqdata1_type *) hiqdata)->keyOffsets);
+    nkeys = SWAPU (((hiqdata1_type *) hiqdata)->NBKEYS);
+    if (nkeys > MAX_KEYS)
+    {
+	DBG2 ("hiq nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+	nkeys = MAX_KEYS;
+    }
+    for (i = 0; i < nkeys; i++)
+    {
+	if (SWAPU (ptr->key) == CGCHARNUMS)
+	    cgcharnumsoffset = fl->hiqdataoffset + SWAPL (ptr->offset);
+	if (SWAPU (ptr->key) == GLOBALCHDATA)
+	    globalchdataoffset = fl->hiqdataoffset + SWAPL (ptr->offset);
+	if (SWAPU (ptr->key) == GLOBINTDATA)
+	{			/* will need it in global_segment_setup() */
+	    fl->globintdataoffset = fl->hiqdataoffset + SWAPL (ptr->offset);
+	    fl->globintdatasize = SWAPL ((ptr + 1)->offset) - SWAPL (ptr->offset);
+	}
+
+	ptr++;
+    }
+    if (cgcharnumsoffset == MAX_LONG)
+    {
+	DBG ("Error reading CGCHARNUMS segment.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_10);
+	return (ld_err_10);
+    }
+    if (globalchdataoffset == MAX_LONG)
+    {
+	DBG ("Error reading GLOBALCHDATA segment.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_9);
+	return (ld_err_9);
+    }
+
+    /* read globalchdata into buffer */
+    globalchdata = (globalchdata_type *) S.b.buffer;
+    fseek (fl->FONTDISPLAY, globalchdataoffset, 0);
+    if (faisRead (fl, (char *) globalchdata, 4 * MAX_CHARS + 10, FALSE,
+		  fl->FONTDISPLAY))
+    {
+	DBG (" Error reading GLOBALCHDATA segment.\n");
+	return (FAILURE);
+    }
+
+    /* read cgcharnums into buffer */
+    cgcharnums = (cgcharnums_type *) (S.b.buffer + 4 * MAX_CHARS + 10);
+    fseek (fl->FONTDISPLAY, cgcharnumsoffset, 0);
+    if (faisRead (fl, (char *) cgcharnums, 2 * MAX_CHARS + 4, FALSE,
+		  fl->FONTDISPLAY))
+    {
+	DBG ("Error reading GLOBALCHDATA segment.\n");
+	return (FAILURE);
+    }
+
+    fl->fontSlant = SWAPW (globalchdata->fontSlant);	/* need for rasterparam segment */
+
+    /* setup face header structure including all entries but keeping */
+    /* count of the number of actual characters in library */
+    faceheaderptr = (faceheader_type *) faceheader;
+    charptr = faceheaderptr->chars;
+    offsets = (LONG *) globalchdata->offsets;
+    fl->nchar_in_font = SWAPU (globalchdata->NCHAR);
+
+    for (i = 0; i < fl->nchar_in_font; i++)
+    {
+	/* get size of ith character */
+	nextoffset = offsets + 1;
+	while (SWAPL (*nextoffset) == -1)
+	    nextoffset++;
+	charptr->size = (UWORD) (SWAPL (*nextoffset) - SWAPL (*offsets));
+
+	/* get offset of ith character; */
+	charptr->offset = SWAPL (*offsets);
+
+	/* if this is a valid character add cgnumber otherwise */
+	/* set cgnumber to MAX_UWORD */
+
+	/* character is invalid if it is too large, too small or */
+	/* has a negative cgnumber (PI character) */
+	if (charptr->size >= MIN_CHAR_SIZE &&
+	    charptr->size <= MAX_CHAR_SIZE &&
+	    (SWAPU (*cgcharnums) & 0x8000) == 0)
+	{
+	    /* this is a valid character */
+	    fl->nchar_in_lib++;
+	    charptr->cg_num = SWAPU (*cgcharnums);
+	}
+	else
+	{
+	    if ((SWAPU (*cgcharnums) & 0x8000) == 0)
+		DBG1 (" Missing character number %ld\n", *cgcharnums);
+	    charptr->cg_num = MAX_UWORD;
+	}
+
+	/* increment pointers for next time around */
+	charptr++;
+	cgcharnums++;
+	offsets++;
+    }
+    DBG1 ("nchar_in_lib %ld\n", fl->nchar_in_lib);
+
+    return (OK);
+}
+
+
+
+
+
+
+/*
+**  Process 1.2.5  Library Header Setup
+*/
+WORD
+library_header_setup (fl)
+    struct FaisLocals *fl;
+{
+    union PointerUnion libptr;
+
+    libptr.b = S.b.buffer;
+
+    /* new file */
+    if (!(fl->LIB = fopen (fl->libName, "w")))
+    {
+	ErrRequester (ERROR_ICreateFail, fl->fontName, fl->libName);
+	return (FAILURE);
+    }
+    memset (libptr.w, 0,
+	    FILE_HEADER_SIZE + FACE_HEADER_SIZE + FILE_DIRECTORY_SIZE);
+
+    *libptr.w++ = 'D';		/* type of library */
+
+    *libptr.w++ = fileheader_key;	/* key for file header segment */
+    *libptr.l++ = FILE_HEADER_SIZE;	/* offset to file header segment */
+    libptr.w++;			/* leave size 0 for file header */
+
+    *libptr.w++ = filedirectory_key;	/* key for file directory segment */
+    *libptr.l++ = FILE_HEADER_SIZE + FACE_HEADER_SIZE;
+    /* offset to file directory */
+    *libptr.w++ = 20;		/* size of file directory */
+    *libptr.w = endofdir_key;
+
+    libptr.b = S.b.buffer + FILE_HEADER_SIZE + FACE_HEADER_SIZE;
+    /* File directory segment */
+    *libptr.l++ = fl->typeface;	/* set typeface */
+    *libptr.l++ = (ULONG)
+      (FILE_HEADER_SIZE + FACE_HEADER_SIZE + FILE_DIRECTORY_SIZE);
+    /* offset to face header */
+    /* save offset to faceheadersize since it may change */
+    fl->faceheadersizeoffset = libptr.b - S.b.buffer;
+    *libptr.w++ = fl->faceheadersize = 6 + 8 * (fl->nchar_in_lib + 1);
+
+    *libptr.l = longendofdir_key;
+    if (faisWrite (fl, S.b.buffer,
+		   FILE_HEADER_SIZE + FACE_HEADER_SIZE + FILE_DIRECTORY_SIZE))
+	return (FAILURE);
+    return (SUCCESS);
+}
+
+
+WORD global_segment_setup (fl)
+    struct FaisLocals *fl;
+{
+
+    ULONG displayheaderoffset = MAX_LONG;
+    ULONG fontheaderoffset = MAX_LONG;
+
+#if 0
+    ULONG fontheadersize;
+
+#endif
+    ULONG charwidthoffset = MAX_LONG, charwidthsize;
+    ULONG attributeheaderoffset = MAX_LONG, attributeheadersize;
+    ULONG trackkernoffset = MAX_LONG, trackkernsize;
+    ULONG textkernoffset = MAX_LONG, textkernsize;
+    ULONG designkernoffset = MAX_LONG, designkernsize;
+    ULONG typefaceheaderoffset = MAX_LONG, typefaceheadersize;
+    ULONG compoundcharoffset = MAX_LONG, compoundcharsize;
+    ULONG ccharmetricsoffset = MAX_LONG, ccharmetricssize;
+    ULONG ccidoffset, ccidsize = MAX_LONG;
+    ULONG complementheaderoffset = MAX_LONG, complementheadersize;
+    ULONG fontaliasoffset = MAX_LONG, fontaliassize;
+
+    UWORD numsegments;
+    ULONG offset;
+    union
+    {
+	BYTE *b;
+	UWORD *w;
+	LONG *l;
+    } ptr;
+    BYTE *tempptr;
+    seg_dir_type *seg_dir;
+    keyoffset_type *keyptr;
+    faceglobal_type *faceglobal;
+    compoundchar_type *compoundchar;
+    complementheader_type *complementheader;
+    ccharmetrics_type *ccharmetrics;
+    ccid_type *ccid;
+
+    UWORD NYLN, NGCD, NGYD, NGXD, NSDM, NFATS, NXREF;
+    UWORD i, j, nkeys;
+
+    /* get number of segments and offsets to segments */
+    numsegments = 2;		/* always have rasterparam segment and end of dir */
+    if (fl->globintdataoffset != MAX_LONG)
+	numsegments++;
+
+    /* displayheader is in display file */
+    keyptr = (keyoffset_type *) (((fileheader_type *) dfileheader)->keyOffsets);
+    for (i = 0; i < SWAPU (((fileheader_type *) dfileheader)->NKEYS); i++)
+    {
+	if (SWAPU (keyptr->key) == DISPLAYHEADER)
+	{
+	    displayheaderoffset = SWAPL (keyptr->offset);
+	    numsegments++;
+	    break;
+	}
+	keyptr++;
+    }
+
+    /* all the other segments are in the attribute file */
+    /* read attribute file header */
+    if (faisRead (fl, afileheader, MAX_HEADER, FALSE, fl->FONTATTRIBUTE))
+	return (FAILURE);
+
+    /* locate segments */
+    keyptr = (keyoffset_type *) (((fileheader_type *) afileheader)->keyOffsets);
+    nkeys = SWAPU (((fileheader_type *) afileheader)->NKEYS);
+    if (nkeys > MAX_KEYS)
+    {
+	DBG2 ("attr file nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+	nkeys = MAX_KEYS;
+    }
+    for (i = 0; i < nkeys; i++)
+    {
+	DBG1 ("attribute key %ld\n", SWAPU (keyptr->key));
+	switch (SWAPU (keyptr->key))
+	{
+	    case FONTHEADER:
+		fontheaderoffset = SWAPL (keyptr->offset);
+#if 0
+		fontheadersize = SWAPL ((keyptr + 1)->offset) -
+		  SWAPL (keyptr->offset);
+#endif
+		numsegments++;
+		break;
+
+	    case CHARWIDTH:
+		charwidthoffset = SWAPL (keyptr->offset);
+		charwidthsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case ATTRIBUTEHEADER:
+		attributeheaderoffset = SWAPL (keyptr->offset);
+		attributeheadersize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case TRACKKERN:
+		trackkernoffset = SWAPL (keyptr->offset);
+		trackkernsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case TEXTKERN:
+		textkernoffset = SWAPL (keyptr->offset);
+		textkernsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case DESIGNKERN:
+		designkernoffset = SWAPL (keyptr->offset);
+		designkernsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case TYPEFACEHEADER:
+		typefaceheaderoffset = SWAPL (keyptr->offset);
+		typefaceheadersize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case COMPOUNDCHAR:
+		compoundcharoffset = SWAPL (keyptr->offset);
+		compoundcharsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	    case CCHARMETRICS:
+		ccharmetricsoffset = SWAPL (keyptr->offset);
+		ccharmetricssize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		DBG2 ("CCHARMETRICS $%lx %ld\n", ccharmetricsoffset,
+		      ccharmetricssize);
+		break;
+
+	    case CCID:
+		ccidoffset = SWAPL (keyptr->offset);
+		ccidsize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		DBG2 ("CCID $%lx %ld\n", ccidoffset, ccidsize);
+		break;
+
+	    case COMPLEMENTHEADER:
+		complementheaderoffset = SWAPL (keyptr->offset);
+		complementheadersize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		break;
+
+	    case FONTALIAS:
+		fontaliasoffset = SWAPL (keyptr->offset);
+		fontaliassize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+		numsegments++;
+		break;
+
+	}
+	keyptr++;
+    }
+
+    if (fontheaderoffset == MAX_LONG)
+    {
+	DBG ("Font Header Segment not found.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_13);
+	return (ld_err_13);
+    }
+    if (charwidthoffset == MAX_LONG)
+    {
+	DBG ("Character Width Segment not found.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_15);
+	return (ld_err_15);
+    }
+    if (attributeheaderoffset == MAX_LONG)
+    {
+	DBG ("Attribute Header Segment not found.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_wrn_4);
+	return (ld_wrn_4);
+    }
+    if (typefaceheaderoffset == MAX_LONG)
+    {
+	DBG ("Typeface Header Segment not found.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_wrn_8);
+	return (ld_wrn_8);
+    }
+    if (displayheaderoffset == MAX_LONG)
+    {
+	DBG ("Display Header Segment not found.\n");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_wrn_1);
+	return (ld_wrn_1);
+    }
+
+    if (trackkernoffset == MAX_LONG)
+	DBG ("Track Kerning Segment not found.\n");
+    if (textkernoffset == MAX_LONG)
+	DBG ("Text Kerning Segment not found.\n");
+    if (designkernoffset == MAX_LONG)
+	DBG ("Design Kerning Segment not found.\n");
+    if (compoundcharoffset == MAX_LONG)
+	DBG ("Compound Character Segment not found.\n");
+    if (ccharmetricsoffset == MAX_LONG)
+	DBG ("Compound Character Metrics Segment not found.\n");
+    if (ccidoffset == MAX_LONG)
+	DBG ("Compound Character ID Segment not found.\n");
+    if (complementheaderoffset == MAX_LONG)
+	DBG ("Complement Header Segment not found.\n");
+    if (fontaliasoffset == MAX_LONG)
+	DBG ("Font Alias Segment not found.\n");
+
+    faceglobal = (faceglobal_type *) S.b.buffer;
+
+    seg_dir = &faceglobal->seg_dir;
+
+    offset = align (numsegments * (LONG) sizeof (seg_dir_type) + 6);
+
+    ptr.b = (BYTE *) faceglobal + offset;
+    if (offset + COPYRIGHTSIZE > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    /* add copyright */
+    seg_dir->key = copyright_key;
+    seg_dir->size = COPYRIGHTSIZE;
+    seg_dir->offset = offset;
+
+    fseek (fl->FONTATTRIBUTE, fontheaderoffset, 0);
+    if (faisRead (fl, ptr.b, COPYRIGHTSIZE, TRUE, fl->FONTATTRIBUTE))
+	return (FAILURE);
+
+    seg_dir++;
+    offset += align ((ULONG) COPYRIGHTSIZE);
+    ptr.b += align ((ULONG) COPYRIGHTSIZE);
+
+
+    /* add global intellifont segment if it exists */
+    if (fl->globintdataoffset != MAX_LONG)
+    {
+
+	if (offset + fl->globintdatasize > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	fseek (fl->FONTDISPLAY, fl->globintdataoffset, 0);
+	tempptr = textkern;
+
+	/* get actual size of global intellifont data */
+	if (faisRead (fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	*ptr.w = NYLN = SWAPU (*ptr.w);
+	ptr.w++;
+	if (faisRead (fl, ptr.b, NYLN * 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	for (i = 0; i < NYLN; i++)
+	    ptr.w[i] = SWAPU (ptr.w[i]);
+	ptr.b += NYLN * 2;
+
+	if (faisRead (fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	*ptr.w = NGCD = SWAPU (*ptr.w);
+	if (faisRead (fl, ptr.b + 2, NGCD, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	if (faisRead (fl, tempptr, NGCD, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	memcpy (ptr.b + 2 + NGCD, tempptr, NGCD);
+	ptr.b += NGCD * 2 + 2;
+
+	if (faisRead (fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	*ptr.w = NGYD = SWAPU (*ptr.w);
+	if (faisRead (fl, ptr.b + 2, NGYD * 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	for (i = 1; i <= NGYD; i++)
+	    ptr.w[i] = SWAPU (ptr.w[i]);
+	if (faisRead (fl, tempptr, (NGYD + 1) & 0xfffe, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	memcpy (ptr.b + 2 + 2 * NGYD, tempptr, (NGYD + 1) & 0xfffe);
+	ptr.b += NGYD * 3 + 2 + (NGYD & 1);
+
+	if (faisRead (fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	*ptr.w = NGXD = SWAPU (*ptr.w);
+	if (faisRead (fl, ptr.b + 2, NGXD * 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	for (i = 1; i <= NGXD; i++)
+	    ptr.w[i] = SWAPU (ptr.w[i]);
+
+	if (faisRead (fl, tempptr, (NGXD + 1) & 0xfffe, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	memcpy (ptr.b + 2 + 2 * NGXD, tempptr, (NGXD + 1) & 0xfffe);
+	ptr.b += NGXD * 3 + 2 + (NGXD & 1);
+
+	if (faisRead (fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	*ptr.w = NSDM = SWAPU (*ptr.w);
+	/* NSDM is now used as orThreshold, assume NSDM <= 10 is an */
+	/* old font and NSDM > 10 is a new font */
+	if (NSDM <= 10)
+	{
+	    /* old style font, need to convert to new style */
+	    *ptr.w = 210;
+	    /* set orThreshold if no value was entered */
+	    if (fl->orThreshold == 0)
+		fl->orThreshold = 210;
+	    if (NSDM > 0)
+	    {
+		if (faisRead (fl, ptr.b + 2, NSDM * 12, TRUE, fl->FONTDISPLAY))
+		    return (FAILURE);
+	    }
+	}
+	else
+	{
+	    /* set orThreshold if no value was entered */
+	    if (fl->orThreshold == 0)
+		fl->orThreshold = NSDM;
+	}
+	if (faisRead (fl, ptr.b + 2, 14 * 14, FALSE, fl->FONTDISPLAY))
+	    return (FAILURE);
+	ptr.w[1] = SWAPU (ptr.w[1]);
+	ptr.w[2] = SWAPU (ptr.w[2]);
+	ptr.w[3] = SWAPU (ptr.w[3]);
+
+	seg_dir->key = globalintellifont_key;
+	seg_dir->size = NYLN * 2 + NGCD * 2 + NGYD * 3 + NGXD * 3
+	  + 24 + (NGYD & 1) + (NGXD & 1);
+	seg_dir->offset = offset;
+
+	offset += align ((ULONG) seg_dir->size);
+	seg_dir++;
+	ptr.b = S.b.buffer + offset;
+
+    }
+
+    /* read charwidth segment into table */
+
+    if (offset + fl->nchar_in_font * sizeof (charwidth_type) + 6 > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    *ptr.w = charwidth_key;
+
+    fseek (fl->FONTATTRIBUTE, charwidthoffset, 0);
+    if (faisRead (fl, ptr.b + 6, (UWORD) charwidthsize, TRUE, fl->FONTATTRIBUTE))
+	return (FAILURE);
+    swapcharwidth (fl, ptr.b + 6);
+
+
+    /* need to read in textkern and designkern segments and */
+    /* sort them with the face header to insure that the */
+    /* characters are in ascending order of cgnumber and that */
+    /* the charwiths and kerning data stays in the same order. */
+
+    if (textkernoffset != MAX_LONG)
+    {
+	fseek (fl->FONTATTRIBUTE, textkernoffset, 0);
+	if (faisRead (fl, textkern, (UWORD) textkernsize, TRUE,
+		      fl->FONTATTRIBUTE))
+	    return (FAILURE);
+    }
+
+    /* pack kerning from words into nibbles */
+    pack_kerning (fl, (packedkern_type *) textkern, (unpackedkern_type *) textkern);
+
+    if (designkernoffset != MAX_LONG)
+    {
+	fseek (fl->FONTATTRIBUTE, designkernoffset, 0);
+	if (faisRead (fl, designkern, (UWORD) designkernsize, TRUE,
+		      fl->FONTATTRIBUTE))
+	    return (FAILURE);
+    }
+
+    /* pack kerning from words into nibbles */
+    pack_kerning (fl, (packedkern_type *) designkern, (unpackedkern_type *) designkern);
+
+    seg_dir->key = charwidth_key;
+    seg_dir->offset = offset;
+
+    sort (fl, (charwidth_type *) (ptr.b + 6), (packedkern_type *) textkern,
+	  (packedkern_type *) designkern);
+
+    /* sort determines nchar_in_lib */
+    seg_dir->size = fl->nchar_in_lib * sizeof (charwidth_type) + 6;
+    *((LONG *) (ptr.b + 2)) = (LONG) (fl->nchar_in_lib * sizeof (charwidth_type) + 6);
+    offset += align ((ULONG) seg_dir->size);
+    seg_dir++;
+    ptr.b = S.b.buffer + offset;
+
+
+    /* add raster parameter segment */
+
+    if (offset + RASTERPARAMSIZE > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    seg_dir->offset = offset;
+    *ptr.w++ = seg_dir->key = rasterparam_key;
+    *ptr.l++ = seg_dir->size = (LONG) RASTERPARAMSIZE;
+    *ptr.w++ = fl->orThreshold;
+    *ptr.w++ = fl->fontSlant;
+
+    offset += align ((ULONG) seg_dir->size);
+    seg_dir++;
+    ptr.b = S.b.buffer + offset;
+
+    /* add attribute header */
+
+    if (offset + attributeheadersize + 6 > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    *ptr.w++ = seg_dir->key = attributeheader_key;
+    *(ptr.l)++ = seg_dir->size = sizeof (attributeheader_type) + 6;
+    seg_dir->offset = offset;
+
+    fseek (fl->FONTATTRIBUTE, attributeheaderoffset, 0);
+    if (faisRead (fl, ptr.b, seg_dir->size, TRUE, fl->FONTATTRIBUTE))
+	return (FAILURE);
+    swapattributeheader (fl, ptr.b);
+
+    offset += align ((ULONG) seg_dir->size);
+    seg_dir++;
+    ptr.b = S.b.buffer + offset;
+
+    /* add track kern if present */
+    if (trackkernoffset != MAX_LONG)
+    {
+
+	if (offset + trackkernsize + 6 > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	seg_dir->offset = offset;
+	*ptr.w++ = seg_dir->key = trackkern_key;
+
+	fseek (fl->FONTATTRIBUTE, trackkernoffset, 0);
+	if (faisRead (fl, ptr.b + 4, (UWORD) trackkernsize, TRUE,
+		      fl->FONTATTRIBUTE))
+	    return (FAILURE);
+	swaptrackkern (ptr.b + 4);
+
+	*ptr.l = seg_dir->size = *ptr.w * 10 + 8;
+
+	offset += align ((ULONG) seg_dir->size);
+	seg_dir++;
+	ptr.b = S.b.buffer + offset;
+    }
+
+    /* add text kern */
+    if (textkernoffset != MAX_LONG)
+    {
+
+	if (offset + fl->nchar_in_lib * 4 + 6 + 6 > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	*ptr.w++ = seg_dir->key = textkern_key;
+	*ptr.l++ = seg_dir->size = fl->nchar_in_lib * 4 + 6 + 6;
+	seg_dir->offset = offset;
+
+	/* kerning has already been sorted and packed copy it into segment */
+	memcpy (ptr.b, textkern, seg_dir->size);
+
+	offset += align ((ULONG) seg_dir->size);
+	seg_dir++;
+	ptr.b = S.b.buffer + offset;
+
+    }
+
+    /* add design kern if present */
+    if (designkernoffset != MAX_LONG)
+    {
+
+	if (offset + fl->nchar_in_lib * 4 + 6 + 6 > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	*ptr.w++ = seg_dir->key = designkern_key;
+	*ptr.l++ = seg_dir->size = fl->nchar_in_lib * 4 + 6 + 6;
+	seg_dir->offset = offset;
+
+	/* kerning has already been sorted and packed copy it into segment */
+	memcpy (ptr.b, designkern, seg_dir->size);
+
+	offset += align ((ULONG) seg_dir->size);
+	seg_dir++;
+	ptr.b = S.b.buffer + offset;
+
+    }
+
+    /* add typeface header */
+
+    if (offset + typefaceheadersize + 6 > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    *ptr.w++ = seg_dir->key = typefaceheader_key;
+    seg_dir->offset = offset;
+
+    fseek (fl->FONTATTRIBUTE, typefaceheaderoffset, 0);
+    if (faisRead (fl, ptr.b + 4, (UWORD) typefaceheadersize, TRUE,
+		  fl->FONTATTRIBUTE))
+    {
+	DBG ("typefaceheader read failure\n");
+	return (FAILURE);
+    }
+    swaptypefaceheader (ptr.b + 4);
+
+    *ptr.l = seg_dir->size = *(UWORD *) (ptr.b + 4) * 12 + 92 + 6;
+
+    offset += align ((ULONG) seg_dir->size);
+    seg_dir++;
+    ptr.b = S.b.buffer + offset;
+
+    /* get compound character segment */
+    /* need to assemble it from many parts */
+
+    DBG5 ("compound character parts $%lx $%lx $%lx $%lx ?= $%lx\n",
+	  compoundcharoffset, ccharmetricsoffset, ccidoffset,
+	  complementheaderoffset, MAX_LONG);
+    if (compoundcharoffset != MAX_LONG &&
+	ccharmetricsoffset != MAX_LONG &&
+	ccidoffset != MAX_LONG &&
+	complementheaderoffset != MAX_LONG)
+    {
+
+	/* estimate size of final cchar buffer as 1.25 * cchar size in fais */
+	if (offset + compoundcharsize + (compoundcharsize >> 2) > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	/* reuse kerning buffers */
+	if (compoundcharsize > 16 * MAX_CHARS + 6)
+	{
+	    DBG (" Error compound char Segment too big.\n");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	if (complementheadersize + ccharmetricssize + ccidsize
+	    > 16 * MAX_CHARS + 6)
+	{
+	    DBG (" Error compound char Segment too big.\n");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	compoundchar = (compoundchar_type *) textkern;
+	complementheader = (complementheader_type *) designkern;
+	ccharmetrics = (ccharmetrics_type *) ((BYTE *) designkern
+					      + complementheadersize);
+	ccid = (ccid_type *) ((BYTE *) ccharmetrics + ccharmetricssize);
+
+	fseek (fl->FONTATTRIBUTE, compoundcharoffset, 0);
+	if (faisRead (fl, (char *) compoundchar, (UWORD) compoundcharsize, TRUE,
+		      fl->FONTATTRIBUTE))
+	{
+	    DBG ("compoundchar read failure\n");
+	    return (FAILURE);
+	}
+	fseek (fl->FONTATTRIBUTE, complementheaderoffset, 0);
+	if (faisRead (fl, (char *) complementheader,
+		      (UWORD) complementheadersize, TRUE, fl->FONTATTRIBUTE))
+	{
+	    DBG ("complementheader read failure\n");
+	    return (FAILURE);
+	}
+
+	fseek (fl->FONTATTRIBUTE, ccharmetricsoffset, 0);
+	if (faisRead (fl, (char *) ccharmetrics, (UWORD) ccharmetricssize, TRUE,
+		      fl->FONTATTRIBUTE))
+	{
+	    DBG ("ccharmetrics read failure\n");
+	    return (FAILURE);
+	}
+
+	fseek (fl->FONTATTRIBUTE, ccidoffset, 0);
+	if (faisRead (fl, (char *) ccid, (UWORD) ccidsize, TRUE,
+		      fl->FONTATTRIBUTE))
+	{
+	    DBG ("ccid read failure\n");
+	    return (FAILURE);
+	}
+
+	seg_dir->key = *ptr.w++ = compoundchar_key;
+	seg_dir->offset = offset;
+	seg_dir->size = (UWORD) (*ptr.l = 6 +
+				 assemblecompoundchar (fl, (WORD *) (ptr.b + 4),
+						       (WORD *) compoundchar, complementheader, ccharmetrics, ccid));
+
+	offset += align ((ULONG) seg_dir->size);
+	seg_dir++;
+	ptr.b = S.b.buffer + offset;
+    }
+
+    /* add display header */
+    if (offset + sizeof (displayheader_type) + 6 > MAX_BUFFER)
+    {
+	DBG ("Error buffer overflow.");
+	ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	return (ld_err_mem);
+    }
+
+    *ptr.w++ = seg_dir->key = displayheader_key;
+    *ptr.l++ = seg_dir->size = sizeof (displayheader_type) + 6;
+    seg_dir->offset = offset;
+
+    fseek (fl->FONTDISPLAY, displayheaderoffset, 0);
+    if (faisRead (fl, ptr.b, seg_dir->size, TRUE, fl->FONTDISPLAY))
+	return (FAILURE);
+    swapdisplayheader (ptr.b);
+
+
+    offset += align ((ULONG) seg_dir->size);
+    seg_dir++;
+    ptr.b = S.b.buffer + offset;
+
+    /* add font alias table */
+    if (fontaliasoffset != MAX_LONG)
+    {
+
+	if (offset + fontaliassize + 6 > MAX_BUFFER)
+	{
+	    DBG ("Error buffer overflow.");
+	    ErrRequester (ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+	    return (ld_err_mem);
+	}
+
+	seg_dir->key = fontalias_key;
+	seg_dir->offset = offset;
+	ptr.b += 6;
+
+	fseek (fl->FONTATTRIBUTE, fontaliasoffset, 0);
+	if (faisRead (fl, ptr.b, (UWORD) fontaliassize, TRUE, fl->FONTATTRIBUTE))
+	    return (FAILURE);
+
+	seg_dir->size = 6;
+
+
+
+	/* count length of segment */
+	*ptr.w = NFATS = SWAPU (*ptr.w);
+	seg_dir->size += 2;
+	ptr.b += 2;
+
+	for (j = 0; j < NFATS; j++)
+	{
+	    *ptr.w = NXREF = SWAPU (*(UWORD *) (ptr.b + j * 104 + 20));
+	    for (i = 0; i < NFATS; i++)
+		*(LONG *) (ptr.b + j * 104 + 122) =
+		  SWAPL (*(LONG *) (ptr.b + j * 104 + 122));
+	    seg_dir->size += NXREF * 104 + 22;
+	    ptr.b += NXREF * 104 + 22;
+	}
+
+	/* reset pointer to begining of fontalias segment */
+	ptr.b = S.b.buffer + offset;
+	seg_dir->key = *ptr.w++ = fontalias_key;
+	*(ULONG *) ptr.b = seg_dir->size;
+	seg_dir->offset = offset;
+
+	/* offset is the size of the face global segment */
+	offset += align ((ULONG) seg_dir->size);
+
+
+    }
+    seg_dir++;
+    seg_dir->key = endofdir_key;
+    seg_dir->size = 0;
+    seg_dir->offset = (LONG) 0;
+
+
+    /* face global immediately follows faceheader */
+    ((faceheader_type *) faceheader)->faceglobal_size = (UWORD) offset;
+    fl->faceheaderoffset = ftell (fl->LIB);
+    fl->faceheadersize = (UWORD) align ((ULONG) fl->faceheadersize);
+    ((faceheader_type *) faceheader)->faceglobal_offset =
+      fl->faceheaderoffset + (LONG) fl->faceheadersize;
+
+    /* rewrite size of face header since it may have changed */
+    fseek (fl->LIB, fl->faceheadersizeoffset, 0);
+    if (faisWrite (fl, (char *) &fl->faceheadersize, 2))
+	return (FAILURE);
+    fseek (fl->LIB, fl->faceheaderoffset, 0);
+
+    /* write face header */
+    if (faisWrite (fl, faceheader, fl->faceheadersize))
+	return (FAILURE);
+
+    /* set face global key & size */
+    faceglobal->key = faceglobal_key;
+    faceglobal->size = offset;
+
+    /* write face global */
+    if (faisWrite (fl, S.b.buffer, (UWORD) offset))
+	return (FAILURE);
+
+    return (OK);
+
+}
+
+WORD
+write_characters (fl)
+    struct FaisLocals *fl;
+{
+
+    char_type *charptr;
+    UWORD i, charsize;
+
+    charptr = ((faceheader_type *) faceheader)->chars;
+
+    DBG1 ("write_characters ... %ld\n", fl->nchar_in_lib);
+    for (i = 0; i < fl->nchar_in_lib; i++)
+    {
+	if ((charptr->offset & 0xe0000000) == normask)
+	{
+	    fseek (fl->FONTDISPLAY, charptr->offset + fl->hiqdataoffset, 0);
+	    if (faisRead (fl, S.b.buffer, charptr->size, TRUE,
+			  fl->FONTDISPLAY))
+	    {
+		DBG ("Error reading characters.\n");
+		return (FAILURE);
+	    }
+	}
+	else
+	{
+	    DBG1 ("Error: Bad Mask $%lx\n", charptr->offset);
+	    return (-1);
+	}
+
+	swapcharacters (S.b.buffer);
+
+	*(UWORD *) S.b.buffer = charptr->size;
+
+	charptr->offset = ftell (fl->LIB);
+	charsize = (UWORD) align ((LONG) charptr->size);
+
+	if (faisWrite (fl, S.b.buffer, charsize))
+	    return (FAILURE);
+
+	charptr++;
+    }
+
+    /* rewrite face header with new offsets */
+    fseek (fl->LIB, fl->faceheaderoffset, 0);
+    if (faisWrite (fl, faceheader, fl->faceheadersize))
+	return (FAILURE);
+
+    return (SUCCESS);
+}
+
+
+/*
+**  return n aligned to next mod boundary
+*/
+ULONG
+align (n)
+    ULONG n;
+{
+    ULONG x;
+
+    if (n % DISK_ALIGN == 0)
+	x = n;
+    else
+	x = (n + DISK_ALIGN - n % DISK_ALIGN);
+    return (x);
+}
+
+void
+ sort (fl, charwidth, textkernptr, designkernptr)
+    struct FaisLocals *fl;
+    charwidth_type *charwidth;
+    packedkern_type *textkernptr;
+    packedkern_type *designkernptr;
+{
+    char_type *charptr, *lowcharptr, *swpcharptr;
+    kerndata_type *textptr, *lowtextptr, *swptextptr;
+    kerndata_type *designptr, *lowdesignptr, *swpdesignptr;
+    charwidth_type *charwidthptr, *lowcharwidthptr, *swpcharwidthptr;
+    charwidth_type charwidthbuf;
+    char_type charbuf;
+    UWORD i, j, k;
+    UBYTE temp, *ptr1, *ptr2;
+    UWORD tot_chars, num_chars;
+
+
+    /* sort on cg_num in faceheader in ascending order */
+    swpcharptr = ((faceheader_type *) faceheader)->chars;
+    swptextptr = textkernptr->character;
+    swpdesignptr = designkernptr->character;
+    swpcharwidthptr = charwidth;
+
+    tot_chars = fl->nchar_in_font;
+    num_chars = fl->nchar_in_lib;
+
+    for (i = 0; i < tot_chars - 1; i++)
+    {
+/*    if(i > num_chars) break; */
+	lowcharptr = swpcharptr;
+	lowtextptr = swptextptr;
+	lowdesignptr = swpdesignptr;
+	lowcharwidthptr = swpcharwidthptr;
+
+	charptr = lowcharptr + 1;
+	textptr = lowtextptr + 1;
+	designptr = lowdesignptr + 1;
+	charwidthptr = lowcharwidthptr + 1;
+
+	for (j = i + 1; j < tot_chars; j++)
+	{
+	    if (charptr->cg_num < lowcharptr->cg_num)
+	    {
+		lowcharptr = charptr;
+		lowtextptr = textptr;
+		lowdesignptr = designptr;
+		lowcharwidthptr = charwidthptr;
+
+	    }
+	    else if (charptr->cg_num == lowcharptr->cg_num)
+	    {
+		if (charptr->cg_num != MAX_UWORD)
+		{
+		    num_chars--;
+		}
+		lowcharptr->cg_num = MAX_UWORD;
+		lowcharptr = charptr;
+		lowtextptr = textptr;
+		lowdesignptr = designptr;
+		lowcharwidthptr = charwidthptr;
+	    }
+
+	    charptr++;
+	    charwidthptr++;
+	    textptr++;
+	    designptr++;
+	}
+
+	if (lowcharptr != swpcharptr)
+	{
+	    /* need to swap all four blocks */
+	    charbuf.cg_num = swpcharptr->cg_num;
+	    charbuf.offset = swpcharptr->offset;
+	    charbuf.size = swpcharptr->size;
+	    swpcharptr->cg_num = lowcharptr->cg_num;
+	    swpcharptr->offset = lowcharptr->offset;
+	    swpcharptr->size = lowcharptr->size;
+	    lowcharptr->cg_num = charbuf.cg_num;
+	    lowcharptr->offset = charbuf.offset;
+	    lowcharptr->size = charbuf.size;
+
+
+	    charwidthbuf.charWidth = swpcharwidthptr->charWidth;
+	    charwidthbuf.charFlags = swpcharwidthptr->charFlags;
+	    swpcharwidthptr->charWidth = lowcharwidthptr->charWidth;
+	    swpcharwidthptr->charFlags = lowcharwidthptr->charFlags;
+	    lowcharwidthptr->charWidth = charwidthbuf.charWidth;
+	    lowcharwidthptr->charFlags = charwidthbuf.charFlags;
+
+	    ptr1 = (UBYTE *) swptextptr;
+	    ptr2 = (UBYTE *) lowtextptr;
+	    for (k = 0; k < 4; k++)
+	    {
+		temp = *ptr1;
+		*ptr1++ = *ptr2;
+		*ptr2++ = temp;
+	    }
+
+	    ptr1 = (UBYTE *) swpdesignptr;
+	    ptr2 = (UBYTE *) lowdesignptr;
+	    for (k = 0; k < 4; k++)
+	    {
+		temp = *ptr1;
+		*ptr1++ = *ptr2;
+		*ptr2++ = temp;
+	    }
+	}
+
+
+
+	swpcharptr++;
+	swpcharwidthptr++;
+	swptextptr++;
+	swpdesignptr++;
+    }
+    /* set end of character */
+    fl->nchar_in_lib = num_chars;
+    fl->faceheadersize = 6 + 8 * (fl->nchar_in_lib + 1);
+    charptr = (char_type *) ((BYTE *) (((faceheader_type *) faceheader)->chars)
+			     + fl->nchar_in_lib * sizeof (char_type));
+    charptr->cg_num = endofdir_key;
+}
+
+void
+ pack_kerning (fl, packed, unpacked)
+    struct FaisLocals *fl;
+    packedkern_type *packed;
+    unpackedkern_type *unpacked;
+{
+    UWORD i, j, k, m1, m2;
+
+    /* copy header information */
+    packed->kernSign = SWAPW (unpacked->kernSign);
+    packed->kernUnit = SWAPU (unpacked->kernUnit);
+    packed->NSECT = SWAPU (unpacked->NSECT);
+
+    for (i = 0; i < fl->nchar_in_lib; i++)
+    {
+	for (j = k = 0; j < 8; j += 2, k++)
+	{
+	    m1 = (SWAPU (unpacked->character[i].data[j]) << 4) & 0x00F0;
+	    m2 = (SWAPU (unpacked->character[i].data[j + 1])) & 0x000F;
+	    m1 = m1 + m2;
+	    packed->character[i].data[k] = (UBYTE) m1;
+	}
+    }
+}
+
+WORD
+assemblecompoundchar (fl, libcompoundchar, compoundchar, complementheader,
+		      ccharmetrics, ccid)
+    struct FaisLocals *fl;
+    WORD *libcompoundchar;
+    WORD *compoundchar;
+    complementheader_type *complementheader;
+    ccharmetrics_type *ccharmetrics;
+    ccid_type *ccid;
+{
+    libcompoundchar_type *libccharptr;
+    compoundchar_type *ccharptr;
+    ccharmetrics_type *ccmetricsptr;
+    ccid_type *ccidptr;
+    isocodetable_type *tableptr;
+    libcompoundchar_type *ptr, *nextptr, *tempptr;
+    part_type *partptr;
+    libpart_type *libpartptr, *nextpartptr, *tpartptr;
+    BYTE tempbuffer[68];
+    UWORD compoundcharsize, tempsize;
+    UWORD i, j, k;
+    UWORD NCCHAR, NCCHAR2;
+    UWORD numparts;
+
+    /* first word of compoundchar and libcompoundchar is cchar count */
+    NCCHAR = *libcompoundchar = SWAPU (*compoundchar);
+
+    libccharptr = (libcompoundchar_type *) (libcompoundchar + 1);
+    ccharptr = (compoundchar_type *) (compoundchar + 1);
+    ccmetricsptr = (ccharmetrics_type *) ccharmetrics;
+    ccidptr = (ccid_type *) ccid;
+    tempptr = (libcompoundchar_type *) tempbuffer;
+    tableptr = complementheader->table;
+    compoundcharsize = 2;	/* include the character count */
+
+    DBG1 ("assemblecompoundchar %ld\n", NCCHAR);
+    /* copy entries into libcompoundchar format */
+    for (i = 0; i < NCCHAR; i++)
+    {
+	DBG1 ("cc id %ld\n", SWAPU (ccidptr->cg_num));
+	libccharptr->cg_num = SWAPU (ccidptr->cg_num);
+	libccharptr->horiz_esc = SWAPU (ccmetricsptr->escapementX);
+	libccharptr->vert_esc = SWAPU (ccmetricsptr->escapementY);
+	libccharptr->NPCC = SWAPU (ccharptr->NPCC);
+	compoundcharsize += 8 + sizeof (libpart_type) * SWAPU (ccharptr->NPCC);
+	partptr = ccharptr->parts;
+	libpartptr = libccharptr->parts;
+
+	for (j = 0; j < SWAPU (ccharptr->NPCC); j++)
+	{
+	    libpartptr->cg_num = code_to_cgnum (fl, SWAPU (partptr->ccCharCode),
+						tableptr);
+	    libpartptr->xoffset = SWAPU (partptr->offsets.x);
+	    libpartptr->yoffset = SWAPU (partptr->offsets.y);
+	    partptr++;
+	    libpartptr++;
+	}
+
+	libccharptr = (libcompoundchar_type *) ((BYTE *) libccharptr +
+						8 + sizeof (libpart_type) * libccharptr->NPCC);
+	ccharptr = (compoundchar_type *) ((BYTE *) ccharptr +
+					  4 + sizeof (part_type) * SWAPU (ccharptr->NPCC));
+	ccmetricsptr++;
+	ccidptr++;
+    }
+
+    /* add the update compound chars (plugins are not allowed cc's) */
+    if (fl->updcompoundcharptr)
+    {
+	NCCHAR2 = *(WORD *) fl->updcompoundcharptr;
+	ptr = (libcompoundchar_type *) ((WORD *) fl->updcompoundcharptr + 1);
+	for (i = 0; i < NCCHAR2; i++)
+	{
+	    ptr->NPCC |= 0x8000;
+	    ptr = (libcompoundchar_type *) ((BYTE *) ptr +
+					    8 + sizeof (libpart_type) * (ptr->NPCC & 0x7fff));
+	}
+	tempsize = (BYTE *) ptr - (BYTE *) fl->updcompoundcharptr - 2;
+	memcpy ((BYTE *) libccharptr, (BYTE *) fl->updcompoundcharptr + 2, tempsize);
+	compoundcharsize += tempsize;
+#if 0
+	libccharptr = (libcompoundchar_type *) ((BYTE *) libccharptr + tempsize);
+#endif
+	NCCHAR += NCCHAR2;
+    }
+
+
+    /* sort the libcompoundchar structure by increasing cg numbers */
+    for (i = 0; i < NCCHAR - 1; i++)
+    {
+
+	ptr = (libcompoundchar_type *) (libcompoundchar + 1);
+
+	for (j = 0; j < NCCHAR - 1; j++)
+	{
+
+	    nextptr = (libcompoundchar_type *) ((BYTE *) ptr +
+						8 + sizeof (libpart_type) * ptr->NPCC);
+
+	    if (ptr->cg_num == nextptr->cg_num)
+	    {
+		NCCHAR--;
+		nextptr->cg_num = MAX_UWORD;
+		compoundcharsize -= 8 + sizeof (libpart_type) *
+		  (nextptr->NPCC & 0x7fff);
+	    }
+
+	    if (ptr->cg_num > nextptr->cg_num)
+	    {
+
+		tempptr->cg_num = ptr->cg_num;
+		tempptr->horiz_esc = ptr->horiz_esc;
+		tempptr->vert_esc = ptr->vert_esc;
+		tempptr->NPCC = ptr->NPCC;
+
+		tpartptr = tempptr->parts;
+		libpartptr = ptr->parts;
+		for (k = 0; k < (ptr->NPCC & 0x7fff); k++)
+		{
+		    tpartptr->cg_num = libpartptr->cg_num;
+		    tpartptr->xoffset = libpartptr->xoffset;
+		    tpartptr->yoffset = libpartptr->yoffset;
+		    tpartptr++;
+		    libpartptr++;
+		}
+
+		ptr->cg_num = nextptr->cg_num;
+		ptr->horiz_esc = nextptr->horiz_esc;
+		ptr->vert_esc = nextptr->vert_esc;
+		ptr->NPCC = nextptr->NPCC;
+
+		libpartptr = ptr->parts;
+		nextpartptr = nextptr->parts;
+		numparts = nextptr->NPCC & 0x7fff;
+		for (k = 0; k < numparts; k++)
+		{
+		    libpartptr->cg_num = nextpartptr->cg_num;
+		    libpartptr->xoffset = nextpartptr->xoffset;
+		    libpartptr->yoffset = nextpartptr->yoffset;
+		    libpartptr++;
+		    nextpartptr++;
+		}
+
+		nextptr = (libcompoundchar_type *) ((BYTE *) ptr +
+						    8 + sizeof (libpart_type) * ptr->NPCC);
+
+		nextptr->cg_num = tempptr->cg_num;
+		nextptr->horiz_esc = tempptr->horiz_esc;
+		nextptr->vert_esc = tempptr->vert_esc;
+		nextptr->NPCC = tempptr->NPCC;
+
+		libpartptr = nextptr->parts;
+		tpartptr = tempptr->parts;
+		for (k = 0; k < (tempptr->NPCC & 0x7fff); k++)
+		{
+		    libpartptr->cg_num = tpartptr->cg_num;
+		    libpartptr->xoffset = tpartptr->xoffset;
+		    libpartptr->yoffset = tpartptr->yoffset;
+		    libpartptr++;
+		    tpartptr++;
+		}
+	    }
+	    ptr = nextptr;
+	}
+    }
+    *libcompoundchar = NCCHAR;
+    ptr = (libcompoundchar_type *) ((WORD *) libcompoundchar + 1);
+    for (i = 0; i < NCCHAR; i++)
+    {
+	ptr->NPCC &= 0x7fff;
+	ptr = (libcompoundchar_type *) ((BYTE *) ptr +
+					8 + sizeof (libpart_type) * ptr->NPCC);
+    }
+    return ((WORD) compoundcharsize);
+}
+
+WORD
+code_to_cgnum (fl, code, table)
+    struct FaisLocals *fl;
+    UWORD code;
+    isocodetable_type *table;
+{
+    WORD i;
+    isocodetable_type *tableptr;
+
+    tableptr = table;
+
+    for (i = 0; i < fl->nchar_in_font; i++)
+    {
+	if (SWAPU (tableptr->isoCode) == code)
+	    return ((WORD) SWAPU (tableptr->cgCode));
+	tableptr++;
+    }
+    return ((UWORD) FALSE);
+}
+
+
+void
+ cleanup (fl)
+    struct FaisLocals *fl;
+{
+
+    /* close files */
+    if (fl->LIB)
+	fclose (fl->LIB);
+    if (fl->FONTATTRIBUTE)
+	fclose (fl->FONTATTRIBUTE);
+    if (fl->FONTDISPLAY)
+	fclose (fl->FONTDISPLAY);
+}
+
+void
+ swapcharwidth (fl, ptr)
+    struct FaisLocals *fl;
+    BYTE *ptr;
+{
+
+    charwidth_type *cptr;
+    UWORD i;
+
+    cptr = (charwidth_type *) ptr;
+
+    for (i = 0; i < fl->nchar_in_font; i++)
+    {
+	cptr->charWidth = SWAPU (cptr->charWidth);
+	cptr->charFlags = SWAPU (cptr->charFlags);
+	cptr++;
+    }
+}
+
+void
+ swapdisplayheader (ptr)
+    BYTE *ptr;
+{
+
+    displayheader_type *dptr;
+    UWORD i;
+
+    dptr = (displayheader_type *) ptr;
+
+    dptr->NCHAR = SWAPU (dptr->NCHAR);
+    for (i = 0; i < 4; i++)
+    {
+	dptr->fontLimits[i] = SWAPU (dptr->fontLimits[i]);
+	dptr->reverseVideoLimits[i] = SWAPU (dptr->reverseVideoLimits[i]);
+    }
+    dptr->leftReference = SWAPU (dptr->leftReference);
+    dptr->baselinePosition = SWAPU (dptr->baselinePosition);
+    dptr->minimumPointSize = SWAPU (dptr->minimumPointSize);
+    dptr->maximumPointSize = SWAPU (dptr->maximumPointSize);
+    dptr->minimumSetSize = SWAPU (dptr->minimumSetSize);
+    dptr->maximumSetSize = SWAPU (dptr->maximumSetSize);
+    dptr->masterPointSize = SWAPU (dptr->masterPointSize);
+    dptr->scanDirection = SWAPU (dptr->scanDirection);
+    dptr->italicAngle = SWAPW (dptr->italicAngle);
+    dptr->xHeight = SWAPW (dptr->xHeight);
+    dptr->scanResolutionY = SWAPU (dptr->scanResolutionY);
+    dptr->scanResolutionX = SWAPU (dptr->scanResolutionX);
+    dptr->outputEnable = SWAPU (dptr->outputEnable);
+}
+
+void
+ swapattributeheader (fl, ptr)
+    struct FaisLocals *fl;
+    BYTE *ptr;
+{
+    attributeheader_type *aptr;
+    UWORD i;
+
+    aptr = (attributeheader_type *) ptr;
+
+    aptr->scaleFactor = SWAPU (aptr->scaleFactor);
+    for (i = 0; i < 3; i++)
+	aptr->fixedSpaceRelWidths[i] = SWAPU (aptr->fixedSpaceRelWidths[i]);
+    aptr->leftReference = SWAPU (aptr->leftReference);
+    aptr->baselinePosition = SWAPU (aptr->baselinePosition);
+    aptr->windowTop = SWAPW (aptr->windowTop);
+    aptr->windowBottom = SWAPW (aptr->windowBottom);
+    for (i = 0; i < 3; i++)
+    {
+	aptr->autoVarComp[i].zeroPoint = SWAPW (aptr->autoVarComp[i].zeroPoint);
+	aptr->autoVarComp[i].variablePoint =
+	  SWAPW (aptr->autoVarComp[i].variablePoint);
+    }
+    aptr->ascender = SWAPW (aptr->ascender);
+    aptr->descender = SWAPW (aptr->descender);
+    aptr->capHeight = SWAPW (aptr->capHeight);
+    aptr->xHeight = SWAPW (aptr->xHeight);
+    aptr->lcAccenHeight = SWAPW (aptr->lcAccenHeight);
+    aptr->ucAccentHeight = SWAPW (aptr->ucAccentHeight);
+    aptr->charPica = SWAPU (aptr->charPica);
+    aptr->leftAlign = SWAPW (aptr->leftAlign);
+    aptr->rightAlign = SWAPW (aptr->rightAlign);
+    aptr->uscoreDepth = SWAPW (aptr->uscoreDepth);
+    aptr->uscoreThickness = SWAPU (aptr->uscoreThickness);
+    aptr->windowLeft = SWAPW (aptr->windowLeft);
+    aptr->windowRight = SWAPW (aptr->windowRight);
+    aptr->spaceBand = SWAPU (aptr->spaceBand);
+    fl->ySizeNumerator = aptr->scaleFactor;
+    fl->ySizeDenominator = aptr->ascender - aptr->descender;
+    fl->spaceBand = aptr->spaceBand;
+    fl->isFixed = aptr->isFixedPitch;
+}
+
+void
+ swaptypefaceheader (ptr)
+    BYTE *ptr;
+{
+
+    typefaceheader_type *tptr;
+    UWORD i;
+
+    tptr = (typefaceheader_type *) ptr;
+
+    tptr->NFACES = SWAPU (tptr->NFACES);
+    for (i = 0; i < tptr->NFACES; i++)
+	tptr->typeFaceSet[0] = SWAPL (tptr->typeFaceSet[0]);
+}
+
+void
+ swaptrackkern (ptr)
+    BYTE *ptr;
+{
+
+    WORD *wptr;
+    UWORD i, num;
+
+    wptr = (WORD *) ptr;
+
+    num = *wptr++ = SWAPU (*(UWORD *) wptr);
+
+    for (i = 0; i < num; i++)
+    {
+	*wptr++ = SWAPW (*wptr);
+	*wptr++ = SWAPU (*(UWORD *) wptr);
+	*wptr++ = SWAPU (*(UWORD *) wptr);
+	*wptr++ = SWAPW (*wptr);
+	*wptr++ = SWAPW (*wptr);
+    }
+}
+
+void
+ swapcharacters (srcB)
+    BYTE *srcB;
+{
+    union PointerUnion src, ptr, ptr2;
+    void *hold;
+    UWORD i, j;
+    UWORD NLOP, NLYLN, NPNT;
+    UBYTE NYSK, NYND, NYDM, NYPR, NYIN, NYLC;
+    UBYTE NYCH, NYCA, NYTR, NLYCD, NXSK, NXND, NXDM;
+    UBYTE NXPR, NXIN, NXLC;
+
+    src.b = srcB;
+    ptr.b = src.b;
+
+    for (i = 0; i < 5; i++)
+    {
+	*ptr.w = SWAPU (*ptr.w);
+	ptr.w++;
+    }
+
+    /* swap metric data */
+    if (src.w[1] > 0)
+    {
+	ptr.w = (WORD *) (src.b + (UWORD) src.w[1]);
+	for (i = 0; i < 10; i++)
+	{
+	    *ptr.w = SWAPW (*ptr.w);
+	    ptr.w++;
+	}
+    }
+
+    /* swap first two words of contour tree */
+    if (src.w[3] > 0)
+    {
+	ptr.w = (UWORD *) (src.b + (UWORD) src.w[3]);
+	*ptr.w = NLOP = SWAPU (*ptr.w);
+	ptr.w++;
+	*ptr.w = SWAPU (*ptr.w);
+
+	if (src.w[2] > 0)
+	{
+	    hold = ptr.b;
+
+	    if (*ptr.w & HQ2FLAG)
+	    {
+		DBG ("HQ2 data!\n");
+		/* swap Intellifont data for hq2 */
+		ptr.b = src.b + (UWORD) src.w[2];
+		NYSK = *ptr.b++;
+		ptr.b += NLOP;
+		ptr.b += (((LONG) ptr.b) & 1);
+		for (i = 0; i < NYSK; i++)
+		{
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		}
+		NYTR = *ptr.b++;
+		NYND = *ptr.b++;
+		ptr.b += NYND * 3;
+		NYDM = *ptr.b++;
+		ptr.b += NYDM;
+		NYPR = *ptr.b++;
+		ptr.b += NYPR * 3;
+		NYIN = *ptr.b++;
+		ptr.b += NYIN;
+		NYLC = *ptr.b++;
+		ptr.b += (((LONG) ptr.b) & 1);
+		for (i = 0; i < NYLC; i++)
+		{
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		}
+		ptr.b += NYLC;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		NYCH = *ptr.b++;
+		ptr.b += NYCH;
+		ptr.b += (((LONG) ptr.b) & 1);
+		ptr.b += NYCH * 2;	/* not swapped */
+		NYCA = *ptr.b++;
+		ptr.b += NYCA + NYTR + NYCA;
+		NLYCD = *ptr.b++;
+		ptr.b += NLYCD * 2;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = NLYLN = SWAPU (*ptr.w);
+		ptr.w++;
+		for (i = 0; i < NLYLN; i++)
+		{		/* was NYSK */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		}
+		NXSK = *ptr.b++;
+		ptr.b += NLOP;
+		ptr.b += (((LONG) ptr.b) & 1);
+		ptr.b += NXSK * 2;	/* not swapped */
+		*ptr.b++;	/* NXTR */
+		NXND = *ptr.b++;
+		ptr.b += NXND * 3;
+		NXDM = *ptr.b++;
+		ptr.b += NXDM;
+		NXPR = *ptr.b++;
+		ptr.b += NXPR * 3;
+		NXIN = *ptr.b++;
+		ptr.b += NXIN;
+		NXLC = *ptr.b++;
+		ptr.b += (((LONG) ptr.b) & 1);
+		for (i = 0; i < NXLC; i++)
+		{		/* was NYSK */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		}
+		ptr.b += NXLC;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		*ptr.w = SWAPU (*ptr.w);
+	    }
+
+	    else
+	    {
+		ptr.b = src.b + src.w[2];
+		*ptr.b++;	/* NYSK */
+		NYTR = *ptr.b++;
+		NYND = *ptr.b++;
+		ptr.b += NYND * 2;
+		NYPR = *ptr.b++;
+		ptr.b += NYPR * 3;
+		NYIN = *ptr.b++;
+		ptr.b += NYIN;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		NYCA = *ptr.b++;
+		ptr.b += NYCA + NYTR + NYCA;
+		NLYCD = *ptr.b++;
+		ptr.b += NLYCD * 2;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = NLYLN = SWAPU (*ptr.w);
+		*ptr.w++;
+		for (i = 0; i < NLYLN; i++)
+		{
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		}
+		*ptr.b++;	/* NXSK */
+		*ptr.b++;	/* NXTR */
+		NXND = *ptr.b++;
+		ptr.b += NXND * 2;
+		NXPR = *ptr.b++;
+		ptr.b += NXPR * 3;
+		NXIN = *ptr.b++;
+		ptr.b += NXIN;
+		ptr.b += (((LONG) ptr.b) & 1);
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		*ptr.w = SWAPU (*ptr.w);
+	    }
+	    ptr.b = hold;
+	}
+
+
+
+	if (*ptr.w & HQ2FLAG)	/* HQ2data */
+	{
+	    /* swap hq2 contour loop and character data */
+	    ptr.b = src.b + src.w[3] + 4;
+	    for (i = 0; i < NLOP; i++)
+	    {
+		/* swap offset to character data */
+		*ptr.w = SWAPU (*ptr.w);
+		ptr2.b = src.b + *ptr.w;
+		/* skip polarity and spare byte */
+		ptr.w += 2;
+		/* swap pointers to right and left branches */
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+
+		/* swap character data */
+		*ptr2.w = NPNT = SWAPU (*ptr2.w);
+		ptr2.w++;
+		*ptr2.w = SWAPU (*ptr2.w);
+		ptr2.w++;
+		*ptr2.w = SWAPU (*ptr2.w);
+		ptr2.w++;
+		for (j = 0; j < NPNT * 2; j++)
+		{
+		    *ptr2.w = SWAPW (*ptr2.w);
+		    ptr2.w++;
+		}
+	    }
+	}
+
+	else
+	{
+	    /* swap hq3 contour loop and character data */
+	    ptr.b = src.b + src.w[3] + 4;
+	    for (i = 0; i < NLOP; i++)
+	    {
+		/* swap offset to character data */
+		*ptr.w = SWAPU (*ptr.w);
+		ptr2.b = src.b + *ptr.w;
+		/* skip polarity and spare byte */
+		ptr.w += 2;
+		/* swap pointers to right and left branches */
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+		*ptr.w = SWAPU (*ptr.w);
+		ptr.w++;
+
+		/* swap character data */
+		*ptr2.w = NPNT = SWAPU (*ptr2.w);
+		ptr2.w++;
+		*ptr2.w = SWAPU (*ptr2.w);
+		ptr2.w++;
+		for (j = 0; j < NPNT * 2; j++)
+		{
+		    *ptr2.w = SWAPW (*ptr2.w);
+		    ptr2.w++;
+		}
+	    }
+	}
+    }
+}
+@
+
+
+37.10
+log
+@new loader from Tim Christo...
+@
+text
+@d2 1
+a2 1
+**	$Id: loader.c,v 37.8 91/03/18 14:39:24 kodiak Exp $
+d2247 1
+d2284 2
+d2291 1
+a2291 1
+		NYSK = *ptr.b;
+d2401 1
+@
+
+
+37.9
+log
+@bug fixes
+@
+text
+@d2 1
+a2 1
+**	$Id: loader.c,v 37.8 91/03/18 14:39:24 kodiak Exp Locker: davidj $
+d39 2
+a42 5
+#define	DB(x)	;
+#define	DC(x)	;
+#define	DS(x)	;
+#define	DH(x)	;
+
+d450 10
+a459 9
+WORD assemblecompoundchar (struct FaisLocals * fl, WORD *, WORD *, complementheader_type *, ccharmetrics_type *, ccid_type *);
+WORD code_to_cgnum (struct FaisLocals * fl, UWORD, isocodetable_type *);
+void cleanup (struct FaisLocals *);
+void swapcharwidth (struct FaisLocals * fl, BYTE *);
+void swapattributeheader (struct FaisLocals * fl, BYTE *);
+void swapdisplayheader (BYTE *);
+void swaptypefaceheader (BYTE *);
+void swaptrackkern (BYTE *);
+void swapcharacters (BYTE *);
+d461 1
+a461 1
+#if	0
+d465 5
+a469 4
+UWORD swapbuffer[128] = {0};
+int dumpuctr = 0;
+
+UWORD SWAPU (UWORD w)
+d482 1
+a482 1
+	kprintf ("vvv\n");
+d484 3
+a486 1
+	    kprintf ("SWAPU 0x%04lx 0x%04lx\n", ((UWORD) swapbuffer[i] >> 8) + (((UWORD) swapbuffer[i] & 0xff) << 8), swapbuffer[i]);
+a488 1
+
+d492 3
+a494 1
+	    kprintf ("SWAPU 0x%04lx 0x%04lx <<<\n", w, r);
+d496 3
+a498 1
+	    kprintf ("SWAPU 0x%04lx 0x%04lx\n", w, r);
+d501 1
+a501 1
+	    kprintf ("^^^\n");
+d505 1
+d515 1
+a515 1
+    DB (kprintf ("FAISLoad \"%s\"\n", libNameArg));
+d532 1
+a532 1
+    DB (kprintf ("directory_setup...\n"));
+d540 1
+a540 1
+    DB (kprintf ("face_header_setup...\n"));
+d548 1
+a548 1
+    DB (kprintf ("library_header_setup...\n"));
+d557 1
+a557 1
+    DB (kprintf ("global_segment_setup...\n"));
+d565 1
+a565 1
+    DB (kprintf ("write_characters...\n"));
+d572 1
+a572 1
+    DB (kprintf ("cleanup...\n"));
+a579 1
+    DB (kprintf ("return TRUE\n"));
+d660 1
+a660 1
+	DB (kprintf ("Maximum files limit exceeded\n"));
+d688 1
+a688 1
+	DB (kprintf ("Typeface/Complement number not found\n"));
+d727 1
+a727 1
+	DB (kprintf ("Typeface/Complement number not found\n"));
+d744 3
+a746 1
+WORD face_header_setup (struct FaisLocals *fl)
+d768 1
+a768 1
+	DB (kprintf ("nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS));
+d783 1
+a783 1
+	DB (kprintf ("Error reading HIQDATA1 segment\n"));
+d792 1
+a792 1
+	DB (kprintf ("Error reading HIQDATA1 segment\n"));
+d804 1
+a804 1
+	DB (kprintf ("hiq nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS));
+d823 1
+a823 1
+	DB (kprintf ("Error reading CGCHARNUMS segment.\n"));
+d829 1
+a829 1
+	DB (kprintf ("Error reading GLOBALCHDATA segment.\n"));
+d840 1
+a840 1
+	DB (kprintf (" Error reading GLOBALCHDATA segment.\n"));
+d850 1
+a850 1
+	DB (kprintf ("Error reading GLOBALCHDATA segment.\n"));
+a888 3
+#if 1
+	    charptr->cg_num = MAX_UWORD;
+#else
+d890 1
+a890 1
+		kprintf (" Missing character number %ld\n", *cgcharnums);
+a891 1
+#endif
+d899 1
+a899 1
+    DB (kprintf ("nchar_in_lib %ld\n", fl->nchar_in_lib));
+d904 5
+d1030 1
+a1030 1
+	DB (kprintf ("attr file nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS));
+d1035 1
+a1035 1
+	DB (kprintf ("attribute key %ld\n", SWAPU (keyptr->key)));
+a1038 1
+		DH (kprintf ("FONTHEADER\n"));
+d1041 2
+a1042 1
+		fontheadersize = SWAPL ((keyptr + 1)->offset) - SWAPL (keyptr->offset);
+a1047 1
+		DH (kprintf ("CHARWIDTH\n"));
+a1053 1
+		DH (kprintf ("ATTRIBUTEHEADER\n"));
+a1059 1
+		DH (kprintf ("TRACKKERN\n"));
+a1065 1
+		DH (kprintf ("TEXTKERN\n"));
+a1071 1
+		DH (kprintf ("DESIGNKERN\n"));
+a1077 1
+		DH (kprintf ("TYPEFACEHEADER\n"));
+a1079 1
+		DH (kprintf ("offset=%ld, size=%ld\n", typefaceheaderoffset, typefaceheadersize));
+a1083 1
+		DH (kprintf ("COMPOUNDCHAR\n"));
+a1089 1
+		DH (kprintf ("CCHARMETRICS\n"));
+d1092 2
+a1093 1
+		DBG2 ("CCHARMETRICS $%lx %ld\n", ccharmetricsoffset, ccharmetricssize);
+a1096 1
+		DH (kprintf ("CCID\n"));
+a1102 1
+		DH (kprintf ("COMPLEMENTHEADER\n"));
+a1107 1
+		DH (kprintf ("FONTALIAS\n"));
+d1137 1
+a1137 1
+	DH (kprintf ("Typeface Header Segment not found.\n"));
+d1469 1
+d1472 1
+a1472 1
+	DH (kprintf ("Error buffer overflow."));
+d1484 1
+a1484 1
+	DH (kprintf ("typefaceheader read failure\n"));
+d1498 3
+a1500 1
+    DB (kprintf ("compound character parts $%lx $%lx $%lx $%lx ?= $%lx\n", compoundcharoffset, ccharmetricsoffset, ccidoffset, complementheaderoffset, MAX_LONG));
+d1510 1
+a1510 1
+	    DB (kprintf ("Error buffer overflow."));
+d1518 1
+a1518 1
+	    DB (kprintf (" Error compound char Segment too big.\n"));
+d1526 1
+a1526 1
+	    DB (kprintf (" Error compound char Segment too big.\n"));
+d1541 1
+a1541 1
+	    DB (kprintf ("compoundchar read failure\n"));
+d1548 1
+a1548 1
+	    DB (kprintf ("complementheader read failure\n"));
+d1556 1
+a1556 1
+	    DB (kprintf ("ccharmetrics read failure\n"));
+d1564 1
+a1564 1
+	    DB (kprintf ("ccid read failure\n"));
+d1582 1
+a1582 1
+	DB (kprintf ("Error buffer overflow."));
+d1607 1
+a1607 1
+	    DB (kprintf ("Error buffer overflow."));
+d1622 2
+d1627 2
+a1628 1
+	ptr.b += 22;
+d1631 1
+a1631 1
+	    *ptr.w = NXREF = SWAPU (*ptr.w);
+d1685 3
+a1687 1
+WORD write_characters (struct FaisLocals *fl)
+d1689 1
+a1692 1
+    DB (kprintf ("write_characters ... %ld\n", fl->nchar_in_lib));
+d1694 2
+d1701 2
+a1702 1
+	    if (faisRead (fl, S.b.buffer, charptr->size, TRUE,fl->FONTDISPLAY))
+d1704 1
+a1704 1
+		DB (kprintf ("Error reading characters.\n"));
+d1710 1
+a1710 1
+	    DB (kprintf ("Error: Bad Mask $%lx\n", charptr->offset));
+d1715 1
+d1717 1
+d1936 1
+a1936 1
+    DB (kprintf ("assemblecompoundchar %ld\n", NCCHAR));
+d1940 1
+a1940 1
+	DC (kprintf ("cc id %ld\n", SWAPU (ccidptr->cg_num)));
+d2205 3
+a2207 1
+void swaptypefaceheader (BYTE *ptr)
+d2209 1
+a2215 1
+    DH (kprintf ("%ld faces\n", (ULONG)tptr->NFACES));
+a2216 1
+    {
+a2217 2
+	DH (kprintf ("set %ld\n", tptr->typeFaceSet[0]));
+    }
+d2242 3
+a2244 1
+void swapcharacters (BYTE *srcB)
+d2285 1
+a2285 2
+		DB (kprintf ("HQ2 data!\n"));
+
+d2357 1
+a2357 25
+
+		/* swap hq2 contour loop and character data */
+		ptr.b = src.b + src.w[3] + 4;
+		for (i = 0; i < NLOP; i++)
+		{
+		    /* swap offset to character data */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr2.b = src.b + *ptr.w;
+
+		    /* skip polarity and spare byte */
+		    ptr.w += 2;
+
+		    /* swap pointers to right and left branches */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+
+		    /* swap character data */
+		    *ptr2.w = NPNT = SWAPU (*ptr2.w);
+		    ptr2.w++;
+		    *ptr2.w = SWAPU (*ptr2.w);
+		    ptr2.w++;
+		    *ptr2.w = SWAPU (*ptr2.w);
+		    ptr2.w++;
+a2358 10
+		    DB (kprintf ("loop 6 (%ld)\n", (LONG)(NPNT * 2)));
+		    for (j = 0; j < NPNT * 2; j++)
+		    {
+			*ptr2.w = SWAPW (*ptr2.w);
+			ptr2.w++;
+		    }
+		    DB (kprintf ("loop 6 done\n"));
+		}
+		DB (kprintf ("done with HQ2 data\n"));
+	    }
+d2397 21
+d2419 8
+a2426 3
+		/* swap hq3 contour loop and character data */
+		ptr.b = src.b + src.w[3] + 4;
+		for (i = 0; i < NLOP; i++)
+d2428 22
+a2449 10
+		    /* swap offset to character data */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr2.b = src.b + *ptr.w;
+		    /* skip polarity and spare byte */
+		    ptr.w += 2;
+		    /* swap pointers to right and left branches */
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+		    *ptr.w = SWAPU (*ptr.w);
+		    ptr.w++;
+d2451 8
+a2458 4
+		    /* swap character data */
+		    *ptr2.w = NPNT = SWAPU (*ptr2.w);
+		    ptr2.w++;
+		    *ptr2.w = SWAPU (*ptr2.w);
+a2459 5
+		    for (j = 0; j < NPNT * 2; j++)
+		    {
+			*ptr2.w = SWAPW (*ptr2.w);
+			ptr2.w++;
+		    }
+@
+
+
+37.8
+log
+@set Face Global Segment : Segment Byte Size to value compatable w/
+PC tools output.
+@
+text
+@d2 1
+a2 1
+**	$Id: loader.c,v 37.7 91/03/17 21:14:08 kodiak Exp Locker: kodiak $
+d41 5
+d54 1
+a54 1
+						/* to MAX_CHAR_SIZE */
+d57 1
+a57 1
+						/* file headers and hiqdata1 */
+d122 2
+a123 1
+union PointerUnion {
+d129 2
+a130 1
+typedef struct {
+d135 2
+a136 1
+typedef struct {
+d143 2
+a144 1
+typedef struct {
+d151 2
+a152 1
+typedef struct {
+d160 2
+a161 1
+typedef struct {
+d167 2
+a168 1
+typedef struct {
+d174 2
+a175 1
+typedef struct {
+d181 2
+a182 1
+typedef struct {
+d188 2
+a189 1
+typedef struct {
+d210 2
+a211 1
+typedef struct {
+d216 2
+a217 1
+typedef struct {
+d221 2
+a222 1
+typedef struct {
+d229 2
+a230 1
+typedef struct {
+d234 2
+a235 1
+typedef struct {
+d242 2
+a243 1
+typedef struct {
+d254 2
+a255 1
+    struct {
+d275 2
+a276 1
+typedef struct {
+d284 2
+a285 1
+typedef struct {
+d291 2
+a292 1
+typedef struct {
+d298 2
+a299 1
+typedef struct {
+d307 2
+a308 1
+typedef struct {
+d313 2
+a314 1
+typedef struct {
+d320 2
+a321 1
+typedef struct {
+d328 2
+a329 1
+typedef struct {
+d337 2
+a338 1
+typedef struct {
+d343 2
+a344 1
+typedef struct {
+d358 2
+a359 1
+struct {
+d365 2
+a366 1
+    struct {
+d385 2
+a386 1
+struct FaisLocals {
+d404 2
+a405 4
+    UWORD nchar_in_lib;			/* number of valid characters to be
+					   put in lib */
+    UWORD nchar_in_font;		/* number of chars in font including
+					   missing and pi etc. */
+d427 8
+a434 11
+#define ld_err_mem     100		/* Insufficient memory */
+#define ld_err_4       104		/* Maximum files limit exceeded */
+#define ld_err_5       105		/* Typeface/Complement number not
+					   found */
+#define ld_err_9       109		/* Global Character Data segment not
+					   found */
+#define ld_err_10      110		/* Cg Character Number Data segment
+					   not found */
+#define ld_err_11      111		/* Can't open Attribute file */
+#define ld_err_13      113		/* Font Header segment not found */
+#define ld_err_15      115		/* Character Width segment not found */
+d437 3
+a439 3
+#define ld_wrn_1      1001		/* Display Header segment not found */
+#define ld_wrn_4      1004		/* Attribute Header segment not found */
+#define ld_wrn_8      1008		/* Typeface Header segment not found */
+d444 18
+a461 19
+UWORD lib_load(WORD, BYTE **);
+ULONG align(ULONG);
+WORD directory_setup(struct FaisLocals *);
+WORD face_header_setup(struct FaisLocals *);
+WORD library_header_setup(struct FaisLocals *);
+WORD global_segment_setup(struct FaisLocals *);
+WORD write_characters(struct FaisLocals *);
+void sort(struct FaisLocals *, charwidth_type *, packedkern_type *, packedkern_type *);
+void pack_kerning(struct FaisLocals *, packedkern_type *, unpackedkern_type *);
+WORD assemblecompoundchar(struct FaisLocals *fl, WORD *, WORD *, complementheader_type *,
+	ccharmetrics_type *, ccid_type *);
+WORD code_to_cgnum(struct FaisLocals *fl, UWORD, isocodetable_type *);
+void cleanup(struct FaisLocals *);
+void swapcharwidth(struct FaisLocals *fl, BYTE *);
+void swapattributeheader(struct FaisLocals *fl, BYTE *);
+void swapdisplayheader(BYTE *);
+void swaptypefaceheader(BYTE *);
+void swaptrackkern(BYTE *);
+void swapcharacters(BYTE *);
+d463 1
+a463 1
+#ifdef	DEBUG
+d467 1
+a467 1
+UWORD swapbuffer[128] = { 0 };
+d469 2
+a470 2
+UWORD SWAPU(w)
+UWORD w;
+d475 1
+a475 1
+    r = (UWORD)(((UWORD)w>>8)+((((UWORD)w&0xff)<<8)));
+d478 1
+a478 1
+	swapbuffer[i] = swapbuffer[i-1];
+d481 5
+a485 6
+    if ((r == 0x2a71) || (r == 0x712a) || (r == 0x2975) || (r == 7529)) {
+	DBG("vvv\n");
+	for (i = 127-dumpuctr; i > 0; i--)
+	    DBG2("SWAPU 0x%04lx 0x%04lx\n",
+		    ((UWORD)swapbuffer[i]>>8)+(((UWORD)swapbuffer[i]&0xff)<<8),
+		    swapbuffer[i]);
+d488 7
+a494 7
+    if (dumpuctr) {
+	if (dumpuctr == 128) {
+	    DBG2("SWAPU 0x%04lx 0x%04lx <<<\n", w, r);
+	}
+	else {
+	    DBG2("SWAPU 0x%04lx 0x%04lx\n", w, r);
+	}
+d497 1
+a497 1
+	    DBG("^^^\n");
+d499 1
+a499 1
+    return(r);
+d503 4
+a506 4
+int FAISLoad(typeEntry, libNameArg, orThreshArg)
+struct TypeEntry *typeEntry;
+char *libNameArg;
+UWORD orThreshArg;
+d508 1
+a508 1
+    struct FaisLocals fl;		/* shared local data */
+d510 1
+a510 1
+    DBG1("FAISLoad \"%s\"\n", libNameArg);
+d527 4
+a530 3
+    DBG("directory_setup...\n");
+    if (directory_setup(&fl)) {
+	cleanup(&fl);
+d535 4
+a538 3
+    DBG("face_header_setup...\n");
+    if (face_header_setup(&fl)) {
+	cleanup(&fl);
+d543 4
+a546 3
+    DBG("library_header_setup...\n");
+    if (library_header_setup(&fl)) {
+	cleanup(&fl);
+d552 4
+a555 3
+    DBG("global_segment_setup...\n");
+    if (global_segment_setup(&fl)) {
+	cleanup(&fl);
+d560 4
+a563 3
+    DBG("write_characters...\n");
+    if (write_characters(&fl)) {
+	cleanup(&fl);
+d567 2
+a568 2
+    DBG("cleanup...\n");
+    cleanup(&fl);
+d575 1
+d579 1
+a579 1
+BOOL faisRead(struct FaisLocals *fl, void *data, int length, BOOL equ, FILE *f)
+d584 2
+a585 1
+    if ((actual = fread((char *) data, 1, length, f)) != length) {
+d587 1
+a587 1
+	    return(SUCCESS);
+d589 1
+a589 1
+	    buildpath(string, fl->faisPath, fl->displayFile);
+d591 4
+a594 4
+	    buildpath(string, fl->faisPath, fl->attributeFile);
+	ErrRequester(ERROR_IFileRead, fl->fontName, string, length,
+		actual, ferror(f));
+	return(FAILURE);
+d596 1
+a596 1
+    return(SUCCESS);
+d599 1
+a599 1
+BOOL faisWrite(struct FaisLocals *fl, void *data, int length)
+d603 5
+a607 4
+    if ((actual = fwrite((char *) data, 1, length, fl->LIB)) != length) {
+	ErrRequester(ERROR_IFileWrite, fl->fontName, fl->libName, length,
+		actual, ferror(fl->LIB));
+	fclose(fl->LIB);
+d609 2
+a610 2
+	DeleteFile(fl->libName);
+	return(FAILURE);
+d612 1
+a612 1
+    return(SUCCESS);
+d620 1
+a620 1
+directory_setup(fl)
+d629 1
+d633 4
+a636 3
+    buildpath(string, fl->faisPath, "FONTINDX.FI");
+    if ((FONTINDEX = fopen(string, "r")) == NULL) {
+	ErrRequester(ERROR_IOpenFail, fl->fontName, string);
+d642 6
+a647 5
+    if ((l = fread((char *) &index_file, 1, sizeof(index_file), FONTINDEX))
+	    == -1) {
+	ErrRequester(ERROR_IFileRead, fl->fontName, string, sizeof(index_file),
+		l, ferror(fl->LIB));
+	return(FAILURE);
+d652 5
+a656 4
+    fclose(FONTINDEX);
+    if (SWAPU(index_file.nFiles) > MAX_FONT_FILES) {
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_4);
+	DBG("Maximum files limit exceeded\n");
+d664 2
+a665 1
+    for (i = 0; i < SWAPU(index_file.nFiles); i++) {
+d667 3
+a669 2
+		(index_file.font[i].fileType[1] == 'D')) {
+	    strncpy(string, index_file.font[i].face, 6);
+d671 2
+a672 2
+	    face = atol(string);
+	    strncpy(string, index_file.font[i].comp, 6);
+d674 3
+a676 2
+	    comp = atol(string);
+	    if ((fl->typeface == face) && (fl->complement == comp)) {
+d682 4
+a685 3
+    if (!found) {
+	DBG("Typeface/Complement number not found\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_5);
+d691 6
+a696 5
+    getString(fl->displayFile, index_file.font[i].fileName, 8);
+    buildpath(string, fl->faisPath, fl->displayFile);
+    if ((fl->FONTDISPLAY = fopen(string, "r")) == NULL) {
+	ErrRequester(ERROR_IOpenFail, fl->fontName, string);
+	return(FAILURE);
+d703 2
+a704 1
+    for (i = 0; i < SWAPU(index_file.nFiles); i++) {
+d706 3
+a708 2
+		(index_file.font[i].fileType[1] == 'A')) {
+	    strncpy(string, index_file.font[i].face, 6);
+d710 2
+a711 2
+	    fl->typeface = atol(string);
+	    strncpy(string, index_file.font[i].comp, 6);
+d713 3
+a715 2
+	    fl->complement = atol(string);
+	    if ((fl->typeface == face) && (fl->complement == comp)) {
+d721 4
+a724 3
+    if (!found) {
+	DBG("Typeface/Complement number not found\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_5);
+d730 6
+a735 5
+    getString(fl->attributeFile, index_file.font[i].fileName, 8);
+    buildpath(string, fl->faisPath, fl->attributeFile);
+    if ((fl->FONTATTRIBUTE = fopen(string, "r")) == NULL) {
+	ErrRequester(ERROR_IOpenFail, fl->fontName, string);
+	return(FAILURE);
+d740 1
+a740 3
+WORD
+face_header_setup(fl)
+    struct FaisLocals *fl;
+d753 2
+a754 2
+    if (faisRead(fl, dfileheader, MAX_HEADER, FALSE, fl->FONTDISPLAY))
+	return(FAILURE);
+d759 4
+a762 3
+    nkeys = SWAPU(((fileheader_type *) dfileheader)->NKEYS);
+    if (nkeys > MAX_KEYS) {
+	DBG2("nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+d765 5
+a769 3
+    for (i = 0; i < nkeys; i++) {
+	if (SWAPU(ptr->key) == HIQDATA1) {
+	    fl->hiqdataoffset = SWAPL(ptr->offset);
+d775 4
+a778 3
+    if (fl->hiqdataoffset == MAX_LONG) {
+	DBG("Error reading HIQDATA1 segment\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_9);
+d783 5
+a787 4
+    fseek(fl->FONTDISPLAY, fl->hiqdataoffset, 0);
+    if (faisRead(fl, hiqdata, MAX_HEADER, FALSE, fl->FONTDISPLAY)) {
+	DBG("Error reading HIQDATA1 segment\n");
+	return(FAILURE);
+d795 4
+a798 3
+    nkeys = SWAPU(((hiqdata1_type *) hiqdata)->NBKEYS);
+    if (nkeys > MAX_KEYS) {
+	DBG2("hiq nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+d801 10
+a810 9
+    for (i = 0; i < nkeys; i++) {
+	if (SWAPU(ptr->key) == CGCHARNUMS)
+	    cgcharnumsoffset = fl->hiqdataoffset + SWAPL(ptr->offset);
+	if (SWAPU(ptr->key) == GLOBALCHDATA)
+	    globalchdataoffset = fl->hiqdataoffset + SWAPL(ptr->offset);
+	if (SWAPU(ptr->key) == GLOBINTDATA) {	/* will need it in
+						   global_segment_setup() */
+	    fl->globintdataoffset = fl->hiqdataoffset + SWAPL(ptr->offset);
+	    fl->globintdatasize = SWAPL((ptr + 1)->offset) - SWAPL(ptr->offset);
+d815 4
+a818 3
+    if (cgcharnumsoffset == MAX_LONG) {
+	DBG("Error reading CGCHARNUMS segment.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_10);
+d821 4
+a824 3
+    if (globalchdataoffset == MAX_LONG) {
+	DBG("Error reading GLOBALCHDATA segment.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_9);
+d830 6
+a835 5
+    fseek(fl->FONTDISPLAY, globalchdataoffset, 0);
+    if (faisRead(fl, (char *) globalchdata, 4*MAX_CHARS+10, FALSE,
+	    fl->FONTDISPLAY)) {
+	DBG(" Error reading GLOBALCHDATA segment.\n");
+	return(FAILURE);
+d840 6
+a845 5
+    fseek(fl->FONTDISPLAY, cgcharnumsoffset, 0);
+    if (faisRead(fl, (char *) cgcharnums, 2*MAX_CHARS+4, FALSE,
+	    fl->FONTDISPLAY)) {
+	DBG("Error reading GLOBALCHDATA segment.\n");
+	return(FAILURE);
+d848 1
+a848 2
+    fl->fontSlant = SWAPW(globalchdata->fontSlant);	/* need for rasterparam
+							   segment */
+d855 1
+a855 1
+    fl->nchar_in_font = SWAPU(globalchdata->NCHAR);
+d857 2
+a858 1
+    for (i = 0; i < fl->nchar_in_font; i++) {
+d861 1
+a861 1
+	while (SWAPL(*nextoffset) == -1)
+d863 1
+a863 1
+	charptr->size = (UWORD) (SWAPL(*nextoffset) - SWAPL(*offsets));
+d866 1
+a866 1
+	charptr->offset = SWAPL(*offsets);
+d874 3
+a876 2
+		charptr->size <= MAX_CHAR_SIZE &&
+		(SWAPU(*cgcharnums) & 0x8000) == 0) {
+d879 1
+a879 1
+	    charptr->cg_num = SWAPU(*cgcharnums);
+d881 3
+a883 3
+	else {
+	    if ((SWAPU(*cgcharnums) & 0x8000) == 0)
+		DBG1(" Missing character number %ld\n", *cgcharnums);
+d885 5
+d897 1
+a897 1
+    DBG1("nchar_in_lib %ld\n", fl->nchar_in_lib);
+a901 5
+
+
+
+
+
+d906 1
+a906 1
+library_header_setup(fl)
+d914 4
+a917 3
+    if (!(fl->LIB = fopen(fl->libName, "w"))) {
+	ErrRequester(ERROR_ICreateFail, fl->fontName, fl->libName);
+	return(FAILURE);
+d919 1
+a919 1
+    memset(libptr.w, 0,
+d922 1
+a922 1
+    *libptr.w++ = 'D';			/* type of library */
+d926 1
+a926 1
+    libptr.w++;				/* leave size 0 for file header */
+d931 1
+a931 1
+    *libptr.w++ = 20;			/* size of file directory */
+d936 1
+a936 1
+    *libptr.l++ = fl->typeface;		/* set typeface */
+d938 1
+a938 1
+	    (FILE_HEADER_SIZE + FACE_HEADER_SIZE + FILE_DIRECTORY_SIZE);
+d945 4
+a948 4
+    if (faisWrite(fl, S.b.buffer,
+	    FILE_HEADER_SIZE + FACE_HEADER_SIZE + FILE_DIRECTORY_SIZE))
+	return(FAILURE);
+    return(SUCCESS);
+d950 1
+a950 1
+
+d952 2
+a953 2
+WORD global_segment_setup(fl)
+struct FaisLocals *fl;
+d958 1
+d961 1
+d977 2
+a978 1
+    union {
+d996 1
+a996 2
+    numsegments = 2;			/* always have rasterparam segment and
+					   end of dir */
+d1002 5
+a1006 3
+    for (i = 0; i < SWAPU(((fileheader_type *) dfileheader)->NKEYS); i++) {
+	if (SWAPU(keyptr->key) == DISPLAYHEADER) {
+	    displayheaderoffset = SWAPL(keyptr->offset);
+d1015 2
+a1016 2
+    if (faisRead(fl, afileheader, MAX_HEADER, FALSE, fl->FONTATTRIBUTE))
+	return(FAILURE);
+d1020 4
+a1023 3
+    nkeys = SWAPU(((fileheader_type *) afileheader)->NKEYS);
+    if (nkeys > MAX_KEYS) {
+	DBG2("attr file nkeys truncated from %ld to %ld\n", nkeys, MAX_KEYS);
+d1026 8
+a1033 5
+    for (i = 0; i < nkeys; i++) {
+	DBG1("attribute key %ld\n", SWAPU(keyptr->key));
+	switch (SWAPU(keyptr->key)) {
+	case FONTHEADER:
+	    fontheaderoffset = SWAPL(keyptr->offset);
+d1035 1
+a1035 2
+	    fontheadersize = SWAPL((keyptr + 1)->offset) -
+		    SWAPL(keyptr->offset);
+d1037 2
+a1038 2
+	    numsegments++;
+	    break;
+d1040 6
+a1045 5
+	case CHARWIDTH:
+	    charwidthoffset = SWAPL(keyptr->offset);
+	    charwidthsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1047 6
+a1052 5
+	case ATTRIBUTEHEADER:
+	    attributeheaderoffset = SWAPL(keyptr->offset);
+	    attributeheadersize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1054 6
+a1059 5
+	case TRACKKERN:
+	    trackkernoffset = SWAPL(keyptr->offset);
+	    trackkernsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1061 6
+a1066 5
+	case TEXTKERN:
+	    textkernoffset = SWAPL(keyptr->offset);
+	    textkernsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1068 6
+a1073 5
+	case DESIGNKERN:
+	    designkernoffset = SWAPL(keyptr->offset);
+	    designkernsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1075 7
+a1081 5
+	case TYPEFACEHEADER:
+	    typefaceheaderoffset = SWAPL(keyptr->offset);
+	    typefaceheadersize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1083 6
+a1088 5
+	case COMPOUNDCHAR:
+	    compoundcharoffset = SWAPL(keyptr->offset);
+	    compoundcharsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1090 6
+a1095 6
+	case CCHARMETRICS:
+	    ccharmetricsoffset = SWAPL(keyptr->offset);
+	    ccharmetricssize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    DBG2("CCHARMETRICS $%lx %ld\n", ccharmetricsoffset,
+		    ccharmetricssize);
+	    break;
+d1097 6
+a1102 5
+	case CCID:
+	    ccidoffset = SWAPL(keyptr->offset);
+	    ccidsize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    DBG2("CCID $%lx %ld\n", ccidoffset, ccidsize);
+	    break;
+d1104 5
+a1108 4
+	case COMPLEMENTHEADER:
+	    complementheaderoffset = SWAPL(keyptr->offset);
+	    complementheadersize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    break;
+d1110 6
+a1115 5
+	case FONTALIAS:
+	    fontaliasoffset = SWAPL(keyptr->offset);
+	    fontaliassize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+	    numsegments++;
+	    break;
+d1121 4
+a1124 3
+    if (fontheaderoffset == MAX_LONG) {
+	DBG("Font Header Segment not found.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_13);
+d1127 4
+a1130 3
+    if (charwidthoffset == MAX_LONG) {
+	DBG("Character Width Segment not found.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_15);
+d1133 4
+a1136 3
+    if (attributeheaderoffset == MAX_LONG) {
+	DBG("Attribute Header Segment not found.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_wrn_4);
+d1139 4
+a1142 3
+    if (typefaceheaderoffset == MAX_LONG) {
+	DBG("Typeface Header Segment not found.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_wrn_8);
+d1145 4
+a1148 3
+    if (displayheaderoffset == MAX_LONG) {
+	DBG("Display Header Segment not found.\n");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_wrn_1);
+d1153 1
+a1153 1
+	DBG("Track Kerning Segment not found.\n");
+d1155 1
+a1155 1
+	DBG("Text Kerning Segment not found.\n");
+d1157 1
+a1157 1
+	DBG("Design Kerning Segment not found.\n");
+d1159 1
+a1159 1
+	DBG("Compound Character Segment not found.\n");
+d1161 1
+a1161 1
+	DBG("Compound Character Metrics Segment not found.\n");
+d1163 1
+a1163 1
+	DBG("Compound Character ID Segment not found.\n");
+d1165 1
+a1165 1
+	DBG("Complement Header Segment not found.\n");
+d1167 1
+a1167 1
+	DBG("Font Alias Segment not found.\n");
+d1173 1
+a1173 1
+    offset = align(numsegments * (LONG) sizeof(seg_dir_type) + 6);
+d1176 4
+a1179 3
+    if (offset + COPYRIGHTSIZE > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1188 3
+a1190 3
+    fseek(fl->FONTATTRIBUTE, fontheaderoffset, 0);
+    if (faisRead(fl, ptr.b, COPYRIGHTSIZE, TRUE, fl->FONTATTRIBUTE))
+	return(FAILURE);
+d1193 2
+a1194 2
+    offset += align((ULONG) COPYRIGHTSIZE);
+    ptr.b += align((ULONG) COPYRIGHTSIZE);
+d1198 2
+a1199 1
+    if (fl->globintdataoffset != MAX_LONG) {
+d1201 4
+a1204 3
+	if (offset + fl->globintdatasize > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1208 1
+a1208 1
+	fseek(fl->FONTDISPLAY, fl->globintdataoffset, 0);
+d1212 3
+a1214 3
+	if (faisRead(fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	*ptr.w = NYLN = SWAPU(*ptr.w);
+d1216 2
+a1217 2
+	if (faisRead(fl, ptr.b, NYLN*2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+d1219 2
+a1220 2
+	    ptr.w[i] = SWAPU(ptr.w[i]);
+	ptr.b += NYLN*2;
+d1222 8
+a1229 8
+	if (faisRead(fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	*ptr.w = NGCD = SWAPU(*ptr.w);
+	if (faisRead(fl, ptr.b + 2, NGCD, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	if (faisRead(fl, tempptr, NGCD, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	memcpy(ptr.b + 2 + NGCD, tempptr, NGCD);
+d1232 5
+a1236 5
+	if (faisRead(fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	*ptr.w = NGYD = SWAPU(*ptr.w);
+	if (faisRead(fl, ptr.b + 2, NGYD*2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+d1238 4
+a1241 4
+	    ptr.w[i] = SWAPU(ptr.w[i]);
+	if (faisRead(fl, tempptr, (NGYD+1)&0xfffe, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	memcpy(ptr.b + 2 + 2 * NGYD, tempptr, (NGYD+1)&0xfffe);
+d1244 5
+a1248 5
+	if (faisRead(fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	*ptr.w = NGXD = SWAPU(*ptr.w);
+	if (faisRead(fl, ptr.b + 2, NGXD*2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+d1250 1
+a1250 1
+	    ptr.w[i] = SWAPU(ptr.w[i]);
+d1252 3
+a1254 3
+	if (faisRead(fl, tempptr, (NGXD+1)&0xfffe, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	memcpy(ptr.b + 2 + 2 * NGXD, tempptr, (NGXD+1)&0xfffe);
+d1257 3
+a1259 3
+	if (faisRead(fl, ptr.b, 2, TRUE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	*ptr.w = NSDM = SWAPU(*ptr.w);
+d1262 2
+a1263 1
+	if (NSDM <= 10) {
+d1269 4
+a1272 3
+	    if (NSDM > 0) {
+		if (faisRead(fl, ptr.b + 2, NSDM * 12, TRUE, fl->FONTDISPLAY))
+		    return(FAILURE);
+d1275 2
+a1276 1
+	else {
+d1281 5
+a1285 5
+	if (faisRead(fl, ptr.b + 2, 14*14, FALSE, fl->FONTDISPLAY))
+	    return(FAILURE);
+	ptr.w[1] = SWAPU(ptr.w[1]);
+	ptr.w[2] = SWAPU(ptr.w[2]);
+	ptr.w[3] = SWAPU(ptr.w[3]);
+d1289 1
+a1289 1
+		+ 24 + (NGYD & 1) + (NGXD & 1);
+d1292 1
+a1292 1
+	offset += align((ULONG) seg_dir->size);
+d1300 4
+a1303 3
+    if (offset + fl->nchar_in_font * sizeof(charwidth_type) + 6 > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1309 4
+a1312 4
+    fseek(fl->FONTATTRIBUTE, charwidthoffset, 0);
+    if (faisRead(fl, ptr.b + 6, (UWORD) charwidthsize, TRUE, fl->FONTATTRIBUTE))
+	return(FAILURE);
+    swapcharwidth(fl, ptr.b + 6);
+d1320 6
+a1325 5
+    if (textkernoffset != MAX_LONG) {
+	fseek(fl->FONTATTRIBUTE, textkernoffset, 0);
+	if (faisRead(fl, textkern, (UWORD) textkernsize, TRUE,
+		fl->FONTATTRIBUTE))
+	    return(FAILURE);
+d1329 1
+a1329 1
+    pack_kerning(fl, (packedkern_type *) textkern, (unpackedkern_type *) textkern);
+d1331 6
+a1336 5
+    if (designkernoffset != MAX_LONG) {
+	fseek(fl->FONTATTRIBUTE, designkernoffset, 0);
+	if (faisRead(fl, designkern, (UWORD) designkernsize, TRUE,
+		fl->FONTATTRIBUTE))
+	    return(FAILURE);
+d1340 1
+a1340 1
+    pack_kerning(fl, (packedkern_type *) designkern, (unpackedkern_type *) designkern);
+d1345 2
+a1346 2
+    sort(fl, (charwidth_type *) (ptr.b + 6), (packedkern_type *) textkern,
+	    (packedkern_type *) designkern);
+d1349 3
+a1351 3
+    seg_dir->size = fl->nchar_in_lib * sizeof(charwidth_type) + 6;
+    *((LONG *) (ptr.b + 2)) = (LONG) (fl->nchar_in_lib * sizeof(charwidth_type) + 6);
+    offset += align((ULONG) seg_dir->size);
+d1358 4
+a1361 3
+    if (offset + RASTERPARAMSIZE > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1371 1
+a1371 1
+    offset += align((ULONG) seg_dir->size);
+d1377 4
+a1380 3
+    if (offset + attributeheadersize + 6 > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1385 1
+a1385 1
+    *(ptr.l)++ = seg_dir->size = sizeof(attributeheader_type) + 6;
+d1388 4
+a1391 4
+    fseek(fl->FONTATTRIBUTE, attributeheaderoffset, 0);
+    if (faisRead(fl, ptr.b, seg_dir->size, TRUE, fl->FONTATTRIBUTE))
+	return(FAILURE);
+    swapattributeheader(fl, ptr.b);
+d1393 1
+a1393 1
+    offset += align((ULONG) seg_dir->size);
+d1398 2
+a1399 1
+    if (trackkernoffset != MAX_LONG) {
+d1401 4
+a1404 3
+	if (offset + trackkernsize + 6 > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1411 5
+a1415 5
+	fseek(fl->FONTATTRIBUTE, trackkernoffset, 0);
+	if (faisRead(fl, ptr.b + 4, (UWORD) trackkernsize, TRUE,
+		fl->FONTATTRIBUTE))
+	    return(FAILURE);
+	swaptrackkern(ptr.b + 4);
+d1419 1
+a1419 1
+	offset += align((ULONG) seg_dir->size);
+d1425 2
+a1426 1
+    if (textkernoffset != MAX_LONG) {
+d1428 4
+a1431 3
+	if (offset + fl->nchar_in_lib * 4 + 6 + 6 > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1440 1
+a1440 1
+	memcpy(ptr.b, textkern, seg_dir->size);
+d1442 1
+a1442 1
+	offset += align((ULONG) seg_dir->size);
+d1449 2
+a1450 1
+    if (designkernoffset != MAX_LONG) {
+d1452 4
+a1455 3
+	if (offset + fl->nchar_in_lib * 4 + 6 + 6 > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1464 1
+a1464 1
+	memcpy(ptr.b, designkern, seg_dir->size);
+d1466 1
+a1466 1
+	offset += align((ULONG) seg_dir->size);
+d1473 4
+a1476 4
+
+    if (offset + typefaceheadersize + 6 > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1483 6
+a1488 5
+    fseek(fl->FONTATTRIBUTE, typefaceheaderoffset, 0);
+    if (faisRead(fl, ptr.b + 4, (UWORD) typefaceheadersize, TRUE,
+	    fl->FONTATTRIBUTE)) {
+	DBG("typefaceheader read failure\n");
+	return(FAILURE);
+d1490 1
+a1490 1
+    swaptypefaceheader(ptr.b + 4);
+d1494 1
+a1494 1
+    offset += align((ULONG) seg_dir->size);
+d1501 1
+a1501 3
+    DBG5("compound character parts $%lx $%lx $%lx $%lx ?= $%lx\n",
+	    compoundcharoffset, ccharmetricsoffset, ccidoffset,
+	    complementheaderoffset, MAX_LONG);
+d1503 4
+a1506 3
+	    ccharmetricsoffset != MAX_LONG &&
+	    ccidoffset != MAX_LONG &&
+	    complementheaderoffset != MAX_LONG) {
+d1509 4
+a1512 3
+	if (offset + compoundcharsize + (compoundcharsize >> 2) > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1517 4
+a1520 3
+	if (compoundcharsize > 16 * MAX_CHARS + 6) {
+	    DBG(" Error compound char Segment too big.\n");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1525 4
+a1528 3
+		> 16 * MAX_CHARS + 6) {
+	    DBG(" Error compound char Segment too big.\n");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1535 1
+a1535 1
+		+ complementheadersize);
+d1538 29
+a1566 25
+	fseek(fl->FONTATTRIBUTE, compoundcharoffset, 0);
+	if (faisRead(fl, (char *) compoundchar, (UWORD) compoundcharsize, TRUE,
+		fl->FONTATTRIBUTE)) {
+	    DBG("compoundchar read failure\n");
+	    return(FAILURE);
+	}
+	fseek(fl->FONTATTRIBUTE, complementheaderoffset, 0);
+	if (faisRead(fl, (char *) complementheader,
+		(UWORD) complementheadersize, TRUE, fl->FONTATTRIBUTE)) {
+	    DBG("complementheader read failure\n");
+	    return(FAILURE);
+	}
+
+	fseek(fl->FONTATTRIBUTE, ccharmetricsoffset, 0);
+	if (faisRead(fl, (char *) ccharmetrics, (UWORD) ccharmetricssize, TRUE,
+		fl->FONTATTRIBUTE)) {
+	    DBG("ccharmetrics read failure\n");
+	    return(FAILURE);
+	}
+
+	fseek(fl->FONTATTRIBUTE, ccidoffset, 0);
+	if (faisRead(fl, (char *) ccid, (UWORD) ccidsize, TRUE,
+		fl->FONTATTRIBUTE)) {
+	    DBG("ccid read failure\n");
+	    return(FAILURE);
+d1572 2
+a1573 2
+		assemblecompoundchar(fl, (WORD *) (ptr.b + 4),
+		(WORD *) compoundchar, complementheader, ccharmetrics, ccid));
+d1575 1
+a1575 1
+	offset += align((ULONG) seg_dir->size);
+d1581 4
+a1584 3
+    if (offset + sizeof(displayheader_type) + 6 > MAX_BUFFER) {
+	DBG("Error buffer overflow.");
+	ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1589 1
+a1589 1
+    *ptr.l++ = seg_dir->size = sizeof(displayheader_type) + 6;
+d1592 4
+a1595 4
+    fseek(fl->FONTDISPLAY, displayheaderoffset, 0);
+    if (faisRead(fl, ptr.b, seg_dir->size, TRUE, fl->FONTDISPLAY))
+	return(FAILURE);
+    swapdisplayheader(ptr.b);
+d1598 1
+a1598 1
+    offset += align((ULONG) seg_dir->size);
+d1603 2
+a1604 1
+    if (fontaliasoffset != MAX_LONG) {
+d1606 4
+a1609 3
+	if (offset + fontaliassize + 6 > MAX_BUFFER) {
+	    DBG("Error buffer overflow.");
+	    ErrRequester(ERROR_IInternalFAIS, fl->fontName, ld_err_mem);
+d1617 3
+a1619 3
+	fseek(fl->FONTATTRIBUTE, fontaliasoffset, 0);
+	if (faisRead(fl, ptr.b, (UWORD) fontaliassize, TRUE, fl->FONTATTRIBUTE))
+	    return(FAILURE);
+d1624 1
+a1624 1
+	*ptr.w = NFATS = SWAPU(*ptr.w);
+d1627 3
+a1629 2
+	for (j = 0; j < NFATS; j++) {
+	    *ptr.w = NXREF = SWAPU(*ptr.w);
+d1632 1
+a1632 1
+			SWAPL(*(LONG *) (ptr.b + j * 104 + 122));
+d1644 1
+a1644 1
+	offset += align((ULONG) seg_dir->size);
+d1656 2
+a1657 2
+    fl->faceheaderoffset = ftell(fl->LIB);
+    fl->faceheadersize = (UWORD) align((ULONG) fl->faceheadersize);
+d1659 1
+a1659 1
+	    fl->faceheaderoffset + (LONG) fl->faceheadersize;
+d1662 4
+a1665 4
+    fseek(fl->LIB, fl->faceheadersizeoffset, 0);
+    if (faisWrite(fl, (char *) &fl->faceheadersize, 2))
+	return(FAILURE);
+    fseek(fl->LIB, fl->faceheaderoffset, 0);
+d1668 2
+a1669 2
+    if (faisWrite(fl, faceheader, fl->faceheadersize))
+	return(FAILURE);
+d1676 2
+a1677 2
+    if (faisWrite(fl, S.b.buffer, (UWORD) offset))
+	return(FAILURE);
+d1683 1
+a1683 3
+WORD
+write_characters(fl)
+    struct FaisLocals *fl;
+a1684 1
+
+d1688 1
+d1690 9
+a1698 9
+
+    DBG1("write_characters ... %ld\n", fl->nchar_in_lib);
+    for (i = 0; i < fl->nchar_in_lib; i++) {
+	if ((charptr->offset & 0xe0000000) == normask) {
+	    fseek(fl->FONTDISPLAY, charptr->offset + fl->hiqdataoffset, 0);
+	    if (faisRead(fl, S.b.buffer, charptr->size, TRUE,
+		    fl->FONTDISPLAY)) {
+		DBG("Error reading characters.\n");
+		return(FAILURE);
+d1701 3
+a1703 2
+	else {
+	    DBG1("Error: Bad Mask $%lx\n", charptr->offset);
+d1707 1
+a1707 2
+	swapcharacters(S.b.buffer);
+
+d1709 2
+d1712 2
+a1713 2
+	charptr->offset = ftell(fl->LIB);
+	charsize = (UWORD) align((LONG) charptr->size);
+a1714 3
+	if (faisWrite(fl, S.b.buffer, charsize))
+	    return(FAILURE);
+
+d1719 3
+a1721 3
+    fseek(fl->LIB, fl->faceheaderoffset, 0);
+    if (faisWrite(fl, faceheader, fl->faceheadersize))
+	return(FAILURE);
+d1731 1
+a1731 1
+align(n)
+d1735 1
+d1744 5
+a1748 5
+sort(fl, charwidth, textkernptr, designkernptr)
+struct FaisLocals *fl;
+charwidth_type *charwidth;
+packedkern_type *textkernptr;
+packedkern_type *designkernptr;
+d1770 2
+a1771 1
+    for (i = 0; i < tot_chars - 1; i++) {
+d1783 4
+a1786 2
+	for (j = i + 1; j < tot_chars; j++) {
+	    if (charptr->cg_num < lowcharptr->cg_num) {
+d1793 4
+a1796 2
+	    else if (charptr->cg_num == lowcharptr->cg_num) {
+		if (charptr->cg_num != MAX_UWORD) {
+d1812 2
+a1813 1
+	if (lowcharptr != swpcharptr) {
+d1835 2
+a1836 1
+	    for (k = 0; k < 4; k++) {
+d1844 2
+a1845 1
+	    for (k = 0; k < 4; k++) {
+d1863 1
+a1863 1
+	    + fl->nchar_in_lib * sizeof(char_type));
+d1868 4
+a1871 4
+pack_kerning(fl, packed, unpacked)
+struct FaisLocals *fl;
+packedkern_type *packed;
+unpackedkern_type *unpacked;
+d1876 3
+a1878 3
+    packed->kernSign = SWAPW(unpacked->kernSign);
+    packed->kernUnit = SWAPU(unpacked->kernUnit);
+    packed->NSECT = SWAPU(unpacked->NSECT);
+d1880 6
+a1885 4
+    for (i = 0; i < fl->nchar_in_lib; i++) {
+	for (j = k = 0; j < 8; j += 2, k++) {
+	    m1 = (SWAPU(unpacked->character[i].data[j]) << 4) & 0x00F0;
+	    m2 = (SWAPU(unpacked->character[i].data[j + 1])) & 0x000F;
+d1893 8
+a1900 8
+assemblecompoundchar(fl, libcompoundchar, compoundchar, complementheader,
+	ccharmetrics, ccid)
+struct FaisLocals *fl;
+WORD *libcompoundchar;
+WORD *compoundchar;
+complementheader_type *complementheader;
+ccharmetrics_type *ccharmetrics;
+ccid_type *ccid;
+d1917 1
+a1917 1
+    NCCHAR = *libcompoundchar = SWAPU(*compoundchar);
+d1925 1
+a1925 1
+    compoundcharsize = 2;		/* include the character count */
+d1927 1
+a1927 1
+    DBG1("assemblecompoundchar %ld\n", NCCHAR);
+d1929 8
+a1936 7
+    for (i = 0; i < NCCHAR; i++) {
+	DBG1("cc id %ld\n", SWAPU(ccidptr->cg_num));
+	libccharptr->cg_num = SWAPU(ccidptr->cg_num);
+	libccharptr->horiz_esc = SWAPU(ccmetricsptr->escapementX);
+	libccharptr->vert_esc = SWAPU(ccmetricsptr->escapementY);
+	libccharptr->NPCC = SWAPU(ccharptr->NPCC);
+	compoundcharsize += 8 + sizeof(libpart_type) * SWAPU(ccharptr->NPCC);
+d1940 6
+a1945 5
+	for (j = 0; j < SWAPU(ccharptr->NPCC); j++) {
+	    libpartptr->cg_num = code_to_cgnum(fl, SWAPU(partptr->ccCharCode),
+		    tableptr);
+	    libpartptr->xoffset = SWAPU(partptr->offsets.x);
+	    libpartptr->yoffset = SWAPU(partptr->offsets.y);
+d1951 1
+a1951 1
+		8 + sizeof(libpart_type) * libccharptr->NPCC);
+d1953 1
+a1953 1
+		4 + sizeof(part_type) * SWAPU(ccharptr->NPCC));
+d1959 2
+a1960 1
+    if (fl->updcompoundcharptr) {
+d1963 2
+a1964 1
+	for (i = 0; i < NCCHAR2; i++) {
+d1967 1
+a1967 1
+		    8 + sizeof(libpart_type) * (ptr->NPCC & 0x7fff));
+d1970 1
+a1970 1
+	memcpy((BYTE *) libccharptr, (BYTE *) fl->updcompoundcharptr + 2, tempsize);
+d1980 2
+a1981 1
+    for (i = 0; i < NCCHAR - 1; i++) {
+d1985 2
+a1986 1
+	for (j = 0; j < NCCHAR - 1; j++) {
+d1989 1
+a1989 1
+		    8 + sizeof(libpart_type) * ptr->NPCC);
+d1991 2
+a1992 1
+	    if (ptr->cg_num == nextptr->cg_num) {
+d1995 2
+a1996 2
+		compoundcharsize -= 8 + sizeof(libpart_type) *
+			(nextptr->NPCC & 0x7fff);
+d1999 2
+a2000 1
+	    if (ptr->cg_num > nextptr->cg_num) {
+d2009 2
+a2010 1
+		for (k = 0; k < (ptr->NPCC & 0x7fff); k++) {
+d2026 2
+a2027 1
+		for (k = 0; k < numparts; k++) {
+d2036 1
+a2036 1
+			8 + sizeof(libpart_type) * ptr->NPCC);
+d2045 2
+a2046 1
+		for (k = 0; k < (tempptr->NPCC & 0x7fff); k++) {
+d2059 2
+a2060 1
+    for (i = 0; i < NCCHAR; i++) {
+d2063 1
+a2063 1
+		8 + sizeof(libpart_type) * ptr->NPCC);
+d2069 4
+a2072 4
+code_to_cgnum(fl, code, table)
+struct FaisLocals *fl;
+UWORD code;
+isocodetable_type *table;
+d2079 4
+a2082 3
+    for (i = 0; i < fl->nchar_in_font; i++) {
+	if (SWAPU(tableptr->isoCode) == code)
+	    return ((WORD) SWAPU(tableptr->cgCode));
+d2090 1
+a2090 1
+cleanup(fl)
+d2093 1
+d2096 1
+a2096 1
+	fclose(fl->LIB);
+d2098 1
+a2098 1
+	fclose(fl->FONTATTRIBUTE);
+d2100 1
+a2100 1
+	fclose(fl->FONTDISPLAY);
+d2104 3
+a2106 3
+swapcharwidth(fl, ptr)
+struct FaisLocals *fl;
+BYTE *ptr;
+d2114 4
+a2117 3
+    for (i = 0; i < fl->nchar_in_font; i++) {
+	cptr->charWidth = SWAPU(cptr->charWidth);
+	cptr->charFlags = SWAPU(cptr->charFlags);
+d2123 1
+a2123 1
+swapdisplayheader(ptr)
+d2132 21
+a2152 20
+    dptr->NCHAR = SWAPU(dptr->NCHAR);
+    for (i = 0; i < 4; i++) {
+	dptr->fontLimits[i] = SWAPU(dptr->fontLimits[i]);
+	dptr->reverseVideoLimits[i] = SWAPU(dptr->reverseVideoLimits[i]);
+    }
+    dptr->leftReference = SWAPU(dptr->leftReference);
+    dptr->baselinePosition = SWAPU(dptr->baselinePosition);
+    dptr->minimumPointSize = SWAPU(dptr->minimumPointSize);
+    dptr->maximumPointSize = SWAPU(dptr->maximumPointSize);
+    dptr->minimumSetSize = SWAPU(dptr->minimumSetSize);
+    dptr->maximumSetSize = SWAPU(dptr->maximumSetSize);
+    dptr->masterPointSize = SWAPU(dptr->masterPointSize);
+    dptr->scanDirection = SWAPU(dptr->scanDirection);
+    dptr->italicAngle = SWAPW(dptr->italicAngle);
+    dptr->xHeight = SWAPW(dptr->xHeight);
+    dptr->scanResolutionY = SWAPU(dptr->scanResolutionY);
+    dptr->scanResolutionX = SWAPU(dptr->scanResolutionX);
+    dptr->outputEnable = SWAPU(dptr->outputEnable);
+}
+
+d2154 3
+a2156 3
+swapattributeheader(fl, ptr)
+struct FaisLocals *fl;
+BYTE *ptr;
+d2163 1
+a2163 1
+    aptr->scaleFactor = SWAPU(aptr->scaleFactor);
+d2165 8
+a2172 7
+	aptr->fixedSpaceRelWidths[i] = SWAPU(aptr->fixedSpaceRelWidths[i]);
+    aptr->leftReference = SWAPU(aptr->leftReference);
+    aptr->baselinePosition = SWAPU(aptr->baselinePosition);
+    aptr->windowTop = SWAPW(aptr->windowTop);
+    aptr->windowBottom = SWAPW(aptr->windowBottom);
+    for (i = 0; i < 3; i++) {
+	aptr->autoVarComp[i].zeroPoint = SWAPW(aptr->autoVarComp[i].zeroPoint);
+d2174 1
+a2174 1
+		SWAPW(aptr->autoVarComp[i].variablePoint);
+d2176 14
+a2189 14
+    aptr->ascender = SWAPW(aptr->ascender);
+    aptr->descender = SWAPW(aptr->descender);
+    aptr->capHeight = SWAPW(aptr->capHeight);
+    aptr->xHeight = SWAPW(aptr->xHeight);
+    aptr->lcAccenHeight = SWAPW(aptr->lcAccenHeight);
+    aptr->ucAccentHeight = SWAPW(aptr->ucAccentHeight);
+    aptr->charPica = SWAPU(aptr->charPica);
+    aptr->leftAlign = SWAPW(aptr->leftAlign);
+    aptr->rightAlign = SWAPW(aptr->rightAlign);
+    aptr->uscoreDepth = SWAPW(aptr->uscoreDepth);
+    aptr->uscoreThickness = SWAPU(aptr->uscoreThickness);
+    aptr->windowLeft = SWAPW(aptr->windowLeft);
+    aptr->windowRight = SWAPW(aptr->windowRight);
+    aptr->spaceBand = SWAPU(aptr->spaceBand);
+d2196 1
+a2196 3
+void
+swaptypefaceheader(ptr)
+    BYTE *ptr;
+a2197 1
+
+d2203 2
+a2204 1
+    tptr->NFACES = SWAPU(tptr->NFACES);
+d2206 4
+a2209 1
+	tptr->typeFaceSet[0] = SWAPL(tptr->typeFaceSet[0]);
+d2213 1
+a2213 1
+swaptrackkern(ptr)
+d2222 1
+a2222 1
+    num = *wptr++ = SWAPU(*(UWORD *) wptr);
+d2224 9
+a2232 8
+    for (i = 0; i < num; i++) {
+	*wptr++ = SWAPW(*wptr);
+	*wptr++ = SWAPU(*(UWORD *) wptr);
+	*wptr++ = SWAPU(*(UWORD *) wptr);
+	*wptr++ = SWAPW(*wptr);
+	*wptr++ = SWAPW(*wptr);
+    }
+}
+d2234 1
+a2234 3
+void
+swapcharacters(srcB)
+BYTE *srcB;
+d2246 3
+a2248 2
+    for (i = 0; i < 5; i++) {
+	*ptr.w = SWAPU(*ptr.w);
+d2253 2
+a2254 1
+    if (src.w[1] > 0) {
+d2256 3
+a2258 2
+	for (i = 0; i < 10; i++) {
+	    *ptr.w = SWAPW(*ptr.w);
+d2264 2
+a2265 1
+    if (src.w[3] > 0) {
+d2267 1
+a2267 1
+	*ptr.w = NLOP = SWAPU(*ptr.w);
+d2269 7
+a2275 1
+	*ptr.w = SWAPU(*ptr.w);
+a2276 3
+	if (src.w[2] > 0) {
+	    if (*ptr.w & HQ2FLAG) {
+		DBG("HQ2 data!\n");
+d2282 3
+a2284 2
+		for (i = 0; i < NYSK; i++) {
+		    *ptr.w = SWAPU(*ptr.w);
+d2298 3
+a2300 2
+		for (i = 0; i < NYLC; i++) {
+		    *ptr.w = SWAPU(*ptr.w);
+d2305 1
+a2305 1
+		*ptr.w = SWAPU(*ptr.w);
+d2310 1
+a2310 1
+		ptr.b += NYCH*2;		/* not swapped */
+d2312 1
+a2312 1
+		ptr.b += NYCA+NYTR+NYCA;
+d2314 1
+a2314 1
+		ptr.b += NLYCD*2;
+d2316 1
+a2316 1
+		*ptr.w = NLYLN = SWAPU(*ptr.w);
+d2318 3
+a2320 2
+		for (i = 0; i < NLYLN; i++) {	/* was NYSK */
+		    *ptr.w = SWAPU(*ptr.w);
+d2326 2
+a2327 2
+		ptr.b += NXSK * 2;		/* not swapped */
+		*ptr.b++;			/* NXTR */
+d2338 3
+a2340 2
+		for (i = 0; i < NXLC; i++) {	/* was NYSK */
+		    *ptr.w = SWAPU(*ptr.w);
+d2345 1
+a2345 1
+		*ptr.w = SWAPU(*ptr.w);
+d2347 1
+a2347 1
+		*ptr.w = SWAPU(*ptr.w);
+d2351 2
+a2352 1
+		for (i = 0; i < NLOP; i++) {
+d2354 1
+a2354 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2356 1
+d2359 1
+d2361 1
+a2361 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2363 1
+a2363 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2367 1
+a2367 1
+		    *ptr2.w = NPNT = SWAPU(*ptr2.w);
+d2369 1
+a2369 1
+		    *ptr2.w = SWAPU(*ptr2.w);
+d2371 1
+a2371 1
+		    *ptr2.w = SWAPU(*ptr2.w);
+d2373 5
+a2377 2
+		    for (j = 0; j < NPNT * 2; j++) {
+			*ptr2.w = SWAPW(*ptr2.w);
+d2380 1
+d2382 1
+d2384 2
+a2385 1
+	    else {
+d2387 1
+a2387 1
+		*ptr.b++;			/* NYSK */
+d2396 1
+a2396 1
+		*ptr.w = SWAPU(*ptr.w);
+d2399 1
+a2399 1
+		ptr.b += NYCA+NYTR+NYCA;
+d2401 1
+a2401 1
+		ptr.b += NLYCD*2;
+d2403 1
+a2403 1
+		*ptr.w = NLYLN = SWAPU(*ptr.w);
+d2405 3
+a2407 2
+		for (i = 0; i < NLYLN; i++) {
+		    *ptr.w = SWAPU(*ptr.w);
+d2410 2
+a2411 2
+		*ptr.b++;			/* NXSK */
+		*ptr.b++;			/* NXTR */
+d2413 1
+a2413 1
+		ptr.b += NXND*2;
+d2415 1
+a2415 1
+		ptr.b += NXPR*3;
+d2419 1
+a2419 1
+		*ptr.w = SWAPU(*ptr.w);
+d2421 1
+a2421 1
+		*ptr.w = SWAPU(*ptr.w);
+d2425 2
+a2426 1
+		for (i = 0; i < NLOP; i++) {
+d2428 1
+a2428 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2433 1
+a2433 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2435 1
+a2435 1
+		    *ptr.w = SWAPU(*ptr.w);
+d2439 1
+a2439 1
+		    *ptr2.w = NPNT = SWAPU(*ptr2.w);
+d2441 1
+a2441 1
+		    *ptr2.w = SWAPU(*ptr2.w);
+d2443 3
+a2445 2
+		    for (j = 0; j < NPNT * 2; j++) {
+			*ptr2.w = SWAPW(*ptr2.w);
+@
+
+
+37.7
+log
+@fix FAIS loader
+@
+text
+@d2 1
+a2 1
+**	$Id: loader.c,v 37.6 91/03/11 14:22:53 kodiak Exp Locker: kodiak $
+a1090 3
+    faceglobal->key = faceglobal_key;
+    faceglobal->size = offset;
+
+d1558 4
+@
+
+
+37.6
+log
+@*** empty log message ***
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d434 40
+a702 1
+    int status;
+d731 1
+a731 1
+    status = fseek(fl->FONTDISPLAY, fl->hiqdataoffset, 0);
+d773 1
+a773 1
+    status = fseek(fl->FONTDISPLAY, globalchdataoffset, 0);
+d782 1
+a782 1
+    status = fseek(fl->FONTDISPLAY, cgcharnumsoffset, 0);
+d896 4
+a899 1
+    ULONG fontheaderoffset = MAX_LONG, fontheadersize;
+a929 1
+    int status;
+d965 4
+a968 1
+	    fontheadersize = SWAPL((keyptr + 1)->offset) - SWAPL(keyptr->offset);
+d1106 1
+a1106 1
+    status = fseek(fl->FONTATTRIBUTE, fontheaderoffset, 0);
+d1124 1
+a1124 1
+	status = fseek(fl->FONTDISPLAY, fl->globintdataoffset, 0);
+d1221 1
+a1221 1
+    status = fseek(fl->FONTATTRIBUTE, charwidthoffset, 0);
+d1233 1
+a1233 1
+	status = fseek(fl->FONTATTRIBUTE, textkernoffset, 0);
+d1243 1
+a1243 1
+	status = fseek(fl->FONTATTRIBUTE, designkernoffset, 0);
+d1296 1
+a1296 1
+    status = fseek(fl->FONTATTRIBUTE, attributeheaderoffset, 0);
+d1317 1
+a1317 1
+	status = fseek(fl->FONTATTRIBUTE, trackkernoffset, 0);
+d1385 1
+a1385 1
+    status = fseek(fl->FONTATTRIBUTE, typefaceheaderoffset, 0);
+d1437 1
+a1437 1
+	status = fseek(fl->FONTATTRIBUTE, compoundcharoffset, 0);
+d1443 1
+a1443 1
+	status = fseek(fl->FONTATTRIBUTE, complementheaderoffset, 0);
+d1450 1
+a1450 1
+	status = fseek(fl->FONTATTRIBUTE, ccharmetricsoffset, 0);
+d1457 1
+a1457 1
+	status = fseek(fl->FONTATTRIBUTE, ccidoffset, 0);
+d1486 1
+a1486 1
+    status = fseek(fl->FONTDISPLAY, displayheaderoffset, 0);
+d1509 1
+a1509 1
+	status = fseek(fl->FONTATTRIBUTE, fontaliasoffset, 0);
+d1516 1
+a1516 1
+	NFATS = SWAPU(*ptr.w);
+d1520 1
+a1520 1
+	    NXREF = SWAPU(*ptr.w);
+d1522 2
+a1523 2
+		*(LONG *) (ptr.b + j * 104 + 122) = SWAPL(*(LONG *) (ptr.b + j * 104 + 122));
+
+a1576 1
+    int status;
+d1583 1
+a1583 2
+	    status = fseek(fl->FONTDISPLAY,
+		    charptr->offset + fl->hiqdataoffset, 0);
+d1609 1
+a1609 1
+    status = fseek(fl->LIB, fl->faceheaderoffset, 0);
+a1835 1
+    NCCHAR2 = 0;
+d1847 1
+d1849 1
+d2103 1
+a2103 1
+    UBYTE NXPR, NXIN, NXLC, NXTR;
+d2171 1
+a2171 1
+		for (i = 0; i < NLYLN; i++) {	/* Was NYSK!! */
+d2179 1
+a2179 1
+		NXTR = *ptr.b++;
+d2229 1
+a2229 1
+		NYSK = *ptr.b++;
+d2251 2
+a2252 2
+		NXSK = *ptr.b++;
+		NXTR = *ptr.b++;
+d2257 1
+a2257 1
+		NXIN = *ptr.b;
+a2262 1
+		ptr.w++;
+@

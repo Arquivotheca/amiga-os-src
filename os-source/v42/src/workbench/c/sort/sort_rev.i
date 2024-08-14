@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'9.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'sort 42.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'sort 42.1 (9.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: sort 42.1 (9.8.93)',0
+	ENDM

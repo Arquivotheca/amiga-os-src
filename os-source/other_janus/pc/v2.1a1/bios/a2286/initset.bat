@@ -1,0 +1,20 @@
+echo off
+set pod=0
+set routines=0
+set top8k=0
+set miscintr=0
+set int5=0
+set int10=0
+set int13=0
+set int14=0
+set int15=0
+set int16=0
+set int17=0
+set int40=0
+set data=0
+set title=0
+set equates=0
+set origins=0
+set external=0
+\pcbios\flags 0
+

@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	12
+DATE	MACRO
+		dc.b	'4.3.93'
+	ENDM
+VERS	MACRO
+		dc.b	'rshd 1.12'
+	ENDM
+VSTRING	MACRO
+		dc.b	'rshd 1.12 (4.3.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: rshd 1.12 (4.3.93)',0
+	ENDM

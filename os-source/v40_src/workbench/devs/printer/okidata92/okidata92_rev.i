@@ -1,0 +1,12 @@
+VERSION		EQU	35
+REVISION	EQU	23
+DATE	MACRO
+		dc.b	'15 Dec 1989'
+	ENDM
+VERS	MACRO
+		dc.b	'okidata92 35.23'
+	ENDM
+VSTRING	MACRO
+		dc.b	'okidata92 35.23 (15 Dec 1989)',13,10,0
+		ds.w	0
+	ENDM

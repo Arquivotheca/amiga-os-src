@@ -1,0 +1,20 @@
+/* ascii equates */
+
+#define SOH		'\001'
+#define EOT		'\004'
+#define ACK		'\006'
+#define BELL	'\007'
+#define BACKSPACE	'\010'
+#define TAB		'\011'
+#define LINEFEED	'\012'
+#define RETURN	'\015'
+#define DLE		'\020'
+#define XON		'\021'
+#define XOFF	'\023'
+#define NAK		'\025'
+#define CAN		'\030'
+#define CTRLZ	'\032'
+#define ESCAPE '\033'
+#define ESC 	'\033'
+#define DELETE '\177'
+#define CSI 	'\233' /* Control Sequence Introducer for AMIGA */

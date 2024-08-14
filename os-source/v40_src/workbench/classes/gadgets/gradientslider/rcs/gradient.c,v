@@ -1,0 +1,1669 @@
+head     39.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.4
+date     93.08.26.11.40.54;  author vertex;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.21.16.52.19;  author vertex;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.22.14.24.34;  author vertex;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.18.13.44.25;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Body of gradientslider class
+@
+
+
+39.4
+log
+@Fixed positioning problem that would cause the rendering to be off when
+  displayed on a requester
+@
+text
+@
+/* "Color Gradient" slider BOOPSI gadget
+ * By TALIN (with Joe Pearce)
+ */
+
+
+/*****************************************************************************/
+
+
+#include <exec/types.h>
+#include <intuition/intuition.h>
+#include <intuition/gadgetclass.h>
+#include <intuition/classusr.h>
+#include <intuition/classes.h>
+#include <intuition/cghooks.h>
+#include <graphics/displayinfo.h>
+#include <graphics/gfxmacros.h>
+#include <string.h>
+
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/macros.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+#include "gradient.h"
+#include "utils.h"
+#include "gradientslider.h"
+
+
+/*****************************************************************************/
+
+
+#define INSET_W         2          /* container inset from bevel      */
+#define INSET_H         1
+
+#define BORDERTHICK_W   1          /* thickness of container          */
+#define BORDERTHICK_H   1
+
+#define KNOB_SLOP       2          /* sloppiness allowed in knob pick */
+#define KNOB_PIXELS     5          /* size of slider knob             */
+
+
+/*****************************************************************************/
+
+
+/* 16 4x4 Half-Tone Dither Patterns for Container (each pat is 16x8) */
+UWORD dither_data[] =
+{
+    0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+    0x1111,0x0000,0x0000,0x0000,0x1111,0x0000,0x0000,0x0000,
+    0x1111,0x0000,0x4444,0x0000,0x1111,0x0000,0x4444,0x0000,
+    0x1111,0x0000,0x5555,0x0000,0x1111,0x0000,0x5555,0x0000,
+    0x5555,0x0000,0x5555,0x0000,0x5555,0x0000,0x5555,0x0000,
+    0x5555,0x2222,0x5555,0x0000,0x5555,0x2222,0x5555,0x0000,
+    0x5555,0x2222,0x5555,0x8888,0x5555,0x2222,0x5555,0x8888,
+    0x5555,0x2222,0x5555,0xAAAA,0x5555,0x2222,0x5555,0xAAAA,
+    0x5555,0xAAAA,0x5555,0xAAAA,0x5555,0xAAAA,0x5555,0xAAAA,
+    0x5555,0xBBBB,0x5555,0xAAAA,0x5555,0xBBBB,0x5555,0xAAAA,
+    0x5555,0xBBBB,0x5555,0xEEEE,0x5555,0xBBBB,0x5555,0xEEEE,
+    0x5555,0xBBBB,0x5555,0xFFFF,0x5555,0xBBBB,0x5555,0xFFFF,
+    0x5555,0xFFFF,0x5555,0xFFFF,0x5555,0xFFFF,0x5555,0xFFFF,
+    0x7777,0xFFFF,0x5555,0xFFFF,0x7777,0xFFFF,0x5555,0xFFFF,
+    0x7777,0xFFFF,0xDDDD,0xFFFF,0x7777,0xFFFF,0xDDDD,0xFFFF,
+    0x7777,0xFFFF,0xFFFF,0xFFFF,0x7777,0xFFFF,0xFFFF,0xFFFF,
+/*  0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF */
+};
+
+
+/*****************************************************************************/
+
+
+LONG Clamp(LONG min, LONG val, LONG max)
+{
+    if (val < min)
+        return min;
+
+    if (val > max)
+        return max;
+
+    return val;
+}
+
+
+/*****************************************************************************/
+
+
+/* InsetIBox: Expands or contracts all four sizes of an IBox
+ *
+ *  This function moves the left and right edges of an IBox inward by the
+ *  amount specified in sx, and the top and bottom edges by sy.
+ */
+
+VOID InsetIBox(struct IBox *b, LONG sx, LONG sy)
+{
+    b->Left   += sx;
+    b->Width  -= sx + sx;
+    b->Top    += sy;
+    b->Height -= sy + sy;
+}
+
+
+/*****************************************************************************/
+
+
+/* DrawFrame: Sort of like DrawBevelBox, but just one color */
+VOID DrawFrame(struct RastPort *rp, struct IBox *b)
+{
+    Move(rp, b->Left, b->Top);
+    Draw(rp, b->Left, b->Top + b->Height - 1);
+    Draw(rp, b->Left + b->Width - 1, b->Top + b->Height - 1);
+    Draw(rp, b->Left + b->Width - 1, b->Top);
+    Draw(rp, b->Left, b->Top);
+}
+
+
+/*****************************************************************************/
+
+
+/* RenderSlider: Draw the various parts of the slider gadget.
+ *
+ *  This function actually draws the gadget. It has sections for each part of
+ *  the gadget that might be drawn, such as the knob, the
+ *  border, etc. The redraw argument controls which sections actually do
+ *  get drawn since it is uneccessary to re-render the entire gadget each time.
+ *
+ *  Note that I have been careful to draw no pixel more than once. This helps
+ *  to minimize flickering when dragging the knob.
+ */
+
+VOID RenderSlider(struct Gadget     *gadget,
+                  struct SliderInfo *si,
+                  struct RastPort   *rp,
+                  struct GadgetInfo *ginfo,
+                  WORD              redraw)
+{
+WORD                ytop, ybottom;                 /* extent of container          */
+WORD                xleft, xright;
+struct DrawInfo     *drinfo = ginfo->gi_DrInfo;    /* DrawInfo for screen          */
+UWORD               *pens = drinfo->dri_Pens;      /* array of pens                 */
+
+    SetABPenDrMd(rp,pens[BACKGROUNDPEN],0,JAM1);
+
+    /* render the frame around the container if needed */
+
+    if (redraw == GREDRAW_REDRAW)
+    {
+    struct IBox GBox;
+
+        /* render the bevel box around the slider */
+
+        GBox = si->ContainerExtent;
+        DrawFrame(rp, &GBox);
+        InsetIBox(&GBox,-INSET_W,-INSET_H);
+        QuickBevel(rp,&GBox,pens[SHINEPEN],pens[SHADOWPEN]);
+    }
+
+    /* figure out which rectangles to draw to render the container */
+
+    xleft   = si->ContainerExtent.Left;
+    xright  = si->ContainerExtent.Left + si->ContainerExtent.Width - 1;
+    ytop    = si->ContainerExtent.Top;
+    ybottom = si->ContainerExtent.Top + si->ContainerExtent.Height - 1;
+
+    if (si->PenCount)
+    {
+        xleft   += BORDERTHICK_W;
+        xright  -= BORDERTHICK_W;
+        ytop    += BORDERTHICK_H;
+        ybottom -= BORDERTHICK_H;
+    }
+
+    if (si->VerticalSlider)
+    {
+    WORD yslider_start, yslider_stop;
+
+        yslider_start = si->KnobExtent.Top;
+        yslider_stop  = si->KnobExtent.Top + si->KnobExtent.Height;
+
+        if (xright < xleft)
+            return;
+
+        /* Code to draw a vertical half-tone gradient */
+
+        if (si->DitherBMap) /* If there is an offscreen dither pattern */
+        {
+            if (yslider_start > ytop)
+            {
+                BltBitMapRastPort(si->DitherBMap,0,0,rp,xleft,ytop,
+                                  xright - xleft + 1,yslider_start-ytop,0xc0);
+            }
+
+            if (ybottom > yslider_stop)
+            {
+                BltBitMapRastPort(si->DitherBMap,0,yslider_stop - ytop,
+                                  rp,xleft,yslider_stop,
+                                  xright - xleft + 1,ybottom - yslider_stop + 1,0xc0);
+            }
+        }
+        else    /* If no pen-array or no dither bitmap, then just draw constant color */
+        {
+            SetAPen(rp,si->PenCount ? si->PenArray[0] : pens[BACKGROUNDPEN]);
+
+            if (yslider_start > ytop)
+                RectFill(rp,xleft,ytop,xright,yslider_start-1);
+
+            if (ybottom > yslider_stop)
+                RectFill(rp,xleft,yslider_stop,xright,ybottom);
+        }
+    }
+    else
+    {
+    WORD xslider_start, xslider_stop;
+
+        xslider_start = si->KnobExtent.Left;
+        xslider_stop = si->KnobExtent.Left + si->KnobExtent.Width;
+
+        if (ybottom < ytop)
+            return;
+
+        if (si->DitherBMap) /* If there is an offscreen dither pattern */
+        {
+            if (xslider_start > xleft)
+            {
+                BltBitMapRastPort(si->DitherBMap,0,0,rp,xleft,ytop,
+                                  xslider_start-xleft,ybottom - ytop + 1,0xc0);
+            }
+
+            if (xright > xslider_stop)
+            {
+                BltBitMapRastPort(si->DitherBMap,xslider_stop - xleft,0,
+                                  rp,xslider_stop,ytop,
+                                  xright - xslider_stop + 1,ybottom - ytop + 1,0xc0);
+            }
+        }
+        else    /* If no pen-array or dither bitmap, then just draw constant color */
+        {
+            SetAPen(rp,si->PenCount ? si->PenArray[0] : pens[BACKGROUNDPEN]);
+
+            if (xslider_start > xleft)
+                RectFill(rp,xleft,ytop,xslider_start-1,ybottom);
+
+            if (xright > xslider_stop)
+                RectFill(rp,xslider_stop,ytop,xright,ybottom);
+        }
+    }
+
+    /* render the actual knob */
+
+    if (!si->PenCount)
+    {
+        /* If the PenArray is empty (i.e. a "Plain" slider) then just
+         *  render the knob as a black box.
+         */
+        SetAPen(rp,pens[SHADOWPEN]);
+        RectFill(rp, si->KnobExtent.Left,
+                     si->KnobExtent.Top,
+                     si->KnobExtent.Left + si->KnobExtent.Width - 1,
+                     si->KnobExtent.Top  + si->KnobExtent.Height - 1 );
+    }
+    else
+    {
+        SetAPen(rp, pens[BACKGROUNDPEN]);
+        DrawFrame(rp, &si->KnobExtent);
+
+        if (gadget->Flags & GFLG_SELECTED)
+            SetAPen(rp, pens[FILLPEN]);
+        else
+            SetAPen(rp, pens[BLOCKPEN]);
+
+        RectFill(rp,si->KnobExtent.Left + BORDERTHICK_W,
+                    si->KnobExtent.Top  + BORDERTHICK_H,
+                    si->KnobExtent.Left + si->KnobExtent.Width - BORDERTHICK_W - 1,
+                    si->KnobExtent.Top  + si->KnobExtent.Height - BORDERTHICK_H - 1 );
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* CalcSliderPosition: Calculate the current position of the slider.
+ *
+ *  Inputs: A SliderInfo structure and a pointer to the gadget.
+ *
+ *  This function first figures out the size of the knob and container.
+ *  It then calculates where the knob might actually be positioned, based on
+ *  the values (min,max,current,span) of the slider, as well as the settings
+ *  of various flags.
+ */
+
+static VOID CalcSliderPosition(struct SliderInfo *si, struct Gadget *g)
+{
+LONG slide_value;
+WORD body_free;
+LONG container_size;
+
+    si->KnobExtent = si->ContainerExtent;       /* initialize Knob to fill size */
+
+    container_size = si->VerticalSlider ? si->ContainerExtent.Height : si->ContainerExtent.Width;
+
+    if ((container_size <= 0) || (si->MaxValue <= 0))
+        return;     /* no "negative" sliders, or <0 box sizes */
+
+    si->PixelRange = container_size;
+    si->PixelSpan  = MIN(si->KnobPixels,container_size); /* body size in pixels          */
+
+    /* value of slider, clamped to range */
+
+    slide_value = Clamp(0, si->CurrentValue, si->MaxValue);
+
+    /* calculate new slider position - return if body == infinite... */
+
+    body_free = si->PixelRange - si->PixelSpan;
+
+    slide_value = ((slide_value * body_free) + (si->MaxValue/2)) / si->MaxValue;
+    si->PixelPos = slide_value;
+
+    if (si->VerticalSlider)
+    {
+        si->KnobExtent.Top += slide_value;
+        si->KnobExtent.Height = si->PixelSpan;
+    }
+    else
+    {
+        si->KnobExtent.Left += slide_value;
+        si->KnobExtent.Width = si->PixelSpan;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* SetupContainerInfo: Fill in the SliderInfo structure for this gadget
+ *
+ *  This function computes the various "derived" fields in the SliderInfo
+ *  structure, such as the actual size of the container (which may be inset from
+ *  the actual gadget hit box), and also calls SetupIBox to figure out how big
+ *  the gadget currently is based on the size of the window.
+ */
+
+static VOID SetupContainerInfo(struct Gadget *g, struct SliderInfo *si,
+                               struct GadgetInfo *gi)
+{
+    /* Compute the gadget's current select box based on window size
+     * and gadget relativity.
+     */
+    si->ContainerExtent.Width  = g->Width;
+    si->ContainerExtent.Height = g->Height;
+    si->ContainerExtent.Left   = g->LeftEdge;
+    si->ContainerExtent.Top    = g->TopEdge;
+
+    /* Shrink the container rectangle */
+    InsetIBox(&si->ContainerExtent,INSET_W,INSET_H);
+}
+
+
+/*****************************************************************************/
+
+
+/* SetupDitherBMap: Attempt to allocate an offscreen bitmap for dither pattern
+ *
+ *  This function attempts to allocate an offscreen bitmap to store the
+ *  color gradient image for the container.
+ */
+
+static VOID SetUpDitherBMap(struct Gadget *g, struct SliderInfo *si,
+                            struct RastPort *rp)
+{
+struct RastPort drp;
+UWORD           depth;
+UWORD           width;
+UWORD           height;
+WORD            containersize;
+WORD            segments;
+WORD            lastsegpos;
+WORD            i;
+
+    if (si->DitherBMap && (si->LastWidth == g->Width) && (si->LastHeight == g->Height))
+        return;
+
+    FreeBitMap(si->DitherBMap);
+    si->DitherBMap = NULL;
+
+    si->LastWidth  = g->Width;
+    si->LastHeight = g->Height;
+
+    if (si->PenCount <= 1)
+        return;
+
+    depth  = GetBitMapAttr(rp->BitMap,BMA_DEPTH);
+    width  = si->ContainerExtent.Width - 2 * BORDERTHICK_W;
+    height = si->ContainerExtent.Height - 2 * BORDERTHICK_H;
+
+    /* try allocating a friend bitmap */
+    if (!(si->DitherBMap = AllocBitMap(width,height,depth,0,rp->BitMap)))
+        return;
+
+    InitRastPort(&drp);
+    drp.BitMap = si->DitherBMap;
+
+    /* Code to draw a half-tone gradient */
+
+    containersize = (si->VerticalSlider ? height : width);
+    segments = ((si->PenCount - 1) << 4) + 1;
+
+    lastsegpos = 0;
+
+    for (i=0; i<segments; i++)
+    {
+    WORD nextsegpos;
+    WORD ditherpat;
+
+        nextsegpos = (containersize * (i + 1)) / segments;
+        ditherpat = i & 15;
+
+        SetAfPt(&drp, &dither_data[ditherpat * 8], 3);
+        if (ditherpat == 0)
+            SetABPenDrMd(&drp,si->PenArray[(i>>4) + 1],si->PenArray[i>>4],JAM2);
+
+        if (nextsegpos > lastsegpos)
+        {
+            if (si->VerticalSlider)
+                RectFill(&drp,0,lastsegpos,width-1,nextsegpos-1);
+            else
+                RectFill(&drp,lastsegpos,0,nextsegpos-1,height-1);
+        }
+
+        lastsegpos = nextsegpos;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* HandleFunc: Gadget handler for low-level Intuition events.
+ *
+ *  This function handles all the low-level Intuition events for the gadget,
+ *  except for pure rendering (which is handles by drawfunc) and the initial
+ *  hit test (which is handles by hitfunc).
+ */
+
+static ULONG HandleFunc(Class *cl, struct gpInput *msg, struct Gadget *g)
+{
+struct SliderInfo *si =INST_DATA( cl, g );/* state    */
+struct SliderInfo  save_si;                /* copy of slider state         */
+UWORD              oldSelected;
+ULONG              result = GMR_MEACTIVE;  /* result of this function      */
+BOOL               draw;
+LONG               newval = si->CurrentValue; /* new slider value         */
+BOOL               final  = FALSE;
+
+    /* copy the SliderInfo so that we can test for changes later */
+
+    save_si     = *si;
+    oldSelected = (g->Flags & GFLG_SELECTED);
+
+    /* if it's a GM_GOACTIVE it must mean somebody clicked on us. */
+
+    if (msg->MethodID == GM_GOACTIVE)           /* classify type of hit         */
+    {
+    UWORD mpos, inset;
+
+        si->SaveValue = si->CurrentValue;
+
+        SetupContainerInfo(g,si,msg->gpi_GInfo);
+
+        inset = (si->VerticalSlider) ? INSET_H : INSET_W;
+        mpos  = (si->VerticalSlider) ? msg->gpi_Mouse.Y : msg->gpi_Mouse.X;
+
+        if (mpos - inset + KNOB_SLOP < si->PixelPos)
+        {
+            newval -= si->SkipValue;
+            result  = (GMR_NOREUSE | GMR_VERIFY);
+        }
+        else if (mpos - inset - KNOB_SLOP >= si->PixelPos + si->PixelSpan)
+        {
+            newval += si->SkipValue;
+            result  = (GMR_NOREUSE | GMR_VERIFY);
+        }
+        else
+        {
+            si->MouseOffset  = mpos - si->PixelPos;
+            g->Flags        |= GFLG_SELECTED;
+        }
+    }
+    else if (msg->MethodID == GM_GOINACTIVE)
+    {
+        g->Flags &= ~GFLG_SELECTED;
+        final     = TRUE;                           /* we are done                  */
+        result    = 0;                             /* mystery value needed by Intuition */
+    }
+
+    if (msg->gpi_IEvent->ie_Class == IECLASS_RAWMOUSE)
+    {
+        if (msg->gpi_IEvent->ie_Code == (IECODE_LBUTTON|IECODE_UP_PREFIX))
+        {
+            /* check for mouse up */
+
+            g->Flags &= ~GFLG_SELECTED;
+            result    = (GMR_NOREUSE | GMR_VERIFY);
+        }
+        else if (msg->gpi_IEvent->ie_Code == IECODE_RBUTTON)
+        {
+            /* check for menu button hit */
+
+            newval    = si->SaveValue;
+            g->Flags &= ~GFLG_SELECTED;
+            result    = (GMR_NOREUSE | GMR_VERIFY);
+        }
+        else if (g->Flags & GFLG_SELECTED)
+        {
+        WORD body_free;
+
+            /* knob: handle dragging of knob */
+
+            body_free = si->PixelRange - si->PixelSpan;
+            newval = si->MaxValue;
+
+            if (newval <= 0 || body_free <= 0)
+            {
+                newval = 0;
+            }
+            else
+            {
+            WORD mousepos;
+
+                mousepos = Clamp(0,
+                    ((si->VerticalSlider) ?
+                        msg->gpi_Mouse.Y : msg->gpi_Mouse.X)
+                        - si->MouseOffset,
+                    body_free);
+
+                newval = ((mousepos * newval) + body_free/2) / body_free;
+            }
+        }
+    }
+
+    /* clamp the calculated slider value between the limits as defined
+     * by min and max.
+     */
+
+    si->CurrentValue = Clamp(0, newval, si->MaxValue);
+
+    /* if highlight state changed, then redraw the knob */
+    draw = ((g->Flags & GFLG_SELECTED) != oldSelected);
+
+    /* if knob position changed, then redraw the knob */
+    if (si->CurrentValue != save_si.CurrentValue)
+    {
+        CalcSliderPosition(si,g);
+
+        if (save_si.PixelPos != si->PixelPos)
+            draw = TRUE;
+    }
+
+    /* re-draw the knob here. */
+
+    if (draw)
+    {
+    struct RastPort *rp;
+
+        if (rp = ObtainGIRPort(msg->gpi_GInfo))
+        {
+            DoMethod( (Object *)g, GM_RENDER, msg->gpi_GInfo, rp, GREDRAW_UPDATE);
+            ReleaseGIRPort(rp);
+        }
+    }
+
+    if ((result & ~GMR_VERIFY) == GMR_NOREUSE)
+        final = TRUE;
+
+    /* "final" is a flag which indicates if the slider has stopped moving */
+
+    if (si->CurrentValue != save_si.CurrentValue || final)
+    {
+    struct TagItem output_tags[3];
+
+        output_tags[0].ti_Tag  = GA_ID;
+        output_tags[0].ti_Data = g->GadgetID;
+        output_tags[1].ti_Tag  = GRAD_CurVal;
+        output_tags[1].ti_Data = si->CurrentValue;
+        output_tags[2].ti_Tag  = TAG_DONE;
+
+        DoMethod( (Object *)g, OM_NOTIFY, output_tags,msg->gpi_GInfo,
+                 final ? 0 : OPUF_INTERIM);
+    }
+
+    return result;
+}
+
+
+/*****************************************************************************/
+
+
+/* SetSliderAttrs: handles attribute changes for slider.
+ *
+ *  This function updates the slider variables based on a tag list. It is called
+ *  by several different functions below.
+ *
+ *  The function returns a non-zero value if any of the data structures were
+ *  actually changed.
+ */
+
+static LONG SetSliderAttrs(Class *cl, Object *o, struct opSet *msg, BOOL init)
+{
+struct TagItem    *tags = msg->ops_AttrList;
+struct TagItem    *tlist = tags;
+struct SliderInfo *si = INST_DATA( cl, o );
+struct SliderInfo  old_si;
+LONG               result = 0;
+
+    old_si = *si;                               /* save old state               */
+
+    /* iterate through the other tags and setup what values are needed */
+
+    while (tags = NextTagItem(&tlist))
+    {
+        switch (tags->ti_Tag)
+        {
+            case PGA_Freedom     : if (init)
+                                   {
+                                       if (tags->ti_Data == LORIENT_VERT)
+                                           si->VerticalSlider = TRUE;
+                                       else
+                                           si->VerticalSlider = FALSE;
+                                   }
+                                   break;
+
+            case GRAD_MaxVal     : si->MaxValue     = tags->ti_Data;
+                                   si->CurrentValue = Clamp(0,si->CurrentValue,si->MaxValue);
+                                   break;
+
+            case GRAD_CurVal     : si->CurrentValue = Clamp(0,tags->ti_Data,si->MaxValue);
+                                   break;
+
+            case GRAD_KnobPixels : if (init)
+                                       si->KnobPixels = tags->ti_Data;
+                                   break;
+
+            case GRAD_PenArray   : si->PenCount = 0;
+                                   if (si->PenArray = (UWORD *)tags->ti_Data)
+                                   {
+                                       while (si->PenArray[si->PenCount] != ~0)
+                                           si->PenCount++;
+                                   }
+                                   result = 1;
+                                   break;
+        }
+    }
+
+    if ((old_si.MaxValue != si->MaxValue) || (old_si.CurrentValue != si->CurrentValue))
+        result = 1;
+
+    return (result);
+}
+
+
+/*****************************************************************************/
+
+
+static ULONG GetFunc(Class *cl, struct opGet *msg, struct Gadget *g)
+{
+    if (msg->opg_AttrID == GRAD_CurVal)
+    {
+    struct SliderInfo *si = INST_DATA( cl, g );
+
+        *msg->opg_Storage = (ULONG)si->CurrentValue;
+        return 1;
+    }
+
+    return (ULONG) DoSuperMethodA( cl, (Object *)g, msg );
+}
+
+
+/*****************************************************************************/
+
+
+static Object *NewFunc(Class *cl, struct opSet *msg, struct Gadget *g)
+{
+struct Gadget *newobj;
+
+    /* this is the "default" slider info for newly created sliders */
+
+    if ( newobj = (struct Gadget *) DoSuperMethodA( cl, (Object *)g, msg ) )
+    {
+    struct SliderInfo *si = INST_DATA( cl, newobj );
+
+        /* set up some defaults for the slider instance variables */
+        si->MaxValue   = 0xffff;
+        si->SkipValue  = 0x1111;
+        si->KnobPixels = KNOB_PIXELS;
+
+        /* set up the slider attributes from the tag list */
+        SetSliderAttrs( cl, (Object *)newobj, msg, TRUE );
+    }
+
+    return (Object *)newobj;
+}
+
+
+/*****************************************************************************/
+
+
+static ULONG DrawFunc(Class *cl, struct gpRender *msg, struct Gadget *g)
+{
+    if (msg->gpr_Redraw == GREDRAW_REDRAW || msg->gpr_Redraw == GREDRAW_UPDATE)
+    {
+    struct SliderInfo *si = INST_DATA( cl, g );  /* state */
+
+        SetupContainerInfo(g,si,msg->gpr_GInfo);
+        SetUpDitherBMap(g,si,msg->gpr_RPort);
+        CalcSliderPosition(si,g);
+        RenderSlider(g,si,msg->gpr_RPort,msg->gpr_GInfo,msg->gpr_Redraw);
+    }
+
+    return 0;
+}
+
+
+/*****************************************************************************/
+
+
+static ULONG UpdateFunc(Class *cl, struct opSet *msg, struct Gadget *g)
+{
+LONG             refresh;
+LONG             flags = g->Flags;
+struct RastPort *rp;
+
+    refresh  = DoSuperMethodA( cl, (Object *)g, msg );
+    refresh |= SetSliderAttrs( cl, (Object *)g, msg, FALSE );  /* set attibutes              */
+    refresh |= (g->Flags ^ flags) & GFLG_SELECTED;             /* update if SELECTED changed */
+
+    if (refresh && ( OCLASS(g) == cl ) && msg->ops_GInfo)
+    {
+        if (rp = ObtainGIRPort(msg->ops_GInfo))
+        {
+            DoMethod( (Object *)g, GM_RENDER, msg->ops_GInfo, rp, GREDRAW_REDRAW);
+            ReleaseGIRPort(rp);
+            return 0L;                          /* don't need refresh any more */
+        }
+    }
+
+    return (ULONG) refresh;
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM ClassDispatcher(REG(a0) Class         *cl,
+                         REG(a1) ULONG         *msg,
+                         REG(a2) struct Gadget *g)
+{
+struct SliderInfo *si = INST_DATA( cl, g );
+
+    switch (*msg)
+    {
+        case GM_RENDER     : return (LONG)DrawFunc(cl, (struct gpRender *)msg, g);
+
+        case GM_HITTEST    : return(GMR_GADGETHIT);
+
+        case GM_GOACTIVE   : if (((struct gpInput *)msg)->gpi_IEvent == NULL)
+                                 return(GMR_NOREUSE);
+
+        case GM_HANDLEINPUT:
+        case GM_GOINACTIVE : return (LONG)HandleFunc(cl, (struct gpInput *)msg,g);
+
+        case OM_NEW        : return (LONG)NewFunc(cl, (struct opSet *)msg, g);
+
+        case OM_SET        :
+        case OM_UPDATE     : return (LONG)UpdateFunc(cl, (struct opSet *)msg, g);
+
+        case OM_GET        : return (LONG)GetFunc(cl, (struct opGet *)msg, g);
+
+        case OM_DISPOSE    : FreeBitMap(si->DitherBMap);
+
+        default            : return DoSuperMethodA( cl, (Object *)g, (Msg *)msg );
+    }
+}
+@
+
+
+39.3
+log
+@Fixed bug where changing the pen array used by the object didn't
+  always result in the visuals of the gadget syncing up.
+Passing a GRAD_MaxValue tag to SetGadgetAttrs() didn't validate the
+  current value of the slider to make sure it is in the new allowable
+  range
+GMR_VERIFY is now set whenever appropriate. Some case were being missed.
+Knob and background rendering is done correctly even if no pens were
+  alloted to the wheel
+Made the background-color border around the dithered region one pixel
+  smaller which improves visuals.
+@
+text
+@d356 2
+a357 2
+    si->ContainerExtent.Left   = g->LeftEdge + gi->gi_Domain.Left;
+    si->ContainerExtent.Top    = g->TopEdge + gi->gi_Domain.Top;
+@
+
+
+39.2
+log
+@Fixed incorrect handling of empty pen arrays
+Collapsed many SetAPen/SetBPen() pairs into SetABPenDrMd()
+Implemented GRAD_KnobPixel tag
+Changed a few uses of DETAILPEN to BACKGROUNDPEN
+Correctly frees its cached bitmap when disposing of an object
+@
+text
+@d39 2
+a40 2
+#define INSET_W         4          /* container inset from bevel      */
+#define INSET_H         2
+a77 12
+VOID SetupGadgetIBox(struct Gadget *g, struct IBox *domain, struct IBox *box)
+{
+    box->Width  = g->Width;
+    box->Height = g->Height;
+    box->Left   = g->LeftEdge + domain->Left;
+    box->Top    = g->TopEdge + domain->Top;
+}
+
+
+/*****************************************************************************/
+
+
+d80 1
+a80 1
+    if (min > val)
+d83 1
+a83 1
+    if (max < val)
+d129 1
+a129 1
+ *  border, etc. The redraw argument controls which sections actually do,
+d147 2
+d153 1
+a153 1
+    struct IBox GBox;                   /* gadget box                   */
+d158 1
+a160 8
+
+        /* render the black border around the gradient area */
+
+        if (si->PenCount)
+        {
+            SetAPen(rp,pens[BACKGROUNDPEN]);
+            DrawFrame(rp, &si->ContainerExtent);
+        }
+a162 3
+    /* get the container pattern */
+    SetDrMd(rp,JAM2);
+
+d165 3
+a167 1
+    ytop = si->ContainerExtent.Top;
+a169 3
+    xleft = si->ContainerExtent.Left;
+    xright = si->ContainerExtent.Left + si->ContainerExtent.Width - 1;
+
+d172 3
+a174 1
+        ytop += BORDERTHICK_H;
+a175 3
+
+        xleft += BORDERTHICK_W;
+        xright -= BORDERTHICK_W;
+d178 1
+a178 1
+    if (si->Flags & VERTICAL_SLIDER)
+d183 1
+a183 1
+        yslider_stop = si->KnobExtent.Top + si->KnobExtent.Height;
+d205 1
+a205 1
+        else if (si->PenCount > 1)
+d207 4
+a210 43
+        WORD segments = ((si->PenCount - 1) << 4) + 1;
+        WORD totalheight = si->ContainerExtent.Height - BORDERTHICK_H*2;
+        WORD lastsegpos;
+        WORD nextsegpos;
+        WORD ditherpat;
+        WORD i;
+
+            lastsegpos = si->ContainerExtent.Top + BORDERTHICK_H;
+
+            for (i=0; i<segments; i++)
+            {
+                nextsegpos = si->ContainerExtent.Top + BORDERTHICK_H +
+                                (totalheight * (i + 1)) / segments;
+
+                ditherpat = i & 15;
+                SetAfPt(rp, &dither_data[ditherpat * 8], 3);
+
+                if (ditherpat == 0)
+                    SetABPenDrMd(rp,si->PenArray[(i>>4) + 1],si->PenArray[i>>4],JAM2);
+
+                if (lastsegpos < yslider_start)
+                {
+                WORD limit = MIN(nextsegpos, yslider_start);
+
+                    if (lastsegpos < limit)
+                        RectFill(rp,xleft,lastsegpos,xright,limit-1);
+                }
+
+                if (nextsegpos > yslider_stop)
+                {
+                WORD limit = MAX(lastsegpos, yslider_stop);
+
+                    if (limit < nextsegpos)
+                        RectFill(rp,xleft,limit,xright,nextsegpos-1);
+                }
+
+                lastsegpos = nextsegpos;
+            }
+            SetAfPt(rp, NULL, 0);
+        }
+        else    /* If no pen-array, then just draw constant color */
+        {
+            SetAPen(rp,si->PenArray ? si->PenArray[0] : pens[BACKGROUNDPEN]);
+d212 2
+a213 2
+            if (yslider_start > ytop) RectFill(rp,xleft,ytop,xright,yslider_start-1);
+            if (ybottom > yslider_stop) RectFill(rp,xleft,yslider_stop,xright,ybottom);
+d241 1
+a241 1
+        else if (si->PenCount > 1)
+d243 8
+a250 46
+        WORD segments = ((si->PenCount - 1) << 4) + 1;
+        WORD totalwidth = si->ContainerExtent.Width - BORDERTHICK_W*2;
+        WORD lastsegpos;
+        WORD nextsegpos;
+        WORD ditherpat;
+        WORD i;
+
+            lastsegpos = si->ContainerExtent.Left + BORDERTHICK_W;
+
+            for (i=0; i<segments; i++)
+            {
+                nextsegpos = si->ContainerExtent.Left + BORDERTHICK_W +
+                                (totalwidth * (i + 1)) / segments;
+
+                ditherpat = i & 15;
+                SetAfPt(rp, &dither_data[ditherpat * 8], 3);
+                if (ditherpat == 0)
+                    SetABPenDrMd(rp,si->PenArray[(i>>4) + 1],si->PenArray[i>>4],JAM2);
+
+                if (lastsegpos < xslider_start)
+                {
+                WORD limit = MIN(nextsegpos, xslider_start);
+
+                    if (lastsegpos < limit)
+                        RectFill(rp,lastsegpos,ytop,limit-1,ybottom);
+                }
+
+                if (nextsegpos > xslider_stop)
+                {
+                WORD limit = MAX(lastsegpos, xslider_stop);
+
+                    if (limit < nextsegpos)
+                        RectFill(rp,limit,ytop,nextsegpos-1,ybottom);
+                }
+
+                lastsegpos = nextsegpos;
+            }
+            SetAfPt(rp, NULL, 0);
+        }
+        else    /* If no pen-array, then just draw constant color */
+        {
+            SetAPen(rp,si->PenArray ? si->PenArray[0] : pens[BACKGROUNDPEN]);
+
+            if (xslider_start > xleft) RectFill(rp,xleft,ytop,xslider_start-1,ybottom);
+            if (xright > xslider_stop) RectFill(rp,xslider_stop,ytop,xright,ybottom);
+        }
+d253 1
+a253 2
+    /* now, render the actual knob */
+    SetABPenDrMd(rp,pens[BACKGROUNDPEN],0,JAM2);
+d260 1
+a260 1
+
+d268 1
+d270 6
+a275 1
+        SetAPen(rp, pens[si->Flags & SLIDERACTIVE ? FILLPEN : TEXTPEN]);
+d292 1
+a292 1
+ *  Then it calculates where the knob might actually be positioned, based on
+d305 1
+a305 1
+    container_size = si->Flags & VERTICAL_SLIDER ? si->ContainerExtent.Height : si->ContainerExtent.Width;
+d307 2
+a308 2
+    if (container_size <= 0 ||                  /* can't have negative box size */
+    si->MaxValue <= 0 ) return;             /* a "negative" slider??        */
+d311 1
+a311 1
+    si->PixelSpan = MIN(si->KnobPixels,container_size); /* body size in pixels          */
+d313 1
+a313 1
+        /* value of slider, clamped to range */
+d317 1
+a317 1
+        /* calculate new slider position - return if body == infinite... */
+d324 1
+a324 1
+    if (si->Flags & VERTICAL_SLIDER)
+d326 1
+a326 1
+       si->KnobExtent.Top += slide_value;
+d344 1
+a344 1
+ *  the actual gadget hit box), and also calls SetupIBox to figure how how big
+d348 2
+a349 1
+static VOID SetupContainerInfo(struct Gadget *g, struct SliderInfo *si, struct GadgetInfo *gi)
+d354 4
+a357 1
+    SetupGadgetIBox(g,&gi->gi_Domain,&si->ContainerExtent);
+d370 1
+a370 3
+ *  color gradient image for the container. Use of an offscreen bitmap greatly
+ *  speeds up the rendering of the slider and makes the gadget feel much, much
+ *  more responsive.
+d385 2
+a386 2
+    if ((si->Flags & TRIED_FOR_BITMAP) && si->LastWidth == g->Width &&
+        si->LastHeight == g->Height) return;
+d391 1
+a391 1
+    si->LastWidth = g->Width;
+a392 1
+    si->Flags |= TRIED_FOR_BITMAP;
+d397 2
+a398 2
+    depth = GetBitMapAttr(rp->BitMap,BMA_DEPTH);
+    width = si->ContainerExtent.Width - 2 * BORDERTHICK_W;
+d401 2
+a402 9
+    /* first try allocating a friend bitmap */
+    si->DitherBMap = AllocBitMap(width,height,depth,0,rp->BitMap);
+
+    /* if that failed, try allocating a standard bitmap */
+    if (!si->DitherBMap)
+        si->DitherBMap = AllocBitMap(width,height,depth,0,NULL);
+
+    /* if that failed, then the container will be rendered SLOWLY... */
+    if (!si->DitherBMap)
+d410 1
+a410 1
+    containersize = (si->Flags & VERTICAL_SLIDER ? height : width);
+d429 1
+a429 1
+            if (si->Flags & VERTICAL_SLIDER)
+d454 1
+d456 1
+a456 1
+BOOL               drawn = 0;
+d458 1
+a458 1
+WORD               final = FALSE;
+d462 2
+a463 1
+    save_si = *si;
+d471 1
+a471 6
+        /* ActivateGadget doesn't work on these guys... */
+
+        if (msg->gpi_IEvent == NULL)
+            return GMR_NOREUSE;
+
+        si->Flags &= ~SLIDERACTIVE;
+d475 2
+a476 2
+        inset = (si->Flags & VERTICAL_SLIDER) ? INSET_H : INSET_W;
+        mpos = (si->Flags & VERTICAL_SLIDER) ? msg->gpi_Mouse.Y : msg->gpi_Mouse.X;
+d481 1
+a481 1
+            result = GMR_NOREUSE;
+d486 1
+a486 1
+            result = GMR_NOREUSE;
+d490 2
+a491 2
+            si->MouseOffset = mpos - si->PixelPos;
+            si->Flags |= SLIDERACTIVE;
+d496 3
+a498 4
+        /* un-highlight the arrows if using complement mode */
+        si->Flags &= ~SLIDERACTIVE;
+        final = TRUE;                           /* we are done                  */
+        result = 1;                             /* mystery value needed by Intuition */
+d503 1
+a503 1
+        if (msg->gpi_IEvent->ie_Code == (UBYTE)(IECODE_LBUTTON+IECODE_UP_PREFIX))
+d507 2
+a508 2
+            si->Flags &= ~SLIDERACTIVE;
+            result = GMR_NOREUSE | GMR_VERIFY;
+d510 1
+a510 1
+        else if (msg->gpi_IEvent->ie_Code == (UBYTE)(IECODE_RBUTTON) )
+d514 3
+a516 2
+            si->Flags &= ~SLIDERACTIVE;
+            result = GMR_REUSE | GMR_VERIFY;
+d518 1
+a518 1
+        else if (si->Flags & SLIDERACTIVE)
+d536 1
+a536 1
+                    ((si->Flags & VERTICAL_SLIDER) ?
+d553 1
+a553 2
+    if ((si->Flags ^ save_si.Flags) & SLIDERACTIVE )
+        drawn = TRUE;
+d561 1
+a561 1
+            drawn = TRUE;
+d566 1
+a566 1
+    if (drawn)
+d584 1
+a584 6
+    struct TagItem output_tags[] =
+    {
+        GA_ID,          0,
+        GRAD_CurVal,    0,
+        TAG_DONE
+    };
+d586 1
+d588 1
+d590 1
+d592 2
+a593 3
+        DoMethod( (Object *)g, OM_NOTIFY, output_tags,
+            msg->gpi_GInfo,
+            final ? 0 : OPUF_INTERIM);
+d595 1
+d618 1
+a618 1
+LONG               changes = 0;
+d628 8
+a635 11
+            case PGA_Freedom:   if (init)
+                                {
+                                    if (tags->ti_Data == LORIENT_VERT)
+                                        si->Flags |= VERTICAL_SLIDER;
+                                    else
+                                        si->Flags &= ~VERTICAL_SLIDER;
+                                }
+                                break;
+
+            case GRAD_MaxVal  : si->MaxValue = tags->ti_Data;
+                                break;
+d637 6
+a642 2
+            case GRAD_CurVal  : si->CurrentValue = Clamp(0,tags->ti_Data,si->MaxValue);
+                                break;
+d648 16
+a663 18
+            case GRAD_PenArray: si->PenCount = 0;
+                                if (si->PenArray = (UWORD *)tags->ti_Data)
+                                {
+                                    while (si->PenArray[si->PenCount] != ~0)
+                                        si->PenCount++;
+                                }
+                                si->Flags &= ~TRIED_FOR_BITMAP;
+                                break;
+        }
+    }
+
+    if ( memcmp(si,&old_si,sizeof *si))
+    {
+       changes |= 1;
+    }
+
+    return changes;
+}
+d694 1
+a694 1
+    struct SliderInfo   *si = INST_DATA( cl, newobj );
+d716 1
+a716 1
+    struct SliderInfo *si = INST_DATA( cl, g );/* state    */
+d733 3
+a735 2
+LONG refresh;
+LONG flags = g->Flags;
+d737 3
+a739 3
+    refresh = DoSuperMethodA( cl, (Object *)g, msg );
+    refresh |= SetSliderAttrs( cl, (Object *)g, msg, FALSE );  /* set attibutes                */
+    refresh |= (g->Flags ^ flags) & SELECTED;   /* update if SELECTED changes.. */
+d741 1
+a741 1
+    if ( refresh && ( OCLASS(g) == cl ) && msg->ops_GInfo )
+a742 2
+    struct RastPort *rp;
+
+d766 3
+a768 2
+        case GM_RENDER     : DrawFunc(cl, (struct gpRender *)msg, g);
+                             break;
+d770 2
+a771 1
+        case GM_HITTEST    : return GMR_GADGETHIT;
+a772 1
+        case GM_GOACTIVE   :
+a786 2
+
+    return 0;
+@
+
+
+39.1
+log
+@Initial V39 RCS checkin
+@
+text
+@d4 1
+a4 37
+ *
+ *  Explanation:
+ *   ~~~~~~~~~~~~
+ *  The Gradient class is a type of non-proportional slider (by non-
+ *  proportional, I mean that the size of the thumb in pixels is a
+ *  constant. The slider's value is still proportional to the position
+ *  of the knob).
+ *
+ *  The primary feature of the Gradient slider is it's appearance.
+ *  Unlike normal sliders, a Gradient slider can display a "spread of
+ *  colors" or "color gradient" in the slider container box. The
+ *  "Knob" or "Thumb" of the slider appears to slide on top of this
+ *  color gradient.
+ *
+ *  The color gradient effect is built up using a comination of multiple
+ *  pens and half-tone dithering. The application can tell the slider
+ *  exactly which pens to use in creating the gradient effect, and in
+ *  what order to use them. Essentially, it does this by passing an
+ *  array of pens (terminated by ~0, just like a PenSpec) to the slider.
+ *  The first pen in the array will be used as the color at the top of
+ *  the slider (or left, if it is horizontal), and the last color in the
+ *  array will be used at the bottom (or right). The other pens will be
+ *  used at evenly spaced intervals inbetween. Dithering is used to
+ *  smoothly fade between the pens, allowing the illusion of a continuous
+ *  change in color.
+ *
+ *  Using the slider is very simple. There are only three special Tags
+ *  that you need to know:
+ *
+ *      GRAD_MaxVal     = max value of slider
+ *      GRAD_CurVal     = current value of slider
+ *      GRAD_PenArray   = array of pen numbers to use.
+ *
+ *  In addition, the slider responds to most of the standard "gadget"
+ *  tags, as well as the PropGadget tag PGA_FREEDOM (which is used to
+ *  determine if the slider is vertical or horizontal).
+ */
+d105 1
+a105 1
+/* InsetIBox: Expands or contracts all four sized of an IBox
+a155 1
+                                                   /* pen array offset (per state) */
+d162 2
+a163 1
+    {   struct IBox     GBox;                   /* gadget box                   */
+d165 1
+a165 1
+            /* render the bevel box around the slider */
+d171 1
+a171 1
+            /* render the black border around the gradient area */
+d173 3
+a175 2
+        if (si->PenArray)
+        {   SetAPen(rp,pens[DETAILPEN]);
+d180 1
+a180 2
+        /* get the container pattern */
+
+d183 1
+a183 1
+        /* figure out which rectangles to draw to render the container */
+d191 3
+a193 2
+    if (si->PenArray)
+    {   ytop += BORDERTHICK_H;
+d201 2
+a202 1
+    {   WORD    yslider_start, yslider_stop;
+d207 2
+a208 1
+        if (xright < xleft) return;
+d210 1
+a210 1
+            /* Code to draw a vertical half-tone gradient */
+d216 2
+a217 4
+                BltBitMapRastPort(
+                    si->DitherBMap,0,0,
+                    rp,xleft,ytop,
+                    xright - xleft + 1,yslider_start-ytop,0xc0);
+d222 3
+a224 4
+                BltBitMapRastPort(
+                    si->DitherBMap,0,yslider_stop - ytop,
+                    rp,xleft,yslider_stop,
+                    xright - xleft + 1,ybottom - yslider_stop + 1,0xc0);
+d228 7
+a234 6
+        {   WORD        segments = ((si->PenCount - 1) << 4) + 1;
+            WORD        totalheight = si->ContainerExtent.Height - BORDERTHICK_H*2,
+                        lastsegpos,
+                        nextsegpos,
+                        ditherpat,
+                        i;
+d245 1
+d247 1
+a247 3
+                {   SetBPen(rp,si->PenArray[i>>4]);
+                    SetAPen(rp,si->PenArray[(i>>4) + 1]);
+                }
+d250 2
+a251 1
+                {   WORD    limit = MIN(nextsegpos, yslider_start);
+d258 2
+a259 1
+                {   WORD    limit = MAX(lastsegpos, yslider_stop);
+d278 2
+a279 1
+    {   WORD    xslider_start, xslider_stop;
+d284 2
+a285 1
+        if (ybottom < ytop) return;
+d291 2
+a292 4
+                BltBitMapRastPort(
+                    si->DitherBMap,0,0,
+                    rp,xleft,ytop,
+                    xslider_start-xleft,ybottom - ytop + 1,0xc0);
+d297 3
+a299 4
+                BltBitMapRastPort(
+                    si->DitherBMap,xslider_stop - xleft,0,
+                    rp,xslider_stop,ytop,
+                    xright - xslider_stop + 1,ybottom - ytop + 1,0xc0);
+d303 7
+a309 6
+        {   WORD        segments = ((si->PenCount - 1) << 4) + 1;
+            WORD        totalwidth = si->ContainerExtent.Width - BORDERTHICK_W*2,
+                        lastsegpos,
+                        nextsegpos,
+                        ditherpat,
+                        i;
+d321 1
+a321 3
+                {   SetBPen(rp,si->PenArray[i>>4]);
+                    SetAPen(rp,si->PenArray[(i>>4) + 1]);
+                }
+d324 2
+a325 1
+                {   WORD    limit = MIN(nextsegpos, xslider_start);
+d332 2
+a333 1
+                {   WORD    limit = MAX(lastsegpos, xslider_stop);
+d352 2
+a353 1
+    SetBPen(rp,0L);
+d355 5
+a359 1
+        /* now, render the actual knob */
+d361 4
+a364 13
+    if (si->PenArray == NULL)
+    {
+            /* If the PenArray is NULL (i.e. a "Plain" slider) then just
+                render the knob as a black box.
+            */
+
+        SetAPen(rp,pens[DETAILPEN]);
+
+        RectFill( rp,
+            si->KnobExtent.Left,
+            si->KnobExtent.Top,
+            si->KnobExtent.Left + si->KnobExtent.Width - 1,
+            si->KnobExtent.Top  + si->KnobExtent.Height - 1 );
+a367 1
+        SetAPen(rp,pens[DETAILPEN]);
+d369 7
+a375 8
+        SetAPen(rp, pens[si->Flags & SLIDERACTIVE ? hifillPen : BLOCKPEN]);
+        RectFill( rp,
+            si->KnobExtent.Left + BORDERTHICK_W,
+            si->KnobExtent.Top  + BORDERTHICK_H,
+            si->KnobExtent.Left + si->KnobExtent.Width - BORDERTHICK_W - 1,
+            si->KnobExtent.Top  + si->KnobExtent.Height - BORDERTHICK_H - 1 );
+    }
+}
+d391 1
+a391 1
+static void CalcSliderPosition(struct SliderInfo *si, struct Gadget *g)
+d399 1
+a399 2
+    container_size = si->Flags & VERTICAL_SLIDER ?
+        si->ContainerExtent.Height : si->ContainerExtent.Width;
+d402 1
+a402 1
+        si->MaxValue <= 0 ) return;             /* a "negative" slider??        */
+d419 2
+a420 1
+    {   si->KnobExtent.Top += slide_value;
+d424 2
+a425 1
+    {   si->KnobExtent.Left += slide_value;
+d444 3
+a446 4
+        /*  Compute the gadget's current select box based on window size
+            and gadget relativity.
+        */
+
+d449 1
+a449 2
+        /*  Shrink the container rectangle */
+
+d480 1
+a480 1
+    if (si->DitherBMap) FreeBitMap(si->DitherBMap);
+d487 2
+a488 1
+    if (si->PenCount <= 1) return;
+d494 1
+a494 2
+        /* first try allocating a friend bitmap */
+
+d497 2
+a498 3
+        /* if that failed, try allocating a standard bitmap */
+
+    if (si->DitherBMap == NULL)
+d501 3
+a503 3
+        /* if that failed, then the container will be rendered SLOWLY... */
+
+    if (si->DitherBMap == NULL) return;
+d508 1
+a508 1
+        /* Code to draw a half-tone gradient */
+d516 3
+a518 2
+    {   WORD    nextsegpos,
+                ditherpat;
+d525 1
+a525 4
+        {
+            SetBPen(&drp,si->PenArray[i>>4]);
+            SetAPen(&drp,si->PenArray[(i>>4) + 1]);
+        }
+d528 2
+a529 1
+        {   if (si->Flags & VERTICAL_SLIDER)
+d531 2
+a532 1
+            else RectFill(&drp,lastsegpos,0,nextsegpos-1,height-1);
+d559 1
+a559 1
+        /* copy the SliderInfo so that we can test for changes later */
+d563 1
+a563 1
+        /* if it's a GM_GOACTIVE it must mean somebody clicked on us. */
+d566 2
+a567 2
+    {   UWORD           mpos,
+                        inset;
+d569 1
+a569 1
+            /* ActivateGadget doesn't work on these guys... */
+d571 2
+a572 1
+        if (msg->gpi_IEvent == NULL) return GMR_NOREUSE;
+d582 2
+a583 1
+        {   newval -= si->SkipValue;
+d587 2
+a588 1
+        {   newval += si->SkipValue;
+d592 2
+a593 1
+        {   si->MouseOffset = mpos - si->PixelPos;
+d598 2
+a599 1
+    {   /* un-highlight the arrows if using complement mode */
+d609 1
+a609 1
+                /* check for mouse up */
+d616 1
+a616 1
+                /* check for menu button hit */
+d622 2
+a623 1
+        {   WORD        body_free;
+d625 1
+a625 1
+                /* knob: handle dragging of knob */
+d630 4
+a633 1
+            if (newval <= 0 || body_free <= 0) newval = 0;
+d635 2
+a636 1
+            {   WORD    mousepos;
+d649 3
+a651 3
+        /* clamp the calculated slider value between the limits as defined
+            by min and max.
+        */
+d655 3
+a657 5
+        /* if highlight state changed, then redraw the knob */
+
+    if ((si->Flags ^ save_si.Flags) & SLIDERACTIVE ) drawn = TRUE;
+
+        /* if knob position changed, then redraw the knob */
+d659 1
+d661 2
+a662 1
+    {   CalcSliderPosition(si,g);
+d664 2
+a665 1
+        if (save_si.PixelPos != si->PixelPos) drawn = TRUE;
+d668 1
+a668 1
+        /* re-draw the knob here. */
+d671 2
+a672 1
+    {   struct RastPort     *rp;
+d681 2
+a682 1
+    if ((result & ~GMR_VERIFY) == GMR_NOREUSE) final = TRUE;
+d684 1
+a684 1
+        /* "final" is a flag which indicates if the slider has stopped moving */
+d687 7
+a693 5
+    {   struct TagItem output_tags[] = {
+            GA_ID,          0,
+            GRAD_CurVal,    0,
+            TAG_DONE
+        };
+d718 1
+a718 1
+static LONG SetSliderAttrs(Class *cl, Object *o, struct opSet *msg)
+a724 1
+UWORD             *pens;
+d728 1
+a728 1
+        /* iterate through the other tags and setup what values are needed */
+d731 30
+a760 14
+    {   switch (tags->ti_Tag) {
+        case PGA_Freedom:
+            if (tags->ti_Data == LORIENT_VERT) si->Flags |= VERTICAL_SLIDER;
+            else si->Flags &= ~VERTICAL_SLIDER;
+            break;
+        case GRAD_MaxVal: si->MaxValue = tags->ti_Data; break;
+        case GRAD_CurVal: si->CurrentValue = Clamp(0,tags->ti_Data,si->MaxValue);
+                         break;
+        case GRAD_PenArray:
+            si->PenArray = pens = (UWORD *)tags->ti_Data;
+            if (pens == NULL) si->PenCount = 0;
+            else for (si->PenCount=0;*pens != (UWORD)~0;si->PenCount++,pens++) ;
+            si->Flags &= ~TRIED_FOR_BITMAP;
+            break;
+d779 3
+a781 1
+    {   struct SliderInfo   *si = INST_DATA( cl, g );
+d783 1
+a783 1
+        return 1L;
+d785 2
+a786 1
+    else return (ULONG) DoSuperMethodA( cl, (Object *)g, msg );
+d797 1
+a797 3
+        /* this is the "default" slider info for newly created sliders */
+
+    static struct SliderInfo sl1;       /* All zeroes... */
+d800 2
+a801 3
+    {   struct SliderInfo   *si = INST_DATA( cl, newobj );
+
+            /* set up some defaults for the slider instance variables */
+d803 3
+a805 3
+        *si = sl1;
+        si->MaxValue = 0xffff;
+        si->SkipValue = 0x1111;
+d808 3
+a810 1
+            /* set up the slider attributes from the tag list */
+a811 2
+        SetSliderAttrs( cl, (Object *)newobj, msg );
+    }
+d822 2
+a823 1
+    {   struct SliderInfo *si = INST_DATA( cl, g );/* state    */
+d830 1
+d844 1
+a844 1
+    refresh |= SetSliderAttrs( cl, (Object *)g, msg );  /* set attibutes                */
+d848 2
+a849 1
+    {   struct RastPort *rp;
+d858 1
+d870 2
+d889 2
+@

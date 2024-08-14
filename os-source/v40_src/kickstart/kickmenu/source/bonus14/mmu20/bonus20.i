@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	15
+DATE	MACRO
+		dc.b	'5.5.91'
+	ENDM
+VERS	MACRO
+		dc.b	'bonus20 37.15'
+	ENDM
+VSTRING	MACRO
+		dc.b	'bonus20 37.15 (5.5.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: bonus20 37.15 (5.5.91)',0
+	ENDM

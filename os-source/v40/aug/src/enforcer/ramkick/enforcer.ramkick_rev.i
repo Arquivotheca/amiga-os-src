@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	41
+DATE	MACRO
+		dc.b	'21.4.93'
+	ENDM
+VERS	MACRO
+		dc.b	'Enforcer.RamKick 37.41'
+	ENDM
+VSTRING	MACRO
+		dc.b	'Enforcer.RamKick 37.41 (21.4.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: Enforcer.RamKick 37.41 (21.4.93)',0
+	ENDM

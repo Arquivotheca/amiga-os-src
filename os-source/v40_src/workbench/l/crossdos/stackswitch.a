@@ -1,0 +1,217 @@
+;
+;  StackSwitch.A
+;
+;
+
+	INCLUDE 'exec/tasks.i'
+	INCLUDE 'exec/execbase.i'
+
+	xref _LVOAllocMem
+	xref _LVOFreeMem
+	xref _LVODisable
+	xref _LVOEnable
+
+	xdef _StackSwitchIn
+	xdef _StackSwitchOut
+
+	section StackSwitch,code
+
+
+******* stackswitch.o/StackSwitchIn ******************************************
+*
+*   NAME
+*
+*		StackSwitchIn - Allocate and switch a new stack in.
+*
+*   SYNOPSIS
+*
+*		oldStack = StackSwitchIn( newSize );
+*          d0                  d0
+*
+*       APTR StackSwitchIn( ULONG );
+*
+*   FUNCTION
+*
+*		Allocates and swaps in a new stack.  You must retain the old
+*		Stack ptr and pass it back to StackSwitchOut() do not modify it.
+*
+*   INPUTS
+*
+*		newSize - size of new stack.
+*
+*   RESULT
+*
+*		oldStack - old stack ptr has info on it for StackSwitchOut().
+*
+*   EXAMPLE
+*
+*		move.l #$C0EDBABE,-(a7) ; push a value
+*
+*		move.l #40,d0			; size of new stack in d0
+*		jsr	_StackSwitchIn			; call function.
+*		move.l d0,oldStack		; save old stack ptr.
+*
+*		move.l #$8BADBEEF,-(a7)	; push some new value.
+*
+*		move.l oldStack,a0		; old stack in a0
+*		jsr _StackSwitchOut			; call function
+*
+*		move.l (a7)+,a0			; pop value ($DEADBABE)
+*
+*   NOTES
+*
+*		Not sure how safe this function is from C.
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*		StackSwitchOut();
+*
+*****************************************************************************
+*
+*
+
+_StackSwitchIn:
+	moveq	#$fffffffe,d1			; move mask to d1
+	addq.l	#1,d0					; add one to size.
+	and.l	d1,d0					; mask size to evenness.
+	move.l	(a7)+,a1				; pop return address
+	movem.l a1/a6/d2,-(a7)			; save a6 and d2
+	moveq	#0,d1					; MEMF_ANY
+	move.l	d0,d2					; save size
+	move.l	4,a6					; load ExecBase
+	jsr		_LVOAllocMem(a6)		;
+	tst.l	d0						; result
+	beq.b	fail					; failed
+
+	move.l	d2,d1					; put size back in d1
+	movem.l	(a7)+,a1/a6/d2				; pop off saved values.
+
+	;-----
+	;  a7    - old stack
+	;  d0    - new mem.
+	;  d1    - size.
+	;  a1    - return adress.
+	;-----
+	movem.l	d0-d1,-(a7)				; store memptr on old stack
+									; store size on old stack.
+
+	add.l	d1,d0					; add size to memptr.
+	move.l	d0,a0					; new stack in a0.
+	sub.l	d1,d0					; make d0 stack lower
+
+	movem.l	a1/a6,-(a0)				; save return address and a6 on newstack.
+	move.l	4,a6
+	move.l	ThisTask(a6),a1
+
+	jsr		_LVODisable(a6)
+	move.l	TC_SPLOWER(a1),-(a7)	; push stack lower
+	move.l	TC_SPUPPER(a1),-(a7)	; push stack upper
+
+	move.l	a0,TC_SPUPPER(a1)		; save new stack upper.
+	add.l	#8,TC_SPUPPER(a1)		; adjust for our temp save.
+
+	move.l	d0,TC_SPLOWER(a1)		; save new stack lower.
+	jsr		_LVOEnable(a6)
+
+	movem.l	(a0)+,a1/a6				; pop values off new stack.
+
+	move.l	a7,d1					; save stack in d1
+	move.l	a0,a7					; put new stack into a7
+	move.l	d1,d0					; put old stack into d0
+	move.l	a1,-(a7)				; push return address.
+	rts
+
+
+fail:
+	movem.l	(a7)+,a1/a6/d2
+	move.l	a1,-(a7)
+	rts
+
+
+******* stackswitch.o/StackSwitchOut ******************************************
+*
+*   NAME
+*
+*		StackSwitchOut - switch back to previous stack.
+*
+*   SYNOPSIS
+*
+*		StackSwitchOut( oldStack );
+*                     a0
+*
+*		VOID StackSwitchOut( APTR );
+*
+*   FUNCTION
+*
+*		Switches stack back to old one and de-allocates the
+*		new one.
+*
+*   INPUTS
+*
+*		oldStack - ptr to old stack returned by StackSwitchIn()
+*
+*   RESULT
+*
+*		None.
+*
+*   EXAMPLE
+*
+*		move.l #$C0EDBABE,-(a7) ; push a value
+*
+*		move.l #40,d0			; size of new stack in d0
+*		jsr	_StackSwitchIn			; call function.
+*		move.l d0,oldStack		; save old stack ptr.
+*
+*		move.l #$8BADBEEF,-(a7)	; push some new value.
+*
+*		move.l oldStack,a0		; old stack in a0
+*		jsr _StackSwitchOut			; call function
+*
+*		move.l (a7)+,a0			; pop value ($DEADBABE)
+*
+*   NOTES
+*
+*		Not sure how safe this is from C
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*		StackSwitchIn();
+*
+*****************************************************************************
+*
+*
+
+_StackSwitchOut:
+	move.l	(a7)+,a1				; pop return address.
+
+	movem.l	a1/a6,-(a7)				; save regs temp.
+
+	 move.l	4,a6
+	 move.l	ThisTask(a6),a1
+
+	 jsr	_LVODisable(a6)
+	 move.l	(a0)+,TC_SPUPPER(a1)	; restore old task stack values.
+	 move.l	(a0)+,TC_SPLOWER(a1)
+	 jsr	_LVOEnable(a6)
+
+	movem.l (a7)+,a1/a6
+
+	movem.l	(a0)+,d0-d1				; get memptr from old stack
+
+									; get size from old stack.
+	move.l	a0,a7					; stick old stack back in.
+	move.l	a1,-(a7)				; push return address.
+	move.l	d0,a1
+	move.l	d1,d0
+
+	move.l	a6,-(a7)				; save a6
+	move.l	4,a6					; load ExecBase
+	jsr		_LVOFreeMem(a6)			;
+	move.l	(a7)+,a6				; save a6
+	rts
+
+	END

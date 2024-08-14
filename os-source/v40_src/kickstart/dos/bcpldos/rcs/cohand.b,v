@@ -1,0 +1,418 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.38.30;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@coroutine library
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@section "Cohand"
+
+get "LIBHDR"
+get "IOHDR"
+get "MANHDR"
+get "internal/EXECLIBHDR"
+get "internal/INTUITIONLIBHDR"
+get "FH3MANIFESTS"
+
+
+// This is a completely new version of the console handler
+// for AmigaDOS. It supports multiple output and single
+// input from a single window. Each open window has an associated
+// invocation of this task.
+
+// When the task is created the parameter packet contains 
+// string of the form CON:X/Y/W/H/Stripname as arg1.
+// Arg2 contains value as follows:
+// 0    CON (buffered window)
+// 1    RAW (unbuffered window)
+// -1   WIN (unbuffered window with no initial window opened)
+
+// In the case of WIN the task must be created by hand (there
+// is no reserved name WIN:) and passed the window instead of
+// the name string in arg1.
+
+// Version 1.2  TJK  March/April 85  Los Gatos
+// Version 1.3  TJK  May 85 - Get window for console
+// Version 1.4  TJK  May 85 - Timeout and changes to raw mode
+
+MANIFEST $(
+bufmask    = #XFF
+delcharlen = 3
+
+ctrl.c = 'C'-'@@'
+ctrl.d = 'D'-'@@'
+ctrl.e = 'E'-'@@'
+ctrl.f = 'F'-'@@'
+ctrl.x = 'X'-'@@'
+eof    =  #X1C      // Actually ^\
+
+$)
+
+
+LET start(parm.pkt) BE
+$( 
+   LET ebuf = VEC 63          // 255 char buffer
+   LET readp, tailp, echop, headp = 0, 0, 0, 0
+   LET raw = parm.pkt!pkt.arg2 NE 0
+   LET charbuf = VEC 1
+   LET outbuf = (charbuf<<2)+4
+   LET output.pkt = 0
+   LET BSpend = 0   // , DEOLpend = 0, 0  ** AC 28 Oct 85
+   LET EOFpend = FALSE
+   LET current.input, current.output = 0, 0
+   LET usecount = 0
+   LET ignoring = false
+   LET clienttaskid = parm.pkt!pkt.taskid
+
+   LET openstring = parm.pkt!pkt.arg1
+
+   LET delchar   = ("*B*S*B"<<2)+1
+   // LET crlfchar  = ("*C*N"<<2)+1    ** AC 28 Oct 85
+
+   LET timerpkt  = VEC pkt.type
+   LET timerIOB  = VEC IO.size
+   LET timeoutpkt = 0
+
+   LET inpkt = VEC pkt.res1
+   LET outpkt= VEC pkt.res1
+   LET IOB    = VEC IO.size
+   LET IOBO   = VEC IO.size
+   LET Window = parm.pkt!pkt.arg2<0 -> openstring, 0
+
+   // CAPC data structure initialisation
+   // LET data = VEC 11   ** AC 28 Oct 85
+   LET devname = "console.device*X00"
+   LET stripname = VEC 20
+   LET colourfix = "*E[31m"
+   LET NLfix = "*E[20h"
+   // LET NLunfix = "*E[20l"
+   LET fixbuf(IOBO,str) BE
+   $( SetIO( IOBO, IOC.write, ?, str%0 )
+      putlong( IOBO, IO.data, (str<<2)+1 )
+      DoIO( IOBO )
+   $)
+
+   // Handle the parameter passed
+   LET Xpos, Ypos, Width, Height = ?, ?, ?, ?
+   LET pos = 5
+   LET error = FALSE
+   IF Window=0 DO
+   $(
+   FOR i=0 to 3 DO
+   $( LET npos = splitname( stripname, '/', openstring, pos)
+      LET sum = 0
+      IF npos = 0 THEN $( error := TRUE; BREAK $)
+      $( LET ch = openstring%pos
+         TEST '0' <= ch <= '9' THEN
+            sum := sum*10 + ch - '0'
+         ELSE 
+         $( error := ch NE '/'
+            BREAK
+         $)
+         pos := pos+1
+      $) REPEAT
+      IF error BREAK
+      (@@Xpos)!i := sum
+      pos := npos
+   $)
+
+   clearvec(stripname,20)
+   UNLESS error DO
+   FOR i=pos to openstring%0 do
+      stripname%(i-pos) := openstring%i
+      
+   UNLESS error DO
+      window := OpenWindow(Xpos,Ypos,Width,Height,stripname)
+   error := window=0
+   $)
+
+   UNLESS error DO
+   $( putlong( IOB, IO.data, window )
+      IF OpenDevice( IOB, devname, 3, 0 ) = 0 THEN error := TRUE
+   $)
+
+   IF error THEN
+   $( returnpkt(parm.pkt,FALSE,error.InvalidWindow)
+      return
+   $)
+
+   copyvec(IOB,IOBO,IO.size)
+   outpkt!pkt.type := act.write
+
+   // Fix colour used, and NL fix unless raw
+   fixbuf(IOBO,colourfix)
+   UNLESS raw DO fixbuf(IOBO,NLfix)
+
+   // Set up initial read. Send it out when opened.
+   inpkt!pkt.type := act.read
+   SetIO( IOB, IOC.read, charbuf, 1 );
+
+   timerpkt!pkt.type := action.timer
+
+   // Finished with parameter packet...send back...
+   returnpkt( parm.pkt, TRUE )
+
+
+   // This is the main repeat loop waiting for an event
+
+   $( LET p = taskwait()
+      LET ch = 0
+      LET printlen, printbuf = 0, ?
+
+      SWITCHON p!pkt.type INTO
+      $(
+
+      CASE act.findinput:     // Open
+      CASE act.findoutput:
+      $( LET scb = p!pkt.arg1
+         scb!scb.id := TRUE   // Interactive
+         IF usecount=0 THEN   // First open
+            SendIO(IOB, inpkt )
+         usecount := usecount+1
+         GOTO rpkt
+      $)
+
+      CASE act.end:          // Close
+         usecount := usecount-1
+  rpkt:  returnpkt(p,TRUE)
+         LOOP
+
+      CASE act.read:      // A returning msg containing a character
+      $( LET nheadp = (headp+1) & bufmask
+         IF IOB%IO.error = 0 THEN 
+         $( LET ch = charbuf%0        // Extract character
+	    IF ctrl.c <= ch <= ctrl.f THEN       // Always set flags
+	    $( setflags( clienttaskid, 1<<(ch-ctrl.c) )
+	       UNLESS raw BREAK
+	    $)
+	    UNLESS raw DO
+	    $(
+	       IF ignoring THEN
+	       $(
+		  ignoring := (#X20 <= ch <= #X3F)
+		  break
+               $)
+
+               SWITCHON ch INTO     // Handle special cases
+               $( CASE #X9B: 
+		     ignoring := TRUE
+	             break	
+		  CASE eof:
+	             EOFpend := TRUE
+                     tailp := headp
+                     BREAK
+	          CASE '*C' : 
+                     ch := '*N'
+                     tailp := nheadp
+                     ENDCASE
+                  CASE '*B' :
+                  CASE ctrl.x:
+                  $( IF headp=tailp BREAK
+                     IF echop=headp THEN
+                     $( echop := (echop-1) & bufmask
+                        BSpend := BSpend+1
+                     $)
+                     headp := (headp-1) & bufmask
+                  $) REPEATUNTIL ch='*B'
+                  BREAK
+               $)
+	    $)
+	    IF nheadp=readp BREAK     // No room in buffer
+	    IF raw THEN
+	    $( echop := (echop+1) & bufmask
+               tailp := nheadp
+	    $)
+            ebuf%nheadp := ch         // Into echo buffer
+            headp := nheadp           // Bump ptr
+            BREAK
+         $) REPEAT
+//         SetIO( IOB, IOC.read, charbuf, 1 );
+         SendIO( IOB, inpkt )
+         ENDCASE
+      $)
+
+      CASE act.write:     // A returning msg after write complete
+         IF output.pkt > 0 THEN
+            qpkt( output.pkt )    // Return to client
+         output.pkt := 0
+         ENDCASE
+
+      CASE 'R':            // A read request
+	 clienttaskid := p!pkt.taskid   // Set my client only if reading
+         append(@@current.input, p)
+         ENDCASE
+
+      CASE 'W':            // A write request
+         append(@@current.output, p)
+         ENDCASE
+
+      CASE action.waitchar:
+      $( LET period = p!pkt.arg1
+	 UNLESS readp=tailp DO		     // 6Nov85 K
+	 $( returnpkt( p, TRUE )             // Character already available
+	    LOOP
+         $)
+	 IF period=0 THEN
+	 $( returnpkt( p, FALSE )            // since fell thru above: FALSE
+            LOOP
+         $)
+	 // Must make a timer request
+	 OpenDevice( timerIOB, "timer.device*X00", 0, 0)
+	 timeoutpkt := p
+         SetIO( timerIOB, IOC.addrequest, ?, period REM 1000000)
+	 timerIOB!IO.secs.p := period / 1000000
+	 SendIO( timerIOB, timerpkt )
+	 LOOP
+      $)
+
+      CASE action.timer:
+	 UNLESS timeoutpkt=0 DO
+	 $( returnpkt( timeoutpkt, FALSE )
+	    timeoutpkt := 0
+	 $)
+	 CloseDevice( timerIOB )
+	 LOOP
+
+      CASE action.discinfo:
+      $( LET v = p!pkt.arg1
+	 clearvec(v,discinfo.size)
+	 v!discinfo.type:= raw -> type.rawcon, type.con
+	 v!discinfo.vol := window
+         v!discinfo.inuse := IOB<<2  // Extra for Kodiak 24Feb86
+         GOTO rpkt
+      $)
+
+      CASE act.sc.mode:            // Extra item 9 July 86
+         raw := p!pkt.arg1
+         GOTO rpkt
+
+      DEFAULT:
+         returnpkt(p,FALSE,Error.ActionNotKnown)
+      $)
+
+      // At this point something has happened. We must see
+      // what we are now free to do.
+
+      // First, see if we can complete any outstanding input request
+      // First case: See if an EOF pending
+      TEST readp=tailp THEN   
+         IF EOFpend & current.input NE 0 THEN
+	 $( LET pkt = current.input
+	    current.input := !pkt
+	    pkt!pkt.link := pkt!pkt.res1
+	    returnpkt( pkt, 0 )
+	    EOFpend := FALSE
+	 $)
+      // Second case: Input pending; no pending read but a timeout waiting
+      ELSE TEST current.input=0 THEN
+	 UNLESS timeoutpkt=0 DO        // Handle timeout request
+         $( exec( e.AbortIO, ?, ?, ?, timerIOB<<2 )
+            returnpkt( timeoutpkt, TRUE )
+            timeoutpkt := 0
+         $)
+      // Third case: Only valid when read pending and data ready
+      ELSE
+      $( LET pkt = current.input
+         LET buf = pkt!pkt.arg2
+         LET end = buf+pkt!pkt.arg3
+	 LET ptr = buf
+         current.input := !pkt
+         pkt!pkt.link := pkt!pkt.res1        // Restore link ptr
+         UNTIL buf >= end | readp=tailp DO
+         $( readp :=(readp+1) & bufmask
+            0%buf := ebuf%readp
+            buf   := buf+1
+         $)
+	 ptr := buf-ptr
+         returnpkt( pkt, ptr)
+      $)
+
+
+      // Next, see if any output is required
+
+      WHILE output.pkt=0 DO 
+      $( 
+         // Character typed requires reflection
+         UNLESS echop=headp DO
+         $( echop := (echop+1) & bufmask
+            ch := ebuf%echop
+            BREAK
+         $)
+
+         // A BS was typed and we must delete last char typed
+         IF BSpend>0 THEN
+         $( BSpend := BSpend-1
+            printbuf, printlen := delchar, delcharlen
+            BREAK
+         $)
+
+         // A line is waiting to be output. We don't print this
+         // if the user is halfway through a line
+         UNLESS current.output=0 | headp NE tailp DO
+         $( output.pkt := current.output
+            printbuf, printlen := output.pkt!pkt.arg2, output.pkt!pkt.arg3
+            current.output := !output.pkt
+            output.pkt!pkt.link := output.pkt!pkt.res1 // Restore link ptr
+            output.pkt!pkt.res1 := printlen
+            IF printlen <= 0 THEN
+            $( qpkt( output.pkt )
+               output.pkt := 0
+               LOOP
+            $)
+         $)
+         
+         BREAK
+
+      $)
+
+      // If ch is nonzero then place it in output buffer
+
+      UNLESS ch=0 DO
+      $( printbuf, printlen := outbuf, 1
+         0%printbuf := ch
+      $)
+
+      // If printlen is nonzero then print that many chars
+      // from printbuf. 
+
+      IF printlen>0 THEN
+      $( 
+         SetIO( IOBO, IOC.write, ?, printlen )
+         putlong( IOBO, IO.data, printbuf )
+         SendIO( IOBO, outpkt )
+         UNLESS output.pkt>0 DO output.pkt := -1 
+      $)
+
+   $) REPEATUNTIL (usecount <= 0) & current.output=0 & output.pkt=0
+
+   // Termination
+   CloseDevice( IOBO )
+
+   callres(intuition,e.CloseWindow,0,0,window)
+$)
+
+AND append( lvp, p ) BE
+$( UNTIL !lvp=0 DO lvp := !lvp
+   !lvp := p
+   p!pkt.res1 := !p
+   !p := 0
+$)
+@

@@ -1,0 +1,191 @@
+;* ============================================================================ *
+;                          Deluxe Music Construction Set II
+;                          timer.asm -- CIA timer interrupt
+;                                     By Talin.
+;* ============================================================================ */
+
+			include		"exec/types.i"
+			include		"exec/tasks.i"
+			include		"dos/dos.i"
+			include		"libraries/realtime.i"
+
+			xdef		_TimeServer
+			xdef		_CalcClockIncrement
+
+			xref		_tempo_rate
+			xref		_mclock_pos
+			xref		_mclock_accumulator
+			xref		_mclocks_per_column
+			xref		_pattern_mclocks
+			xref		_current_pattern_start
+			xref		_current_pattern_end
+			xref		_pattern_pos
+			xref		_column_pos
+			xref		_clock_pos
+			xref		_main_task
+			xref		_clock_state
+
+			xref		_SysBase
+			xref		_LVOSignal
+
+			SECTION		text,CODE
+
+_TimeServer
+			move.l		pmt_Method(a1),d0		; d0 <-- method id
+			cmp.l		#PM_TICK,d0				; is it a tick message?
+			bne			10$
+
+;---------- determine the number of ticks which have occured since
+;			the last time this hook was called.
+
+			move.l		pmt_Time(a1),d0			; d0 <-- current clock time
+			bmi			2$						; DMCS doesn't deal with negative time...
+			move.l		_clock_pos,d1			; d1 <-- time of last call
+			sub.l		d1,d0					; d0 <-- time since last call
+			bmi			2$						; if clock went backwards, ignore...
+			add.l		d0,_clock_pos			; update accumulated time
+
+;---------- Check to see if we're the Maestro
+
+*			move.l		pl_Source(a2),a0		; a0 <-- Conductor
+*			btst.b		#CONDUCTB_METROSET,cdt_Flags+1(a0) ; if metronome already set
+*			beq.s		1$
+*			move.l		cdt_Metronome(a0),d0	; d0 <-- current metronome time
+*			move.l		d0,pl_MetricTime(a2)	; update playerinfo w/ time
+*			bra.s		4$
+
+; d0 now equals the number of ticks since the last time we updated _clock_pos.
+; use this to do an extended precision multiply...
+
+			move.l		d0,d1					; get copy of delta time
+			swap		d1						; get upper half
+			mulu.w		_tempo_rate,d1			; do extended precision math.
+			swap		d1						; put extended part in upper
+			clr.w		d1						; half of d1
+
+			mulu.w		_tempo_rate,d0			; d0 <-- musical ticks since last
+			add.l		d1,d0					; add extended precision part.
+
+; d0 has now been converted to a delta-mclocks * 256
+
+			add.l		_mclock_accumulator,d0	; d0 <-- total elapsed musical time
+			move.l		d0,_mclock_accumulator	; update tempo_accumulator
+
+; d0 now contains to total elapsed mclocks.
+
+			asr.l		#8,d0					; convert fixed-point to integer
+
+;---------- since we're musically aware, update the "conducted" bit.
+
+;			move.l		d0,cdt_Metronome(a0)	; update conductor metronome
+;			bset.b		#CONDUCTB_METROSET,cdt_Flags+1(a0) ; set metronome flag
+
+			cmp.l		pl_MetricTime(a2),d0	; see if they are the same
+			beq.s		2$						; no point in waking up if they are.
+
+4$			move.l		d0,pl_MetricTime(a2)	; see if they are the same
+
+;---------- See if we overflowed into the next pattern
+
+5$			cmp.l		_current_pattern_end,d0	; see if we're at the frame end
+			blt.s		6$
+
+			add.l		#1,_pattern_pos			; add 1 to pattern position
+												; new start <-- old end
+			move.l		_current_pattern_end,_current_pattern_start
+												; new end += pattern size
+			move.l		_pattern_mclocks,d1
+			add.l		d1,_current_pattern_end
+			bra.s		5$
+
+;---------- calculate the column # within the pattern
+
+6$			sub.l		_current_pattern_start,d0	; clocks in this pattern
+			divu		_mclocks_per_column,d0	; get column #
+
+			cmp.w		_column_pos,d0			; see if column # changed
+			beq.s		2$						; if so
+
+			move.w		d0,_column_pos			; then update column # and signal
+
+;---------- get ExecBase into a6.
+
+			move.l		a6,-(sp)
+			move.l		_SysBase,a6
+
+;---------- signal main task that a state change has occurred
+
+			move.l		_main_task,a1			; address of player task
+			move.l		#SIGBREAKF_CTRL_F,d0	; signal to send
+			CALLLIB		_LVOSignal				; wake up player task
+
+;---------- restore a6 register
+
+			move.l		(sp)+,a6
+
+;---------- just exit
+
+2$			moveq		#0,d0
+			rts
+
+10$			cmp.l		#PM_STATE,d0			; is it a state-change message?
+			bne.s		20$
+
+;---------- get ExecBase into a6.
+
+			move.l		a6,-(sp)
+			move.l		_SysBase,a6
+
+;---------- signal main task that a state change has occurred
+
+			move.l		_main_task,a1			; address of player task
+			move.l		#SIGBREAKF_CTRL_E,d0	; signal to send
+			CALLLIB		_LVOSignal				; wake up player task
+
+;---------- restore a6 register
+
+			move.l		(sp)+,a6
+
+;---------- return from hook
+
+			moveq		#0,d0					; end server chain???
+			rts
+
+20$
+;			cmp.l		#PM_POSITION,d0			; is it a special locate?
+;			bne.s		30$
+;
+;;---------- handle special locate message
+;
+;			move.l		pmt_Time(a1),_special_locate_time
+;
+;			move.l		a6,-(sp)
+;			move.l		_SysBase,a6
+;
+;;---------- signal player task that a state change has occurred
+;
+;			move.l		_player_task,a1			; address of player task
+;			move.l		#SIGF_INTUITION,d0		; signal to send
+;			Call		Signal					; wake up player task
+;
+;;---------- restore a6 register
+;
+;			move.l		(sp)+,a6
+
+;---------- return from hook
+
+30$			moveq		#0,d0					; end server chain???
+			rts
+
+_CalcClockIncrement			; (music delta)
+;			move.l		4(sp),d0				; d0 <-- musical ticks
+;			lsl.l		#8,d0					; d0 <-- musical ticks * 256
+;			add.l		_time_remainder,d0		; plus remaining ticks
+;			divu.w		_tempo_rate+2,d0		; d0.w <-- real-time ticks
+;			swap.w		d0						; get remainder
+;			move.w		d0,_time_remainder+2	; put remainder into time remainder
+;			clr.w		d0						; clear lower half d0
+;			swap.w		d0						; d0.l <--real-time ticks
+;			rts
+
+			end

@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	55
+DATE	MACRO
+		dc.b	'3.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'RebootOff 37.55'
+	ENDM
+VSTRING	MACRO
+		dc.b	'RebootOff 37.55 (3.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: RebootOff 37.55 (3.9.93)',0
+	ENDM

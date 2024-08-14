@@ -1,0 +1,263 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.37.59;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file system cache buffer allocation
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+******************************************************************************/
+
+
+
+SECTION "BUFALLOC"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+
+LET search ( lvq, key, extract ) = VALOF
+$(
+   LET buf = ! lvq
+
+   UNTIL ( buf = 0 ) | ( buf ! buf.key = key ) DO
+   $(
+      lvq :=   buf
+      buf := ! buf
+   $)
+
+   IF ( buf \= 0 ) & extract THEN ! lvq := ! buf
+
+   RESULTIS buf
+$)
+
+AND waitfor(buf) = VALOF
+$( buf ! buf.co := stackbase
+   RESULTIS fetch()
+$)
+
+AND waitforpend(buf) = VALOF
+$( append( @@pending.queue, buf )
+   RESULTIS waitfor(buf)
+$)
+
+AND queue.behind(buf) BE
+$( LET nextco = buf ! buf.co     // save previous waiter
+   buf := waitfor(buf) - buf.prefix   // wait for buffer
+   buf ! buf.co := nextco        // to be tidy only - prob. not necc.
+   callco( nextco, buf )         // invoke previous waiter
+$)
+
+AND fetch () = [ disc.running -> cowait (), resumeco ( disc.co ) ] + buf.prefix
+
+AND head ( lvq ) = VALOF
+$(
+   LET buf = ! lvq
+
+   ! lvq := ! buf
+
+   RESULTIS buf
+$)
+
+
+LET locatebuf ( lvq, type ) = VALOF
+$(
+   LET buf = ! lvq
+
+   UNTIL ( buf = 0 ) | ( buf ! buf.prefix ) = type DO
+   $(
+      lvq :=   buf
+      buf := ! buf
+   $)
+
+   IF ( buf \= 0 ) THEN ! lvq := ! buf
+
+   RESULTIS buf
+$)
+
+/* Block allocation. We need to be have a workable algorithm which copes with
+   a) Write pending blocks (on the waiting queue) must not hog cache blocks.
+   b) Data blocks are less useful than file headers and directories.
+   c) Blocks in pending queue must not hog cache blocks.
+   d) Where possible, we should write to tracks that we are over or passing.
+*/
+AND getblock( hold ) = VALOF
+$(
+   LET buf = ?
+
+   // First attempt, try the free queue.
+   UNLESS free.buffer.queue = 0 DO
+      RESULTIS head(  @@free.buffer.queue) + buf.prefix
+
+   // Second attempt. See if there is a data block in the valid queue
+   buf := locatebuf( @@valid.buffer.queue, t.data )
+   UNLESS buf=0 RESULTIS buf + buf.prefix
+
+   // Return back now if we were just testing.
+   UNLESS hold RESULTIS 0
+
+   // See if a block would be available if we waited for the first
+   // pending block to be written.
+   IF pending.queue NE 0 & pending.queue!buf.co=0 THEN
+      RESULTIS waitfor(pending.queue)
+
+   // Try the waiting queue and see if there is more than one block
+   // containing data waiting to be written. If so, write it.
+   IF waiting.queue NE 0 & !waiting.queue NE 0 &
+      waiting.queue!buf.prefix = t.data THEN
+   $( buf := head( @@waiting.queue )
+      RESULTIS waitforpend(buf)
+   $)
+
+   // Try any block on the valid queue
+   UNLESS valid.buffer.queue=0 DO
+      RESULTIS head( @@valid.buffer.queue ) + buf.prefix
+
+   // Try any block on the waiting queue
+   UNLESS waiting.queue=0 DO
+   $( buf := head( @@waiting.queue )
+      RESULTIS waitforpend(buf)
+   $)
+
+   // Try some other block on the pending queue besides the first
+   // which is not being waited for by someone else
+   buf := pending.queue
+   UNTIL buf=0 DO
+   $( IF buf!buf.co=0 THEN
+         RESULTIS waitfor(buf)
+      buf := !buf
+   $)
+
+   // Really panic now. Any buffer will do when it is free.
+   // When we get it back from an existing waiter we must loop and
+   // start again
+   queue.behind(pending.queue)
+
+$) REPEAT
+
+
+AND freeblock( buf, state ) BE
+$( LET b = buf - buf.prefix
+   IF buf!b.file.type = 0 DO state := buf.invalid  // never 0 on valid blocks
+   append( state -> 
+           ( b!buf.state=IOC.write -> @@waiting.queue, 
+                                      @@valid.buffer.queue ),
+                                      @@free.buffer.queue,
+           b )
+$)
+
+/* // error checking version...
+AND freeblock( buf, state ) BE
+   TEST state
+   THEN $(
+      LET cbuf = search( @@valid.buffer.queue, (buf - buf.prefix) ! buf.key, FALSE )
+      UNLESS [ cbuf = 0 ]
+      DO abort(999)
+      UNLESS search( @@pending.queue, (buf - buf.prefix) ! buf.key, FALSE ) = 0
+      DO abort( 998 )
+      UNLESS search( @@waiting.queue, (buf - buf.prefix) ! buf.key, FALSE ) = 0
+      DO abort( 997 )
+      append( @@valid.buffer.queue, buf - buf.prefix )
+   $)
+   ELSE append( @@valid.buffer.queue, buf - buf.prefix )
+*/
+
+AND readblock ( key, snatch ) = VALOF
+$(
+   LET buf = search ( @@valid.buffer.queue, key, TRUE )
+
+   IF buf \= 0 THEN RESULTIS buf + buf.prefix
+
+   buf := search ( @@waiting.queue, key, TRUE )
+
+   IF buf \= 0 THEN TEST snatch
+                    THEN
+                         RESULTIS buf + buf.prefix
+                    ELSE
+                         RESULTIS waitforpend(buf)
+
+   buf := search ( @@pending.queue, key, FALSE )
+
+   IF ( buf \= 0 ) THEN
+      TEST ( buf ! buf.co = 0 ) THEN
+         TEST snatch & [ buf \= pending.queue ]
+         THEN
+               RESULTIS search ( @@pending.queue, key, TRUE ) + buf.prefix
+         ELSE
+	       RESULTIS waitfor(buf)
+
+      ELSE
+        $(  queue.behind(buf)
+            LOOP                          // search all queues for the block
+        $)
+
+   // if all else fails, read the block
+
+   $(
+      LET buf = getblock( FALSE )
+      IF buf = 0 DO
+      $(
+         // If there are no instantly available buffers we must wait for one.
+         // Since some other coroutine may already be waiting here to read the
+         // same block: when we get a buffer we free it and re-search the
+         // queues to prevent it being read twice.
+
+         buf := getblock( TRUE )
+
+         freeblock( buf , buf.invalid )
+
+         LOOP
+      $)
+
+      append ( @@pending.queue, 
+        setvec( buf-buf.prefix, buf.key, ?, stackbase, IOC.read, ?, key ) )
+   $)
+
+   RESULTIS fetch ()
+
+$) REPEAT
+
+
+AND writeblock ( buf, key, status ) BE
+$(
+   LET out = search ( @@valid.buffer.queue, key, TRUE )
+
+   IF out \= 0 THEN append ( @@free.buffer.queue, out )
+
+   append ( status -> @@waiting.queue, @@pending.queue,
+            setvec ( buf - buf.prefix, buf.key, ?, 0, IOC.write, status, key ) )
+$)
+@

@@ -1,0 +1,2340 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    freds:1.7; strict;
+comment  @ * @;
+
+
+1.7
+date     94.02.07.15.24.30;  author freds;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     94.01.27.15.44.26;  author freds;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     94.01.19.15.13.22;  author freds;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     94.01.18.12.14.58;  author freds;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     94.01.14.16.48.51;  author freds;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     94.01.11.10.26.58;  author freds;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     94.01.03.16.21.34;  author freds;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@audio.device test2
+@
+
+
+1.7
+log
+@safely handle Audio.Device CMD_STOP, CMD_START with AbortIO() as necessary
+@
+text
+@/*  aspool - nostartup - CLI/WorkBench - SAS/C 6.50 compatible  */
+
+#include <exec/execbase.h>
+#include   <exec/types.h>
+#include     <exec/memory.h>
+#include <dos/dos.h>
+#include   <dos/dosextens.h>
+#include     <dos/rdargs.h>
+#include <intuition/intuition.h>
+#include <graphics/gfxbase.h>
+#include <workbench/startup.h>
+#include <iff/compiler.h>
+#include   <iff/iff.h>
+#include     <iff/8svx.h>
+#include       "8svx_opt.h"
+#include <devices/audio.h>
+
+/*  External Prototypes  */
+#include <clib/exec_protos.h>
+#include <clib/alib_protos.h>
+#include <clib/alib_stdio_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/icon_protos.h>
+
+/*  Pragmas  */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+#include <pragmas/icon_pragmas.h>
+
+/*  Local Prototypes  */
+ULONG startupWB(void);
+void ParseAudioIFF(UBYTE *filename);
+void ParseChunks8SVX(struct MyInst *CurrrentInst, ULONG formsize);
+void PlayInst8SVX(struct MyInst *CurrentInst, ULONG chunksize);
+void ReadFileData(struct FileHandle *fh, UBYTE *bufptr, ULONG bufsize, ULONG *unread);
+void WaitSpool(struct IOAudio *IOAudioCur, struct IOAudio *IOAudioX);
+void UpdateStatWin(UBYTE statuscode, UBYTE *statusmsg);
+void ReportFault2(UBYTE *msg, ULONG code, ULONG level);
+
+#define CLI_TEMPLATE "8SVXNAME/M/A"
+#define MAX_CHIP_AUDIO 0x1FFFE
+/*  Status Codes  */
+#define ASPOOL_CLR_FILE_ARG 0
+#define ASPOOL_FILENAME     1
+#define ASPOOL_ARGCT        2
+#define ASPOOL_BAR_BORDER   3
+#define ASPOOL_CLR_BAR      4
+#define ASPOOL_FILL_BAR     5
+
+typedef struct MyArg {
+  UBYTE **filename;
+  };
+
+typedef struct MyInst {
+  ID instType;
+  BYTE *instHeader;
+  BYTE *instChan;
+  BYTE *instData;
+  BYTE *instData2;
+  struct FileHandle *instFile;
+  struct FileInfoBlock *instFileInfo;
+  ULONG instFileUnread;
+  };
+
+/*  Global Data  */
+struct ExecBase *SysBase;
+struct Library *DOSBase = NULL;
+struct Library *IntuitionBase = NULL;
+struct Library *IconBase = NULL;
+struct Library *UtilityBase = NULL;
+struct GfxBase *GfxBase = NULL;
+struct WBStartup *wbMsg = NULL;
+struct Window *StatWin = NULL;
+struct DrawInfo *DrawInfo = NULL;
+struct MyInst *CurrentInst = NULL;
+ULONG ErrLevel = RETURN_OK;
+ULONG ErrCode = NULL;
+ULONG resultES;
+ULONG AudioClock;
+UBYTE ErrMsg[40];
+UBYTE verstiontag[] = "$VER: aspool 1.7 " __AMIGADATE__;
+struct IntuiText IText;
+struct TextAttr TextAttr;
+struct Border Border;
+struct EasyStruct myES = {
+  sizeof(struct EasyStruct),
+  0,
+  "aspool",
+  "",
+  ""
+  };
+
+
+/*  ---------------------------- cmd_startup -----------------------------  */
+
+__saveds  /*  Establishes A4 as near data pointer, for sc DATA=NEAR/AUTO  */
+
+ULONG cmd_startup(void) {
+  struct Process *Process;
+  struct RDArgs *rdArgs = NULL;
+  UBYTE **argString;
+  struct MyArg myArgs;
+
+  SysBase = (*((struct ExecBase **) 4));
+  Process = (struct Process *) SysBase->ThisTask;
+  if (!(Process->pr_CLI)) {
+    WaitPort(&Process->pr_MsgPort);
+    wbMsg = (struct WBStartup *) GetMsg(&Process->pr_MsgPort);
+    }
+  DOSBase = OpenLibrary("dos.library",37);
+  if (!DOSBase) {
+    ErrLevel = RETURN_FAIL;
+    ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+    goto ShutDown;
+    }
+  UtilityBase = OpenLibrary("utility.library",37);
+  if (!UtilityBase) {
+    ErrLevel = RETURN_FAIL;
+    ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+    goto ShutDown;
+    }
+  GfxBase = (struct GfxBase *) OpenLibrary("graphics.library",37);
+  if (GfxBase == NULL) {
+    ErrLevel = RETURN_FAIL;
+    ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+    goto ShutDown;
+    }
+  if (GfxBase->DisplayFlags & REALLY_PAL)
+    AudioClock = 3546895;  /*  PAL  */
+  else
+    AudioClock = 3579545;  /* NTSC  */
+
+  /*  CLI startup  */
+  if (!wbMsg) {
+    Printf("  What is the purpose of MEMF_PUBLIC!\n");
+    myArgs.filename = NULL;
+    rdArgs = ReadArgs(CLI_TEMPLATE, (LONG *) &myArgs, NULL);
+    if (!rdArgs) {
+      ReportFault2(NULL,IoErr(),RETURN_FAIL);
+      goto ShutDown;
+      }
+    if (argString = myArgs.filename) {
+      do {
+        Printf("  Attempt to load audio file: %s\n",*argString);
+        ParseAudioIFF(*argString);  /*  updates ErrLevel  */
+        argString++;
+        } while ((*argString) && (!ErrLevel));
+      }
+    FreeArgs(rdArgs);
+    }
+
+  /*  Workbench startup  */
+  else {
+    startupWB();
+    }
+
+ShutDown:
+  if (GfxBase)
+    CloseLibrary((struct Library *) GfxBase);
+  if (UtilityBase)
+    CloseLibrary(UtilityBase);
+  if (DOSBase)
+    CloseLibrary(DOSBase);
+  if (wbMsg) {
+    Forbid();
+    ReplyMsg((struct Message *) wbMsg);
+    }
+  if (ErrCode)
+    Process->pr_Result2 = ErrCode;
+  return(ErrLevel);
+  }
+
+
+/*  ------ startupWB -------------  */
+
+ULONG startupWB(void) {
+  struct Screen *screenLock = NULL;
+  struct TextFont *Font = NULL;
+  struct DiskObject *iconObject = NULL;
+  struct WBArg *wbArg;
+  UBYTE *toolTypeString;
+  BPTR oldLock = NULL;
+  BPTR wbStdIO = NULL;
+  BPTR wbInput = NULL;
+  BPTR wbOutput = NULL;
+  UWORD wbArgIndex;
+
+  StatWin = NULL;
+  IntuitionBase = OpenLibrary("intuition.library",37);
+  if (!IntuitionBase) {
+    ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+    ErrLevel = RETURN_FAIL;
+    goto Exit_startupWB;
+    }
+  IconBase = OpenLibrary("icon.library",37);
+  if (!IconBase) {
+    ReportFault2("icon.library V37",NULL,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+  screenLock = LockPubScreen(NULL);
+  if (!screenLock) {
+    ReportFault2("Lock Public Screen Failure",NULL,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+  StatWin = OpenWindowTags(NULL,
+    WA_PubScreen,   screenLock,
+    WA_Left,        10,
+    WA_Top,         10,
+    WA_Width,       288,
+    WA_Height,      64,
+    WA_Title,       "aspool",
+    WA_DepthGadget, TRUE,
+    WA_DragBar,     TRUE,
+    WA_CloseGadget, TRUE,
+    WA_IDCMP,       IDCMP_CLOSEWINDOW,
+    TAG_END
+    );
+  if (!StatWin) {
+    ReportFault2("Open Window Failure",NULL,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+
+  DrawInfo = GetScreenDrawInfo(screenLock);
+  if (!DrawInfo) {
+    ReportFault2("Get Draw Info Failure",NULL,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+  TextAttr.ta_Name = "topaz.font";
+  TextAttr.ta_YSize = 8;
+  TextAttr.ta_Style = FS_NORMAL;
+  TextAttr.ta_Flags = FPF_ROMFONT | FPF_DESIGNED;
+  Font = OpenFont(&TextAttr);
+  if (!Font) {
+    ReportFault2("topaz.font not opened",NULL,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+  IText.FrontPen = DrawInfo->dri_Pens[TEXTPEN];
+  IText.BackPen = DrawInfo->dri_Pens[BACKGROUNDPEN];
+  IText.DrawMode = JAM1;
+  IText.LeftEdge = 0;
+  IText.TopEdge = 0;
+  IText.ITextFont = &TextAttr;
+  IText.IText = NULL;
+  IText.NextText = NULL;
+  Border.DrawMode = JAM1;
+  Border.NextBorder = NULL;
+
+  /*  'Tool' Tool Types  */
+  wbArg = wbMsg->sm_ArgList;
+  if (!(*wbArg->wa_Name)) {
+    ReportFault2("no tool",0,RETURN_FAIL);
+    goto Exit_startupWB;
+    }
+  if (wbArg->wa_Lock) {
+    oldLock = CurrentDir(wbArg->wa_Lock);
+    iconObject = GetDiskObject(wbArg->wa_Name);
+    if (!iconObject) {
+      ReportFault2("Trouble reading Tool Icon",IoErr(),RETURN_FAIL);
+      goto Exit_startupWB;
+      }
+    /*  WB Standard I/O window  */
+    toolTypeString = FindToolType((UBYTE **) iconObject->do_ToolTypes,"WINDOW");
+    if (toolTypeString)
+      wbStdIO = Open(toolTypeString,MODE_READWRITE);
+    else
+      wbStdIO = Open("CON:10/100/300/80/aspool/AUTO/NOCLOSE",MODE_READWRITE);
+    if (!wbStdIO) {
+      ReportFault2("no console avaliable",IoErr(),RETURN_FAIL);
+      FreeDiskObject(iconObject);
+      goto Exit_startupWB;
+      }
+    wbOutput = SelectOutput(wbStdIO);
+    wbInput = SelectInput(wbStdIO);
+    /*  TRIGGER  */
+    toolTypeString = FindToolType((UBYTE **) iconObject->do_ToolTypes,"TRIGGER");
+    if (toolTypeString)
+      Printf("ToolType TRIGGER '%s'\n",toolTypeString);
+    CurrentDir(oldLock);
+    oldLock = NULL;
+    }
+  else {  /*  No Tool Icon present  */
+    wbStdIO = Open("CON:10/100/300/80/aspool/AUTO/NOCLOSE",MODE_READWRITE);
+    if (!wbStdIO) {
+      ReportFault2("no console avaliable",IoErr(),RETURN_FAIL);
+      goto Exit_startupWB;
+      }
+    wbOutput = SelectOutput(wbStdIO);
+    wbInput = SelectInput(wbStdIO);
+    }
+
+  UpdateStatWin(ASPOOL_BAR_BORDER, NULL);
+
+  /*  'Project' Tool Types  */
+  for (wbArgIndex = 1; wbArgIndex < wbMsg->sm_NumArgs; wbArgIndex++) {
+    wbArg++;
+    if (!(*wbArg->wa_Name))
+      ReportFault2("Project Icon <> Directory Icon",NULL,RETURN_WARN);
+    else if (wbArg->wa_Lock) {
+      oldLock = CurrentDir(wbArg->wa_Lock);
+
+      UpdateStatWin(ASPOOL_CLR_FILE_ARG, NULL);
+      UpdateStatWin(ASPOOL_FILENAME, wbArg->wa_Name);
+      UpdateStatWin(ASPOOL_ARGCT, (UBYTE *) wbArgIndex);
+
+      ParseAudioIFF(wbArg->wa_Name);
+      /*  updates ErrLevel  */
+      CurrentDir(oldLock);
+      oldLock = NULL;
+      }
+    else
+      ReportFault2("no lock on project file",NULL,RETURN_WARN);
+    if (ErrLevel) {
+      if (ErrLevel >= RETURN_WARN)
+        goto Exit_startupWB;
+      ErrLevel = RETURN_OK;
+      }
+    }
+  if (wbArgIndex == 1)
+    ReportFault2("No Project Icon selected",NULL,RETURN_FAIL);
+
+Exit_startupWB:
+  if (wbStdIO) {
+    Close(wbStdIO);
+    SelectInput(wbInput);
+    SelectOutput(wbOutput);
+    }
+  if (iconObject)
+    FreeDiskObject(iconObject);
+  if (oldLock)
+    CurrentDir(oldLock);
+  if (Font)
+    CloseFont(Font);
+  if (DrawInfo)
+    FreeScreenDrawInfo(screenLock, DrawInfo);
+  if (screenLock)
+    UnlockPubScreen(NULL, screenLock);
+  if (StatWin)
+    CloseWindow(StatWin);  /* single IDCMP/window requires no msg cleanup, no?  */
+  if (IconBase)
+    CloseLibrary(IconBase);
+  if (IntuitionBase)
+    CloseLibrary(IntuitionBase);
+  return(ErrLevel);
+  }
+
+
+/*  --------------------------- ParseAudioIFF ----------------------------  */
+
+void ParseAudioIFF(UBYTE *filename) {
+  ULONG formsize;
+  GroupHeader groupheader;
+  struct FileInfoBlock audioFileInfo;
+  struct MyInst ParseInst = { 0 };
+
+  if (wbMsg)
+    UpdateStatWin(ASPOOL_CLR_BAR, NULL);
+
+  /*  Open audio file  */
+  CurrentInst = &ParseInst;
+  CurrentInst->instFile = (struct FileHandle *) Open(filename,MODE_OLDFILE);
+  if (CurrentInst->instFile == NULL) {
+    ReportFault2("Open",IoErr(),RETURN_WARN);
+    goto Exit_ParseAudioIFF;
+    }
+  ExamineFH((BPTR) CurrentInst->instFile, &audioFileInfo);
+  CurrentInst->instFileInfo = &audioFileInfo;
+  if (!wbMsg)
+    Printf("  File Size:%8ld\n",audioFileInfo.fib_Size);
+  CurrentInst->instFileUnread = audioFileInfo.fib_Size;
+
+  /*  Read in composite header chunk (IFF file type) */
+  ReadFileData(CurrentInst->instFile, (BYTE *) &groupheader, sizeof(GroupHeader),
+    &CurrentInst->instFileUnread);
+  if (ErrLevel > RETURN_OK)
+    goto Exit_ParseAudioIFF;
+
+  /*  FUTURE: Allow multiple passes, multi-FORMs ???  */
+
+  switch(groupheader.ckID) {
+    case FORM:
+      /*  Declare amount of unread FORM data  */
+      formsize = groupheader.ckSize - sizeof(ID);
+      if (!formsize) {
+        ReportFault2("NULL IFF FORM",0,RETURN_WARN);
+        goto Exit_ParseAudioIFF;
+        }
+      if (!wbMsg)
+        Printf(" 'FORM'Size:%8ld",groupheader.ckSize);
+      if (formsize >= CurrentInst->instFileUnread)
+        formsize = 0;
+      else {
+        formsize = CurrentInst->instFileUnread - formsize;
+        if (!wbMsg)
+          Printf(" %ld extra",formsize);
+        }
+      /*  Process IFF FORM 8SVX  */
+      switch(groupheader.grpSubID) {
+        case ID_8SVX:
+          if (!wbMsg)
+            Printf(" 8SVX\n");
+          ParseChunks8SVX(CurrentInst, formsize);
+          if (ErrLevel >= RETURN_WARN)
+            goto Exit_ParseAudioIFF;
+          break;
+        default:
+          if (!wbMsg)
+            Printf(" ?\n");
+        }
+      break;
+
+    default:
+      ReportFault2("Not IFF FORM",0,RETURN_WARN);
+      goto Exit_ParseAudioIFF;
+
+    }
+
+  if ((!ErrLevel) && (CurrentInst->instFileUnread)) {
+    sprintf(ErrMsg,"post-FORM remaining bytes: %ld",CurrentInst->instFileUnread);
+    ReportFault2(ErrMsg,0,RETURN_OK);
+    }
+
+Exit_ParseAudioIFF:
+  if (CurrentInst->instFile)
+    Close((BPTR) CurrentInst->instFile);
+  }
+
+
+/*  -------------------------- ParseChunks8SVX ---------------------------  */
+
+void ParseChunks8SVX(struct MyInst *CurrentInst, ULONG endform) {
+  LONG l;
+  UBYTE *formID;
+  ChunkHeader chunkheader;
+
+  do {
+    l = CurrentInst->instFileUnread - endform;
+    if (l < sizeof(ChunkHeader)) {
+      sprintf(ErrMsg,"8SVX FORM remaining bytes: %ld", l);
+      ReportFault2(ErrMsg,0,RETURN_OK);
+      while ((l = FGetC((BPTR) CurrentInst->instFile)) != -1) {
+        CurrentInst->instFileUnread -= 1;
+        if (CurrentInst->instFileUnread == endform)
+          break;
+        }
+      goto Exit_ParseChunks8SVX;
+      }
+
+    /*  Read in chunk header */
+    ReadFileData(CurrentInst->instFile, (UBYTE *) &chunkheader, sizeof(ChunkHeader),
+      &CurrentInst->instFileUnread);
+    if (ErrLevel > RETURN_OK)
+      goto Exit_ParseChunks8SVX;
+
+    if (!wbMsg) {
+      formID = (UBYTE *) &chunkheader.ckID;
+      Printf("  8SVX %lc%lc%lc%lc:%8ld+8",
+        formID[0], formID[1], formID[2], formID[3], chunkheader.ckSize);
+      if (chunkheader.ckSize & 1)
+        Printf("+1");
+      Printf("\n");
+      }
+
+    switch (chunkheader.ckID) {
+      case ID_VHDR:  /*  Read in chunk data into Inst Header -------------  */
+        /*  Purge/Allocate Inst Header structure?  */
+        if (CurrentInst->instHeader) {
+          FreeVec(CurrentInst->instHeader);
+          CurrentInst->instHeader = NULL;
+          }
+        CurrentInst->instHeader = AllocVec(chunkheader.ckSize, MEMF_PUBLIC);
+        if (!CurrentInst->instHeader) {
+          ReportFault2("Error, Low Memory",0,RETURN_WARN);
+          goto Exit_ParseChunks8SVX;
+          }
+        ReadFileData(CurrentInst->instFile, CurrentInst->instHeader,
+          chunkheader.ckSize, &CurrentInst->instFileUnread);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_ParseChunks8SVX;
+        break;
+
+      case ID_CHAN:  /*  -------------------------------------------------  */
+        /*  Purge/Allocate Inst Chan structure?  */
+        if (CurrentInst->instChan) {
+          FreeVec(CurrentInst->instChan);
+          CurrentInst->instChan = NULL;
+          }
+        CurrentInst->instChan = AllocVec(chunkheader.ckSize, MEMF_PUBLIC);
+        if (!CurrentInst->instChan) {
+          ReportFault2("Error, Low Memory",0,RETURN_WARN);
+          goto Exit_ParseChunks8SVX;
+          }
+        ReadFileData(CurrentInst->instFile, CurrentInst->instChan,
+          chunkheader.ckSize, &CurrentInst->instFileUnread);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_ParseChunks8SVX;
+        break;
+
+      case ID_BODY:  /*  Read in chunk data into Inst Data area ----------  */
+        PlayInst8SVX(CurrentInst,chunkheader.ckSize);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_ParseChunks8SVX;
+        break;
+
+      default:  /*  Seek to next header chunk ----------------------------  */
+        ReadFileData(CurrentInst->instFile, NULL, chunkheader.ckSize,
+          &CurrentInst->instFileUnread);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_ParseChunks8SVX;
+        break;
+
+      }
+
+    /*  End chunk on even WORD boundary  */
+    if (chunkheader.ckSize & 1) {
+      if (CurrentInst->instFileUnread) {
+        FGetC((BPTR) CurrentInst->instFile);
+        if (!wbMsg)
+          Printf("  read 1 pad byte\n");
+        CurrentInst->instFileUnread -= 1;
+        }
+      }
+
+    } while (CurrentInst->instFileUnread > endform);
+
+Exit_ParseChunks8SVX:
+  if (CurrentInst->instHeader)
+    FreeVec(CurrentInst->instHeader);
+  if (CurrentInst->instChan)
+    FreeVec(CurrentInst->instChan);
+  }
+
+
+/*  --------------------------- PlayInst8SVX -----------------------------  */
+
+void PlayInst8SVX(struct MyInst *CurrentInst, ULONG chunksize) {
+  struct IOAudio aIOAudio;
+  struct IOAudio bIOAudio;
+  struct IOAudio xIOAudio;
+  struct IOAudio *curIOAudio;
+  struct MsgPort *aAudioPort = NULL;
+  struct MsgPort *bAudioPort = NULL;
+  struct MsgPort *xAudioPort = NULL;
+  Voice8Header *v8h;
+  Voice8Type *v8ch;
+  UBYTE *chmsg = "any";
+  ULONG AudioDevice;
+  ULONG curSampleSize,remainSampleSize;
+  UWORD curOctave;
+  UWORD curChannel;
+  /*  default MaxChannels, left/right/stereo channel array  */
+  UWORD MaxChannels = 1;
+  UBYTE ach[] = {1, 2, 4, 8};  /*  any  */
+  UBYTE atrys = 4;
+
+  v8h = (Voice8Header *) CurrentInst->instHeader;
+  v8ch = (Voice8Type *) CurrentInst->instChan;
+
+  /*  CHAN chunk = STEREO then 2 channels  */
+  if (v8ch) {
+    switch(*v8ch) {
+      case CHAN_RIGHT:
+        ach[0] = 1;
+        ach[1] = 8;
+        atrys = 2;
+        chmsg = "RIGHT";
+        break;
+      case CHAN_LEFT:
+        ach[0] = 2;
+        ach[1] = 4;
+        atrys = 2;
+        chmsg = "LEFT";
+        break;
+      case CHAN_STEREO:
+        MaxChannels = 2;
+        ach[0] = 3;
+        ach[1] = 12;
+        atrys = 2;
+        chmsg = "STEREO";
+        break;
+      }
+    }
+
+  if (!wbMsg) {
+    Printf("  oneshot:%7ld",v8h->oneShotHiSamples);
+    Printf("%7ld Hz",       v8h->samplesPerSec);
+    Printf("  CHAN:%7s\n",chmsg);
+
+    Printf("   repeat:%7ld",          v8h->repeatHiSamples);
+    Printf("%7ld Samples/Hi Cycle\n", v8h->samplesPerHiCycle);
+
+    Printf("  Octaves:%2ld", v8h->ctOctave);
+    Printf("  Compressn:%2lX", v8h->sCompression);
+    Printf("  Volume $%lX\n", v8h->volume);
+    }
+  if (v8h->sCompression) {
+    ReportFault2("Unsupported Compression",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+  else if (!v8h->samplesPerSec) {
+    ReportFault2("Illegal sample period of 0",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+
+  if (v8h->oneShotHiSamples > chunksize) {
+    ReportFault2("BODY data < VHDR oneShotHiSamples",0,RETURN_OK);
+    v8h->oneShotHiSamples = chunksize;
+    }
+  if ((!v8h->oneShotHiSamples) && (!v8h->repeatHiSamples)) {
+    ReportFault2("All VHDR ... HiSamples = 0\n  Setting oneshot = BODY",0,RETURN_OK);
+    v8h->oneShotHiSamples = chunksize;
+    }
+  if (!v8h->ctOctave) {
+    ReportFault2("VHDR ctOctave = 0\n  Default to 1",0,RETURN_OK);
+    v8h->ctOctave = 1;
+    }
+
+  aAudioPort = CreateMsgPort();
+  if (!aAudioPort) {
+    ReportFault2("Error, No more ports",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+  bAudioPort = CreateMsgPort();
+  if (!bAudioPort) {
+    ReportFault2("Error, No more ports",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+  xAudioPort = CreateMsgPort();
+  if (!xAudioPort) {
+    ReportFault2("Error, No more ports",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+
+  aIOAudio.ioa_Request.io_Message.mn_ReplyPort = aAudioPort;
+  aIOAudio.ioa_Request.io_Message.mn_Node.ln_Pri = 0;  /*  for now  */
+  aIOAudio.ioa_AllocKey = 0;
+  aIOAudio.ioa_Data = ach;
+  aIOAudio.ioa_Length = atrys;
+  AudioDevice = OpenDevice(AUDIONAME, 0, &aIOAudio, 0);
+  if (AudioDevice) {
+    ReportFault2("Error, No audio channels free",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+  xIOAudio = aIOAudio;
+  xIOAudio.ioa_Request.io_Message.mn_ReplyPort = xAudioPort;
+
+  aIOAudio.ioa_Request.io_Command = CMD_WRITE;
+  aIOAudio.ioa_Request.io_Flags = ADIOF_PERVOL;
+  aIOAudio.ioa_Cycles = 1;
+  aIOAudio.ioa_Volume = 64;
+  aIOAudio.ioa_Request.io_Message.mn_ReplyPort = aAudioPort;
+
+  bIOAudio = aIOAudio;
+  bIOAudio.ioa_Request.io_Message.mn_ReplyPort = bAudioPort;
+
+  for (curChannel = 0; curChannel < MaxChannels; curChannel++) {
+
+  for (curOctave = 0; curOctave < v8h->ctOctave; curOctave++) {
+
+    if (!wbMsg) {
+      Printf("  Attempting to play 8SVX audio octave:%ld",curOctave + 1);
+      Flush(Output());
+      }
+
+    /*  Read in one-shot data --------------------------------------------  */
+
+    if (curSampleSize = v8h->oneShotHiSamples) {
+      if (CurrentInst->instData) {  /*  Purge/Allocate Inst Data ?  */
+        FreeVec(CurrentInst->instData);
+        CurrentInst->instData = NULL;
+        }
+      remainSampleSize = curSampleSize << curOctave;
+      if (remainSampleSize > MAX_CHIP_AUDIO)
+        curSampleSize = MAX_CHIP_AUDIO;
+      else
+        curSampleSize = remainSampleSize;
+      CurrentInst->instData = AllocVec(curSampleSize, MEMF_CHIP);
+      if (!CurrentInst->instData) {
+        ReportFault2("Error, Low CHIP Memory",0,RETURN_WARN);
+        goto Exit_PlayInst8SVX;
+        }
+      ReadFileData(CurrentInst->instFile, CurrentInst->instData, curSampleSize,
+        &CurrentInst->instFileUnread);
+      if (ErrLevel > RETURN_OK)
+        goto Exit_PlayInst8SVX;
+      remainSampleSize -= curSampleSize;
+
+      if (!wbMsg) {
+        Printf(" oneshot");
+        Flush(Output());
+        }
+      aIOAudio.ioa_Request.io_Message.mn_ReplyPort = aAudioPort;
+      aIOAudio.ioa_Request.io_Command = CMD_WRITE;
+      aIOAudio.ioa_Data = CurrentInst->instData;
+      aIOAudio.ioa_Length = curSampleSize;
+      aIOAudio.ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+      BeginIO(&aIOAudio);
+      curIOAudio = &aIOAudio;
+      bIOAudio = aIOAudio;  /*  share everything except ports  */
+
+      /*  oneshot data >128K?  */
+
+      if (remainSampleSize) {
+        if (!wbMsg) {
+          Printf(" >128K");
+          Flush(Output());
+          }
+        if (CurrentInst->instData2) {  /*  Purge/Allocate Inst Data2 ?  */
+          FreeVec(CurrentInst->instData2);
+          CurrentInst->instData2 = NULL;
+          }
+        if (remainSampleSize > MAX_CHIP_AUDIO)
+          curSampleSize = MAX_CHIP_AUDIO;
+        else
+          curSampleSize = remainSampleSize;
+        CurrentInst->instData2 = AllocVec(curSampleSize, MEMF_CHIP);
+        if (!CurrentInst->instData2) {
+          ReportFault2("Error, Low CHIP Memory",0,RETURN_WARN);
+          goto Exit_PlayInst8SVX;
+          }
+        }
+
+      while (remainSampleSize) {
+        if (!wbMsg) {  /*  progress monitor  */
+          Printf(" .");
+          Flush(Output());
+          }
+        if (remainSampleSize > MAX_CHIP_AUDIO)
+          curSampleSize = MAX_CHIP_AUDIO;
+        else
+          curSampleSize = remainSampleSize;
+
+        if (curIOAudio == &aIOAudio) {
+          ReadFileData(CurrentInst->instFile, CurrentInst->instData2, curSampleSize,
+            &CurrentInst->instFileUnread);
+          if (ErrLevel > RETURN_OK)
+            goto Exit_PlayInst8SVX;
+          remainSampleSize -= curSampleSize;
+          bIOAudio.ioa_Request.io_Message.mn_ReplyPort = bAudioPort;
+          bIOAudio.ioa_Data = CurrentInst->instData2;
+          bIOAudio.ioa_Length = curSampleSize;
+          BeginIO(&bIOAudio);
+          if (wbMsg)
+            UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+          WaitSpool(&aIOAudio, &xIOAudio);
+          curIOAudio = &bIOAudio;
+          }
+
+        else {
+          ReadFileData(CurrentInst->instFile, CurrentInst->instData, curSampleSize,
+            &CurrentInst->instFileUnread);
+          if (ErrLevel > RETURN_OK)
+            goto Exit_PlayInst8SVX;
+          remainSampleSize -= curSampleSize;
+          aIOAudio.ioa_Request.io_Message.mn_ReplyPort = aAudioPort;
+          aIOAudio.ioa_Data = CurrentInst->instData;
+          aIOAudio.ioa_Length = curSampleSize;
+          BeginIO(&aIOAudio);
+          if (wbMsg)
+            UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+          WaitSpool(&bIOAudio, &xIOAudio);
+          curIOAudio = &aIOAudio;
+          }
+
+        }
+
+      if (!(v8h->repeatHiSamples)) {
+        if (wbMsg)
+          UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+        WaitSpool(curIOAudio, &xIOAudio);
+        curIOAudio = NULL;
+        if (!wbMsg)
+          Printf("\n");
+        }
+
+      }  /*  if oneShot  */
+
+    /*  Read/Skip repeat data (if any) -----------------------------------  */
+
+    if (curSampleSize = v8h->repeatHiSamples) {
+      curSampleSize = curSampleSize << curOctave;
+
+      if (curSampleSize > MAX_CHIP_AUDIO) {
+        ReadFileData(CurrentInst->instFile, NULL, curSampleSize,
+          &CurrentInst->instFileUnread);
+        if (ErrLevel = RETURN_OK) {
+          remainSampleSize -= curSampleSize;
+          ReportFault2("Skipped:  8SVX repeat portion >128K",0,RETURN_WARN);
+          }
+        goto Exit_PlayInst8SVX;
+        }
+
+      if (curIOAudio == &aIOAudio) {
+
+        /*  If short oneShot followed by repeat, then need to allocate Data2  */
+        if (CurrentInst->instData2) {  /*  Purge/Allocate Inst Data2 ?  */
+          FreeVec(CurrentInst->instData2);
+          CurrentInst->instData2 = NULL;
+          }
+        CurrentInst->instData2 = AllocVec(curSampleSize, MEMF_CHIP);
+        if (!CurrentInst->instData2) {
+          ReportFault2("Error, Low CHIP Memory",0,RETURN_WARN);
+          goto Exit_PlayInst8SVX;
+          }
+
+        ReadFileData(CurrentInst->instFile, CurrentInst->instData2,
+          curSampleSize, &CurrentInst->instFileUnread);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_PlayInst8SVX;
+        remainSampleSize -= curSampleSize;
+        bIOAudio.ioa_Request.io_Message.mn_ReplyPort = bAudioPort;
+        bIOAudio.ioa_Data = CurrentInst->instData2;
+        bIOAudio.ioa_Length = curSampleSize;
+        bIOAudio.ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+        bIOAudio.ioa_Cycles = 10;
+        bIOAudio.ioa_Request.io_Command = CMD_WRITE;
+        BeginIO(&bIOAudio);
+        if (v8h->oneShotHiSamples) {
+          if (wbMsg)
+            UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+          WaitSpool(curIOAudio, &xIOAudio);
+          }
+        curIOAudio = &bIOAudio;
+        }
+
+      else {
+        /*  If short oneShot followed by repeat, then need to allocate Data  */
+        if (CurrentInst->instData) {  /*  Purge/Allocate Inst Data ?  */
+          FreeVec(CurrentInst->instData);
+          CurrentInst->instData2 = NULL;
+          }
+        CurrentInst->instData = AllocVec(curSampleSize, MEMF_CHIP);
+        if (!CurrentInst->instData) {
+          ReportFault2("Error, Low CHIP Memory",0,RETURN_WARN);
+          goto Exit_PlayInst8SVX;
+          }
+
+        ReadFileData(CurrentInst->instFile, CurrentInst->instData,
+          curSampleSize, &CurrentInst->instFileUnread);
+        if (ErrLevel > RETURN_OK)
+          goto Exit_PlayInst8SVX;
+        remainSampleSize -= curSampleSize;
+        aIOAudio.ioa_Request.io_Message.mn_ReplyPort = aAudioPort;
+        aIOAudio.ioa_Data = CurrentInst->instData;
+        aIOAudio.ioa_Length = curSampleSize;
+        aIOAudio.ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+        aIOAudio.ioa_Cycles = 10;
+        aIOAudio.ioa_Request.io_Command = CMD_WRITE;
+        BeginIO(&aIOAudio);
+        if (v8h->oneShotHiSamples) {
+          if (wbMsg)
+            UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+          WaitSpool(curIOAudio, &xIOAudio);
+          }
+        curIOAudio = &aIOAudio;
+        }
+
+      if (!wbMsg)
+        Printf(" repeat\n");
+      if (wbMsg)
+        UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+      WaitSpool(curIOAudio, &xIOAudio);
+      curIOAudio = NULL;
+
+      }  /*  if repeat  */
+
+    }  /*  for curOctave  */
+
+    }
+
+Exit_PlayInst8SVX:
+  if (curIOAudio) {
+    if (!wbMsg)
+      Printf("\n");
+    if (wbMsg)
+      UpdateStatWin(ASPOOL_FILL_BAR, (UBYTE *) CurrentInst);
+    WaitSpool(curIOAudio, &xIOAudio);
+    }
+  if (CurrentInst->instData)
+    FreeVec(CurrentInst->instData);
+  if (CurrentInst->instData2)
+    FreeVec(CurrentInst->instData2);
+  if (!AudioDevice)
+    CloseDevice(&aIOAudio);
+  if (aAudioPort)
+    DeleteMsgPort(aAudioPort);
+  if (bAudioPort)
+    DeleteMsgPort(bAudioPort);
+  if (xAudioPort)
+    DeleteMsgPort(xAudioPort);
+  }
+
+
+/*  --------------------------- ReadFileData -----------------------------  */
+
+void ReadFileData(struct FileHandle *fh, UBYTE *bufptr, ULONG bufsize, ULONG *unread) {
+  ULONG iocount;
+
+  if (bufptr) {
+    iocount = Read((BPTR) fh, bufptr, bufsize);
+    if (iocount == -1)
+      ReportFault2("Read Error",IoErr(),RETURN_WARN);
+    else {
+      if (unread)
+        *unread -= iocount;
+      if (iocount < bufsize) {
+        if (!wbMsg)
+          Printf("  bufsize: %ld  iocount: %ld\n",bufsize,iocount);
+        ReportFault2("Read Error, Incomplete IFF",IoErr(),RETURN_WARN);
+        }
+      }
+    }
+
+  /*  bufptr == NULL, then seek (no data transfer)  */
+  else {
+    iocount = Seek((BPTR) fh, bufsize, OFFSET_CURRENT);
+    if (iocount == -1)
+      ReportFault2("Seek Error",IoErr(),RETURN_WARN);
+    else {
+      if (unread)
+        *unread -= bufsize;
+      }
+    }
+
+  }
+
+
+/*  ------------------------------ WaitSpool -----------------------------  */
+
+#define ASPOOL_PLAY   0
+#define ASPOOL_PAUSED 1
+#define ASPOOL_RESUME 2
+
+void WaitSpool(struct IOAudio *curIOAudio, struct IOAudio *xIOAudio) {
+  struct IntuiMessage *message;
+  struct MsgPort *curAudioPort;
+  struct MsgPort *xAudioPort;
+  ULONG signals;
+  ULONG StatWinSigMask = 0;
+  ULONG AudioSigMask;
+  ULONG msgclass;
+  UWORD msgcode;
+  UWORD TransportMode = ASPOOL_PLAY;
+
+  curAudioPort = curIOAudio->ioa_Request.io_Message.mn_ReplyPort;
+  xAudioPort = xIOAudio->ioa_Request.io_Message.mn_ReplyPort;
+  AudioSigMask = (1 << curAudioPort->mp_SigBit);
+  if (StatWin)
+    StatWinSigMask = (1 << StatWin->UserPort->mp_SigBit);
+
+  do {
+    Printf("waiting ...\n");
+    if (TransportMode == ASPOOL_PAUSED)
+      signals = Wait(StatWinSigMask);
+    else
+      signals = Wait(AudioSigMask | StatWinSigMask);
+
+    if (signals & StatWinSigMask) {
+      while (message = (struct IntuiMessage *) GetMsg(StatWin->UserPort)) {
+        msgclass = message->Class;
+        msgcode = message->Code;
+        ReplyMsg(message);
+        switch (msgclass) {
+          case IDCMP_CLOSEWINDOW:
+            switch (TransportMode) {
+              case ASPOOL_PLAY:
+                if (signals & AudioSigMask)
+                  Printf("pause disabled\n");
+                else {
+                  TransportMode = ASPOOL_PAUSED;
+                  xIOAudio->ioa_Request.io_Command = CMD_STOP;
+                  BeginIO(xIOAudio);
+                  WaitPort(xAudioPort);
+                  message = (struct IntuiMessage *) GetMsg(xAudioPort);
+                  AbortIO(curIOAudio);
+                  Wait(AudioSigMask);
+                  message = (struct IntuiMessage *) GetMsg(curAudioPort);
+                  Printf("pause%lX\n",(ULONG) message);
+                  }
+                break;
+              case ASPOOL_PAUSED:
+                TransportMode = ASPOOL_RESUME;
+                xIOAudio->ioa_Request.io_Command = CMD_START;
+                BeginIO(xIOAudio);
+                WaitPort(xAudioPort);
+                message = (struct IntuiMessage *) GetMsg(xAudioPort);
+                Printf("resume\n");
+                break;
+              }
+            break;
+          default:
+            Printf("Unknown IDCMP event\n");
+          }
+        }
+      }
+
+    } while((!(signals & AudioSigMask)) && (TransportMode == ASPOOL_PAUSED));
+
+  if (TransportMode == ASPOOL_PLAY) {
+    message = (struct IntuiMessage *)  GetMsg(curAudioPort);
+    Printf("audio done%8lX\n",message);
+    }
+
+  }
+
+/*
+      AudioIO->ioa_Request.io_Command = CMD_STOP;
+      BeginIO(AudioIO);
+      WaitPort(AudioIO->ioa_Request.io_Message.mn_ReplyPort);
+      message = (struct IntuiMessage *) GetMsg(AudioIO->ioa_Request.io_Message.mn_ReplyPort);
+
+      AudioIO->ioa_Request.io_Command = CMD_START;
+      BeginIO(AudioIO);
+      WaitPort(AudioIO->ioa_Request.io_Message.mn_ReplyPort);
+      message = (struct IntuiMessage *) GetMsg(AudioIO->ioa_Request.io_Message.mn_ReplyPort);
+*/
+
+
+/*  ---------------------------- UpdateStatWin ---------------------------  */
+
+void UpdateStatWin(UBYTE statuscode, UBYTE *statusmsg) {
+  WORD *BorderData;
+  WORD X, Y, DX, DY;
+  UBYTE str[40];
+
+  switch(statuscode) {
+    case ASPOOL_CLR_FILE_ARG:
+      SetAPen(StatWin->RPort, DrawInfo->dri_Pens[BACKGROUNDPEN]);
+      RectFill(StatWin->RPort, StatWin->BorderLeft + 2, StatWin->BorderTop + 1,
+        (StatWin->Width - 1) - (StatWin->BorderRight + 2),
+        TextAttr.ta_YSize + StatWin->BorderTop + 1
+        );
+      break;
+    case ASPOOL_FILENAME:
+      IText.IText = statusmsg;
+      PrintIText(StatWin->RPort, &IText,
+        (StatWin->BorderLeft + 2),
+        StatWin->BorderTop + 1
+        );
+      break;
+    case ASPOOL_ARGCT:
+      sprintf(str,"%ld",(UWORD) statusmsg);
+      IText.IText = str;
+      PrintIText(StatWin->RPort, &IText,
+        (StatWin->Width - 1) - IntuiTextLength(&IText) - (StatWin->BorderRight + 2),
+        StatWin->BorderTop + 1
+        );
+      break;
+    case ASPOOL_BAR_BORDER:
+      BorderData = (WORD *) str;
+      Border.FrontPen = DrawInfo->dri_Pens[SHADOWPEN];
+      Border.LeftEdge = 0;
+      Border.TopEdge = 0;
+      Border.XY = BorderData;
+      Border.Count = 6;
+      X = StatWin->Width - (StatWin->BorderLeft + 2) - (StatWin->BorderRight + 2) - 1;
+      Y = 20;
+      BorderData[0] = 0;
+      BorderData[1] = Y;
+      BorderData[2] = 0;
+      BorderData[3] = 0;
+      BorderData[4] = X;
+      BorderData[5] = 0;
+
+      BorderData[6] = X - 1;
+      BorderData[7] = 1;
+      BorderData[8] = 1;
+      BorderData[9] = 1;
+      BorderData[10] = 1;
+      BorderData[11] = Y - 1;
+      DrawBorder(StatWin->RPort, &Border,
+        (StatWin->BorderRight + 2), StatWin->BorderTop + TextAttr.ta_YSize + 2);
+      Border.FrontPen = DrawInfo->dri_Pens[SHINEPEN];
+      BorderData[0] = 1;
+      BorderData[1] = Y;
+      BorderData[2] = X;
+      BorderData[3] = Y;
+      BorderData[4] = X;
+      BorderData[5] = 1;
+
+      BorderData[6] = X - 1;
+      BorderData[7] = 2;
+      BorderData[8] = X - 1;
+      BorderData[9] = Y - 1;
+      BorderData[10] = 2;
+      BorderData[11] = Y - 1;
+      DrawBorder(StatWin->RPort, &Border,
+        (StatWin->BorderRight + 2), StatWin->BorderTop + TextAttr.ta_YSize + 2);
+      break;
+    case ASPOOL_CLR_BAR:
+      SetAPen(StatWin->RPort, DrawInfo->dri_Pens[BACKGROUNDPEN]);
+      RectFill(StatWin->RPort,
+        StatWin->BorderLeft + 4, StatWin->BorderTop + TextAttr.ta_YSize + 4,
+        (StatWin->Width - 1) - (StatWin->BorderRight + 4),
+        TextAttr.ta_YSize + StatWin->BorderTop + 4 + (20-4)
+        );
+      break;
+    case ASPOOL_FILL_BAR:
+      SetAPen(StatWin->RPort, DrawInfo->dri_Pens[FILLPEN]);
+      X = StatWin->BorderRight + 4;
+      DX = (StatWin->Width - 1) - X - (StatWin->BorderLeft + 4);
+      Y = (StatWin->BorderTop + 1) + (TextAttr.ta_YSize + 1) + 2;
+      DY = 20 - 4;
+      DX = UDivMod32(
+        UMult32(CurrentInst->instFileInfo->fib_Size - CurrentInst->instFileUnread, DX),
+        CurrentInst->instFileInfo->fib_Size);
+      RectFill(StatWin->RPort, X, Y, X + DX, Y + DY);
+      break;
+    }
+  }
+
+
+/*  ---------------------------- ReportFault2 ----------------------------  */
+
+void ReportFault2(UBYTE *msg, ULONG code, ULONG level) {
+  UBYTE s[64];
+
+  if (level > ErrLevel)
+    ErrLevel = level;
+  if (code) {
+    Fault(code,msg,s,sizeof(s));
+    msg = s;
+    }
+  if (wbMsg) {
+    myES.es_TextFormat = msg;
+    if (ErrLevel < RETURN_WARN)
+      myES.es_GadgetFormat = "continue";
+    else if (ErrLevel < RETURN_FAIL)
+      myES.es_GadgetFormat = "continue|abort";
+    else
+      myES.es_GadgetFormat = "abort";
+    resultES = EasyRequest(NULL, &myES, NULL);
+    switch(resultES) {
+      case 1:
+        ErrLevel = RETURN_WARN-1;
+        break;
+      }
+    }
+  else
+    Printf("  %s\n",msg);
+  }
+@
+
+
+1.6
+log
+@Uses defaults for most non-fatal 8SVX VHDR chunk violations
+CLI template now accepts multiple 8SVX files
+@
+text
+@d15 1
+d18 1
+a18 1
+/*  Extarnal Prototypes  */
+d21 1
+d24 1
+d32 1
+d37 1
+d39 1
+a39 1
+void ParseChunks8SVX(struct MyInst *CurrrentInst);
+d41 3
+a43 1
+void ReadFileData(struct FileHandle *fh, UBYTE *bufptr, ULONG bufsize);
+d48 7
+a55 1
+
+d63 1
+d67 1
+a71 4
+ULONG ErrLevel = RETURN_OK;
+ULONG ErrCode = NULL;
+ULONG resultES;
+ULONG AudioClock;
+d79 12
+a90 3
+BPTR wbStdIO = NULL;
+BPTR wbInput = NULL;
+BPTR wbOutput = NULL;
+a97 2
+struct FileHandle *audiofilehandle;
+UBYTE verstiontag[] = "$VER: aspool 1.6 " __AMIGADATE__;
+d102 2
+a106 3
+  struct WBArg *wbArg;
+  struct DiskObject *iconObject = NULL;
+  UBYTE *toolTypeString;
+a108 2
+  BPTR oldLock = NULL;
+  UWORD wbArgIndex;
+a137 1
+  CloseLibrary((struct Library *) GfxBase);
+d139 1
+a139 1
+  /*  CLI  */
+d153 1
+a153 3
+        if (ErrLevel)
+          goto ShutDown;
+        } while (*argString);
+d155 1
+d158 1
+a158 1
+  /*  Workbench  */
+d160 1
+a160 78
+    IntuitionBase = OpenLibrary("intuition.library",37);
+    IconBase = OpenLibrary("icon.library",37);
+    if ((!IntuitionBase) || (!IconBase)) {
+      ErrLevel = RETURN_FAIL;
+      ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+      goto ShutDown;
+      }
+
+    wbArg = wbMsg->sm_ArgList;  /*  'Tool' Tool Types  */
+    if (*wbArg->wa_Name) {
+      if (wbArg->wa_Lock) {
+        oldLock = CurrentDir(wbArg->wa_Lock);
+        iconObject = GetDiskObject(wbArg->wa_Name);
+        if (iconObject) {
+          /*  WINDOW  */
+          toolTypeString = FindToolType((UBYTE **) iconObject->do_ToolTypes,"WINDOW");
+          if (toolTypeString)
+            wbStdIO = Open(toolTypeString,MODE_READWRITE);
+          else
+            wbStdIO = Open("CON:10/100/300/80/aspool/AUTO/NOCLOSE",MODE_READWRITE);
+          if (!wbStdIO) {
+            ReportFault2("no console avaliable",IoErr(),RETURN_FAIL);
+            FreeDiskObject(iconObject);
+            goto ShutDown;
+            }
+          wbOutput = SelectOutput(wbStdIO);
+          wbInput = SelectInput(wbStdIO);
+          /*  TRIGGER  */
+          toolTypeString = FindToolType((UBYTE **) iconObject->do_ToolTypes,"TRIGGER");
+          if (toolTypeString)
+            Printf("ToolType TRIGGER '%s'\n",toolTypeString);
+          FreeDiskObject(iconObject);
+          }
+        else {
+          ReportFault2("Trouble reading Tool Icon",IoErr(),RETURN_FAIL);
+          goto ShutDown;
+          }
+        CurrentDir(oldLock);
+        oldLock = NULL;
+        }
+      else {  /*  No Tool Icon present  */
+        wbStdIO = Open("CON:10/100/300/80/aspool/AUTO/NOCLOSE",MODE_READWRITE);
+        if (!wbStdIO) {
+          ReportFault2("no console avaliable",IoErr(),RETURN_FAIL);
+          goto ShutDown;
+          }
+        wbOutput = SelectOutput(wbStdIO);
+        wbInput = SelectInput(wbStdIO);
+        }
+      }
+    else {
+      ReportFault2("no tool",0,RETURN_FAIL);
+      goto ShutDown;
+      }
+
+    /*  'Project' Tool Types - ignored for now  */
+    for (wbArgIndex = 1; wbArgIndex < wbMsg->sm_NumArgs; wbArgIndex++) {
+      wbArg++;
+      if (!(*wbArg->wa_Name))
+        ReportFault2("Can not play Directory Icon",0,RETURN_WARN);
+      else if (wbArg->wa_Lock) {
+        oldLock = CurrentDir(wbArg->wa_Lock);
+        Printf("Arg[%ld] '%s'\n",wbArgIndex,wbArg->wa_Name);
+        ParseAudioIFF(wbArg->wa_Name);  /*  updates ErrLevel  */
+        CurrentDir(oldLock);
+        oldLock = NULL;
+        }
+      else
+        ReportFault2("no lock on project file",0,RETURN_WARN);
+      if (ErrLevel) {
+        if (ErrLevel >= RETURN_WARN)
+          goto ShutDown;
+        ErrLevel = RETURN_OK;
+        }
+      }
+
+    if (wbArgIndex == 1)
+      ReportFault2("No Project Icons selected",0,RETURN_FAIL);
+d164 2
+a165 12
+  if (oldLock)
+    CurrentDir(oldLock);
+  if (rdArgs)
+    FreeArgs(rdArgs);
+  if (IntuitionBase)
+    CloseLibrary(IntuitionBase);
+  if (wbMsg)
+    if (wbStdIO) {
+      Close(wbStdIO);
+      SelectInput(wbInput);
+      SelectOutput(wbOutput);
+    }
+d180 173
+a355 1
+  struct MyInst *CurrentInst = NULL;
+d358 5
+d365 4
+a368 3
+  audiofilehandle = (struct FileHandle *) Open(filename,MODE_OLDFILE);
+  if (audiofilehandle == NULL) {
+    ReportFault2("Open",IoErr(),RETURN_FAIL);
+d371 5
+d378 2
+a379 1
+  ReadFileData(audiofilehandle,(BYTE *) &groupheader, sizeof(GroupHeader));
+d383 33
+a415 7
+  /*  Allocate/Init Inst structure  */
+  CurrentInst = AllocVec(sizeof(struct MyInst), MEMF_PUBLIC | MEMF_CLEAR);
+  if (!CurrentInst) {
+    ReportFault2("Error, Low Memory",0,RETURN_WARN);
+    goto Exit_ParseAudioIFF;
+    }
+  CurrentInst->instFile = audiofilehandle;
+d417 2
+a418 6
+  /*  Process IFF FORM  */
+  if (groupheader.ckID == FORM) {
+    /*  Declare amount of unread FORM data  */
+    formsize = groupheader.ckSize - sizeof(ID);
+    if (!formsize) {
+      ReportFault2("NULL IFF FORM",0,RETURN_WARN);
+a419 2
+      }
+    CurrentInst->instFileUnread = formsize;
+d421 1
+a421 6
+    /*  Process IFF FORM 8SVX  */
+    if (groupheader.grpSubID == ID_8SVX) {
+      ParseChunks8SVX(CurrentInst);
+      if (ErrLevel > RETURN_OK)
+        goto Exit_ParseAudioIFF;
+      }
+d423 3
+a425 1
+    goto Exit_ParseAudioIFF;
+a427 2
+  ReportFault2("Error, Unknown/Unsupported IFF Type",0,RETURN_WARN);
+
+d429 2
+a430 11
+  if (CurrentInst) {
+    if (CurrentInst->instHeader)
+      FreeVec(CurrentInst->instHeader);
+    if (CurrentInst->instData)
+      FreeVec(CurrentInst->instData);
+    if (CurrentInst->instData2)
+      FreeVec(CurrentInst->instData2);
+    FreeVec(CurrentInst);
+    }
+  if (audiofilehandle)
+    Close((BPTR) audiofilehandle);
+d436 3
+a438 1
+void ParseChunks8SVX(struct MyInst *CurrentInst) {
+d442 12
+d455 2
+a456 1
+    ReadFileData(CurrentInst->instFile, (UBYTE *) &chunkheader, sizeof(ChunkHeader));
+d460 8
+a467 4
+    /*  Decrement amount of unread FORM data  */
+    CurrentInst->instFileUnread -= sizeof(ChunkHeader);
+    if (chunkheader.ckSize & 1)
+      chunkheader.ckSize++;  /*  pad IFF chunk size to WORD boundary  */
+d470 16
+d487 16
+a502 17
+      case ID_VHDR:  /*  Read in chunk data into Inst Header -------------  */
+      if (!wbMsg)
+        Printf("  8SVX Header:%5ld\n",chunkheader.ckSize);
+      /*  Purge/Allocate Inst Header structure?  */
+      if (CurrentInst->instHeader) {
+        FreeVec(CurrentInst->instHeader);
+        CurrentInst->instHeader = NULL;
+      }
+      CurrentInst->instHeader = AllocVec(chunkheader.ckSize, MEMF_PUBLIC);
+      if (!CurrentInst->instHeader) {
+        ReportFault2("Error, Low Memory",0,RETURN_WARN);
+        goto Exit_ParseChunks8SVX;
+        }
+      ReadFileData(CurrentInst->instFile,CurrentInst->instHeader, chunkheader.ckSize);
+      if (ErrLevel > RETURN_OK)
+        goto Exit_ParseChunks8SVX;
+      break;
+d505 4
+a508 12
+      if (!wbMsg)
+        Printf("  8SVX Body%8ld\n",chunkheader.ckSize);
+      /*  Play must read entire remainder of chunk unless error  */
+      PlayInst8SVX(CurrentInst,chunkheader.ckSize);
+/*    PROCEED NO FURTHER, any file remnant from this point on is probably trash  */
+      CurrentInst->instFileUnread -= (chunkheader.ckSize - 1);
+      if (CurrentInst->instFileUnread > 1) {
+        if (!wbMsg)
+          Printf("  remainder: %ld\n",CurrentInst->instFileUnread);
+        ReportFault2("ignoring 8SVX FORM remainder",0,RETURN_WARN);
+        }
+      goto Exit_ParseChunks8SVX;
+d511 7
+a517 6
+      if (!wbMsg)
+        Printf("  8SVX unknown?%4ld\n",chunkheader.ckSize);
+      ReadFileData(CurrentInst->instFile, NULL, chunkheader.ckSize);
+      if (ErrLevel > RETURN_OK)
+        goto Exit_ParseChunks8SVX;
+      break;
+d519 8
+a527 2
+    CurrentInst->instFileUnread -= chunkheader.ckSize;
+    } while (CurrentInst->instFileUnread);
+d529 2
+d532 4
+d542 7
+a548 6
+  struct IOAudio *AudioIOA = NULL;
+  struct IOAudio *AudioIOB = NULL;
+  struct MsgPort *AudioPortA = NULL;
+  struct MsgPort *AudioPortB = NULL;
+  struct MsgPort *curAudioPort = NULL;
+  struct Message *AudioMessage;
+d550 2
+d554 6
+a559 2
+  UWORD curOctave = 1;
+  UBYTE ach[] = {1,2,4,8};  /*  Audio Channel selection (any)  */
+d562 26
+d590 3
+a592 2
+    Printf("  oneshot:%7ld",          v8h->oneShotHiSamples);
+    Printf("%7ld Hz\n",               v8h->samplesPerSec);
+d597 3
+a599 3
+    Printf("  Octaves:%2ld",          v8h->ctOctave);
+    Printf("  Comp:%2ld",             v8h->sCompression);
+    Printf("  Volume $%lx\n",         v8h->volume);
+d623 3
+a625 3
+  AudioIOA = AllocVec(sizeof(struct IOAudio), MEMF_PUBLIC | MEMF_CLEAR);
+  if (!AudioIOA) {
+    ReportFault2("Error, Low Memory",0,RETURN_WARN);
+d628 2
+a629 2
+  AudioPortA = CreateMsgPort();
+  if (!AudioPortA) {
+d633 2
+a634 7
+  AudioIOB = AllocVec(sizeof(struct IOAudio), MEMF_PUBLIC | MEMF_CLEAR);
+  if (!AudioIOB) {
+    ReportFault2("Error, Low Memory",0,RETURN_WARN);
+    goto Exit_PlayInst8SVX;
+    }
+  AudioPortB = CreateMsgPort();
+  if (!AudioPortB) {
+d638 7
+a644 6
+  AudioIOA->ioa_Request.io_Message.mn_ReplyPort = AudioPortA;
+  AudioIOA->ioa_Request.io_Message.mn_Node.ln_Pri = 0;  /*  for now  */
+  AudioIOA->ioa_AllocKey = 0;
+  AudioIOA->ioa_Data = ach;
+  AudioIOA->ioa_Length = sizeof(ach);
+  AudioDevice = OpenDevice(AUDIONAME, 0, AudioIOA, 0);
+d649 13
+d687 2
+a688 1
+      ReadFileData(CurrentInst->instFile, CurrentInst->instData, curSampleSize);
+d697 8
+a704 11
+      AudioIOA->ioa_Request.io_Message.mn_ReplyPort = AudioPortA;
+      AudioIOA->ioa_Request.io_Command = CMD_WRITE;
+      AudioIOA->ioa_Request.io_Flags = ADIOF_PERVOL;
+      AudioIOA->ioa_Data = CurrentInst->instData;
+      AudioIOA->ioa_Length = curSampleSize;
+      AudioIOA->ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+      AudioIOA->ioa_Volume = 64;
+      AudioIOA->ioa_Cycles = 1;
+      BeginIO(AudioIOA);
+      curAudioPort = AudioPortA;
+      *AudioIOB = *AudioIOA;  /*  share everything except ports  */
+d738 3
+a740 2
+        if (curAudioPort == AudioPortA) {
+          ReadFileData(CurrentInst->instFile, CurrentInst->instData2, curSampleSize);
+d744 8
+a751 7
+          AudioIOB->ioa_Request.io_Message.mn_ReplyPort = AudioPortB;
+          AudioIOB->ioa_Data = CurrentInst->instData2;
+          AudioIOB->ioa_Length = curSampleSize;
+          BeginIO(AudioIOB);
+          WaitPort(AudioPortA);
+          AudioMessage = GetMsg(AudioPortA);
+          curAudioPort = AudioPortB;
+d755 2
+a756 1
+          ReadFileData(CurrentInst->instFile, CurrentInst->instData, curSampleSize);
+d760 8
+a767 7
+          AudioIOA->ioa_Request.io_Message.mn_ReplyPort = AudioPortA;
+          AudioIOA->ioa_Data = CurrentInst->instData;
+          AudioIOA->ioa_Length = curSampleSize;
+          BeginIO(AudioIOA);
+          WaitPort(AudioPortB);
+          AudioMessage = GetMsg(AudioPortB);
+          curAudioPort = AudioPortA;
+d773 4
+a776 3
+        WaitPort(curAudioPort);
+        AudioMessage = GetMsg(curAudioPort);
+        curAudioPort = NULL;
+d789 2
+a790 1
+        ReadFileData(CurrentInst->instFile, NULL, curSampleSize);
+d798 1
+a798 1
+      if (curAudioPort == AudioPortA) {
+d812 1
+a812 1
+          curSampleSize);
+d816 7
+a822 9
+        AudioIOB->ioa_Request.io_Message.mn_ReplyPort = AudioPortB;
+        AudioIOB->ioa_Data = CurrentInst->instData2;
+        AudioIOB->ioa_Length = curSampleSize;
+        AudioIOB->ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+        AudioIOB->ioa_Cycles = 10;
+        AudioIOB->ioa_Request.io_Command = CMD_WRITE;
+        AudioIOB->ioa_Request.io_Flags = ADIOF_PERVOL;
+        AudioIOB->ioa_Volume = 64;
+        BeginIO(AudioIOB);
+d824 3
+a826 2
+          WaitPort(curAudioPort);
+          AudioMessage = GetMsg(curAudioPort);
+d828 1
+a828 1
+        curAudioPort = AudioPortB;
+a831 1
+
+d844 1
+a844 1
+          curSampleSize);
+d848 7
+a854 9
+        AudioIOA->ioa_Request.io_Message.mn_ReplyPort = AudioPortA;
+        AudioIOA->ioa_Data = CurrentInst->instData;
+        AudioIOA->ioa_Length = curSampleSize;
+        AudioIOA->ioa_Period = UDivMod32(AudioClock,v8h->samplesPerSec);
+        AudioIOA->ioa_Cycles = 10;
+        AudioIOA->ioa_Request.io_Command = CMD_WRITE;
+        AudioIOA->ioa_Request.io_Flags = ADIOF_PERVOL;
+        AudioIOA->ioa_Volume = 64;
+        BeginIO(AudioIOA);
+d856 3
+a858 2
+          WaitPort(curAudioPort);
+          AudioMessage = GetMsg(curAudioPort);
+d860 1
+a860 1
+        curAudioPort = AudioPortA;
+d865 4
+a868 3
+      WaitPort(curAudioPort);
+      AudioMessage = GetMsg(curAudioPort);
+      curAudioPort = NULL;
+d874 2
+d877 1
+a877 1
+  if (curAudioPort) {
+d880 3
+a882 2
+    WaitPort(curAudioPort);
+    AudioMessage = GetMsg(curAudioPort);
+d884 4
+d889 7
+a895 9
+    CloseDevice(AudioIOA);
+  if (AudioPortA)
+    DeleteMsgPort(AudioPortA);
+  if (AudioPortB)
+    DeleteMsgPort(AudioPortB);
+  if (AudioIOA)
+    FreeVec(AudioIOA);
+  if (AudioIOB)
+    FreeVec(AudioIOB);
+d901 1
+a901 1
+void ReadFileData(struct FileHandle *fh, UBYTE *bufptr, ULONG bufsize) {
+d908 8
+a915 4
+    else if (iocount < bufsize) {
+      if (!wbMsg)
+        Printf("  bufsize: %ld  iocount: %ld\n",bufsize,iocount);
+      ReportFault2("Read Error, Incomplete IFF",IoErr(),RETURN_WARN);
+d924 190
+d1121 1
+a1121 1
+  static UBYTE s[64];
+@
+
+
+1.5
+log
+@Workbench multi-Icon support
+@
+text
+@d1 1
+a1 1
+/* aspool - nostartup - CLI/WorkBench - SAS/C 6.50 compatible */
+d12 3
+a14 2
+#include <iff/iff.h>
+#include   <iff/8svx.h>
+d23 1
+d30 1
+d35 1
+a35 1
+void PlayInst8SVX(struct MyInst *CurrentInst);
+d37 1
+a37 1
+void ReportFault(UBYTE *ErrMsg);
+d39 1
+a39 1
+#define CLI_TEMPLATE "8SVXNAME/A"
+d44 1
+a44 1
+  UBYTE *filename;
+a58 1
+UBYTE *ErrMsg = NULL;  /*  Error message, altered by Walk../Emit..  */
+d64 1
+d79 1
+a79 1
+UBYTE verstiontag[] = "$VER: aspool 1.5 (02.18.94)";
+d87 4
+d92 1
+a92 2
+  struct WBArg *wbArg;
+  BPTR oldLock;
+d131 1
+a131 1
+      ReportFault("ReadArgs");
+d134 9
+a142 4
+    Printf("  Attempt to load audio file: %s\n",myArgs.filename);
+    ParseAudioIFF(myArgs.filename);
+    if (ErrMsg)
+      ReportFault(ErrMsg);
+d148 2
+a149 1
+    if (IntuitionBase == NULL) {
+d154 45
+a198 3
+    wbStdIO = Open("CON:10/20/300/80/aspool/AUTO/NOCLOSE",MODE_READWRITE);
+    if (!wbStdIO) {
+      ReportFault("no console avaliable");
+d201 8
+a208 7
+    wbOutput = SelectOutput(wbStdIO);
+    wbInput = SelectInput(wbStdIO);
+    Printf("Inherit WINDOW=""..."" how?\n");
+    wbArg = wbMsg->sm_ArgList;
+    wbArg++;  /*  skip 1st arg = executable  */
+    for (wbArgIndex = 1; wbArgIndex < wbMsg->sm_NumArgs; wbArgIndex++, wbArg++) {
+      if (wbArg->wa_Lock) {
+d210 1
+a210 6
+        oldLock = CurrentDir(wbArg->wa_Lock);
+
+        ParseAudioIFF(wbArg->wa_Name);
+        if (ErrMsg)
+          ReportFault(ErrMsg);
+
+d212 1
+d215 10
+a224 5
+        Printf("Arg[%ld] '%s' no lock, skipped\n",wbArgIndex,wbArg->wa_Name);
+      }
+/*
+    ReportFault("workbench interface disabled");
+*/
+d228 2
+d264 1
+a264 1
+    ErrMsg = "Open";
+d270 1
+a270 1
+  if (ErrMsg)
+d276 1
+a276 1
+    ErrMsg = "Error, Low Memory";
+d286 1
+a286 1
+      ErrMsg = "NULL IFF FORM";
+d294 1
+a294 1
+      if (ErrMsg)
+d301 1
+a301 1
+  ErrMsg = "Error, Unknown/Unsupported IFF Type";
+d325 2
+a326 3
+    ReadFileData(CurrentInst->instFile, (UBYTE *) &chunkheader,
+      sizeof(ChunkHeader));
+    if (ErrMsg)
+d338 1
+a338 1
+        Printf("  8SVX Header: %ld\n",chunkheader.ckSize);
+d346 1
+a346 1
+        ErrMsg = "Error, Low Memory";
+d349 2
+a350 3
+      ReadFileData(CurrentInst->instFile,CurrentInst->instHeader,
+        chunkheader.ckSize);
+      if (ErrMsg)
+d356 1
+a356 1
+        Printf("  8SVX Body\n");
+d358 9
+a366 4
+      PlayInst8SVX(CurrentInst);  /*  ------- PLAY SOMETHING -------------  */
+      if (ErrMsg)
+        goto Exit_ParseChunks8SVX;
+      break;
+d370 1
+a370 1
+        Printf("  8SVX unknown?\n");
+d372 1
+a372 1
+      if (ErrMsg)
+a376 1
+
+d386 1
+a386 1
+void PlayInst8SVX(struct MyInst *CurrentInst) {
+d413 1
+a413 2
+    if (!wbMsg)
+      Printf("  Bonk!  Unsupported Compression.\n");
+d417 1
+a417 2
+    if (!wbMsg)
+      Printf("  Bonk!  Illegal sample period of 0.\n");
+d421 13
+d436 1
+a436 1
+    ErrMsg = "Error, Low Memory";
+d441 1
+a441 1
+    ErrMsg = "Error, No more ports";
+d446 1
+a446 1
+    ErrMsg = "Error, Low Memory";
+d451 1
+a451 1
+    ErrMsg = "Error, No more ports";
+d461 1
+a461 1
+    ErrMsg = "Error, No audio channels free";
+d486 1
+a486 1
+        ErrMsg = "Error, Low CHIP Memory";
+d490 1
+a490 1
+      if (ErrMsg)
+d527 1
+a527 1
+          ErrMsg = "Error, Low CHIP Memory";
+d544 1
+a544 1
+          if (ErrMsg)
+d558 1
+a558 1
+          if (ErrMsg)
+d589 1
+a589 1
+        if (!ErrMsg) {
+d591 1
+a591 1
+          ErrMsg = "  Skipped:  8SVX repeat portion >128K";
+d605 1
+a605 1
+          ErrMsg = "Error, Low CHIP Memory";
+d611 1
+a611 1
+        if (ErrMsg)
+d639 1
+a639 1
+          ErrMsg = "Error, Low CHIP Memory";
+d645 1
+a645 1
+        if (ErrMsg)
+d702 6
+a707 3
+      ErrMsg = "Read Error";
+    else if (iocount < bufsize)
+      ErrMsg = "Read Error, Incomplete IFF";
+d714 1
+a714 1
+      ErrMsg = "Seek Error";
+d719 1
+a719 1
+/*  ---------------------------- ReportFault -----------------------------  */
+d721 2
+a722 2
+void ReportFault(UBYTE *ErrMsg) {
+  ULONG e2;
+d724 12
+a735 4
+  if (!wbMsg) {
+    Printf("  ");
+    if (e2 = IoErr())
+      PrintFault(e2,ErrMsg);
+d737 1
+a737 5
+      Printf("%s\n",ErrMsg);
+    }
+  else {
+    myES.es_TextFormat = ErrMsg;
+    myES.es_GadgetFormat = "abort";
+d739 5
+d745 2
+a746 1
+  ErrLevel = RETURN_FAIL;
+@
+
+
+1.4
+log
+@... repeat samples too, floating point removed
+@
+text
+@d11 1
+d65 3
+d76 1
+a76 1
+UBYTE verstiontag[] = "$VER: aspool 1.2 (02.18.94)";
+d85 3
+d107 11
+d119 1
+a119 1
+  /* ----- custom code here ------ */
+d121 1
+d124 1
+a124 1
+    if (rdArgs == NULL) {
+d128 4
+d133 2
+d142 25
+d168 1
+a168 27
+    goto ShutDown;
+    }
+  if (!wbMsg) {
+    Printf("    What is the purpose of MEMF_PUBLIC!\n");
+    Printf("  Attempt to load audio file: %s\n",myArgs.filename);
+    }
+
+  /*  Determine AudioClock value  */
+  GfxBase = (struct GfxBase *) OpenLibrary("graphics.library",37);
+  if (GfxBase == NULL) {
+    ErrLevel = RETURN_FAIL;
+    ErrCode = ERROR_INVALID_RESIDENT_LIBRARY;
+    goto ShutDown;
+    }
+  if (GfxBase->DisplayFlags & REALLY_PAL)
+    AudioClock = 3546895;  /*  PAL  */
+  else
+    AudioClock = 3579545;  /* NTSC  */
+  CloseLibrary((struct Library *) GfxBase);
+
+  /* Examine multiple files here?  */
+
+  /*  Walk through Audio Data  */
+  ParseAudioIFF(myArgs.filename);
+  if (ErrMsg) {
+    ReportFault(ErrMsg);
+    goto ShutDown;
+d176 6
+@
+
+
+1.3
+log
+@now handles IFF FORM 8SVX oneShot samples > 128K
+@
+text
+@d4 2
+a5 2
+#include <exec/types.h>
+#include <exec/memory.h>
+d7 2
+a8 2
+#include <dos/dosextens.h>
+#include <dos/rdargs.h>
+d12 1
+a12 1
+#include <iff/8svx.h>
+d15 1
+a15 1
+/*  Prototypes  */
+d20 9
+d35 2
+a36 4
+/*  Pragmas  */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+a37 3
+#define CLI_TEMPLATE "8SVXNAME/A"
+#define MAX_CHIP_AUDIO 0x20000
+/*  well?  */
+d61 1
+d72 1
+a72 1
+UBYTE verstiontag[] = "$VER: aspool 1.1 (02.14.94)";
+a74 1
+
+d89 7
+a95 1
+  if (DOSBase == NULL) {
+d152 2
+a326 9
+  else if (!v8h->oneShotHiSamples) {
+    if (!wbMsg)
+      Printf("  Bonk!  No 8SVX repeat playback capability.\n");
+    goto Exit_PlayInst8SVX;
+    }
+  else if (v8h->repeatHiSamples) {
+    if (!wbMsg)
+      Printf("  Skipped:  8SVX repeat portion\n");
+    }
+d338 1
+a338 1
+  AudioPortA = CreatePort(0,0);
+d343 10
+d366 5
+d394 1
+a394 1
+        Printf("  Attempting to play 8SVX audio octave:%ld",curOctave + 1);
+d402 1
+a402 1
+      AudioIOA->ioa_Period = (UWORD) (AudioClock/v8h->samplesPerSec);
+d407 1
+a415 16
+        if (!AudioIOB) {
+          AudioIOB = AllocVec(sizeof(struct IOAudio), MEMF_PUBLIC | MEMF_CLEAR);
+          if (!AudioIOB) {
+            ErrMsg = "Error, Low Memory";
+            goto Exit_PlayInst8SVX;
+            }
+          /*  share everything except ports  */
+          *AudioIOB = *AudioIOA;
+          }
+        if (!AudioPortB) {
+          AudioPortB = CreatePort(0,0);
+          if (!AudioPortB) {
+            ErrMsg = "Error, No more ports";
+            goto Exit_PlayInst8SVX;
+            }
+          }
+a446 2
+          AudioIOB->ioa_Request.io_Command = CMD_WRITE;
+          AudioIOB->ioa_Request.io_Flags = ADIOF_PERVOL;
+a448 3
+          AudioIOB->ioa_Period = (UWORD) (AudioClock/v8h->samplesPerSec);
+          AudioIOB->ioa_Volume = 64;
+          AudioIOB->ioa_Cycles = 1;
+a460 2
+          AudioIOA->ioa_Request.io_Command = CMD_WRITE;
+          AudioIOA->ioa_Request.io_Flags = ADIOF_PERVOL;
+a462 3
+          AudioIOA->ioa_Period = (UWORD) (AudioClock/v8h->samplesPerSec);
+          AudioIOA->ioa_Volume = 64;
+          AudioIOA->ioa_Cycles = 1;
+d471 7
+a477 5
+      WaitPort(curAudioPort);
+      AudioMessage = GetMsg(curAudioPort);
+      curAudioPort = NULL;
+      if (!wbMsg)
+        Printf("\n");
+d481 1
+a481 1
+    /*  Skip repeat data (if any) ----------------------------------------  */
+d485 7
+a491 2
+      ReadFileData(CurrentInst->instFile, NULL, curSampleSize);
+      if (ErrMsg)
+d493 75
+d583 1
+a583 1
+    DeletePort(AudioPortA);
+d585 1
+a585 1
+    DeletePort(AudioPortB);
+@
+
+
+1.2
+log
+@more of the same ...
+@
+text
+@d4 1
+d15 1
+d20 4
+a23 3
+void ParseAudioFile(UBYTE *filename);
+void SelectInstSample(struct MyInst *CurrentInst);
+void Play8SVXdata(BYTE *sData, ULONG sLength);
+d26 1
+d32 2
+a33 1
+#define MAX_CHIP_AUDIO 102400
+d41 1
+a41 1
+  Voice8Header *instHeader;
+d43 3
+a45 1
+  struct MyInst *next;
+d67 1
+a67 1
+UBYTE verstiontag[] = "$VER: aspool 1.0 (02.02.94)";
+d70 3
+d111 1
+a111 2
+    Printf("  ... use EXEC list functions, iffparse.libarary functions?\n");
+    Printf("  What is the purpose of MEMF_PUBLIC! ...\n");
+d131 1
+a131 1
+  ParseAudioFile(myArgs.filename);
+d154 4
+a157 2
+void ParseAudioFile(UBYTE *filename) {
+  ULONG iocount;
+d159 1
+a159 4
+  Chunk *formptr = NULL;
+  Chunk *chunkptr;
+  struct MyInst *CurrentInst = NULL;
+  GroupHeader headerbuffer;
+d165 1
+a165 1
+    goto Exit_ParseAudioFile;
+d168 8
+a175 20
+  /*  Read in header chunk  */
+  iocount = Read((BPTR) audiofilehandle,&headerbuffer,sizeof(GroupHeader));
+  if ((iocount == -1) || (iocount < sizeof(GroupHeader))) {
+    ErrMsg = "Error, Not IFF 8SVX file";
+    goto Exit_ParseAudioFile;
+    }
+  if (headerbuffer.ckID != FORM) {
+    ErrMsg = "Error, Not IFF 8SVX file";
+    goto Exit_ParseAudioFile;
+    }
+  if (headerbuffer.grpSubID != ID_8SVX) {
+    ErrMsg = "Error, BAD IFF 8SVX file";
+    goto Exit_ParseAudioFile;
+    }
+
+  /*  Allocate memory for FORM  */
+  formsize = headerbuffer.ckSize - sizeof(ID);
+  /*  technically, formptr is +4 (ID) offset into FORM data  */
+  formptr = (Chunk *) AllocVec(formsize,MEMF_PUBLIC | MEMF_CLEAR);
+  if (formptr == NULL) {
+d177 1
+a177 1
+    goto Exit_ParseAudioFile;
+d179 1
+d181 16
+a196 28
+  /*  Read in form  */
+  iocount = Read((BPTR) audiofilehandle,formptr,formsize);
+  if ((iocount == -1) || (iocount < formsize)) {
+    ErrMsg = "Error, BAD IFF 8SVX file";
+    goto Exit_ParseAudioFile;
+    }
+
+  /*  Ultimately, will parse all 8SVX FORMs contained in file and
+  /*  build linked list to reference any VHDR and BODY chunks that
+  /*  are found.  */
+
+  /*  Evaluate FORM Chunks  */
+  chunkptr = formptr;
+  while (chunkptr < (Chunk *) ((ULONG) formptr + formsize)) {
+    switch(chunkptr->ckID) {
+
+      case ID_VHDR:
+        if (!CurrentInst) {
+          /*  Allocate myInst  */
+          CurrentInst = AllocVec(sizeof(struct MyInst), MEMF_PUBLIC | MEMF_CLEAR);
+          if (!CurrentInst) {
+            ErrMsg = "Error, Low Memory";
+            goto Exit_ParseAudioFile;
+            }
+          }
+          CurrentInst->instType = ID_8SVX;
+          CurrentInst->instHeader = (Voice8Header *) chunkptr->ckData;
+        break;
+d198 2
+a199 21
+      case ID_BODY:
+        if (!CurrentInst) {
+          ErrMsg = "Error, 8SVX data without header";
+          goto Exit_ParseAudioFile;
+          }
+        CurrentInst->instData = chunkptr->ckData;
+
+        /*  Play Audio sample here  */
+        SelectInstSample(CurrentInst);
+        if (ErrMsg)
+          goto Exit_ParseAudioFile;
+        break;
+
+      default:
+        break;
+
+      }  /*  end switch  */
+    chunkptr = (Chunk *) ((ULONG) chunkptr + sizeof(ChunkHeader) + chunkptr->ckSize);
+    if ((ULONG) chunkptr & 1)
+      (ULONG) chunkptr++;
+    }
+d201 1
+a201 1
+  /*  Look for additional FORMs here?  */
+d203 8
+a210 2
+Exit_ParseAudioFile:
+  if (CurrentInst)
+d212 1
+a212 2
+  if (formptr)
+    FreeVec(formptr);
+d218 54
+a271 1
+void SelectInstSample(struct MyInst *CurrentInst) {
+d273 1
+a273 11
+  if (CurrentInst->instType == ID_8SVX) {
+    if (!wbMsg) {
+      Printf("  8SVX Instrument Type\n");
+      Printf("   oneShotHiSamples: %ld\n",CurrentInst->instHeader->oneShotHiSamples);
+      Printf("    repeatHiSamples: %ld\n",CurrentInst->instHeader->repeatHiSamples);
+      }
+    if (CurrentInst->instHeader->oneShotHiSamples) {
+      Play8SVXdata(CurrentInst->instData,CurrentInst->instHeader->oneShotHiSamples);
+      }
+    goto Exit_SelectInstSample;
+    }
+d275 2
+a276 2
+  if (!wbMsg)
+    Printf("  Bonk! Unrecognized Instrument Type\n");
+d278 1
+a278 1
+Exit_SelectInstSample:
+d282 10
+a291 2
+void Play8SVXdata(BYTE *sData, ULONG sLength) {
+  ULONG sbufLength;
+d293 3
+a295 4
+  struct IOAudio *AudioIOA = NULL, *AudioIOB = NULL;
+  struct MsgPort *AudioPortA = NULL, *AudioPortB = NULL;
+  BYTE *sbufData;
+  UBYTE ach[] = {1,2,4,8};
+d297 1
+a297 2
+  if (!wbMsg)
+    Printf("  Playing 8SVX Sample Data ...\n");
+d299 3
+a301 4
+  if (sLength <= MAX_CHIP_AUDIO)
+    sbufLength = sLength;
+  else
+    sbufLength = MAX_CHIP_AUDIO;
+d303 25
+a327 4
+  sbufData = AllocVec(sbufLength,MEMF_CHIP);
+  if (sbufData == NULL) {
+    ErrMsg = "Error, Low CHIP Memory";
+    goto Exit_Play8SVXdata;
+a329 2
+  CopyMem(sData,sbufData,sLength);
+
+d333 1
+a333 1
+    goto Exit_Play8SVXdata;
+d337 2
+a338 2
+    ErrMsg = "Error, No more Ports";
+    goto Exit_Play8SVXdata;
+d341 1
+a341 1
+  AudioIOA->ioa_Request.io_Message.mn_Node.ln_Pri = 0;  /*  For now  */
+d345 1
+a345 1
+  AudioDevice = OpenDevice(AUDIONAME,0,AudioIOA,0);
+d347 2
+a348 2
+    ErrMsg = "Error, No Audio Channels Free";
+    goto Exit_Play8SVXdata;
+d351 156
+a506 3
+Exit_Play8SVXdata:
+  if (AudioDevice)
+    CloseDevice((struct IORequest *) AudioDevice);
+d515 22
+a536 2
+  if (sbufData)
+    FreeVec(sbufData);
+d540 2
+d543 2
+d547 4
+a550 1
+    PrintFault(IoErr(),ErrMsg);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+d9 4
+d15 1
+d18 4
+d28 1
+d32 1
+a32 1
+};
+d34 7
+d44 1
+d46 1
+d50 2
+d56 4
+a59 3
+  "line 1\n%s 2\nline 3",
+  "abort|%ld%|continue"
+};
+a63 1
+  struct WBStartup *wbMsg = NULL;
+d73 1
+a73 1
+  }
+d79 1
+a79 1
+  }
+d86 1
+a86 1
+      PrintFault(IoErr(),"ReadArgs");
+d88 1
+a89 2
+    Printf("  Attempt to load 8SVX file: %s\n",myArgs.filename);
+  }
+d96 8
+d105 15
+a119 7
+    myES.es_StructSize = sizeof(struct EasyStruct);
+    myES.es_Flags = 0;
+    myES.es_Title = "aspool";
+    myES.es_TextFormat = "workbench interface disabled";
+    myES.es_GadgetFormat = "abort";
+    resultES = EasyRequest(NULL, &myES, NULL);
+  }
+d121 6
+d138 1
+a138 1
+  }
+d142 199
+a340 1
+}
+@

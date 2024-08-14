@@ -1,0 +1,596 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  v37r8:1.7 Distillery:1.7;
+locks    ; strict;
+comment  @ * @;
+
+
+1.7
+date     91.03.11.11.14.21;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.01.15.02.35.09;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.12.31.15.22.46;  author J_Toebes;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.18.22.54.18;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.11.05.06.55.21;  author J_Toebes;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.03.03.42;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.22.59.27;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file manipulation routines
+@
+
+
+1.7
+log
+@Correct parameters for the SetFileDate packet.
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987, 1988 The Software Distillery.  All Rights  */
+/* |. o.| || Reserved.	This program may not be distributed without the    */
+/* | .	| || permission of the authors: 			   BBS:    */
+/* | o	| ||   John Toebes     Doug Walker    Dave Baker		   */
+/* |  . |//								   */
+/* ======								   */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* File Manipulation  */
+/*  ActDelete ActRename ActSetProtection ActSetComment */
+/*
+**      $Filename: file.c $ 
+**      $Author: J_Toebes $
+**      $Revision: 1.6 $
+**      $Date: 91/01/15 02:35:09 $
+**      $Log:	file.c,v $
+ * Revision 1.6  91/01/15  02:35:09  J_Toebes
+ * Correct problem with SetData packet.
+ * 
+ * Revision 1.5  90/12/31  15:22:46  J_Toebes
+ * Implement security restrictions for read/write access and prevention of
+ * moving up too many levels.
+ * Corrected the code for ACTION_SET_DATE packet
+ * 
+ * Revision 1.4  90/11/18  22:54:18  J_Toebes
+ * Corrected bug in setfilecomment failing to use the correct argument.
+ * 
+ * Revision 1.3  90/11/05  06:55:21  J_Toebes
+ * Major rewrite to make server multi-threaded with support for multiple
+ * devices.  At this point in time it is not debugged and the concept of
+ * sessions is missing.
+ * 
+**
+**/
+
+#include "server.h"
+
+ACTFN(RmtDelete)
+{
+   /* Arg1: Lock        */
+   /* Arg2: Name        */
+   struct MsgPort *port;
+   
+   BUG(("RmtDelete, lock %lx\n", spkt->sp_RP->Arg1));
+   BUGBSTR("File to delete is ", spkt->sp_RP->DataP);
+
+   spkt->sp_RP->DLen = 0;
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg1,
+                                  spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+   spkt->sp_Pkt.dp_Arg2 = (LONG)MKBADDR(spkt->sp_RP->DataP);
+
+   Dispatch(global, spkt, ACTION_RETURN, port);
+}
+
+ACTFN(RmtRename)
+{
+   /* Arg1: FromLock    */
+   /* Arg2: FromName   in DataP */
+   /* Arg3: ToLock      */
+   /* Arg4: ToName     in DataP+FILENAMELEN */
+   struct MsgPort *port1, *port2;
+
+   BUG(("RmtRename\n"));
+   BUGBSTR("Renaming ", spkt->sp_RP->DataP);
+   BUGBSTR("New Name ", spkt->sp_RP->DataP+FILENAMELEN);
+
+   spkt->sp_Pkt.dp_Arg2 = (LONG)MKBADDR(spkt->sp_RP->DataP);
+   spkt->sp_Pkt.dp_Arg4 = (LONG)MKBADDR(spkt->sp_RP->DataP+FILENAMELEN);
+   spkt->sp_RP->DLen    = 0;
+
+   if ((port2 = GetRDevice(global, spkt, (ELOCK)spkt->sp_RP->Arg3,
+                            spkt->sp_RP->DataP+FILENAMELEN, ATTEMPT_ACCESS)) == NULL)
+   {
+      return;
+   }
+   spkt->sp_Pkt.dp_Arg3 = spkt->sp_Pkt.dp_Arg1;
+
+   if ((port1 = GetRDevice(global, spkt, (ELOCK)spkt->sp_RP->Arg1,
+                                   spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+
+   if (port1 != port2)
+   {
+      spkt->sp_RP->Arg1 = DOS_FALSE;
+      spkt->sp_RP->Arg2 = ERROR_RENAME_ACROSS_DEVICES;
+      return;
+   }
+
+   Dispatch(global, spkt, ACTION_RETURN, port1);
+}
+
+ACTFN(RmtSetProtection)
+{
+   /* Arg1: Unused */
+   /* Arg2: Lock */
+   /* Arg3: Name */
+   /* Arg4: Mask of protection */
+   struct MsgPort *port;
+
+   BUG(("RmtSetProtection\n"));
+   BUGBSTR("File to protect: ", spkt->sp_RP->DataP);
+
+   spkt->sp_RP->DLen = 0;
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg2,
+                                  spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+   spkt->sp_Pkt.dp_Arg2 = spkt->sp_Pkt.dp_Arg1;
+   spkt->sp_Pkt.dp_Arg3 = (LONG)MKBADDR(spkt->sp_RP->DataP);
+
+   Dispatch(global, spkt, ACTION_RETURN, port);
+}
+
+ACTFN(RmtSetComment)
+{
+   /* Arg1: Unused */
+   /* Arg2: Lock */
+   /* Arg3: Name */
+   /* Arg4: Comment */
+   /* DEBUG THIS ONE WELL! */
+   char *comment;
+   int len;
+   struct MsgPort *port;
+
+   BUG(("RmtSetComment\n"));
+
+   len = (BSTRLEN(spkt->sp_RP->DataP)+4) & ~3;
+   comment = ((char *)spkt->sp_RP->DataP)+len;
+
+   BUGBSTR("File to Comment: ", spkt->sp_RP->DataP);
+   BUGBSTR("Comment Text: ",    comment);
+
+   spkt->sp_RP->DLen = 0;
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg2,
+                                  spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+
+   spkt->sp_Pkt.dp_Arg2 = spkt->sp_Pkt.dp_Arg1;
+   spkt->sp_Pkt.dp_Arg3 = (LONG)MKBADDR(spkt->sp_RP->DataP);
+   spkt->sp_Pkt.dp_Arg4 = (LONG)MKBADDR(comment);
+
+   Dispatch(global, spkt, ACTION_RETURN, port);
+}
+
+
+ACTFN(RmtSetFileDate)
+{
+   /* Arg1: Unused */
+   /* Arg2: BPTR Lock */
+   /* Arg3: Name */
+   /* Arg4: BPTR DateStamp */
+   struct MsgPort *port;
+   char *buf;
+   
+   BUG(("RmtSetFileDate\n"))
+   buf = spkt->sp_RP->DataP+sizeof(struct DateStamp);
+   
+   spkt->sp_RP->DLen = 0;
+
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg2,
+                                  buf, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+
+   spkt->sp_Pkt.dp_Arg2 = spkt->sp_Pkt.dp_Arg1;
+   spkt->sp_Pkt.dp_Arg3 = (LONG)MKBADDR(buf);
+   spkt->sp_Pkt.dp_Arg4 = (LONG)spkt->sp_RP->DataP;
+
+   Dispatch(global, spkt, ACTION_RETURN, port);
+}
+@
+
+
+1.6
+log
+@Correct problem with SetData packet.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.5 $
+**      $Date: 90/12/31 15:22:46 $
+d17 3
+d156 4
+a159 4
+   /* Arg1: BPTR Lock */
+   /* Arg2: BPTR DateStamp */
+   /* Arg3: Unused */
+   /* Arg4: Unused */
+d161 2
+a162 1
+   char buf[10];
+d164 2
+a165 2
+
+   spkt->sp_Pkt.dp_Arg2 = MKBADDR(spkt->sp_RP->DataP);
+a166 1
+   buf[0] = 0;
+d168 1
+a168 1
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg1,
+d173 4
+@
+
+
+1.5
+log
+@Implement security restrictions for read/write access and prevention of
+moving up too many levels.
+Corrected the code for ACTION_SET_DATE packet
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.4 $
+**      $Date: 90/11/18 22:54:18 $
+d17 5
+d158 1
+d163 1
+d166 1
+a166 1
+                                  spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+@
+
+
+1.4
+log
+@Corrected bug in setfilecomment failing to use the correct argument.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.3 $
+**      $Date: 90/11/05 06:55:21 $
+d17 3
+d40 2
+a41 2
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg1,
+                                  spkt->sp_RP->DataP)) == NULL)
+d66 9
+a74 4
+   if (((port1 = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg1,
+                                   spkt->sp_RP->DataP)) == NULL) ||
+       ((port2 = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg3,
+                                   spkt->sp_RP->DataP+FILENAMELEN)) == NULL))
+d101 2
+a102 2
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg2,
+                                  spkt->sp_RP->DataP)) == NULL)
+d106 1
+d132 2
+a133 2
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg2,
+                                  spkt->sp_RP->DataP)) == NULL)
+d138 1
+d148 4
+a151 5
+   /* Arg1: Unused */
+   /* Arg2: BPTR Lock */
+   /* Arg3: Name (BPTR to BSTR) /
+   /* Arg4: APTR (!) to DateStamp */
+   int len;
+d155 1
+a155 1
+   spkt->sp_Pkt.dp_Arg3 = MKBADDR(spkt->sp_RP->DataP);
+d158 2
+a159 2
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg1,
+                                  spkt->sp_RP->DataP)) == NULL)
+a162 2
+   len = (BSTRLEN(spkt->sp_RP->DataP)+4) & ~3;
+   spkt->sp_Pkt.dp_Arg4 = (LONG)(spkt->sp_RP->DataP+len);  /* NOT A BADDR!!!! */
+@
+
+
+1.3
+log
+@Major rewrite to make server multi-threaded with support for multiple
+devices.  At this point in time it is not debugged and the concept of
+sessions is missing.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.4 $
+**      $Date: 90/11/04 17:36:27 $
+d17 5
+d116 3
+d120 1
+d123 1
+a123 1
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg1,
+a129 2
+   len = (BSTRLEN(spkt->sp_RP->DataP)+4) & ~3;
+   comment = ((char *)spkt->sp_RP->DataP)+len;
+@
+
+
+1.2
+log
+@Change interface to Dispatch
+@
+text
+@d11 8
+d22 1
+a22 6
+void
+RmtDelete(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;	/* a pointer to the dos packet sent   */
+			/* Arg1: Lock	*/
+			/* Arg2: Name	*/
+d24 2
+d27 3
+a29 2
+   BUG(("RmtDelete, lock %lx\n", global->RP.Arg1));
+   BUGBSTR("File to delete is ", global->RP.DataP);
+d31 7
+a37 9
+   pkt->dp_Arg1 = global->RP.Arg1;
+   MBSTR(global->RP.DataP, global->fib);
+   if ((port = GetRDevice(global, pkt->dp_Arg1, global->fib)) == NULL)
+   {
+      return;
+   }
+   pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+
+   Dispatch(global, port);
+d39 1
+a39 1
+   global->RP.DLen = 0;
+d42 1
+a42 7
+void
+RmtRename(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;	/* Arg1: FromLock	*/
+			/* Arg2: FromName	*/
+			/* Arg3: ToLock 	*/
+			/* Arg4: ToName 	*/
+d44 4
+a47 1
+   char *name;
+d51 2
+a52 2
+   BUGBSTR("Renaming ", global->RP.DataP);
+   BUGBSTR("New Name ", global->RP.DataP+FILENAMELEN);
+d54 8
+a61 11
+   pkt->dp_Arg1 = global->RP.Arg1;
+   MBSTR(global->RP.DataP, global->fib);
+   if ((port1 = GetRDevice(global, pkt->dp_Arg1, global->fib)) == NULL)
+   {
+      return;
+   }
+   pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+   pkt->dp_Arg3 = global->RP.Arg3;
+   name = ((char *)global->fib)+FILENAMELEN;
+   MBSTR(global->RP.DataP+FILENAMELEN, name);
+   if ((port2 = GetRDevice(global, pkt->dp_Arg1, global->RP.DataP+FILENAMELEN)) == NULL)
+a64 1
+   pkt->dp_Arg4 = (LONG)MKBADDR(name);
+d68 2
+a69 2
+      global->RP.Arg1 = DOS_FALSE;
+      global->RP.Arg2 = ERROR_RENAME_ACROSS_DEVICES;
+a71 1
+   Dispatch(global, port1);
+d73 1
+a73 1
+   global->RP.DLen = 0;
+d76 1
+a76 7
+void
+RmtSetProtection(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;	/* Arg1: Unused */
+			/* Arg2: Lock */
+			/* Arg3: Name */
+			/* Arg4: Mask of protection */
+d78 4
+d83 1
+d85 1
+a85 1
+   BUGBSTR("File to protect: ", global->RP.DataP);
+d87 7
+a93 8
+   pkt->dp_Arg2 = global->RP.Arg2;
+   MBSTR(global->RP.DataP, global->fib);
+   if ((port = GetRDevice(global, pkt->dp_Arg2, global->fib)) == NULL)
+   {
+      return;
+   }
+    pkt->dp_Arg3 = (LONG)MKBADDR(global->fib);
+    pkt->dp_Arg4 = global->RP.Arg4;
+d95 1
+a95 3
+    Dispatch(global, port);
+
+    global->RP.DLen = 0;
+d98 1
+a98 8
+void
+RmtSetComment(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;	/* a pointer to the dos packet sent	  */
+			/* Arg1: Unused */
+			/* Arg2: Lock */
+			/* Arg3: Name */
+			/* Arg4: Comment */
+d100 4
+d105 3
+a107 3
+    char *comment;
+    int len;
+    struct MsgPort *port;
+d109 1
+a109 15
+    BUG(("RmtSetComment\n"));
+
+    BUGBSTR("File to Comment: ", global->RP.DataP);
+
+    pkt->dp_Arg2 = global->RP.Arg2;
+    MQ(global->RP.DataP, global->fib, global->RP.DLen);
+    if ((port = GetRDevice(global, pkt->dp_Arg1, global->fib)) == NULL)
+    {
+       return;
+    }
+    pkt->dp_Arg3 = (LONG)MKBADDR(global->fib);
+    len = BSTRLEN(global->RP.DataP)+1;
+    len = (((len+3)>>2)<<2);
+    comment = ((char *)global->fib)+len;
+    pkt->dp_Arg4 = (LONG)MKBADDR(comment);
+d111 1
+a111 1
+    Dispatch(global, port);
+d113 13
+a125 1
+    global->RP.DLen = 0;
+d129 1
+a129 6
+void RmtSetFileDate(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+                        /* Arg2: BPTR Lock */
+                        /* Arg3: Name (BPTR to BSTR) /
+                        /* Arg4: APTR (!) to DateStamp */
+d131 4
+d139 2
+a140 9
+   pkt->dp_Arg2 = global->RP.Arg2;
+   MQ(global->RP.DataP, global->fib, global->RP.DLen);
+   pkt->dp_Arg3 = MKBADDR(global->fib);
+   if ((port = GetRDevice(global, pkt->dp_Arg1, global->fib)) == NULL)
+   {
+      return;
+   }
+   len = (((BSTRLEN(global->fib)+4)>>2)<<2);
+   pkt->dp_Arg4 = (LONG)(global->fib+len);  /* NOT A BADDR!!!! */
+d142 7
+a148 1
+   Dispatch(global, port);
+d150 1
+a150 1
+   global->RP.DLen = 0;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d21 3
+a23 2
+    BUG(("RmtDelete, lock %lx\n", global->RP.Arg1));
+    BUGBSTR("File to delete is ", global->RP.DataP);
+d25 7
+a31 3
+    pkt->dp_Arg1 = global->RP.Arg1;
+    MBSTR(global->RP.DataP, global->fib);
+    pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+d33 1
+a33 1
+    Dispatch(global);
+d35 1
+a35 1
+    global->RP.DLen = 0;
+d46 2
+a47 13
+    char *name;
+
+    BUG(("RmtRename\n"));
+    BUGBSTR("Renaming ", global->RP.DataP);
+    BUGBSTR("New Name ", global->RP.DataP+FILENAMELEN);
+
+    pkt->dp_Arg1 = global->RP.Arg1;
+    MBSTR(global->RP.DataP, global->fib);
+    pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+    pkt->dp_Arg3 = global->RP.Arg3;
+    name = ((char *)global->fib)+FILENAMELEN;
+    MBSTR(global->RP.DataP+FILENAMELEN, name);
+    pkt->dp_Arg4 = (LONG)MKBADDR(name);
+d49 27
+a75 1
+    Dispatch(global);
+d77 1
+a77 1
+    global->RP.DLen = 0;
+d88 3
+a90 1
+    BUG(("RmtSetProtection\n"));
+d92 6
+a97 4
+    BUGBSTR("File to protect: ", global->RP.DataP);
+
+    pkt->dp_Arg2 = global->RP.Arg2;
+    MBSTR(global->RP.DataP, global->fib);
+d101 1
+a101 1
+    Dispatch(global);
+d115 1
+d118 1
+d126 4
+d136 1
+a136 1
+    Dispatch(global);
+d150 1
+d156 4
+d163 1
+a163 1
+   Dispatch(global);
+@

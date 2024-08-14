@@ -1,0 +1,678 @@
+head	40.18;
+access;
+symbols;
+locks; strict;
+comment	@ * @;
+
+
+40.18
+date	93.05.20.22.52.18;	author LPOMA;	state Exp;
+branches;
+next	38.15;
+
+38.15
+date	92.12.16.01.15.14;	author LPOMA;	state Exp;
+branches;
+next	38.14;
+
+38.14
+date	92.11.25.13.30.53;	author LPOMA;	state Exp;
+branches;
+next	38.10;
+
+38.10
+date	92.08.07.01.22.45;	author LPOMA;	state Exp;
+branches;
+next	38.9;
+
+38.9
+date	92.06.23.00.29.42;	author LPOMA;	state Exp;
+branches;
+next	38.7;
+
+38.7
+date	92.05.06.10.33.30;	author LPOMA;	state Exp;
+branches;
+next	38.5;
+
+38.5
+date	92.03.30.13.52.33;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.18.12;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.18
+log
+@Mostly struct name changes to support the enhanced Key in the lock.
+
+Fixed a problem in the RES2 return value for ACTION_DISK_INFO if a
+ARG1 = lock = 0.
+@
+text
+@/*** DPswitch_Status.c ***************************************************************
+** Copyright 1991 CONSULTRON
+****************************************************************************/
+
+#include "FS:FS.h"
+#include "dos.h"
+
+/*---------------------------------------------------------------------------
+** References to system
+*/
+
+extern char             DeviceName[];
+
+struct DosLibrary       *DOSBase=0;
+
+extern int              DOSerror;
+extern APTR             NewProc_seglist;
+extern APTR             Data_seg;
+extern struct ExecBase  *SysBase;
+
+
+extern struct MemEntry  *MemEntry;
+extern struct Process   *StatusProc;
+extern struct MsgPort   *StatusPort;
+extern struct Process   *Proc;
+extern struct MsgPort   *DOSPort;
+extern struct FS        *fsys;
+
+static int Disk_Info(register struct InfoData *infodata);
+static int DInfo(struct MLock *filelock, struct InfoData *infodata);
+
+/**********************************************************************
+*   FileSystem_Status() --- performs the DOS packet status calls such as
+*       ACTION_INFO, ACTION_DISK_INFO, ACTION_CURRENT_VOLUME and 
+*       ACTION_IS_FILESYSTEM.
+*       It forwards the other calls to the other FileSystem task (mostly
+*       device IO related stuff).
+**********************************************************************/
+void FileSystem_Status()
+{ 
+    struct DosPacket    *pkt;
+    register int        DOSreturn=DOSFALSE;
+    struct MsgPort      *SPort = StatusPort;
+    struct MsgPort      *replyport;
+    UBYTE               die=0;
+    UBYTE               noreply=0;
+    register struct Message  *msg;
+    struct DeviceNode   *DevNode=0;
+    struct FileSysStartupMsg *Fssm;
+    UBYTE               *temp;
+    int                 i;
+
+#define ARG1    pkt->dp_Arg1
+#define ARG2    pkt->dp_Arg2
+#define ARG3    pkt->dp_Arg3
+#define ARG4    pkt->dp_Arg4
+#define ARG5    pkt->dp_Arg5
+#define ARG6    pkt->dp_Arg6
+#define ARG7    pkt->dp_Arg7
+
+
+    if( !(DOSBase = (struct DosLibrary *)OpenLibrary(DOSNAME, LIB_VERS)) ) goto QUIT;
+
+/*** Initialization code for first packet received ****/
+                /* Create new process to pass DOS pkts to perform actual disk IO */
+    pkt = WaitPkt();
+
+    Forbid();
+#define NEWPROCPRI      10
+#define MIN_STACK_SZ    4000
+    if((DOSPort = CreateProc(StatusProc->pr_Task.tc_Node.ln_Name, 
+        NEWPROCPRI, MKBPTR(NewProc_seglist), MIN_STACK_SZ)) == 0)
+    {
+        goto QUIT;   /* return; proceed no further */
+    }
+/* Pass the data seg pointer which is in register A4 to the child process. */
+    ((struct Task *)DOSPort->mp_SigTask)->tc_UserData = (APTR)&Data_seg;
+    Permit();
+
+    if(fsys->f_DevNode = DevNode = (struct DeviceNode *) BADDR(ARG3))    /* passed DeviceNode from ARG3 if available*/
+    {
+        DevNode->dn_Task= SPort;   /* make sure DOS sends DOS pkts to this task */
+        DevNode->dn_GlobalVec= (BPTR)fsys;  /* Debug info; temp use */
+        Install_on_FileSysRes(DevNode->dn_SegList);
+    }
+    Fssm = (struct FileSysStartupMsg *) BADDR(ARG2);    /* passed FileSysStartupMsg from ARG2 */
+    fsys->f_fssm = Fssm;
+
+    temp = ((UBYTE *)BADDR(ARG1));   /* get device name from ARG1 */
+    for(i=temp[0]-1; i>0; i--)            /* Copy the device name */
+    {
+        /* for some reason, DeviceName has the ':' tacked on the end.  Get rid of it */
+        if(temp[i] == ':') DeviceName[i-1] = '\0';
+        else DeviceName[i-1] = toupper(temp[i]); /* convert to uppercase */
+    } 
+    DeviceName[temp[0]]  = '\0';    /* Add null at the end of the name */
+
+    AllocSignal(SIGB_KILLPARENT);
+
+    replyport = pkt->dp_Port;   /* save the replyport of the originator */
+
+/*** For reasons that may seem strange, This code has been added to support a
+    very peculiar feature of the mfm.device driver.  As of 38.6 of mfm.device,
+    it installs the appropriate TDPatch needed under KS 33 or 34.  To do so
+    correctly, we can not assume that the patch will be installed.  If the user
+    uses CrossDOS from the product disk only, then we must execute the TDPatch
+    from the current directory.  If KS 2.0 or higher is used this code is run
+    but is useless.  Backwards compatibility.  Isn't it GRAND!
+**********/
+    StatusProc->pr_CurrentDir = ((struct Process *)replyport->mp_SigTask)->pr_CurrentDir;
+
+    SendPkt(pkt, DOSPort, SPort);   /* pass initial pkt off to filesystem process */
+
+    if(pkt = WaitPkt())    /* Wait for startup pkt to come back */
+    {
+        DOSreturn = pkt->dp_Res1;
+        SendPkt(pkt, replyport, SPort);   /* Send startup pkt back to DOS */
+    }
+    if(DOSreturn == DOSFALSE) goto QUIT; /* check startup packet for successful child startup */
+
+/**********************************************************************
+*   Check for DOS Packet 
+**********************************************************************/
+    while(!die && (pkt = WaitPkt()))
+    {
+
+/**********************/
+/* Process Packet types. */
+        DOSreturn= DOSFALSE;
+        DOSerror= 0;
+
+        switch(pkt->dp_Type)
+        {
+        case ACTION_INFO:
+
+DPRTF(KPrintF("\naction_INFO"));
+
+            DOSreturn = MKBPTR( DInfo( BADDR(ARG1),BADDR(ARG2)));
+DPRTF(KPrintF("\n\tLock = %lxH  InfoData = %lxH  Result1 = %ld  Result2 = %ld",
+    BADDR(ARG1), BADDR(ARG2), DOSreturn, DOSerror));
+            break;
+
+        case ACTION_CURRENT_VOLUME:
+
+DPRTF(KPrintF("\naction_CURRENT_VOLUME"));
+
+/* I found this out as of 8/2/90!  NOT DOCUMENTED anywhere in specs available at this time! */
+/* if dp_Arg1 != 0 then = fh_Arg1 which in my case is a lock.  Get current volume node from lock */
+            if(ARG1)
+            {
+                DOSreturn = ((struct MLock *)ARG1)->ml_Volume;
+            }
+
+             else
+            {
+                DOSreturn = MKBPTR(fsys->f_VolumeNode);
+            }
+            DOSerror = fsys->f_fssm->fssm_Unit;
+
+DPRTF(KPrintF("\n\tLock = %lxH  VolNode = %lxH  unit = %ld", ARG1, BADDR(DOSreturn), DOSerror));
+
+            break;
+
+        case ACTION_DISK_INFO:
+
+DPRTF(KPrintF("\naction_DISK_INFO  "));
+
+            DOSreturn = MKBPTR( Disk_Info( BADDR(ARG1)));
+
+DPRTF(KPrintF("\n\tInfoData = %lxH  Result1 = %ld  Result2 = %ld",
+    BADDR(ARG1), DOSreturn, DOSerror));
+
+            break;
+
+
+        case ACTION_IS_FILESYSTEM:
+
+DPRTF(KPrintF("\naction_IS_FILESYSTEM"));
+
+            DOSreturn = DOSTRUE;
+            break;
+
+        case ACTION_DIE:
+DPRTF(KPrintF("\naction_DIE"));
+            DOSreturn= DOSTRUE;
+            die = 1;
+
+        case ACTION_STARTUP:
+DPRTF(KPrintF("\naction_STARTUP"));
+        default:
+DPRTF(KPrintF("\naction = %ld",pkt->dp_Type));
+DPRTF(KPrintF("\n%lxH",ARG1));
+DPRTF(KPrintF("  %lxH",ARG2));
+DPRTF(KPrintF("  %lxH",ARG3));
+DPRTF(KPrintF("  %lxH",ARG4));
+
+PassOnDOSPkt:
+            SendPkt(pkt, DOSPort, pkt->dp_Port);
+/* if die = 1, after this point, do not use anything from _fsys or the data seg */
+/* This is because you cannot trust that it will still be there */
+            noreply = 1;
+
+            break;
+        }
+
+        if( !noreply )
+        {
+            ReplyPkt(pkt,DOSreturn, DOSerror);
+        }
+          else noreply = 0;    /* clear flag */
+    }
+
+
+/**********************************************************************
+*   QUIT the File System!
+**********************************************************************/
+QUIT:
+    if(DevNode)
+    {
+        DevNode->dn_Task= NULL;     /* bad if someone in process of accessing us . . . */
+        DevNode->dn_GlobalVec= -1;
+    }
+       /*  Return packets not used */
+    while(msg = (struct Message *) GetMsg(SPort))
+    {
+        if(pkt = (struct DosPacket *) msg->mn_Node.ln_Name)
+        {
+            ReplyPkt(pkt,DOSFALSE,ERROR_ACTION_NOT_KNOWN);
+        }
+    }
+    Wait(SIGF_KILLPARENT);  /* Wait for child process to signal that he is dead */
+    if(DOSBase) CloseLibrary((struct Library *)DOSBase);
+}
+
+
+/*************
+* Disk_Info()  --- Get disk info and fill supplied InfoData struct
+*************/
+static int Disk_Info(register struct InfoData *infodata)
+{
+
+    if(infodata)
+    {
+        infodata->id_UnitNumber   = fsys->f_fssm->fssm_Unit;
+        infodata->id_NumSoftErrors= fsys->f_NumSoftErrors;
+        infodata->id_NumBlocksUsed= fsys->f_used_blocks;
+        infodata->id_VolumeNode   = 0;
+        infodata->id_InUse        = 0;
+        infodata->id_NumBlocks    = fsys->f_blocks_part;
+        infodata->id_BytesPerBlock= fsys->f_bytes_block;
+        if(fsys->f_Diskflags & WRITE_PROT_F) infodata->id_DiskState = ID_WRITE_PROTECTED;
+          else  if(fsys->f_FSflags & MF_VALIDATED) infodata->id_DiskState = ID_VALIDATED;
+          else  infodata->id_DiskState = ID_VALIDATING;
+    }
+      else return(DOSFALSE);    /* no valid infodata struct passed */
+
+      if(fsys->f_FSflags & MF_NODISK)
+    {
+        infodata->id_DiskType             = ID_NO_DISK_PRESENT;
+    }
+      else if( fsys->f_inhibit_cnt )
+    {
+        infodata->id_DiskType             = ID_BUSY_DISK;
+    }
+      else if( (fsys->f_FSflags & MF_NOTREADABLE) )
+    {
+        infodata->id_DiskType             = ID_UNREADABLE_DISK;
+    }
+      else if( (fsys->f_FSflags & MF_FSDISK) && (fsys->f_FSflags & MF_VALIDATED))
+    {
+      /* for reasons unknown, only this DiskType is accepted by AmigaDOS V1.2 and V1.3 */
+      /* It should be the DosType specified in the struct DosEnvec ->de_DosType */
+        infodata->id_DiskType             = ID_DOS_DISK;
+        infodata->id_VolumeNode   = MKBPTR(fsys->f_VolumeNode);
+        infodata->id_InUse        = fsys->f_LockList;
+    }
+      else
+    {
+        infodata->id_DiskType             = ID_NOT_REALLY_DOS;
+    }
+
+/*
+DPRTF(KPrintF("\n id_UnitNumber     = %ld ",infodata->id_UnitNumber   ));
+DPRTF(KPrintF("\n id_NumSoftErrors  = %ld ",infodata->id_NumSoftErrors));
+DPRTF(KPrintF("\n id_NumBlocksUsed  = %ld ",infodata->id_NumBlocksUsed));
+DPRTF(KPrintF("\n id_VolumeNode     = %lxH",infodata->id_VolumeNode   ));
+DPRTF(KPrintF("\n id_InUse          = %lxH",infodata->id_InUse        ));
+DPRTF(KPrintF("\n id_NumBlocks      = %ld ",infodata->id_NumBlocks    ));
+DPRTF(KPrintF("\n id_BytesPerBlock  = %ld ",infodata->id_BytesPerBlock));
+DPRTF(KPrintF("\n id_DiskState      = %lxH",infodata->id_DiskState    ));
+DPRTF(KPrintF("\n id_DiskType       = %lxH",infodata->id_DiskType     ));
+*/
+
+    return(DOSTRUE);
+}
+
+
+/*************
+* DInfo()  --- Get disk info based on lock passed and fill supplied InfoData struct
+*************/
+static int DInfo(struct MLock *filelock, struct InfoData *infodata)
+{
+    if(!filelock || (fsys->f_VolumeNode == (struct DosList *)BADDR(filelock->ml_Volume)))
+    {       /* Volume node in the lock is the same as the current volume mounted */
+        return(Disk_Info(infodata));
+    }
+    DOSerror = ERROR_DEVICE_NOT_MOUNTED;
+    return(DOSFALSE);
+}
+@
+
+
+38.15
+log
+@Make nonexternal functions and strings static for future inlining under SAS C 6.1.
+@
+text
+@d130 1
+a130 1
+        DOSerror= ERROR_ACTION_NOT_KNOWN;
+d151 1
+a151 1
+                DOSreturn = ((struct MLock *)ARG1)->ml_lock.fl_Volume;
+a281 2
+    DOSerror = 0;
+
+d303 1
+a303 1
+    if((fsys->f_VolumeNode == (struct DosList *)BADDR(filelock->ml_lock.fl_Volume)))
+d307 1
+@
+
+
+38.14
+log
+@Minor change to store DevNode pointer in FS struct.
+@
+text
+@d19 1
+d29 3
+d114 6
+a119 3
+    pkt = WaitPkt();    /* Wait for startup pkt to come back */
+    SendPkt(pkt, replyport, SPort);   /* Send startup pkt back to DOS */
+    if(pkt->dp_Res1 == DOSFALSE) goto QUIT; /* check startup packet for successful child startup */
+d166 1
+a166 1
+DPRTF(KPrintF("\naction_DISK_INFO"));
+d239 1
+a239 2
+int Disk_Info(infodata)
+register struct InfoData *infodata;
+d303 1
+a303 3
+int DInfo(filelock, infodata)
+struct MLock *filelock;
+struct InfoData *infodata;
+@
+
+
+38.10
+log
+@Added setting of pr_CurrentDir to the current directory to the first
+packet.
+@
+text
+@a11 4
+extern struct Message   *GetMsg ();
+extern void             PutMsg ();
+extern void             ReplyDOSPkt();
+
+d76 1
+a76 1
+    if(DevNode = (struct DeviceNode *) BADDR(ARG3))    /* passed DeviceNode from ARG3 if available*/
+a234 1
+//    register struct InfoData *id = infodata;
+@
+
+
+38.9
+log
+@Fix problem with sometimes dp_Arg1 being passed with a file name tacked
+on the end of the device name.
+@
+text
+@d6 1
+d18 1
+a18 1
+struct DosLibrary       *DOSBase;
+d22 1
+a23 1
+extern APTR             Data_seg;
+d44 1
+d48 1
+a48 1
+    struct DeviceNode   *DevNode;
+a51 1
+    ULONG               signals,signalmask;
+d61 1
+d66 1
+a66 3
+    WaitPort(SPort);
+    msg = (struct Message *) GetMsg(SPort);
+    pkt = (struct DosPacket *) msg->mn_Node.ln_Name;
+d76 2
+a77 1
+    ((struct Task *)DOSPort->mp_SigTask)->tc_UserData = &Data_seg;
+d79 1
+d100 17
+a116 1
+    PutMsg(DOSPort,msg);    /* pass initial pkt off to filesystem process */
+a117 5
+    signalmask  = SIGF_DOS|SIGF_KILLPARENT;
+    while(!die)
+    {
+      signals = Wait(signalmask);
+      if(signals & SIGF_KILLPARENT) die=1;
+d121 3
+a123 2
+      else while(!die && (msg = (struct Message *) GetMsg(SPort)))
+      {
+d126 4
+a129 1
+        if(pkt = (struct DosPacket *) msg->mn_Node.ln_Name)
+d131 1
+a131 6
+            DOSreturn= DOSFALSE;
+            DOSerror= ERROR_ACTION_NOT_KNOWN;
+
+            switch(pkt->dp_Type)
+            {
+            case ACTION_INFO:
+d135 1
+a135 1
+                DOSreturn = MKBPTR( DInfo( BADDR(ARG1),BADDR(ARG2)));
+d138 1
+a138 1
+                break;
+d140 1
+a140 1
+            case ACTION_CURRENT_VOLUME:
+d146 10
+a155 10
+                if(ARG1)
+                {
+                    DOSreturn = ((struct MLock *)ARG1)->ml_lock.fl_Volume;
+                }
+
+                 else
+                {
+                    DOSreturn = MKBPTR(fsys->f_VolumeNode);
+                }
+                DOSerror = fsys->f_fssm->fssm_Unit;
+d159 1
+a159 1
+                break;
+d161 1
+a161 1
+            case ACTION_DISK_INFO:
+d165 1
+a165 1
+                DOSreturn = MKBPTR( Disk_Info( BADDR(ARG1)));
+d170 1
+a170 1
+                break;
+d173 1
+a173 1
+            case ACTION_IS_FILESYSTEM:
+d177 2
+a178 2
+                DOSreturn = DOSTRUE;
+                break;
+d180 1
+a180 1
+            case ACTION_DIE:
+d182 2
+a183 2
+                DOSreturn= DOSTRUE;
+                signalmask  = SIGF_KILLPARENT;  /* Wait for this signal only! */
+d185 1
+a185 1
+            case ACTION_STARTUP:
+d187 1
+a187 1
+            default:
+d195 1
+a195 1
+                PutMsg(DOSPort,msg);
+d198 1
+a198 1
+                noreply = 1;
+d200 2
+a201 2
+                break;
+            }
+d203 3
+a205 9
+            if( !noreply )
+            {
+                ReplyPkt(pkt,DOSreturn, DOSerror);
+            }
+              else noreply = 0;    /* clear flag */
+        }
+        else
+        {        /* no message recvd but not a DOS packet.  ReplyMsg if not this task  */
+            if(msg->mn_ReplyPort != SPort) ReplyMsg(msg);
+d207 1
+a207 1
+      }
+d228 2
+d237 1
+a237 1
+struct InfoData *infodata;
+d239 1
+a239 1
+    register struct InfoData *id = infodata;
+d243 10
+a252 10
+        id->id_UnitNumber   = fsys->f_fssm->fssm_Unit;
+        id->id_NumSoftErrors= fsys->f_NumSoftErrors;
+        id->id_NumBlocksUsed= fsys->f_used_blocks;
+        id->id_VolumeNode   = 0;
+        id->id_InUse        = 0;
+        id->id_NumBlocks    = fsys->f_blocks_part;
+        id->id_BytesPerBlock= fsys->f_bytes_block;
+        if(fsys->f_Diskflags & WRITE_PROT_F) id->id_DiskState = ID_WRITE_PROTECTED;
+          else  if(fsys->f_FSflags & MF_VALIDATED) id->id_DiskState = ID_VALIDATED;
+          else  id->id_DiskState = ID_VALIDATING;
+d258 1
+a258 1
+        id->id_DiskType             = ID_NO_DISK_PRESENT;
+d262 1
+a262 1
+        id->id_DiskType             = ID_BUSY_DISK;
+d266 1
+a266 1
+        id->id_DiskType             = ID_UNREADABLE_DISK;
+d272 3
+a274 3
+        id->id_DiskType             = ID_DOS_DISK;
+        id->id_VolumeNode   = MKBPTR(fsys->f_VolumeNode);
+        id->id_InUse        = fsys->f_LockList;
+d278 1
+a278 1
+        id->id_DiskType             = ID_NOT_REALLY_DOS;
+d284 9
+a292 9
+DPRTF(KPrintF("\n id_UnitNumber     = %ld ",id->id_UnitNumber   ));
+DPRTF(KPrintF("\n id_NumSoftErrors  = %ld ",id->id_NumSoftErrors));
+DPRTF(KPrintF("\n id_NumBlocksUsed  = %ld ",id->id_NumBlocksUsed));
+DPRTF(KPrintF("\n id_VolumeNode     = %lxH",id->id_VolumeNode   ));
+DPRTF(KPrintF("\n id_InUse          = %lxH",id->id_InUse        ));
+DPRTF(KPrintF("\n id_NumBlocks      = %ld ",id->id_NumBlocks    ));
+DPRTF(KPrintF("\n id_BytesPerBlock  = %ld ",id->id_BytesPerBlock));
+DPRTF(KPrintF("\n id_DiskState      = %lxH",id->id_DiskState    ));
+DPRTF(KPrintF("\n id_DiskType       = %lxH",id->id_DiskType     ));
+@
+
+
+38.7
+log
+@Fixed a problem with dp_Arg1 being supplied with a device name with a file
+name attach also.  The only occurance we have seen is by the Janus software..
+@
+text
+@a59 1
+#define LIB_VERS    37
+@
+
+
+38.5
+log
+@Maintenance.
+@
+text
+@d91 3
+a93 1
+        DeviceName[i-1] = toupper(temp[i]); /* convert to uppercase */
+a94 1
+        /* for some reason, DeviceName has the ':' tacked on the end.  Get rid of it */
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@a51 1
+
+d121 1
+a121 1
+DPRTF(KPrintF("\nACTION_INFO"));
+d130 1
+a130 1
+DPRTF(KPrintF("\nACTION_CURRENT_VOLUME"));
+d151 1
+a151 1
+DPRTF(KPrintF("\nACTION_DISK_INFO"));
+d163 1
+a163 1
+DPRTF(KPrintF("\nACTION_IS_FILESYSTEM"));
+d169 1
+a169 1
+DPRTF(KPrintF("\nACTION_DIE"));
+d174 1
+a174 1
+DPRTF(KPrintF("\nACTION_STARTUP"));
+d176 1
+a176 1
+DPRTF(KPrintF("\nACTION = %ld",pkt->dp_Type));
+d240 1
+a240 1
+        id->id_NumBlocks    = fsys->f_blocks_disk;
+d275 1
+d285 1
+@

@@ -1,0 +1,309 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  V36_3:1.3;
+locks    ; strict;
+comment  @@;
+
+
+1.3
+date     89.04.18.09.19.38;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.04.10.17.17.17;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.22.11.40.49;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@*
+* This module implements the Requestor function for DOS.
+* It also provides an OpenWindow call.
+* 
+* It defines BCPL callable functions with the following syntax
+*
+*    Bool := requestor( line1, line2, line3 )
+*
+* The three lines are displayed within an intuition requestor
+* box. Two gadgets are also presented, labelled Retry and Cancel
+* This call requires about 2K of stack, which is obtained dynamically
+* from the free pool. If there is no stack left it returns FALSE anyway.
+*
+*    Window := OpenWindow( Xpos, Ypos, Width, Height, StripName )
+*
+* The window specified is opened.
+*  
+	INCLUDE "exec/types.i"
+	INCLUDE "exec/nodes.i"
+	INCLUDE "exec/lists.i"
+	INCLUDE "exec/tasks.i"
+	INCLUDE "exec/memory.i"
+	INCLUDE "exec/ports.i"
+	INCLUDE "exec/interrupts.i"
+	INCLUDE "exec/libraries.i"
+	INCLUDE "exec/io.i"
+	INCLUDE	"intuition/intuition.i"
+
+	INCLUDE	"dos.i"
+	INCLUDE	"dosextens.i"
+	
+	INCLUDE	"libhdr.i"
+
+FUNCDEF     MACRO   * function
+LVO_\1      EQU     FUNC_CNT
+FUNC_CNT    SET     FUNC_CNT-6
+	    ENDM
+		     
+FUNC_CNT    SET     LIB_NONSTD
+		       
+	INCLUDE "exec/exec_lib.i"
+
+LVO_OpenWindow  EQU     -30-174
+LVO_AutoRequest	EQU	-30-318
+STSIZE		EQU	2048
+
+*
+* The calling sequence for AutoRequest is as follows
+*
+* Window      Obtained from pr_WindowPtr A0
+* BodyText    Main message		 A1
+* PosText     "Retry"			 A2
+* NegText     "Cancel"			 A3
+* PosFlags    DiskInsertedFlag		 D0
+* NegFlags    Null			 D1
+* Width       640			 D2
+* Height      60			 D3
+
+*
+* The text is passed using the IntuiText structure
+*
+
+* Version 1.0 TJK July 11th 85
+* Version 1.1 TJK August 25th 85
+* Version 1.2 NHG September 9th 86
+
+REQS	DC.L	(REQE-REQS)/4			Size of module in lwords
+
+REQ0
+	MOVE.L	#DISKINSERTED,D4		set DISKINSERTED flag
+REQUEST2
+	MOVEM.L A0-A2/A5/A6,-(SP)		Save BCPL regs
+	MOVE.L	A1,A4				Save BCPL P pointer
+	MOVE.L  $4,A6    	       		Exec pointer
+	MOVEQ   #0,D7				Clear stack counter
+	MOVE.L	D7,D6				And set result to FALSE
+* Get space for stack
+	MOVE.L	#STSIZE,D0			Size required
+	MOVE.L  #MEMF_PUBLIC!MEMF_CLEAR,D1      Clear memory
+	JSR	LVO_AllocMem(A6)		Get memory
+	TST.L	D0				Check it worked
+	BEQ	EXIT1				Return FALSE (in D6)
+* Stack space obtained. Save current SP and swap to new space
+	EXG.L   D0,SP
+	LEA.L   STSIZE(SP),SP
+	MOVE.L  D0,-(SP)			Save old SP on new stack
+* Now find my own task
+	SUB.L   A1,A1
+	JSR     LVO_FindTask(A6)
+	MOVEA.L D0,A3           		Task pointer
+* Open intuition
+	LEA.L   INAME(PC),A1			Intuition Name
+	MOVEQ   #0,D0
+	JSR	LVO_OpenLibrary(A6)
+	TST.L   D0
+	BEQ     EXIT0				Failed, return FALSE
+	MOVEA.L D0,A6				Intuition base into A6
+* Build intuition arguments
+	MOVEQ   #0,D0				Set D0 to FALSE
+	MOVE.L  pr_WindowPtr(A3),D1	        Window Pointer
+	BLT     EXIT				<0, return FALSE
+	MOVEA.L D1,A0				Into A0 as ptr
+	MOVE.L  A4,A3				Restore BCPL P ptr
+* Handle three arguments
+	MOVEQ   #0,D1				Flag no previous value
+	MOVEQ   #5,D2				Initial topedge value
+	MOVEQ   #15,D3				Initial leftedge value
+	MOVE.L  (A3),D0				Get argument
+	ASL.L   #2,D0				As mc ptr
+	ADDQ.L  #1,D0				Skip count byte
+	LEA.L   -it_SIZEOF(SP),SP	   	Reserve stack space
+	MOVEA.L SP,A1				First struct ptr into A1
+	BSR     INITIT
+
+	MOVE.L  4(A3),D0			Get argument
+	BEQ.S   REQ1				No second argument
+	ASL.L   #2,D0				As mc ptr
+	ADDQ.L  #1,D0				Skip count byte
+	ADD.W   #10,D2
+	LEA.L   -it_SIZEOF(SP),SP	   	Reserve stack space
+	BSR.S   INITIT
+
+REQ1	MOVE.L  8(A3),D0			Get argument
+	BEQ.S	REQ2				No third argument
+	ASL.L   #2,D0				As mc ptr
+	ADDQ.L  #1,D0				Skip count byte
+	ADD.W   #10,D2
+	LEA.L   -it_SIZEOF(SP),SP	   	Reserve stack space
+	BSR.S   INITIT
+* Zero the last entry in the list. This is just below me on the stack
+REQ2	CLR.L   it_NextText(SP)
+* Handle the Retry text
+	LEA.L   OKMESS(PC),A5			Pos text  
+	MOVE.L  A5,D0				Into D0
+	MOVEQ   #0,D1				Start of list
+	MOVEQ   #AUTOTOPEDGE,D2			Edge info for gadgets
+	MOVEQ   #AUTOLEFTEDGE,D3
+	LEA.L   -it_SIZEOF(SP),SP	   	Reserve stack space
+	MOVEA.L SP,A2
+	BSR.S   INITIT
+* Handle the Cancel text
+	LEA.L   NOKMESS(PC),A5			Neg text
+	MOVE.L  A5,D0				Into D0
+	MOVEQ   #0,D1				Start of list
+	LEA.L   -it_SIZEOF(SP),SP	   	Reserve stack space
+	MOVEA.L SP,A3
+	BSR.S   INITIT
+* Handle other args
+*	MOVE.L  #DISKINSERTED,D0		Pos flags
+	MOVE.L  D4,D0				Pos flags
+	MOVEQ.L	#0,D1				Neg flags
+	MOVE.L  #320,D2				Width
+	MOVEQ   #72,D3				Height
+* Well thats finished. Try calling intuition at last.
+	JSR	LVO_AutoRequest(A6)
+	MOVE.L	D0,D6				Result
+* Close down Intuition if we opened it
+EXIT	MOVEA.L A6,A1				IntuiBase to A1
+	MOVEA.L $4,A6				Get ExecBase
+	JSR	LVO_CloseLibrary(A6)		Close it down
+* Give back stack space used
+EXIT0   ADDA.L  D7,SP				Restore stack used
+	LEA.L   (4-STSIZE)(SP),A1		A1 points to stack low
+	MOVE.L	(SP)+,SP			Get back previous SP
+	MOVE.L	#STSIZE,D0			Stack size
+	JSR	LVO_FreeMem(A6)			Free stack used
+* Restore registers and return
+EXIT1	MOVEM.L (SP)+,A0-A2/A5/A6
+	MOVE.L  D6,D1				Result to D1
+	JMP     (A6)				BCPL return
+*
+* Subroutine to initialise Intuitext structure.
+* Text required is in D0; IntuiText structure is on the stack.
+* D1 is either zero, or a pointer to the previous structure
+* D2 is the required value for the TopEdge, D3 is that for LeftEdge.
+* Maintains D7 as the amount that the stack has been pushed.
+* Corrupts A4.
+*
+INITIT	LEA.L   4(SP),A4	IntuiText pointer
+	MOVE.B  #AUTOFRONTPEN,it_FrontPen(A4)
+	MOVE.B  #AUTOBACKPEN,it_BackPen(A4)
+	MOVE.B  #AUTODRAWMODE,it_DrawMode(A4)
+	MOVE.W  D3,it_LeftEdge(A4)
+	MOVE.W  D2,it_TopEdge(A4)
+	MOVE.L  #AUTOITEXTFONT,it_ITextFont(A4)
+	MOVE.L  D0,it_IText(A4)
+	TST.L	D1				D1=0 if last
+	BEQ.S	INITIT2				Zero this ptr if D1 zero
+	EXG.L   A4,D1				A4 now previous, D1 this
+INITIT2	MOVE.L  D1,it_NextText(A4)
+	BNE.S	INITIT3				D1 already this node
+	MOVE.L	A4,D1				D1 is now this node
+INITIT3	ADD.L	#it_SIZEOF,D7	
+	RTS
+*
+* The gadget text is stored here
+* 
+OKMESS	DC.B	'Retry',0
+NOKMESS DC.B    'Cancel',0
+INAME	DC.B	'intuition.library',0
+	CNOP    0,2
+	PAGE
+**********************************************************************
+*                                                                    *
+*       OpenWindow(Xpos,Ypos,Width,Height,StripName)                 *
+*                                                                    *
+*    Returns a window pointer obtained from Intuition.               *
+*    No checks are made on whether the arguments are valid.          *
+*                                                                    *
+**********************************************************************
+OW_TYPE EQU	1
+OW_MAXW	EQU	$FFFF
+OW_MAXH EQU	$FFFF
+OW_MINW	EQU	50
+OW_MINH	EQU	120
+*
+OW_FLGS EQU     WINDOWSIZING!WINDOWDRAG!WINDOWDEPTH!ACTIVATE!SIMPLE_REFRESH
+*
+OPENW   MOVEM.L A0/A1/A5/A6,-(SP)       Save regs
+* Start constructing parameter area on stack
+	MOVE.W  #OW_TYPE,-(SP)		Type
+	MOVE.W	#OW_MAXW,-(SP)		Window bounds
+	MOVE.W	#OW_MAXH,-(SP)
+	MOVE.W	#OW_MINW,-(SP)
+	MOVE.W	#OW_MINH,-(SP)
+	CLR.L   -(SP)			Bitmap
+	CLR.L   -(SP)			Screen
+        MOVE.L  16(A1),D5               Stripname into D5
+	ASL.L   #2,D5			As mc address
+	MOVE.L  D5,-(SP)		Next arg is name
+	CLR.L	-(SP)			Check
+	CLR.L	-(SP)			Gadget
+	MOVE.L  #OW_FLGS,-(SP)		Flags
+	CLR.L	-(SP)			idcmp
+	MOVEQ   #-1,D5      		Pens
+	MOVEM.W D1-D5,-(SP)		Xpos/Ypos/Width/Height/Pens
+	MOVEA.L G_INTUITION(A2),A6    Get intuition library pointer
+	MOVEA.L SP,A0                   Into A0
+	JSR	LVO_OpenWindow(A6)      Call Intuition
+	LEA.L   48(SP),SP               Restore stack
+        MOVEM.L (SP)+,A0/A1/A5/A6       Restore regs
+	MOVE.L	D0,D1			Return window ptr
+        JMP	(A6)
+*
+* BCPL global initialisation
+*
+	CNOP	0,4
+	DC.L	0				End of list
+	DC.L	G_OPENWINDOW/4,(OPENW-REQS)	GN/EntryLabel
+	DC.L	G_REQUESTOR/4,(REQ0-REQS)	GN/EntryLabel
+	DC.L    G_REQUESTOR2/4,(REQUEST2-REQS)
+	DC.L	100				HRG
+REQE	END
+@
+
+
+1.2
+log
+@
+@
+text
+@d41 1
+a41 1
+	INCLUDE "exec_lib.i"
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d41 1
+a41 1
+	INCLUDE "exec/exec_lib.i"
+@

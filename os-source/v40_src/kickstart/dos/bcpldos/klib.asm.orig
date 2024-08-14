@@ -1,0 +1,1976 @@
+          PLEN 55
+          TTL    *** TRIPOS Kernel for the CAPC ***
+******************************************************************
+*                                                                *
+* This version a major rewrite for the CAPC by TJK Jan 85        *
+* (C) Copyright 1985 Metacomco, 26 Portland Square, BRISTOL, UK  *
+* All rights reserved                                            *
+*                                                                *
+* This is based to a small extent on the original TRIPOS kernel  *
+* for the 68000 written by Martin Richards at the University of  *
+* Cambridge                                                      *
+*                                                                *
+******************************************************************
+          SPC 4
+******************************************************************
+******************************************************************
+*****        **       *****  ****       ****      ****     *******
+********  *****  ***   ****  ****  ***   **   **   **   **  ******
+********  *****  ****  ****  ****  ****  **  ****  **   **********
+********  *****  ***   ****  ****  ***   **  ****  ***   *********
+********  *****       *****  ****       ***  ****  ****   ********
+********  *****  **  ******  ****  ********  ****  *****   *******
+********  *****  ***  *****  ****  ********  ****  ******   ******
+********  *****  ****  ****  ****  ********   **   **  **   ******
+********  *****  *****  ***  ****  *********      ****     *******
+******************************************************************
+******************************************************************
+          SPC 4
+******************************************************************
+*                                                                *
+*        A 32 bit kernel for TRIPOS for the MC68000 system       *
+*                                                                *
+*                                                                *
+******************************************************************
+          PAGE
+          SPC 4
+* Register usage when in BCPL compiled code.
+*
+*      D0       work reg - used to hold the stack increment
+*                          in a procedure call
+*      D1       the first argument and result register
+*      D2-D4    the second to fourth argument registers
+*      D5-D7    general work registers
+*      Z (=A0)  hold the constant 0 (to allow n(Z,Di.L) addresses)
+*      P (=A1)  BCPL P pointer (MC address of first arg)
+*      G (=A2)  BCPL G pointer (MC address of global 0)
+*      L (=A3)  work reg - (hold the return address in the
+*                           entry and return sequences)
+*      B (=A4)  base reg - (hold the MC address of entry to the
+*                           current procedure. It is necessary
+*                           for position independent addressing
+*                           of data in program code.  Note that
+*                           instruction and data space MUST be
+*                           the same)
+*      S (=A5)  MC address of the save S/R:        Timings Totals
+*                  MOVEA.L   (SP)+,L                  6
+*                  MOVEM.L   P/L/B,-12(P,D0.L)       19
+*                  ADDA.L    D0,P                     7
+*                  MOVEM.L   D1-D4,(P)               20
+*                  JMP       (B)                      4      32
+*      R (=A6)  MC address of the return code:
+*                  MOVEM.L   -12(P),P/L              16
+*                  MOVE.L    -4(P),B                  8
+*                  JMP       (L)                      4      28
+*      SP(=A7)the system stack pointer
+*
+* The (typical) calling sequence is:
+*
+*         MMOVEQ    #36,D0     Stack increment         2
+*         MOVEA.L  n(G),B     (calling a global)      8
+*         JSR      (S)        Call the save routine   4      14
+*
+* To return from a procedure:
+*
+*         JMP      (R)                                4       4
+*
+*
+	  PAGE
+	  INCLUDE "exec/types.i"
+	  INCLUDE "exec/nodes.i"
+	  INCLUDE "exec/lists.i"
+	  INCLUDE "exec/memory.i"
+	  INCLUDE "exec/ports.i"
+	  INCLUDE "exec/libraries.i"
+	  INCLUDE "exec/io.i"
+	  INCLUDE "exec/tasks.i"
+	  INCLUDE "exec/resident.i"
+	  INCLUDE "exec/execbase.i"
+
+	  INCLUDE "libraries/expansion.i"
+	  INCLUDE "libraries/expansionbase.i"
+	  INCLUDE "libraries/romboot_base.i"
+
+	  INCLUDE "dos.i"
+	  INCLUDE "dosextens.i"
+	  INCLUDE "filehandler.i"
+
+	  INCLUDE "dos_rev.i"
+
+
+FUNCDEF     MACRO   * function
+LVO_\1	    EQU	    FUNC_CNT
+FUNC_CNT    SET     FUNC_CNT-6
+            ENDM
+
+FUNC_CNT    SET     LIB_NONSTD
+
+
+	  INCLUDE "exec/exec_lib.i"
+	  INCLUDE "exec/alerts.i"
+
+
+          PAGE
+          TTL ** TRIPOS Kernel  -   Equates **
+*
+*
+* Symbol definitions and data structures
+*
+*
+LIBWORD   EQU    23456               Marks library routines
+SECWORD   EQU    12345               Marks a BCPL section
+NOTINUSE  EQU       -1               Link word for dequeued packets
+NEGSIZE   EQU       50               Number of negative globals
+GLOBSIZE  EQU      150               NUmber of positive globals
+ROOTSIZE  EQU      8*4
+SEGSIZE   EQU        3               Size of SegVec for CreateProc
+GVSIZE    EQU      (NEGSIZE+GLOBSIZE+1)*4
+CLI_UPB   EQU       15               Upper bound of CLI structure
+CLISTK    EQU      400		     Stack used for initial CLI
+DOSSTK    EQU     1500		     Stack used by DOS when called
+*
+* Absolute areas
+*
+SysBase	    EQU	    4
+*
+SIGMASK   EQU     $100               Signal bit 8 mask
+MSGSIG    EQU        8               Signal 8 used for message handling
+FLGSIG    EQU       12               Signals 12-15 used for testflag/setflag
+*
+* Register definition
+*
+Z         EQUR    A0                 Constant Zero
+P         EQUR    A1                 BCPL P ptr
+G         EQUR    A2                 BCPL G ptr
+L         EQUR    A3                 Work reg
+B         EQUR    A4                 Addr of current procedure
+S         EQUR    A5                 Save routine addr
+R         EQUR    A6                 Return addr
+*
+*
+* Coroutine symbols
+*
+C_LINK    EQU        0               Link to next co-routine
+C_CLLR    EQU        4               Caller coroutine
+C_SEND    EQU        8               Stack end - 32
+C_RESP    EQU       12               Resumption ptr
+C_FUNC    EQU       16               Function
+*                   20               PC dump - dummy
+C_RTRN    EQU       24               Return link for stop
+
+*
+* Global vector symbols
+*
+UNGLOB    EQU $474C0001              (Unset global n is UNGLOB + 2*n)
+
+G_START   EQU       1*4              START
+G_SBASE   EQU      12*4              Current stack base
+*
+* Nucleus primitives
+*
+G_STOP    EQU       2*4
+G_SETIO   EQU       6*4
+G_BACKT   EQU       7*4
+G_RES2    EQU      10*4
+G_TASKID  EQU      14*4
+G_GETMEM  EQU      19*4
+G_DOIO    EQU      21*4
+G_SendIO  EQU      22*4
+G_ABORT   EQU      38*4
+G_OPEND   EQU      31*4
+G_CRTASK  EQU      33*4
+G_CLOSED  EQU      32*4
+G_DTASK   EQU      34*4
+G_FVEC    EQU      30*4
+G_GLOBIN  EQU      28*4
+G_GVEC    EQU      29*4
+G_ROOTN   EQU      39*4
+G_QPKT    EQU      42*4
+G_RELEASE EQU      40*4
+G_SFLAGS  EQU      36*4
+G_TWait   EQU      41*4
+G_TFLAGS  EQU      37*4
+G_CDIR    EQU      51*4
+G_REQUEST EQU      52*4
+G_SELIN   EQU      61*4
+G_SELOUT  EQU      62*4
+G_INPUT   EQU      65*4
+G_OUTPUT  EQU      66*4
+G_EXEC    EQU      88*4
+G_SEGL    EQU      89*4
+G_CALLRES EQU     103*4
+G_CTASK   EQU     105*4
+G_FTASK   EQU     106*4
+G_GETLONG EQU     110*4
+G_PUTLONG EQU     111*4
+G_RUNC    EQU     121*4
+G_CLI     EQU     134*4
+
+G_GLOBMAX EQU      G_CLI            Highest global used in KLIB
+          PAGE
+
+          TTL      ** TRIPOS Kernel - Macro definitions
+*
+* Macro definitions
+*
+* Module header
+*
+SECT    MACRO
+**        CNOP   0,4
+**        DC.L   LIBWORD
+**        DC.B   7,\1
+        ENDM
+*
+* Call EXEC with A6 already set
+*
+CALL    MACRO
+        JSR          LVO_\1(A6)
+        ENDM
+*
+* Call EXEC with A6 not set
+*
+CALLS   MACRO
+        MOVEA.L      SysBase,A6
+        CALL         \1
+        ENDM
+        PAGE
+******************************************************************
+*                                                                *
+*         Kernel initialisation                                  *
+*                                                                *
+******************************************************************
+
+KLIB      DC.L       (KEND-KLIB)/4   The size of the module for segment
+*
+* We are entered at KSTART from bootstrap.
+* This Tripos derivative does not have any
+* fixed locations within it, and most primitive calls are handled by EXEC.
+*
+* Where TRIPOS uses task numbers we use here EXEC ports so that we can use
+* the EXEC message passing mechanism.
+*
+          BRA        KINIT           Jump past segment list (keep lword aligned)
+*
+* Initialisation consists of starting up the initial CLI task. We create
+* a new task and set it up so that when it starts executing it will initialise
+* registers in a suitable fashion. We also need to build an initial segment
+* list for this task. The Tripos image loaded into memory is built by SYSL
+* so that the code segment table is patched to contain the correct values.
+*
+SEGLIST   DC.L       4               Size of segment list
+          DS.L       8               Slots filled in when linked
+*
+* Create initial task after setting up suitable registers
+*
+
+	    ; put in a rom tag, so we can find it later.
+
+            ; get the offset from an include file
+            INCLUDE     "startaddr.i"
+
+BASE	SET	$F30004+ROMOFFSET
+						;STRUCTURE RT,0
+ramtag:
+		DC.W	RTC_MATCHWORD		;(50) UWORD RT_MATCHWORD
+		DC.L	BASE+ramtag-KLIB	;(52) APTR  RT_MATCHTAG
+		DC.L	BASE+KINIT-KLIB		;(56) APTR  RT_ENDSKIP
+		DC.B	0			;(5A) UBYTE RT_FLAGS
+		DC.B	VERSION			;(5B) UBYTE RT_VERSION
+		DC.B	NT_LIBRARY		;(5C) UBYTE RT_TYPE
+		DC.B	0			;(5D) BYTE  RT_PRI
+		DC.L	BASE+LIBNAME-KLIB	;(5E) APTR  RT_NAME
+		DC.L	BASE+idtag-KLIB		;(62) APTR  RT_IDSTRING
+		DC.L	BASE+KINIT-KLIB		;(66) APTR  RT_INIT
+						;(6A) LABEL RT_SIZE
+
+BASE	SET	$FF0004+ROMOFFSET
+romtag:
+		DC.W	RTC_MATCHWORD		;(50) UWORD RT_MATCHWORD
+		DC.L	BASE+romtag-KLIB	;(52) APTR  RT_MATCHTAG
+		DC.L	BASE+KINIT-KLIB		;(56) APTR  RT_ENDSKIP
+		DC.B	0			;(5A) UBYTE RT_FLAGS
+		DC.B	VERSION			;(5B) UBYTE RT_VERSION
+		DC.B	NT_LIBRARY		;(5C) UBYTE RT_TYPE
+		DC.B	0			;(5D) BYTE  RT_PRI
+		DC.L	BASE+LIBNAME-KLIB	;(5E) APTR  RT_NAME
+		DC.L	BASE+idtag-KLIB		;(62) APTR  RT_IDSTRING
+		DC.L	BASE+KINIT-KLIB		;(66) APTR  RT_INIT
+						;(6A) LABEL RT_SIZE
+
+* nametag:	dc.b	'dos.library',0 ;(6a)
+; VERSION	EQU	29
+; REVISION EQU	02
+idtag:		VSTRING
+		ds.w	0
+
+KINIT     MOVEA.L    SysBase,A6      Library base register
+
+*
+* Initialise DOS library. This involves copying the node to real RAM
+* and allocating space for rootnode and shared GV
+*
+	  MOVE.L     #(LIBE-LIBS+4),D0		Size of library node
+	  ADD.L	     JTABSIZE(PC),D0		Add the jump table size
+	  MOVEQ      #MEMF_PUBLIC,D1		Public memory
+	  CALL       AllocMem       		Get library node
+	  ADD.L      JTABSIZE(PC),D0		Skip jump table
+	  ADDQ.L     #3,D0			force to lword alignment
+	  ANDI.B     #$FC,D0
+	  MOVEA.L    D0,A5          		A5 points to space
+          MOVEA.L    D0,A3			Save base of memory away
+	  SUBA.L     JTABSIZE(PC),A3		and step back to jump table
+	  LEA.L      LIBS(PC),A4    		A4 points to copy in ROM
+	  MOVE.W     #((LIBE-LIBS+3)/4)-1,D1	Lwords to copy
+K1        MOVE.L     (A4)+,(A5)+
+	  DBRA       D1,K1
+	  ADD.L	     #(DOSLIB-LIBS),D0		Skip negative values
+	  MOVEA.L    D0,A5          		Restore A5 as DOS base
+*
+* Now build the jump table
+*
+	  MOVE.L     JTABSIZE(PC),D0		number of entries in table
+	  LEA.L	     JTAB(PC),A4		A4 points to jump table bytes
+K11	  SUBQ.L     #6,D0			pre-decrement size
+	  BMI.S	     K12			if <0 end of table
+	  MOVE.B     #$70,(A3)+			first byte of MOVEQ
+	  MOVE.B     (A4)+,(A3)+		second byte - the value
+	  MOVE.W     #$6000,(A3)+		first word of long branch
+	  MOVE.W     #(CALLGLOB-LIBS+2),D1	offset of last branch
+	  ADD.W	     D0,D1			add offset to this one
+	  MOVE.W     D1,(A3)+			install it
+	  BRA.S	     K11
+K12:
+	  MOVE.L     #MEMF_PUBLIC+MEMF_CLEAR,D1	Public memory
+	  MOVE.L     #ROOTSIZE,D0		Size needed
+	  CALL       AllocMem
+	  TST.L      D0
+	  BEQ        DISASTER
+	  MOVE.L     D0,dl_Root(A5)
+	  MOVEQ      #MEMF_PUBLIC,D1
+	  MOVE.L     #GVSIZE,D0
+	  CALL       AllocMem
+	  TST.L      D0
+	  BEQ        DISASTER
+	  ADD.L      #(NEGSIZE*4),D0 Skip negative global area
+	  MOVE.L     D0,dl_GV(A5)
+	  MOVEA.L    A5,A1           Address of library node  
+          LEA.L      LIBNAME(PC),A0  Pointer to name
+          MOVE.L     A0,LN_NAME(A1)  Install library name
+	  LEA.L      idtag(PC),A0    Pointer to version info
+	  MOVE.L     A0,LIB_IDSTRING(A1)  Install it
+	  MOVEA.L    dl_GV(A5),A2  Global vector to use
+          LEA.L      SAVE(PC),A3     Save routine address
+          LEA.L      RET(PC),A4      Return routine address
+          MOVEM.L    A2-A4,dl_A2(A1)   Save registers
+          CALL       AddLibrary
+
+*
+* add the ram based library code (nak, 13 june 85)
+*
+
+	  LEA	     RAMLIBNAME(PC),A1
+	  CALL	     FindResident
+
+	  TST.L	     D0
+	  BEQ.S      residentfound 
+
+	  MOVE.L     D0,A1
+	  MOVEQ      #0,D1
+	  CALL       InitResident
+
+residentfound
+*
+*
+* Create initial CLI
+*
+          LEA.L      K2(PC),R        CREATETASK returns through R
+          LEA.L      SEGLIST,L       Segment list ptr
+          MOVE.L     L,D1            As arg1
+          ASR.L      #2,D1           As BCPL ptr
+          MOVE.L     #CLISTK,D2      Stack size
+          MOVEQ      #0,D3           Priority zero
+          LEA.L      CLINAME(PC),L   Name
+          MOVE.L     L,D4            As arg4
+          ASR.L      #2,D4           BCPL address
+          MOVE.L     #GLOBSIZE,(G)   Insert size of GV
+	      MOVE.L     G,D5
+          BRA        CRTASK1
+K2        MOVE.L     D1,D7
+          BEQ        DISASTER        Failed
+
+* Extract the mount list node from the expansion base slot
+
+		  LEA.L		 EXPNAME(pc),A1
+		  MOVEQ      #0,D0			 Any version
+		  CALLS	     OpenLibrary
+		  MOVEA.L	 D0,A0			 Pointer
+		  LEA.L		 eb_MountList(A0),A0
+
+*		  ; BootNode struct now declared in /libraries/romboot_base.i
+*
+* STRUCTURE BootNode,LN_SIZE
+*    UWORD	bn_Flags
+*    CPTR	bn_DeviceNode
+*    LABEL	BootNode_SIZEOF
+*
+* Link the remaining eb_MountList entries to the boot devicenode for AmigaDos
+*
+		  MOVEM.L	D0/A0/A1,-(SP)
+		  MOVE.L	LH_HEAD(A0),A0
+		  TST.L		LN_SUCC(A0)			; list empty ?
+		  BEQ.S		BootLink_Done
+		  TST.L		bn_DeviceNode(A0)	; this bootnode has current devnode ?
+		  BEQ.S		BootLink_Done
+
+Boot_Link:
+		  MOVE.L	LN_SUCC(A0),A1		
+		  TST.L		LN_SUCC(A1)			; nothing more to link ?
+		  BEQ.S		BootLink_Done
+
+		  MOVE.L	bn_DeviceNode(A0),A0
+
+		  TST.L		dn_Next(A0)			; current node already linked ?
+		  BNE.S		BootLink_Done		; won't mess with circularities for now.
+
+		  TST.L		bn_DeviceNode(A1)	; next bootnode has subsequent devnode ?
+		  BEQ.S		BootLink_Done
+		  MOVE.L	bn_DeviceNode(A1),D0	; cptr to next node
+		  LSR.L		#2,D0					; convert to bptr
+		  MOVE.L	D0,dn_Next(A0) 			; link to next of current node
+
+		  MOVE.L	A1,A0					; next becomes current node
+		  BRA.S		Boot_Link
+
+BootLink_Done:
+		  MOVEM.L	(SP)+,D0/A0/A1
+
+		  CALLS      RemHead
+*
+* D1 contains the message port for that task which is waiting for a message
+* Use rootnode space as initial message area, and send message to
+* start it up. D0 contains the device node pointer for the boot device.
+*
+	  	  BSR        GETDATA         Get library ptr into L
+          MOVE.L     D7,A0           Port
+	      CLR.L      pr_WindowPtr-pr_MsgPort(A0) Zero window ptr (use workbench)
+	      MOVEA.L    dl_Root(L),A1 Message area
+
+* Pass the boot device pointer in the startup packet, and release
+* the node space used for it.
+
+	      TST.L		 D0
+		  BEQ.S		 EndL
+		  MOVEA.L	 D0,L
+		  MOVE.L	 bn_DeviceNode(L),rn_FileHandlerSegment(A1)
+EndL
+
+          CALLS      PutMsg
+
+* Free the boot node memory
+
+*		  MOVEA.L	 L,A1
+*		  MOVEQ		 #BootNode_SIZEOF,D0
+*		  CALLS		 FreeMem
+*
+* We have nothing else to do now, so delete myself.
+*
+K3        SUBA.L     A1,A1           Myself
+          CALL       RemTask         Bye bye
+*
+* Here if a disaster whilst booting
+*
+DISASTER  MOVE.L     #AN_DOSLib,D7
+          CALLS      Alert
+	      BRA.S      DISASTER
+
+	      CNOP       0,4
+CLINAME   DC.B       11,'Initial CLI'
+LIBNAME   DC.B       'dos.library',$00
+EXPNAME   DC.B       'expansion.library',$00
+RAMLIBNAME DC.B	     'ramlib.library',$00
+		  DC.W       0
+          PAGE
+          TTL        Library support
+*
+*
+*  This section of code provides a library interface for DOS
+*  commands.
+*
+*  It works by using a global vector held within the
+*  process control space and by jumping indirect through this.
+*  Some global numbers are negative; others map to existing positive
+*  ones.
+*
+*  Version 1.0 March 11 1985   TJK
+*
+*
+LIBENT  MACRO
+*        MOVEQ   #\1,D0
+*        BRA     CALLGLOB
+	DC.B	 \1
+JTSIZE  SET      JTSIZE+6
+        ENDM
+*
+LIBJMP  MACRO
+        NOP
+        BRA     \1
+        ENDM
+*
+* Global entry points
+*
+I_EXECUTE       EQU     -27
+I_ISINTERACTIVE EQU     -26
+I_PARENTDIR     EQU     35 
+I_WaitFORCH     EQU     87
+I_DELAY         EQU     47
+I_DATSTAMP      EQU     -25
+I_SETPROTECT    EQU     -24
+I_SETCOMMENT    EQU     -23
+I_DEVICEPROC    EQU     -22
+I_QUEUEPACKET   EQU     -21
+I_GETPACKET     EQU     -20
+I_UNLOADSEG     EQU      82
+I_LOADSEG       EQU     -19
+I_EXIT          EQU       2
+I_CREATEPROC    EQU     -18
+I_IOERR         EQU     -17
+I_CURRENTDIR    EQU     -16
+I_CREATEDIR     EQU     -15
+I_INFO          EQU     -14
+I_EXNEXT        EQU     -13
+I_EXAMINE       EQU     -12
+I_DUPLOCK       EQU     113
+I_UNLOCK        EQU     109
+I_LOCK          EQU     -11
+I_RENAMEFILE    EQU     -10
+I_DELETEFILE    EQU      -9
+I_SEEK          EQU      -8
+I_OUTPUT        EQU      66
+I_INPUT         EQU      65
+I_WRITECHAR     EQU      -7
+I_WRITE         EQU      -6
+I_UNREADCHAR    EQU      -5
+I_READCHAR      EQU      -4
+I_READ          EQU      -3
+I_CLOSE         EQU      93 
+I_OPEN          EQU      -1
+*
+*
+* This is the main library structure. First the jump table.
+*
+*
+JTSIZE  SET	0
+	CNOP	0,4
+JTAB
+        LIBENT  I_EXECUTE
+        LIBENT  I_ISINTERACTIVE
+        LIBENT  I_PARENTDIR
+	LIBENT	I_WaitFORCH
+	LIBENT	I_DELAY   
+	LIBENT	I_DATSTAMP 
+	LIBENT	I_SETPROTECT
+	LIBENT	I_SETCOMMENT
+        LIBENT  I_DEVICEPROC
+        LIBENT  I_QUEUEPACKET
+        LIBENT  I_GETPACKET
+        LIBENT  I_UNLOADSEG
+        LIBENT  I_LOADSEG
+        LIBENT  I_EXIT
+        LIBENT  I_CREATEPROC
+        LIBENT  I_IOERR
+        LIBENT  I_CURRENTDIR
+        LIBENT  I_CREATEDIR
+        LIBENT  I_INFO
+        LIBENT  I_EXNEXT
+        LIBENT  I_EXAMINE
+        LIBENT  I_DUPLOCK
+        LIBENT  I_UNLOCK
+        LIBENT  I_LOCK
+        LIBENT  I_RENAMEFILE
+        LIBENT  I_DELETEFILE
+        LIBENT  I_SEEK
+        LIBENT  I_OUTPUT
+        LIBENT  I_INPUT
+        LIBENT  I_WRITE
+        LIBENT  I_READ
+        LIBENT  I_CLOSE
+        LIBENT  I_OPEN
+
+JTABSIZE DC.L 	JTSIZE
+
+	CNOP    0,4                   Ensure lword aligned
+LIBS
+        LIBJMP  J_NOP                   Unused
+        LIBJMP  J_NOP                   Expunge
+        LIBJMP  J_CLOSE                 Close
+        LIBJMP  J_OPEN                  Open
+*
+* Now the library structure itself
+*
+DOSLIB
+        DS.B    LN_SIZE                 First a node
+	DC.B    LIBF_SUMUSED!LIBF_CHANGED  Flags
+        DC.B    0                       Pad
+        DC.W    DOSLIB-LIBS+JTSIZE      Number of bytes before
+        DC.W    LIBE-DOSLIB             Number of bytes after
+        DC.W    VERSION                 Version
+        DC.W    REVISION                Revision
+	DC.L    0                       Version string
+        DC.L    0                       Checksum
+DOSUSE  DC.W    0                       Open count
+*
+* Data area
+*
+LIBDATA
+        DC.L    0			Pointer to root structure
+        DC.L    0			Pointer to shared GV
+*
+* Private data store for BCPL register contents
+*
+BCPLregs
+        DS.L    3
+*
+* Initialisation code
+*
+J_OPEN  
+        ADDI.W  #1,DOSUSE-DOSLIB(A6)    Increment use count
+        MOVE.L  A6,D0                   And return A6
+	RTS
+J_CLOSE MOVE.W  DOSUSE-DOSLIB(A6),D0    Get use count
+        SUBQ.W  #1,D0
+        MOVE.W  D0,DOSUSE-DOSLIB(A6)    Place back
+J_NOP   MOVEQ	#0,D0			Return with zero (no segment)
+        RTS
+*
+* Now the standard call for calling the DOS, using BCPL globals.
+*
+* Entered with D0        Global number
+*              D1-D4     Args
+*
+* Note A6 does not have to point to library entry.
+*
+* We may trash D0/D1/A0/A1 and nothing else.
+*
+CALLGLOB
+        MOVEM.L D2-D7/A2-A6,-(SP)       Save all registers we must
+        SUBA.L  A0,A0                   Zero A0
+	MOVE.L  SP,D5                   Get SP
+	SUBI.L  #DOSSTK,D5              Make BCPL stack ptr
+	BCLR    #1,D5                   Ensure long word aligned
+	MOVEA.L D5,A1                   And into BCPL stack ptr reg
+        MOVEM.L BCPLregs,A2/A5/A6       Set up other BCPL regs
+        ASL.L   #2,D0                   Make global number byte offset
+        MOVEA.L 0(A2,D0.L),A4           Get entry point required
+        MOVEQ   #12,D0                  Mimimal stack frame
+        JSR     (A5)                    Call BCPL routine
+        MOVE.L  D1,D0                   Result to D0
+        MOVEM.L (SP)+,D2-D7/A2-A6       Restore registers
+        RTS
+	CNOP	0,4
+LIBE
+*
+* Various return sequences used by the kernel
+*
+BCPLERROR
+          BSR        GETID
+          MOVE.L     D1,pr_Result2-pr_MsgPort(L)
+ER_RET    CLR.L      D1             Set zero result
+          JMP        (R)            Return
+          PAGE
+         TTL         Subroutines at fixed offset from S register
+*
+* Subroutines which are called relative to the S register
+*
+******************************************************************
+* The standard return sequence                                   *
+******************************************************************
+
+RET         MOVEM.L    -12(P),P/L                           [-0C]
+            MOVEA.L    -4(P),B                              [-06]
+            JMP        (L)                                  [-02]
+*
+******************************************************************
+*  The standard SAVE routine which is used to call a routine     *
+*         Entered with B pointing to routine address             *
+******************************************************************
+
+SAVE      MOVEA.L    (SP)+,L           Standard save sequence [00]
+          MOVEM.L    P/L/B,-12(P,D0.L)                        [02]
+          ADDA.L     D0,P                                     [08]
+          MOVEM.L    D1-D4,(P)                                [0A]
+          JMP        (B)                                      [0E]
+
+********************************************************************************
+*  Branches to arithmetic routines                                             *
+********************************************************************************
+MULT      BRA.S     MULTIPLY                                  [10]
+DIV       BRA.S     DIVIDE                                    [12]
+DIVX      BRA.S     DIV01                                     [14]
+********************************************************************************
+*       Stack Check                                                            *
+*                 Entered with D0 = Stack frame size of this routine           *
+********************************************************************************
+STACKCHECK
+*            ADD.L   P,D0                New top of stack      [16]
+*            MOVE.L  G_SBASE(G),D5       Current stackbase as BCPL address
+*            LSL.L   #2,D5               MC address
+*            CMP.L   C_SEND(Z,D5.L),D0   Compare stack limit with stack top
+*           BGE.S   STACKOVER           J if top > limit
+            RTS                         OK
+STACKOVER   MOVEQ   #84,D0              Stack overflow error
+            TRAP    #0
+            RTS
+********************************************************************************
+*       Multiply                32 bit multiply routine                        *
+*                 Performs D1 := D1 * D2                                       *
+********************************************************************************
+MULTIPLY    MOVEM.L D2-D4,-(SP)         Save registers used
+            MOVE.W  D1,D3               Low word into D3
+            MOVE.W  D2,D4               Low word into D4
+            SWAP    D1                  High word into D1
+            SWAP    D2                  High word into D2
+            MULU    D3,D2               D2H * D1L
+            MULU    D4,D1               D1H * D2L
+            MULU    D4,D3               D1L * D2L
+            ADD.W   D2,D1               D2H*D1L + D1H*D2L
+            SWAP    D1                  Get into high word
+            CLR.W   D1                  Clear bottom word
+            ADD.L   D3,D1               (D2H*D1L + D1H*D2L) << 16  +  D1L*D2L
+            MOVEM.L (SP)+,D2-D4         Restore registers
+            RTS
+            PAGE
+********************************************************************************
+*       Divide                  32 bit division routine                        *
+*           Performs D1 := D1/D2; D2 := D1 REM D2                              *
+*           Corrupts all data registers                                        *
+********************************************************************************
+*
+DIVIDE
+            TST.L   D2                  Denominator < 0 ?
+            BPL     DIV01
+            NEG.L   D2
+            BSR     DIV01
+            NEG.L   D1
+            RTS
+
+DIV01       TST.L   D1                  Numerator < 0 ?
+            BPL     DIV02
+            NEG.L   D1
+            BSR     DIV02               Divide abs(d1) by d2
+            NEG.L   D1
+            NEG.L   D2                  Correct for sign
+            RTS
+
+* DIV02 performs division on unsigned numbers. It first sees if the
+* denominator is small enough for straight-line code using DIVU to
+* be applicable
+
+* set D1, D2 := D1/D2, D1 Rem D2.
+* D1 and D2 are treated as unsigned numbers, and 0<=D1<=#X80000000
+* and 0<D2<=#X80000000.
+*     Note that both D1 and D2 can be as big as one greater than the
+*     largest ordinary positive integer held in a 32-bit (signed) word.
+* If D2=0 the 68000 will take a 'divide by zero' trap.
+* The only case that can lead to an answer that is out of the range
+* of normal (signed) numbers is #X80000000/1 which can arise when
+* Divide1 was called on #X80000000/(-1)
+DIV02       CMPI.L  #$0000FFFF,D2
+            BHI     DIV04               Denominator is larger than 16 bits
+* DIV03 is used as a subroutine called from the general case code.
+* It returns with D1,D2 := D1/D2, D1 rem D2, and D3 and D6 corrupted
+DIV03       MOVE.L  D1,D6
+            CLR.W   D1
+            SWAP    D1                  High part of numerator
+            DIVU    D2,D1
+            MOVE.L  D1,D3               Save partial result away
+            MOVE.W  D6,D1
+            DIVU    D2,D1               Other part of the division
+            SWAP    D1
+            CLR.L   D2
+            MOVE.W  D1,D2
+            MOVE.W  D3,D1
+            SWAP    D1
+            RTS
+* DIV04 is reached if the denominator does not fit in 16 bits. It takes
+* a quick exit if the numerator is less than the denominator
+DIV04       CMP.L   D1,D2
+            BLS     DIV05               Branch in general case
+            MOVE.L  D1,D2
+            MOVEQ.L #0,D1               Result IS zero
+            RTS
+* At DIV05, since the denominator is >= 2^16 and the numerator is
+* < 2^32, the quotient will be < 2^16. An approximation to the
+* required quotient is produced by dividing both numerator & denominator
+* by a scale factor computed as 1+(D2/#X10000), and then doing a
+* short division by the (now) 16-bit denominator. The scale factor fits in
+* 16 bits even after the '+1' because the original D2 had #X80000000 as its
+* largest possible value, so the largest scale factor is #X00008001.
+DIV05       MOVE.L  D2,D7
+            CLR.W   D7
+            SWAP    D7                  Top half of D2 = D2/#X10000
+            ADDQ.L  #1,D7               Increment it to get safe scale factor
+            MOVE.L  D1,D4
+            MOVE.L  D2,D5               Grab a safe copy of the input
+            MOVE.L  D7,D2
+            BSR     DIV03               D1 := D1 / Scalefactor
+            MOVE.L  D5,D2
+            DIVU    D7,D2               now D2 (word) = scaled denominator
+* the choice of scalefactor here was intended to ensure that the
+* scaled denominator now in D2 was less than 16 bits long, and entry
+* conditions imply that the quotient I compute will be small enough that
+* a single DIVU order can be used to get it
+            DIVU    D2,D1
+* D1 (word) now holds an estimate for the quotient that I want.
+* Check it, and produce a remainder, by multiplying by original
+* denominator & comparing with original numerator.
+            ANDI.L  #$0000FFFF,D1       Get rid of top half, since not wanted
+DIV06       MOVE.L  D5,D2
+            MOVE.L  D5,D3
+            SWAP    D3
+            MULU    D1,D2
+            MULU    D1,D3
+            SWAP    D3                  Top half of D3 should have been zero
+            ADD.L   D3,D2               and this ADD can not cause a carry
+            SUB.L   D4,D2
+            BHI     DIV08               overshot, since remainder seems negative
+            NEG.L   D2
+            CMP.L   D2,D5
+            BHI     DIV07               OK, remainder is in range
+            ADDQ.L  #1,D1               Crank up the quotient
+            BRA     DIV06
+DIV07       RTS
+DIV08       SUBQ.L  #1,D1
+            BRA     DIV06               Adjust quotient & try again
+            PAGE
+            TTL     *** Tripos Kernel - Primitive Routines ***
+******************************************************************
+*                                                                *
+* CREATETASK( SEGLIST, STACK, PRIORITY, NAME, GVEC )             *
+*                                                                *
+* This creates a new task with code specified by seglist. The    *
+* stack and priority also passed. The task structure is          *
+* initialised and the task added to the queue.                   *
+* This is a BCPL task and a global vector (shared or             *
+* private) is passed as GVEC. In this case the task is started   *
+* so that suitable BCPL initialisation is performed (the global  *
+* vector is initialised and registers set up). The initialisation*
+* will then call TASKWait to wait for the first message.         *
+*                                                                *
+******************************************************************
+          SECT       <'Createt'>
+CRTASK    MOVE.L     16(P),D5               Extract Gvec
+          ASL.L      #2,D5                  As mc ptr
+CRTASK1   ASL.L      #2,D4                  Name ptr to mc
+          MOVEA.L    D4,L                   Into address reg
+          MOVEM.L    D1/A0-A2/A5/A6,-(SP)
+          MOVEA.L    SysBase,A6             Get library pointer
+* Get space for Task struct and process base
+          MOVE.L     #pr_SIZEOF,D0
+* Add space needed for stack
+          ASL.L      #2,D2                  Bytes required
+          ADD.L      D2,D0
+          BSR.S      GETMEM
+          MOVE.L     (SP)+,D1               Get back seglist
+          TST.L      D0
+          BNE.S      CRT1                   OK
+* Error
+          MOVEM.L    (SP)+,A0-A2/A5/A6
+          BRA        GVC1
+* Call shared routine to initialise task structure slots
+CRT1      BSR        INITTS
+* Copy BCPL name in L onto stack as C name
+          MOVE.L     A5,-(SP)               Save process ID
+	  MOVEQ      #0,D4
+          MOVE.B     (L),D4                 Get length
+          ADDQ.B     #2,D4                  Add 1 for null, 1 to round
+          BCLR       #0,D4                  Round to word
+          SUBA.L     D4,A4                  Allocate space on stack
+          MOVE.L     A4,LN_NAME(A1)         Name pointer
+          MOVE.L     A4,TC_SPREG(A1)        And save as SPReg
+          MOVE.L     A4,pr_ReturnAddr-pr_MsgPort(A5)   Also for STOP 
+          MOVE.B     (L)+,D4                Real length
+CRT2      DBRA       D4,CRT3
+          BRA.S      CRT4
+CRT3      MOVE.B     (L)+,(A4)+
+          BRA.S      CRT2
+CRT4      MOVE.B     #0,(A4)                Final nul
+
+	    ;;;; MAKETS moved to before AddTask -- 14 nov 85
+          BSR        MAKETS
+          LEA.L      ACTIV(PC),A2           Initial PC
+          LEA.L      DEACT(PC),A3           Final PC
+	  CALL       AddTask
+          MOVEM.L    (SP)+,D1/A0-A2/A5/A6   Restore regs, return procid
+          JMP        (R)
+*
+* Get memory for task structure and stack. Place it into
+* the task field so that it gets deleted properly on exit.
+* Entered with D0 = size.
+*
+GETMEM
+	  MOVE.L     D0,-(SP)		    Size onto stack
+	  MOVE.L     #MEMF_PUBLIC+MEMF_CLEAR,-(SP) Requirements
+	  MOVE.W     #1,-(SP)		    Number of entries
+	  LEA.L      -LN_SIZE(SP),SP        Leave space for node
+	  MOVEA.L    SP,A0		    Arg into A0
+	  CALL       AllocEntry		    Get Memory
+	  TST.L      D0
+	  BLE.S      GetErr 
+	  MOVEA.L    D0,A2		    A2 is mem block
+	  MOVEA.L    ME_ADDR+ML_ME(A2),A1   A1 is task space
+	  LEA        TC_MEMENTRY(A1),A0
+	  NEWLIST    A0
+	  EXG.L      A2,A1	
+	  CALL       AddHead 
+          MOVE.L     A2,D0		    Return memory
+GetMem2   LEA.L      LN_SIZE+10(SP),SP      Adjust stack
+	  MOVE.L     D0,D1                  BCPL return value
+	  RTS
+GetErr    MOVEQ      #0,D0                  Error
+          BRA.S      GetMem2
+*
+* Initialise task structure slots. Called as follows:
+* D0 Space for task
+* D1 Segment list
+* D2 Stacksize in bytes
+* D3 Priority
+* D5 Global vector ptr
+* A6 Exec library base
+* Corrupts D4 A1 A4 A5
+*
+INITTS    MOVE.L     D0,A1                  Task ptr
+          MOVE.B     D3,LN_PRI(A1)          Priority
+	  MOVE.B     #NT_PROCESS,LN_TYPE(A1)   Set type of new task
+          MOVE.L     #SIGMASK,TC_SIGWAIT(A1)   Wait for this signal
+	  LEA.L      AbortHandler(PC),A5
+	  MOVE.L     A5,TC_TRAPCODE(A1)     Install trap handler
+          LEA.L      TC_SIZE(A1),A5         A5 is now process id
+          LEA.L      pr_SIZEOF(A1),A4       A4 is low stack
+          MOVE.L     A4,TC_SPLOWER(A1)      Fill in SPLower
+          MOVE.L     A4,D4
+          ASR.L      #2,D4                  Stack as BCPL ptr
+          MOVE.L     D4,pr_StackBase-pr_MsgPort(A5)    Stored in process base
+          ADDA.L     D2,A4                  Make SPUpper
+          MOVE.L     A4,TC_SPUPPER(A1)
+          MOVE.L     A1,MP_SIGTASK(A5)      Initialise message port slot
+	  LEA.L      MP_MSGLIST(A5),A2      Point to msg list
+	  NEWLIST    A2                     Initialise this
+          MOVE.B     #MSGSIG,MP_SIGBIT(A5)  ..and signal to be issued
+* Initialise process structure
+          MOVE.L     D1,pr_SegList-pr_MsgPort(A5)      Seglist
+          MOVE.L     D2,pr_StackSize-pr_MsgPort(A5)    Stack size
+          MOVE.L     D5,pr_GlobVec-pr_MsgPort(A5)      Global vector ptr
+          RTS
+*
+* Subroutine to construct a new task
+* Called with 
+* A1 task id
+* A2 pointer to activate code
+* A3 pointer to deactivate code
+* A5 pointer to process base
+*
+;;; makets now preserves a1 -- 14 nov 85, Neil
+MAKETS
+          MOVE.L     A1,-(SP)
+          SUBA.L     A1,A1
+          CALL       FindTask
+          MOVE.L     D0,B
+          MOVE.L     pr_SegList(B),D0       Extract this seglist
+          MOVE.L     pr_ConsoleTask(B),pr_ConsoleTask-pr_MsgPort(A5)
+          MOVE.L     pr_FileSystemTask(B),pr_FileSystemTask-pr_MsgPort(A5)
+	  MOVE.L     pr_WindowPtr(B),pr_WindowPtr-pr_MsgPort(A5)
+	  MOVE.L     (SP)+,A1
+          RTS
+          CNOP       0,4
+****************************************************************
+*                                                              *
+* ProcID := CreateProc( Name, Pri, Seg, Stacksize )            *
+*                                                              *
+* Creates a new process with specified (C format) name, pri    *
+* and stacksize (in bytes). The segment list is one returned   *
+* from LoadSeg, and other entries in the Segment vector are    *
+* copied from the current environment.                         * 
+*                                                              *
+****************************************************************
+*
+CRPROC    MOVEM.L    A0-A2/A5/A6,-(SP)
+          MOVEA.L    SysBase,A6             Get library pointer
+          MOVE.L     D1,D7                  Save name ptr
+          MOVE.L     D3,D6                  Save Seg ptr
+* Get space for Task struct and process base
+          MOVE.L     #pr_SIZEOF,D0
+* Add space needed for stack
+          ADD.L      D4,D0
+* Find length of Task name
+	  MOVE.L     D7,A3		    point to name
+CRP1	  TST.B	     (A3)+	            is byte zero ?
+	  BNE.S	     CRP1
+  	  SUB.L      A3,D7		    D7 = -length
+	  SUB.L	     D7,D0		    form length of block
+	  ADDQ.L     #1,D0
+	  BCLR	     #0,D0		    make length even
+	  MOVE.L     D0,-(SP)		    save it
+	  BSR        GETMEM
+          MOVE.L     D0,D5                  Save task space ptr
+          BNE.S      CRP3
+	  ADDQ.L     #4,SP                  pop saved D0
+	  BRA.S      CRPERR                 Now error
+CRP3	  ADD.L	     D7,A3		    back to beginning of string!
+	  ADD.L	     (SP)+,D0		    address of block end
+	  MOVE.L     D0,A4		    pointer to name
+	  BCLR	     #0,D7		    make length even
+	  ADD.L	     D7,A4		    subtract string length
+	  MOVE.L     A4,D7		    into D7 for later
+CRP2	  MOVE.B     (A3)+,(A4)+	    copy name
+	  BNE.S	     CRP2	  
+* Make segment ptr
+          MOVEQ      #(SEGSIZE+2)*4,D0      Segment space
+	  MOVE.L     #MEMF_PUBLIC+MEMF_CLEAR,D1  Requirements
+	  CALL       AllocMem
+          MOVE.L     D0,D1                  Segment space to D1
+          BEQ.S      CRPERR
+	  MOVE.L     D5,D0                  Restore task space ptr to D0
+          MOVEA.L    D1,A3
+          MOVE.L     #(SEGSIZE+2)*4,(A3)    Slot in size for FREEVEC
+          ADDQ.L     #4,D1                  D1 points to seglist
+          MOVE.L     D1,-(SP)               Save segment ptr
+          LSR.L      #2,D1                  .. as BCPL ptr
+* Initialise process
+          MOVE.L     D2,D3                  Pri to D3
+          MOVE.L     D4,D2                  Stacksize to D2
+	  BSR        GETDATA                Get data ptr in A3
+          MOVEA.L    dl_GV(L),A3          Address of shared global
+          MOVE.L     A3,D5
+          BSR        INITTS                 Initialise task
+          MOVE.L     D2,-(A4)               Place size onto stack
+          MOVE.L     A4,TC_SPREG(A1)        And slot in as SPReg
+          MOVE.L     A4,pr_ReturnAddr-pr_MsgPort(A5)   Fill in return address
+          MOVE.L     D7,LN_NAME(A1)         Fill in name provided
+* Fill in the segment list, and copy values from caller
+	  BSR        MAKETS		    Return with D0=BCPL SegVec ptr
+          LSL.L      #2,D0                  To mc addr
+          MOVEA.L    D0,A4
+	  MOVE.L     (SP)+,A2               A1 is task ptr/A2 is segment
+* At this point we have A1 pointing to task control block.
+* Register A4 points to the segment vector for the caller process.
+* In A2 we must build the segment vector.
+* We allow four slots: size (2) / Klib chain / Blib chain / This segment
+* The size is set to 2 because only the first two segment lists are BCPL
+* tasks and hence require BCPL initialisation via GLOBIN.
+	  MOVE.L     #2,(A2)+		    Size
+	  MOVE.L     4(B),(A2)+		    Klib segment
+	  MOVE.L     8(B),(A2)+		    Blib segment
+	  MOVE.L     D6,(A2)+		    This segment
+* Set up entry code and make process
+          LSL.L      #2,D6                   mc ptr to list
+          MOVEA.L    D6,A2
+          LEA.L      4(A2),A2                entry point
+          LEA.L      DEACT(PC),A3            exit point
+	  CALL       AddTask
+          MOVE.L     A5,D1                   return process id
+CRPERR    MOVEM.L    (SP)+,A0-A2/A5/A6
+          JMP        (R)
+          CNOP       0,4
+****************************************************************
+*                                                              *
+*  This code is called when a task is activated or deactivated *
+*                                                              *
+****************************************************************
+*
+* D0-D7, L, S and R may be used during activation, and P and G are
+* used until they are set to the stack and global vector.
+*
+*
+* First find the required global vector size after locating my own
+* task structure
+*
+ACTIV     MOVEA.L    SysBase,A6
+          SUBA.L     A1,A1                  Find myself
+          CALL       FindTask
+          MOVEA.L    D0,B
+          ADDA.L     #TC_SIZE,B             B is now process ID
+*
+* Set up BCPL registers
+*
+          SUBA.L     Z,Z
+          MOVEA.L    TC_SPLOWER(Z,D0.L),P   Set up BCPL stack
+          MOVEA.L    pr_GlobVec-pr_MsgPort(B),G        And global vector
+*
+* Now clear BCPL stack
+*
+          MOVEA.L    P,L                    L = starting address
+	  MOVE.L     #$ABABABAB,D3          Stack pattern
+          MOVE.L     SP,D2                  Top of stack
+          SUBQ.L     #2,D2                  Less two bytes for safety
+ACT10     MOVE.L     D3,(L)+                Clear the BCPL stack
+          CMPA.L     D2,L
+          BLT.S      ACT10
+*
+          MOVE.L     #-1,C_CLLR(P)          -1 -> root coroutine
+          MOVE.L     D2,C_SEND(P)           Stack end
+          MOVE.L     P,D2                   Stack base
+          ASR.L      #2,D2                  BCPL address
+          MOVE.L     D2,G_SBASE(G)          Patch GV (***TEMP)
+*
+          MOVE.L     pr_SegList-pr_MsgPort(B),D7       D7 = BCPL ptr to SEGL
+          MOVE.L     D7,D6
+          ASL.L      #2,D6                  D6 = MC addr to SEGL
+          ADD.L      0(Z,D6.L),D7
+          ASL.L      #2,D7                  D7 = MC addr of last entry
+          LEA.L      ACT11(PC),R            Return link for GLOBIN
+*
+ACT11     ADDQ.L     #4,D6                  D6 = MC addr of next entry
+          CMP.L      D6,D7
+          BLT.S      ACT12                  J if all entries processed
+*
+* At this point:
+*
+*      D6 = MC addr of the current entry of SEGL
+*      D7 = MC address of the last entry of SEGL
+*      Z  = 0
+*      R  = MC addr of ACT11 (the return addr for GLOBIN)
+*
+* GLOBIN only changes D0, D1, D2, D3, B and L
+*
+*
+          MOVE.L     0(Z,D6.L),D1           D1 = BCPL ptr to segment
+          BRA        GLOBIN                 GLOBIN(seg) rtn to ACT11
+*
+*
+* We are now ready to call START(TASKWait())
+*
+ACT12     LEA.L      SAVE,S                 Addr of save routine
+          LEA.L      RET,R                  Addr of return routine
+*
+          MOVEA.L    G_TWait(G),B
+          MOVEQ.L    #32,D0
+          JSR        (S)                    D1 := TASKWait()
+*
+          MOVEA.L    G_START(G),B
+          MOVEQ      #32,D0                 Stack increment
+          JSR        (S)                    Now call START(pkt)
+*
+* Task has finished normally - free its seglist and globvec if new
+*
+DEACT     SUBA.L     A1,A1
+          CALLS      FindTask
+          MOVEA.L    D0,A1                  Save my task id
+*
+          MOVE.L     pr_SegList(A1),D1
+          LEA.L      DEACT1(PC),R
+          BRA        FREEVEC                Call FREEVEC(seglist)
+*
+DEACT1    MOVE.L     pr_GlobVec(A1),D1
+	  BSR        GETDATA
+	  MOVEA.L    dl_GV(L),L
+          CMP.L      L,D1                   See if the same as shared gv
+          BEQ.S      DEACT2                 Don't deallocate if so
+          LSR.L      #2,D1                  Convert to BCPL addr
+          SUB.L      #NEGSIZE,D1            Allow for negative globals
+          LEA.L      DEACT2(PC),R
+          BRA        FREEVEC                Call FREEVEC(gbase)
+* Deallocate task structure and stack
+DEACT2    
+	  SUBA.L     A1,A1		    Request self removal
+	  CALLS     RemTask		    Bye bye
+	  RTS				    Should never happen
+	  PAGE
+******************************************************************
+* 
+*        DELETETASK( )                                           *
+*                                                                *
+* This deletes the current task                                  *
+*                                                                *
+******************************************************************
+          SECT       <'Deletet'>
+DELTASK   BRA        DEACT
+          PAGE
+******************************************************************
+*                                                                *
+*        OPENDEVICE( IOB, NAME, UNIT, FLAGS )                    *
+*                                                                *
+* This opens the specified device and returns nonzero if OK      *
+* NAME is a BCPL string but terminated with a null a la C        *
+*                                                                *
+******************************************************************
+          SECT       <'OpenDev'>
+OPEND     ASL.L      #2,D2                  Move name to mc ptr
+          ADDQ.L     #1,D2                  Avoid length field
+          ASL.L      #2,D1                  Move IOB to mc ptr
+          MOVE.L     D1,D5                  And save
+          MOVEM.L    A0/A1/A5/A6,-(SP)      Save regs
+          SUBA.L     A1,A1                  Get my task id
+          CALLS      FindTask
+          MOVE.L     D0,D6
+          ADD.L      #TC_SIZE,D6            Now process id
+          MOVEA.L    D2,A0                  Name to A0
+          MOVEA.L    D5,A1                  IOB to A1
+          MOVE.L     D3,D0                  Unit to D0
+          MOVE.L     D4,D1                  Flags to D1
+* Initialise the IOB
+          CLR.L      LN_SUCC(A1)            Zero links
+          CLR.L      LN_PRED(A1)
+          MOVE.L     A0,LN_NAME(A1)         Device name
+          MOVE.L     D6,MN_REPLYPORT(A1)    Reply port
+          MOVE.W     #IO_SIZE-MN_SIZE,MN_LENGTH(A1)  Message length
+          CALLS      OpenDevice
+          MOVEM.L    (SP)+,A0/A1/A5/A6      Restore regs
+          MOVEQ      #-1,D1                 Assume OK
+          TST.L      D0
+          BEQ.S      OPEND1                 OK
+          MOVEQ      #0,D1                  Flag error
+OPEND1    JMP        (R)
+          PAGE
+******************************************************************
+*                                                                *
+*        SETIO( IOB, COMMAND, DATA, LENGTH, OFFSET )             *
+*                                                                *
+* This sets fields as specified in the IOB                       *
+*                                                                *
+******************************************************************
+          SECT       <'SetIo  '>
+SETIO     ASL.L      #2,D1                  Move IOB to mc ptr
+          MOVEA.L    D1,L                   IOB to L
+          MOVE.W     D2,IO_COMMAND(L)
+          ASL.L      #2,D3                  Convert data ptr to mc
+          MOVE.L     D3,IO_DATA(L)
+          MOVE.L     D4,IO_LENGTH(L)
+          MOVE.L     16(P),IO_OFFSET(L)
+          JMP        (R)
+          PAGE
+******************************************************************
+*                                                                *
+*        SendIO( IOB, pkt )                                      *
+*                                                                *
+* This performs the specified IO but does not wait for it.       *
+* The pkt will be returned later with the ID field pointing to   *
+* the IOB.                                                       *
+*                                                                *
+******************************************************************
+          SECT       <'SendIo '>
+SEND_IO   ASL.L      #2,D1                  IOB to mc ptr
+          ASL.L      #2,D2                  Pkt to mc ptr
+          MOVE.L     D2,LN_NAME(Z,D1.L)     pkt address saved in name
+          MOVE.L     D1,0(Z,D2.L)           ID field has IOB ptr
+          MOVEM.L    A0/A1/A5/A6,-(SP)      Save regs
+          MOVEA.L    D1,A1                  IOB to A1
+          CALLS      SendIO
+          MOVEM.L    (SP)+,A0/A1/A5/A6      Restore regs
+          JMP        (R)
+          PAGE
+******************************************************************
+*                                                                *
+*        CLOSEDEVICE( IOB )                                      *
+*                                                                *
+* This closes the device associated with the IOB                 *
+*                                                                *
+******************************************************************
+CLOSED    ASL.L      #2,D1                  Move IOB to mc ptr
+          MOVEM.L    A0/A1/A5/A6,-(SP)      Save regs
+          MOVEA.L    D1,A1                  IOB to A1
+          CALLS      CloseDevice
+          MOVEM.L    (SP)+,A0/A1/A5/A6      Restore regs
+          JMP        (R)
+          PAGE
+******************************************************************
+*                                                                *
+*                         GLOBIN(SEG)                            *
+*                                                                *
+* This function initialises the globals defined in the given     *
+* segment. It returns -1, or 0 if an error is detected - an      *
+* attempt to initialise a global beyond the upperbound given in  *
+* GLOBSIZE. GLOBIN is defined in KLIB since it is called from    *
+* the scheduler in ACTIV.                                        *
+*                                                                *
+* GLOBIN must return via register R since this is assumed in     *
+* ACTIV.                                                         *
+*                                                                *
+* GLOBIN changes:  D0, D1, D2, D3, B and L                       *
+*                                                                *
+******************************************************************
+
+          SECT       <'globin '>
+*
+GLOBIN    MOVEQ.L    #-1,D0           Success flag initialized to TRUE
+*
+GLOBIN0   ASL.L      #2,D1
+          BEQ.S      GLOBIN3          J if end of section list
+          MOVEA.L    D1,B             B  = MC addr of the section
+          MOVE.L     (B)+,D1          D1 = BCPL ptr to next sect (or 0)
+          MOVE.L     (B),D2           D2 = the section length in words
+          ASL.L      #2,D2            Now in bytes
+          LEA.L      -4(B,D2.L),L     L = MC addr of MAXGLOB word
+*
+GLOBIN1   MOVE.L     -(L),D2          D2 = entry relative ptr
+          BEQ.S      GLOBIN0          J if end of Gn/Ln pairs
+          MOVE.L     -(L),D3          D3 = the global number (n say)
+          CMP.L      (G),D3
+          BGT.S      GLOBIN2          Error if n too big
+          ADD.L      B,D2             D2 = MC addr of entry
+          ASL.L      #2,D3            D3 = Gvec subscript in bytes
+          MOVE.L     D2,0(G,D3.L)     Put entry address in global n
+          BRA.S      GLOBIN1          Deal with next Gn/Ln pair
+*
+GLOBIN2   CLR.L      D0               Indicate error in flag
+          MOVE.L     #111,D1
+          BRA        BCPLERROR
+*
+GLOBIN3   MOVE.L     D0,D1            Return flag as result
+          JMP        (R)
+
+          PAGE
+******************************************************************
+*                                                                *
+*                 RES := GETMEM(UPPERBOUND,FLAGS)                *
+*                 RES := GETVEC(UPPERBOUND)                      *
+*                                                                *
+* This function is BCPL callable.                                *
+* Returns the BCPL pointer to a vector with at least the given   *
+* upper bound. The word at offset -1 of the vector contains      *
+* the length of the store block and should not be touched by the *
+* user. It may be called                                         *
+* from machine code using R a the return address.  If no global  *
+* vector has been set up then G must be zero.                    *
+*                                                                *
+* GETVEC changes: D0, D1, D2, D3, D4 and L                       *
+*                                                                *
+* On return:                                                     *
+*      RES ~= 0    OK                                            *
+*      RES  = 0    Error                                         *
+*                  RESULT2 = 103    Insufficient store           *
+*                                                                *
+******************************************************************
+
+          SECT       <'getvec '>
+*
+GETVEC    MOVEQ      #MEMF_PUBLIC,D2
+GETM      ADDQ.L     #2,D1            True vector size + 1 overhead
+          ASL.L      #2,D1            Block size in Bytes
+          BLE.S      GVC1             Error if negative
+*
+          MOVE.L     D1,D0            Size into D0
+          MOVE.L     D2,D1            Type required
+          MOVEM.L    D0/A1/A5/A6,-(SP)
+          CALLS      AllocMem
+          MOVEM.L    (SP)+,D3/A1/A5/A6
+          SUBA.L     Z,Z
+          MOVE.L     D0,D1
+          BEQ.S      GVC1             Error - no store
+          MOVE.L     D3,0(Z,D1.L)     Store size in bytes
+          ASR.L      #2,D1            Return BCPL address
+          ADDQ.L     #1,D1            .. and avoid size
+          JMP        (R)
+*
+GVC1      MOVE.L     G,D0
+          TST.L      D0               If no global
+          BEQ        ER_RET           Then cannot set RESULT2
+          MOVE.L     #103,D1          Insufficient store
+          BRA        BCPLERROR        Error return
+          PAGE
+******************************************************************
+*                                                                *
+*                           FREEVEC(V)                           *
+*                                                                *
+* This BCPL callable routine frees the vector V, which should    *
+* have been obtained from GETVEC. It aborts the task if an error *
+* is detected. If the vector is zero the call has no effect      *
+* No BCPL stack or Global vector are required.                   *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'freevec'>
+*
+FREEVEC   TST.L      D1
+          BEQ.S      FVC1             Return if V = 0
+          MOVEM.L    A1/A5/A6,-(SP)
+          ASL.L      #2,D1            Back to mc address
+          MOVEA.L    D1,A1
+          MOVE.L     -(A1),D0         D0 = size
+          MOVE.L     D0,D1            Take copy
+          ANDI.L     #$FF000003,D1    Top byte and bottom 2 bits..
+          BNE.S      FVC2             .. must be clear to be valid length
+          CALLS      FreeMem
+          MOVEM.L    (SP)+,A1/A5/A6
+          SUBA.L     Z,Z
+FVC1      JMP        (R)              and return
+FVC2      MOVE.L     #AN_FreeVec,D1   Abort "Illegal Freevec"
+	  LEA.L      ABORT(PC),B
+	  MOVEQ      #12,D0
+	  JSR        (S)
+          PAGE
+******************************************************************
+*                                                                *
+*               Qpkt( pkt )                                      *
+*                                                                *
+* This BCPL callable routine sends a packet by means of a        *
+* message structure pointed at by machine ptr in pkt!pkt.link.   *
+* The message is sent to the port identified by pkt!pkt.id, and  *
+* this field is swapped to indicate the senders port.            *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'qpkt   '>
+*
+QPKT      MOVEA.L    D1,L                Pkt into address register
+          ADDA.L     L,L
+          ADDA.L     L,L                 mc address
+          MOVE.L     (L),D2              Extract message mc address
+          BLE.S      QPKT1               Invalid message ptr
+          MOVEM.L    A0/A1/A5/A6,-(SP)   Save regs
+          SUBA.L     A1,A1
+          CALLS      FindTask
+          ADD.L      #TC_SIZE,D0         Process ID
+          MOVEA.L    D2,A1               Into A1
+          MOVEA.L    4(L),A0             Port ID into A0
+          MOVE.L     D0,4(L)             Replace my port ID in pkt
+	  ASL.L      #2,D1               Packet ptr as mc ptr
+          MOVE.L     D1,LN_NAME(A1)      Ptr to pkt in message name field
+          CLR.L      LN_SUCC(A1)
+          CLR.L      LN_PRED(A1)         Clear link fields
+          CALL       PutMsg
+          MOVEM.L    (SP)+,A0/A1/A5/A6   Restore regs
+          MOVEQ      #1,D1               No error
+          JMP        (R)                 And return
+* Invalid port. Set error.
+QPKT1     MOVEQ      #101,D1
+          BRA        BCPLERROR
+          PAGE
+******************************************************************
+*                                                                *
+*                   Packet := Taskwait()                         *
+*                                                                *
+* This BCPL callable routine waits for a message to arrive.      *
+* It then dequeues the message and returns the packet pointed    *
+* at by the node name field. The message can be retrieved if     *
+* required by following the link field of the packet.            *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'taskwai'>
+*
+TASKWAI   MOVEM.L    A1/A5/A6,-(SP)     Save regs
+          SUBA.L     A1,A1
+          CALLS      FindTask
+          ADD.L      #TC_SIZE,D0
+* See if pktwait function to be called instead
+	  MOVEA.L    D0,A0
+          TST.L      pr_PktWait-pr_MsgPort(A0)
+	  BEQ.S      TWait0             Zero so no special action
+          MOVEA.L    pr_PktWait-pr_MsgPort(A0),A0  Address to call
+          JSR        (A0)               Call it, returns msg in D0
+          BRA.S      TWait3
+TWait0    MOVE.L     D0,D7              Save port address
+          MOVEQ      #0,D0              Clear signal
+          MOVE.L     #SIGMASK,D1        Signal mask
+          CALL       SetSignal          Clear packet signal
+* Signal can be set from any point now. See if message waiting already.
+TWait1    MOVEA.L    D7,A0              Retrieve port address
+          CALL       GetMsg
+          TST.L      D0 
+          BEQ.S      TWait2             No message this time
+* Message received. Return packet ptr held in name field.
+TWait3    SUBA.L     Z,Z                Clear A0
+          MOVE.L     LN_NAME(Z,D0.L),D1 Extract packet mc address
+	  ASR.L      #2,D1              Convert to BCPL address
+          MOVEM.L    (SP)+,A1/A5/A6     Restore regs
+          JMP        (R)                And return
+* Wait for message to arrive.
+TWait2    MOVE.L     #SIGMASK,D0        Wait for signal
+          CALL       Wait
+          BRA.S      TWait1             Now go get message
+          PAGE
+*****************************************************************
+*                                                               *
+*                 RES := SETFLAGS(TASKID,FLAGS)                 *
+*                                                               *
+* Sets flags of the specified task. We use signal numbers       *
+* 12, 13, 14, 15 for this purpose.                              *
+*                                                               *
+*                                                               *
+*****************************************************************
+
+          SECT       <'setflag'>
+*
+SETFLG    MOVEM.L    A1/A5/A6,-(SP)   Save regs
+          MOVEA.L    MP_SIGTASK(Z,D1.L),A1      Get Task Struct
+          MOVE.L     D2,D0            Mask to D0
+          ANDI.L     #$F,D0           Ensure only 4 set
+          MOVEQ      #12,D3           Shift required
+          LSL.L      D3,D0            Shift flags up
+          CALLS      Signal
+SETFLG1   SUBA.L     Z,Z
+          MOVEM.L    (SP)+,A1/A5/A6
+          JMP        (R)
+          PAGE
+*****************************************************************
+*                                                               *
+*               RES := TESTFLAGS(FLAGS)                         *
+*                                                               *
+* Tests and clears the flags of the current task.               *
+* On return:                                                    *
+*    RES  = FALSE (=0)  None of the specified flags were set    *
+*    RES  = TRUE (-1)   At least one specified flag was set     *
+*    RESULT2 = the flags that were cleared                      *
+*                                                               *
+*****************************************************************
+
+          SECT       <'testfla'>
+*
+TSTFLG    MOVEM.L    A1/A5/A6,-(SP)
+          MOVEQ      #0,D0            Signals are to be cleared
+          MOVEQ      #12,D2           Shift required
+          ANDI.L     #$F,D1           Ensure only 4 signals used
+          MOVE.L     D1,D3            Save mask
+          LSL.L      D2,D1            Move mask up
+          CALLS      SetSignal        Clear specified flags, return setting
+          MOVEQ      #0,D1            Anticipate answer FALSE
+          LSR.L      D2,D0            Shift old signals down
+          AND.L      D3,D0            Mask with request
+          BEQ.S      TSTFLG1          None set
+          MOVEQ      #-1,D1           Return TRUE if some set
+TSTFLG1
+**MOVE.L     D0,G_RES2(G)     Store them in RES2
+          BRA.S      SETFLG1          Restore & return
+          PAGE
+******************************************************************
+*                                                                *
+*           Res := EXEC( CODE, D0, D1, A0, A1, A2 )              *
+*                                                                *
+* This BCPL callable routine provides a general interface to the *
+* ROM routines provided by EXEC.                                 *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'Exec   '>
+*
+EXEC      MOVEM.L    A0-A2/A5/A6,-(SP)   Save regs
+          MOVE.L     D1,D7               Save request code
+          MOVE.L     D2,D0               Arg2 is D0
+          MOVE.L     D3,D1               Arg3 is D1
+          MOVEA.L    D4,A0               Arg4 is A0
+          MOVEA.L    20(P),A2            Arg6 is A2
+          MOVEA.L    16(P),A1            Arg5 is A1
+          MOVE.L     SysBase,A6          Library pointer
+          JSR        0(A6,D7.W)          Call routine
+          MOVEM.L    (SP)+,A0-A2/A5/A6   Restore regs
+          MOVE.L     D0,D1               Result in D1
+          JMP        (R)                 And return
+          PAGE
+******************************************************************
+*                                                                *
+*           Res := CALLRES( LIB, CODE, D0, D1, A0, A1 )          *
+*                                                                *
+* This BCPL callable routine provides a general interface to the *
+* ROM routines provided by other libraries.                      *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'Callres'>
+*
+CALLRES   MOVEM.L    A0/A1/A5/A6,-(SP)   Save regs
+          MOVE.L     D1,A6               Library pointer to A6
+          MOVE.L     D2,D7               Save request code
+          MOVE.L     D3,D0               Arg3 is D0
+          MOVE.L     D4,D1               Arg4 is D1
+          MOVEA.L    16(P),A0            Arg5 is A0
+          MOVEA.L    20(P),A1            Arg6 is A1
+          JSR        0(A6,D7.W)          Call it
+          MOVEM.L    (SP)+,A0/A1/A5/A6   Restore regs
+          MOVE.L     D0,D1               Result in D1
+          JMP        (R)                 And return
+          PAGE
+******************************************************************
+*                                                                *
+*         Res := GETLONG(Base, Byteoffset)                       *
+*                PUTLONG(Base, Byteoffset,Val)                   *
+*                                                                *
+* These BCPL callable routines are used to access long sized     *
+* values which are not long word aligned                         *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'Getlong'>
+*
+GETLONG   ASL.L      #2,D1               mc ptr
+          ADD.L      D2,D1               add byte offset
+          MOVE.L     0(Z,D1.L),D1        get lword
+          JMP        (R)
+*
+          SECT       <'Putlong'>
+*
+PUTLONG   ASL.L      #2,D1               mc ptr
+          ADD.L      D2,D1               add byte offset
+          MOVE.L     D3,0(Z,D1.L)        put lword
+          JMP        (R)                 And return
+          PAGE
+******************************************************************
+*                                                                *
+* Routines to provide information from the process structure     *
+*                                                                *
+******************************************************************
+*
+* Service routine to locate my process id, and return it in L
+* Saves all registers used
+*
+GETID     MOVEM.L    D0/D1/A1/A5/A6,-(SP)
+          SUBA.L     A1,A1
+          CALLS      FindTask
+          ADD.L      #TC_SIZE,D0
+          MOVEA.L    D0,L
+          SUBA.L     Z,Z
+          MOVEM.L    (SP)+,D0/D1/A1/A5/A6
+          RTS
+*
+* id := taskid()
+*
+* Return process id
+*
+TASKID    BSR.S      GETID
+          MOVE.L     L,D1
+          JMP        (R)
+*
+* list := seglist()
+*
+* Return segment list
+*
+SEGL      BSR.S      GETID
+          MOVE.L     pr_SegList-pr_MsgPort(L),D1
+          JMP        (R)
+*
+* task := consoletask()
+*
+* Return console task id
+*
+CTASK     BSR.S      GETID
+          MOVE.L     pr_ConsoleTask-pr_MsgPort(L),D1
+          JMP        (R)
+*
+* task := filesystemtask()
+*
+* Return filing system task id
+*
+FTASK     BSR.S      GETID
+          MOVE.L     pr_FileSystemTask-pr_MsgPort(L),D1
+          JMP        (R)
+*
+* rc := RESULT2(alter,val)
+*
+* Returns value of RESULT2, and sets it if ALTER is true
+*
+RES2      BSR.S      GETID               Get ID
+          LEA.L      pr_Result2-pr_MsgPort(L),L     Point to val
+          BRA.S      UPDTE
+*
+* rc := currentdir(alter,val)
+*
+* Returns value of currentdir, and alters it
+*
+CDIR      BSR.S      GETID
+          LEA.L      pr_CurrentDir-pr_MsgPort(L),L
+
+UPDTE     TST.L      D1                  Update?
+          BNE.S      UPDTE1              No, return value
+          MOVE.L     (L),D1
+          JMP        (R)
+UPDTE1    MOVE.L     (L),D1
+          MOVE.L     D2,(L)
+          JMP        (R)
+          PAGE
+*
+* These routines provide BCPL io support with read only globals
+*
+*
+SELIN     BSR.S      GETID
+          MOVE.L     D1,pr_CIS-pr_MsgPort(L)
+          JMP        (R)
+*
+SELOUT    BSR.S      GETID
+          MOVE.L     D1,pr_COS-pr_MsgPort(L)
+          JMP        (R)
+*
+INPUT     BSR.S      GETID
+          MOVE.L     pr_CIS-pr_MsgPort(L),D1
+          JMP        (R)
+*
+OUTPUT    BSR.S      GETID
+          MOVE.L     pr_COS-pr_MsgPort(L),D1
+          JMP        (R)
+*
+CLI       BSR.S      GETID
+          MOVE.L     pr_CLI-pr_MsgPort(L),D1
+          JMP        (R)
+*
+* This service routine returns with the address of the DOS
+* data area in L. All registers are saved.
+*
+GETDATA   MOVEM.L    D0/D1/A0/A1/A6,-(SP)
+	  LEA.L      LIBNAME,A1	      Pointer to name
+	  MOVEQ      #0,D0            Version
+	  CALLS      OpenLibrary
+	  MOVEA.L    D0,L
+	  SUBI.W     #1,DOSUSE-DOSLIB(L) Keep use count correct
+	  MOVEM.L    (SP)+,D0/D1/A0/A1/A6
+	  RTS
+*
+* Routine to return pointer to root structure
+*
+ROOTN     BSR.S      GETDATA          Get data ptr into L
+	  MOVE.L     dl_Root(L),D1  Pointer to rootnode
+	  LSR.L      #2,D1            As BCPL ptr
+	  JMP        (R)
+          PAGE
+	  TTL        Error Handler
+*
+* This section of code gets called when an exception is encountered.
+* It saves all the registers and then calls the routine Abort.
+*
+AbortHandler
+	  MOVEM.L    D0-D7/A0-A6,-(SP)	Save regs on super stack
+	  MOVE.L     60(SP),D7          Code into arg
+	  ANDI.W     #(~$2000),SR       Into user mode
+* Get Exec's handler, and patch it in to stop runaway
+	  MOVEA.L    $4,A6
+	  MOVEA.L    TaskTrapCode(A6),A2
+	  MOVEA.L    ThisTask(A6),A0
+	  MOVE.L     A2,TC_TRAPCODE(A0)
+* Find the DOS data structure
+	  BSR.S      GETDATA
+          LEA.L      (CALLGLOB-DOSLIB)(A3),A3
+* Now call Abort( Code )
+	  MOVEQ      #G_ABORT/4,D0      Global required
+	  MOVE.L     D7,D1              Move arg to D1
+	  JSR        (A3)               Call Abort
+* We return and now call the default handler.
+	  LEA.L      AbortNext(PC),A5   Where to go..
+	  JMP        LVO_Supervisor(A6) Into supervisor mode
+AbortNext ADDQ.L     #6,SP              Ignore the SR,PC saved by that
+	  BTST.B     #AFB_68010,AttnFlags+1(A6)
+	  BEQ.S      1$
+	  ADDQ.L     #2,SP		Remove format word
+1$:	  MOVE.L     56(SP),A6          Restore A6
+	  MOVE.L     A2,56(SP)          Plant address
+	  MOVEM.L    (SP)+,D0-D7/A0-A5  Restore other regs
+	  RTS                           Call Exec handler
+*
+
+******************************************************************
+*                                                                *
+*           ABORT( Code )                                        *
+*                                                                *
+* This BCPL callable routine displays a requestor, then when the *
+* user presses Continue it calls an Alert if it was called with  *
+* a DOS code, and returns to caller otherwise. The message is    *
+* slightly different depending on whether it was a disk error.   *
+*                                                                *
+******************************************************************
+*
+*
+          SECT       <'Abort  '>
+*
+ABORT
+	  CMPI.L     #AN_KeyRange!AT_DeadEnd,D1	Disk error?
+	  BNE.S      ABORT0             No..
+
+	  LEA.L      LINE0(PC),A0
+	  BRA.S	     ABORT1
+
+ABORT0	  LEA.L      LINE1(PC),A0
+ABORT1	  MOVE.L     A0,D1
+	  ASR.L      #2,D1
+
+	  LEA.L      LINE2(PC),A0
+	  MOVE.L     A0,D2
+	  ASR.L      #2,D2
+
+	  LEA.L      LINE3(PC),A0
+	  MOVE.L     A0,D3
+	  ASR.L      #2,D3
+
+	  MOVEA.L    G_REQUEST(G),B
+	  MOVEQ      #16,D0
+	  JSR        (S)
+
+* If the user presses Retry, we give the message again
+
+	  TST.L      D1
+	  BNE.S      ABORT
+
+* If the user presses Cancel, we call an Alert if DOS errors or
+* return otherwise.
+
+          MOVE.L     (P),D7          Code passed. If top bit set then Alert
+	  BPL.S      ABORT2
+* A DOS code. Now jump to an Alert.
+          CALLS      Alert
+ABORT2    JMP        (R)
+
+* The messages we need
+
+          CNOP       0,4
+LINE0	  DC.B       24,'Disk corrupt - task held'
+          CNOP       0,4
+LINE1	  DC.B       26,'Software error - task held'
+	  CNOP       0,4
+LINE2	  DC.B       25,' Finish ALL disk activity'
+	  CNOP       0,4
+LINE3	  DC.B       28,'Select CANCEL to reset/debug'
+	  CNOP       0,2
+          PAGE
+          SECT       <'RunComm'>
+*
+* rc := runcommand( seg, stacksize, paramptr, paramlen )
+*
+* This code runs a command under TRIPOS in a language independent
+* fashion. A stack of specified size is constructed, and the entry point
+* of the code is assumed to be the first executable word of the first
+* hunk in the segment list (which is a list of code blocks linked by BCPL
+* pointers). All TRIPOS registers are saved, and the code is entered with
+* the SP at the base of the new stack, having pushed a suitable return
+* address, the size of the stack and the caller's stack onto it first of all.
+* In addition the previous return address for STOP is saved, and a new
+* one installed.
+*
+* Thus a program running under Tripos will find a stack as follows
+*
+* ReturnAddress    StackSize   CallerStack
+*
+* The registers are set up as follows (any register may be corrupted
+* except SP).
+* 
+* D0  Size of parameter string in bytes
+* A0  Pointer to parameter string area
+* 
+* The routine returns
+* -1  if the program could not be loaded (result2() has more info)
+* 0   if the program ran and did not set a return code
+* >0  if the program set a return code (result2() normally has more info)
+*
+
+RUNC	MOVE.L  D2,D1                   Stacksize to D2
+	MOVEQ   #28,D0
+        MOVEA.L G_GVEC(G),B
+        JSR     (S)                     Call GETVEC
+        TST.L   D1                      Check worked
+        BEQ.S   RUNERRL                 Error
+        MOVE.L  4(P),D2                 Get back size
+        ADD.L   D2,D1                   D1 is now high stack address
+        ADDQ.L  #1,D1                   Now top stack ptr
+        ASL.L   #2,D1                   Byte ptr to stack
+        MOVEA.L D1,B                    Into B
+        MOVEM.L A1/A2/A5/A6,-(SP)       Save Tripos registers
+        BSR     GETID                   Get process ID in L
+        MOVE.L  pr_ReturnAddr-pr_MsgPort(L),-(SP)  Save previous return address
+        MOVE.L  SP,-(B)                 Push my stack
+        ASL.L   #2,D2                   Stacksize in bytes
+        MOVE.L  D2,-(B)                 Push stacksize
+*
+
+* Remember the base stack in the process base for STOP.
+*
+        MOVE.L  B,pr_ReturnAddr-pr_MsgPort(L)      Store new returnaddr stack
+        MOVE.L  (P),D1                  Segment list
+        ASL.L   #2,D1                   As mc ptr
+        MOVEA.L D1,L                    Save seglist in A3
+        MOVE.L  8(P),D1                 BCPL args ptr
+        ASL.L   #2,D1                   As mc ptr
+        MOVEA.L D1,Z                    Into A0
+        MOVE.L  12(P),D0                Args size
+        MOVE.L  B,SP                    New stack ptr
+        JSR     4(L)                    Hold tight
+*
+* The loaded command should return here. Convention indicates that D0
+* contains the return code. SP should be set to point to the stacksize.
+*
+RETADD  MOVEM.L (SP)+,D2/D3             Extract stack size and my stack
+        MOVE.L  SP,D1                   Save old stack ptr
+        MOVE.L  D3,SP                   New stack now
+        MOVE.L  (SP)+,D7                Remember previous returnaddr
+        BSR     GETID                   Get my ID
+        MOVE.L  D7,pr_ReturnAddr-pr_MsgPort(L)     Restore saved return address
+        MOVEM.L (SP)+,A1/A2/A5/A6       Restore my registers
+        SUBA.L  Z,Z
+        MOVE.L  D0,(P)                  Save return code
+        SUB.L   D2,D1                   D1 = Low stack + 1
+        SUBQ.L  #1,D1                   Now Stack Base
+        ASR.L   #2,D1                   As BCPL ptr
+        MOVEQ   #16,D0                  Stack inc
+        MOVEA.L G_FVEC(G),B
+        JSR     (S)                     Call FREEVEC
+        MOVE.L  (P),D1                  Return returncode
+        JMP     (R)
+*
+* Here if out of memory
+*
+RUNERRL MOVEQ   #-1,D1
+        JMP     (R)
+        PAGE
+**********************************************************************
+*                                                                    *
+*       STOP(RC)                                                     *
+*                                                                    *
+*    Returns from either a command called through RUNCOMMAND         *
+*    or deactivates a process. It simply returns to the return       *
+*    address saved on the stack pointed to by pr_ReturnAddr-pr_MsgPort-4        *
+*                                                                    *
+**********************************************************************
+NSTOP   BSR     GETID                   Get my ID
+        MOVE.L  pr_ReturnAddr-pr_MsgPort(L),D0     New stack ptr
+	SUBQ.L  #4,D0                   Point to return address
+	MOVE.L	D0,SP
+        MOVE.L  D1,D0                   Return code into D0
+        RTS                             Return to saved address
+        PAGE
+**********************************************************************
+*                                                                    *
+*                       Globals to be initialised                    *
+*                                                                    *
+**********************************************************************
+
+
+          CNOP       0,4                    Align
+GLOBEND   DC.L       0                      End of the global list
+
+          DC.L       G_GLOBIN/4,(GLOBIN-KLIB)
+          DC.L       G_GETMEM/4,(GETM-KLIB)
+          DC.L       G_GVEC/4,(GETVEC-KLIB)
+          DC.L       G_FVEC/4,(FREEVEC-KLIB)
+          DC.L       G_OPEND/4,(OPEND-KLIB)
+          DC.L       G_SETIO/4,(SETIO-KLIB)
+          DC.L       G_SendIO/4,(SEND_IO-KLIB)
+          DC.L       G_CLOSED/4,(CLOSED-KLIB)
+          DC.L       G_CRTASK/4,(CRTASK-KLIB)
+          DC.L       I_CREATEPROC,(CRPROC-KLIB)
+          DC.L       G_DTASK/4,(DELTASK-KLIB)
+          DC.L       G_SFLAGS/4,(SETFLG-KLIB)
+          DC.L       G_TFLAGS/4,(TSTFLG-KLIB)
+          DC.L       G_ABORT/4,(ABORT-KLIB)
+          DC.L       G_ROOTN/4,(ROOTN-KLIB)
+          DC.L       G_TWait/4,(TASKWAI-KLIB)
+          DC.L       G_QPKT/4,(QPKT-KLIB)
+          DC.L       G_EXEC/4,(EXEC-KLIB)
+          DC.L       G_CALLRES/4,(CALLRES-KLIB)
+          DC.L       G_RES2/4,(RES2-KLIB)
+          DC.L       G_CDIR/4,(CDIR-KLIB)
+          DC.L       G_TASKID/4,(TASKID-KLIB)
+          DC.L       G_SEGL/4,(SEGL-KLIB)
+          DC.L       G_SELIN/4,(SELIN-KLIB)
+          DC.L       G_SELOUT/4,(SELOUT-KLIB)
+          DC.L       G_INPUT/4,(INPUT-KLIB)
+          DC.L       G_OUTPUT/4,(OUTPUT-KLIB)
+          DC.L       G_CTASK/4,(CTASK-KLIB)
+          DC.L       G_FTASK/4,(FTASK-KLIB)
+          DC.L       G_GETLONG/4,(GETLONG-KLIB)
+          DC.L       G_PUTLONG/4,(PUTLONG-KLIB)
+          DC.L       G_RUNC/4,(RUNC-KLIB)
+          DC.L       G_STOP/4,(NSTOP-KLIB)
+          DC.L       G_CLI/4,(CLI-KLIB)
+
+          DC.L       G_GLOBMAX/4             Highest referenced global
+
+KEND      END

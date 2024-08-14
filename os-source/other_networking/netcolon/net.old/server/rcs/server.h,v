@@ -1,0 +1,780 @@
+head     1.21;
+branch   ;
+access   ;
+symbols  v37r8:1.21 Distillery:1.21;
+locks    ; strict;
+comment  @ * @;
+
+
+1.21
+date     91.03.11.11.17.34;  author J_Toebes;  state Exp;
+branches ;
+next     1.20;
+
+1.20
+date     91.01.16.20.26.48;  author J_Toebes;  state Exp;
+branches ;
+next     1.19;
+
+1.19
+date     91.01.15.01.50.26;  author J_Toebes;  state Exp;
+branches ;
+next     1.18;
+
+1.18
+date     91.01.15.01.06.01;  author J_Toebes;  state Exp;
+branches ;
+next     1.17;
+
+1.17
+date     91.01.11.10.46.04;  author J_Toebes;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     91.01.10.23.59.40;  author J_Toebes;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     91.01.06.18.07.16;  author J_Toebes;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     90.12.31.15.28.34;  author J_Toebes;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     90.12.30.15.39.59;  author J_Toebes;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     90.12.29.13.47.06;  author J_Toebes;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     90.11.29.02.00.41;  author J_Toebes;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.11.28.01.55.05;  author J_Toebes;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.11.23.15.08.23;  author J_Toebes;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.11.20.21.34.46;  author J_Toebes;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.18.22.56.02;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.17.01.12.44;  author Doug;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.15.08.18.02;  author J_Toebes;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.05.06.56.29;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.10.16.00.59.35;  author J_Toebes;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.03.04.56;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.00.59;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@server include file
+@
+
+
+1.21
+log
+@Add code to limit the number of active open file handles
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                                          BBS:      */
+/* | o  | ||   John Toebes     Dave Baker     John Mainwaring                */
+/* |  . |//                                                                  */
+/* ======                                                                    */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#include "netcomm.h"
+#include "sdn_pragmas.h"
+#include "network-server_rev.h"
+
+#define VERSTRING VERSTAG "\0© 1991 SAS Institute Inc.  All Rights Reserved."
+
+#define PERMSPACK   10
+#define MAXNODENAME 32
+
+#ifndef TESTING
+#define TESTING 1
+#endif
+
+/* Private action numbers for state information                                 */
+#define ACTION_RETURN           5558
+#define ACTION_RETRW            5559
+#define ACTION_RWMORE1          5560
+#define ACTION_RWMORE2          5561
+#define ACTION_RWMORE3          5562
+#define ACTION_RETOPEN          5563
+#define ACTION_RETEND           5564
+#define ACTION_RETLOCKNAME      5565
+#define ACTION_RETPARENT        5566
+#define ACTION_RETNAMEEX        5567
+#define ACTION_RETNAMELOCK      5568
+#define ACTION_RETNAMEUNLOCK    5569
+#define ACTION_FINDINFO         5570
+#define ACTION_RETINFO          5571
+#define ACTION_RETLOCK          5572
+#define ACTION_RETFIB           5573
+
+#define DEFICON      "\x16" "icons/__DEFAULT__.info"
+#define NODEINFONAME "\x13" "icons/__NODE__.info"
+
+#define CLASS_READONLY 0
+#define CLASS_SHARED   1
+#define CLASS_EXCLUDE  2
+#define CLASS_PSEUDO   0x40     /* This is a special return from GetRDevice     */
+#define CLASS_ASSIGN   0x80     /* This is a bit mask setting over the others   */
+
+#if TESTING
+#define CONFIGFILE "DEVS:networks/testserv-config"
+#else
+#define CONFIGFILE "DEVS:networks/server-config"
+#endif
+
+#define MAXPW     32
+#define MAXOPENS   2
+
+/* Return codes from testlock */
+#define LOCK_INVALID   0
+#define LOCK_ROOT      1
+#define LOCK_NORMAL    2
+#define LOCK_PSEUDO    3
+
+#define ATTEMPT_WRITE  1
+#define ATTEMPT_ACCESS 0
+
+struct ACCESS {
+   struct ACCESS *next;
+   int class;                   /* One of the CLASS values above.  Note that a  */
+                                /* a bit setting of CLASS_ASSIGN is given, we   */
+                                /* will store the assign name just after the    */
+                                /* real name in the name array.                 */
+   char name[1];
+};
+
+struct DEVLIST {
+   struct DEVLIST *next;        /* Next entry on the list                       */
+   short  type;                 /* The type.  One of:                           */
+                                /*    2 = ST_USERDIR  a directory               */
+                                /*    4 = ST_LINKDIR  an assign to a directory  */
+                                /*   -3 = ST_FILE     a file                    */
+                                /*   -4 = ST_LINKFILE an assign to a file       */
+   short  protect;              /* Access protection bits for the entry         */
+/* struct MsgPort *port;        ** Message port associated with the entry       */
+   BPTR lock;                   /* Lock for any assigned item.                  */
+   char len;                    /* Length of the name (make this a BSTR)        */
+   char name[1];                /* The actual name itself                       */
+};
+
+typedef union {
+   long     all;
+   struct {
+      short devpos;
+      signed char class;
+      signed char depth;
+   } a;
+} ACINFO;
+
+typedef struct lchain {
+   struct lchain *next;
+   BPTR           lock;
+   ACINFO         info;
+} *ELOCK;
+
+struct FCHAIN {
+   struct FileHandle fh;
+   struct FCHAIN *next;
+   ACINFO         info;
+};
+
+/* Indicator of the current session */
+typedef struct session
+{
+   struct session *next;     /* Next active session                             */
+   DRIVER         *driver;   /* Driver handle for communicating with session    */
+   ELOCK           locks;    /* List of active locks                            */
+   struct FCHAIN  *fhs;      /* List of active file handles                     */
+   char            name[MAXNODENAME]; /* Our name as we know it                 */
+   struct DEVLIST *devices;  /* List of devices we have access to               */
+   struct Access  *pending;  /* Pending access waiting for a password           */
+} SESSION;
+
+typedef struct ServerPacket {
+   struct Message        sp_Msg;        /* These two fields make it look like   */
+   struct DosPacket      sp_Pkt;        /*   a normal StandardPacket            */
+   struct ServerPacket  *sp_Next;       /* Next server packet on the chain.     */
+                                        /*  == SPACKET_PERM for permanent packet*/
+   struct RPacket       *sp_RP;         /* RPacket to respond to at completion  */
+   DRIVER               *sp_Driver;     /* Driver which initiated the action    */
+   SESSION              *sp_Ses;        /* Session associated with packet       */
+   short                 sp_Action;     /* Action code to be processed          */
+   short                 sp_State;      /* Action state value                   */
+                                        /*   Note that 0 indicates an inactive  */
+                                        /*   packet that is available for reuse */
+} SPACKET;
+#define SPACKET_PERM ((SPACKET *)-1)
+typedef struct global
+   {
+   struct NetGlobal       n;            /* Globals in common with handler       */
+   long                   sigbits;      /* signal bits available to the driver  */
+   long                   waitbits;     /* Bits to wait on.                     */
+   long                   replymask;    /* Signal bit of our port               */
+   int                    reply;        /* Flag to indicate time to reply       */
+   DRIVER                *drivers;      /* Points to list of active drivers     */
+   SPACKET               *pspacket;     /* Array of permanent SPackets          */
+   SPACKET               *tempspkt;     /* List of temporary SPackets           */
+   SESSION               *sessions;     /* List of all active sessions          */
+   struct FCHAIN         *fhs;          /* List of all open files               */
+   struct MsgPort        *dosport;      /* Msgport of last dos device           */
+   BPTR                   portlock;     /* Relative lock for operation          */
+   BPTR                   configlock;   /* Lock on the networks/devs directory  */
+   long                   opencount;    /* Number of currently open files       */
+   SPACKET               *openpend;     /* Opens pending closes being completed */
+   }* SGLOBAL;
+
+#undef GLOBAL
+#define GLOBAL SGLOBAL
+#define ROOTLOCK ((BPTR)-2)
+#define HANDLOCK ((BPTR)-3)
+
+void checkdebug U_ARGS((void));
+
+#if DEBUG
+#define BUGCHECK() checkdebug();
+#define BUGINIT()  initdebug(NULL);
+#else
+#define BUGCHECK()
+#define BUGINIT()
+#endif
+
+/* Each packet type has a corresponding Act??? function */
+/* All of them take the same parameters - thus, use a macro to define them */
+#define ACTFN(name) void name (GLOBAL global, SPACKET *spkt)
+
+/* main.c */
+ACTFN(RmtSetDebug    );
+
+/* file.c */
+ACTFN(RmtDelete        );
+ACTFN(RmtRename        );
+ACTFN(RmtSetComment    );
+ACTFN(RmtSetProtection );
+ACTFN(RmtSetFileDate   );
+
+/* io.c */
+ACTFN(RmtRW        );
+ACTFN(RmtRWRet     );
+ACTFN(RmtRWMore    );
+ACTFN(RmtRWMore1   );
+ACTFN(RmtRWMore2   );
+ACTFN(RmtRWMore3   );
+ACTFN(RmtSeek      );
+ACTFN(RmtOpen      );
+ACTFN(RmtOpenRet   );
+ACTFN(RmtEnd       );
+ACTFN(RmtEndRet    );
+
+/* dir.c */
+ACTFN(RmtCreateDir );
+ACTFN(RmtNameLockRet);
+ACTFN(RmtFindInfo  );
+ACTFN(RmtDoneInfo  );
+ACTFN(RmtExamine   );
+#define RmtExNext RmtExamine
+ACTFN(RmtRetFIB    );
+ACTFN(RmtParent    );
+ACTFN(RmtParentRet );
+
+/* lock.c */
+ACTFN(RmtLock      );
+void NameNode     U_ARGS((GLOBAL, SPACKET *, BPTR));
+struct MsgPort *GetRDevice   U_ARGS((GLOBAL, SPACKET *, ELOCK, char *, int));
+ACTFN(RmtRetLock    );
+ACTFN(RmtNameExamine);
+ACTFN(RmtNameLock  );
+ACTFN(RmtNameUnlock);
+ACTFN(RmtDupLock   );
+ACTFN(RmtUnLock    );
+void chainlock    U_ARGS((GLOBAL, SPACKET *, BPTR));
+void unchainlock  U_ARGS((GLOBAL, SPACKET *, ELOCK));
+int testlock      U_ARGS((GLOBAL, SPACKET *, ELOCK));
+
+/* volume.c */
+ACTFN(RmtInfo       );
+ACTFN(RmtNetInit    );
+ACTFN(RmtNetLogin   );
+ACTFN(RmtNetStart   );
+ACTFN(RmtNetStop    );
+
+/* device.c */
+void ParseConfig U_ARGS((GLOBAL));
+SPACKET *GetSPacket U_ARGS((GLOBAL));
+void FreeSPacket U_ARGS((GLOBAL, SPACKET *));
+ACTFN(RmtDie        );
+
+/* Dispatch.c */
+void Dispatch    U_ARGS((GLOBAL, SPACKET *, int, struct MsgPort *));
+ACTFN(RmtReturn     );
+
+/* inhibit.c */
+int inhibit  U_ARGS((struct MsgPort *, long));
+long sendpkt U_ARGS((struct MsgPort *, long, long*, long));
+
+/* volume.c */
+ACTFN(RmtInfo       );
+SESSION *NewSession U_ARGS((GLOBAL));
+struct ACCESS *loadaccess U_ARGS((GLOBAL global, char *name));
+void freeaccess U_ARGS((GLOBAL global, struct ACCESS *access));
+void freedevlist U_ARGS((GLOBAL global, struct DEVLIST *devlist));
+struct DEVLIST *builddevlist U_ARGS((GLOBAL global, struct ACCESS *access));
+
+void __stdargs kprintf(char *, ...);
+int __stdargs kgetc(void);
+
+#include "proto.h"
+#include "memwatch.h"
+@
+
+
+1.20
+log
+@Changed default location of icons.
+@
+text
+@d56 2
+a57 1
+#define MAXPW 32
+d153 2
+@
+
+
+1.19
+log
+@Added version information
+@
+text
+@d41 2
+a42 3
+#define DEFICON "\x16icons/__DEFAULT__.info"
+
+#define NODEINFONAME "\x21" "devs/networks/icons/__NODE__.info"
+@
+
+
+1.18
+log
+@Implement pseudo locks on handlers.
+@
+text
+@d12 3
+@
+
+
+1.17
+log
+@Cleanup support for uplevel reference limits.  At the same time corrected
+problems where cd net:john/assigned  would not return the asigned name
+of the object
+@
+text
+@d45 1
+d56 6
+d155 1
+d217 1
+@
+
+
+1.16
+log
+@Added code to compress the FIB portion of the return on an ACT_EXAMINE/EXNEXT
+@
+text
+@d81 9
+d93 1
+a93 2
+   char           depth;
+   char           class;
+d99 1
+a99 2
+   char   depth;
+   char   class;
+@
+
+
+1.15
+log
+@Add prototype for kgetc
+@
+text
+@d36 1
+d104 1
+d186 1
+a235 1
+#if MWDEBUG
+a236 1
+#endif
+@
+
+
+1.14
+log
+@Updated lchain and echain structures.  Added support for access protection.
+@
+text
+@d230 1
+@
+
+
+1.13
+log
+@Add Network Init routine
+@
+text
+@d39 2
+d54 3
+d80 6
+a85 4
+struct LCHAIN {
+   struct LCHAIN *next;
+   void          *data;
+};
+d90 2
+d99 1
+a99 1
+   struct LCHAIN  *locks;    /* List of active locks                            */
+d190 1
+a190 1
+struct MsgPort *GetRDevice   U_ARGS((GLOBAL, SPACKET *, BPTR, char *));
+d198 1
+a198 1
+void unchainlock  U_ARGS((GLOBAL, SPACKET *, BPTR));
+@
+
+
+1.12
+log
+@Added config for testing, memwatch file
+@
+text
+@d193 1
+@
+
+
+1.11
+log
+@Added lock chaining routines.
+@
+text
+@d16 3
+d44 6
+d222 3
+@
+
+
+1.10
+log
+@Added new actions, updated device information.
+@
+text
+@d179 2
+d209 2
+@
+
+
+1.9
+log
+@Added in session support of access control lists.
+@
+text
+@d30 3
+d34 2
+d39 1
+a39 1
+#define CLASS_ASSIGN   0x80
+d45 4
+a48 1
+   int class;
+d53 11
+a63 7
+   struct DEVLIST *next;
+   short  type;
+   short  protect;
+   struct MsgPort *port;
+   BPTR lock;
+   char len;
+   char name[1];
+d115 1
+d162 2
+d173 1
+@
+
+
+1.8
+log
+@Added structures for access and device list management.
+@
+text
+@d50 2
+d72 1
+d82 1
+d188 3
+@
+
+
+1.7
+log
+@Added RmtNameUnlock routine for namenode state machine.
+@
+text
+@d31 21
+d96 1
+d183 1
+@
+
+
+1.6
+log
+@move DRIVER struct to netcomm.h
+@
+text
+@d11 1
+d29 1
+d133 2
+a134 1
+ACTFN(RmtNameLock   );
+@
+
+
+1.5
+log
+@Add waitmask field.
+@
+text
+@a38 8
+typedef struct driver
+{
+   struct driver  *next;     /* Next known driver                               */
+   long            sigmask;  /* Signal mask of active bits                      */
+   APTR            drglobal; /* Pointer to driver global data.                  */
+   struct library *libbase;  /* Pointer to library base                         */
+} DRIVER;
+
+@
+
+
+1.4
+log
+@Major rewrite to make server multi-threaded with support for multiple
+devices.  At this point in time it is not debugged and the concept of
+sessions is missing.
+@
+text
+@d72 11
+a82 10
+   struct NetGlobal       n;           /* Globals in common with handler     */
+   long                   sigbits;     /* signal bits available to the driver*/
+   long                   replymask;   /* Signal bit of our port             */
+   int                    reply;       /* Flag to indicate time to reply     */
+   DRIVER                *drivers;     /* Points to list of active drivers   */
+   SPACKET               *pspacket;    /* Array of permanent SPackets        */
+   SPACKET               *tempspkt;    /* List of temporary SPackets         */
+   SESSION               *sessions;    /* List of all active sessions        */
+   struct MsgPort        *dosport;     /* Msgport of last dos device         */
+   BPTR                   portlock;    /* Relative lock for operation        */
+@
+
+
+1.3
+log
+@added portlock.
+@
+text
+@d12 1
+d14 15
+d39 8
+d51 1
+a51 1
+   void           *handle;   /* Driver handle for communicating with session    */
+d57 13
+d73 8
+a80 5
+   struct RPacket         RP;          /* Data area for remote node          */
+   struct DosPacket      *pkt;         /* the packet we are processing       */
+   struct StandardPacket *stdpkt;      /* Packet to send to local handlers   */
+   struct MsgPort        *dosport;     /* msgport for DOS device to talk to  */ 
+   struct RPacket        *rpptr;       /* Points to msg for singlemachine v  */
+a81 5
+   char                  *fib;         /* For use by RmtExamine/RmtExNext    */
+   struct InfoData       *infodata;    /* For use by RmtInfo                 */
+   SESSION               *ses;         /* Current session                    */
+   LONG                   rootlock;    /* Lock on root of ROOT:              */
+   SESSION               *sessions;    /* List of all active sessions        */
+d98 4
+d103 1
+a103 1
+void RmtSetDebug      U_ARGS((GLOBAL, struct DosPacket *));
+d106 5
+a110 5
+void RmtDelete        U_ARGS((GLOBAL, struct DosPacket *));
+void RmtRename        U_ARGS((GLOBAL, struct DosPacket *));
+void RmtSetComment    U_ARGS((GLOBAL, struct DosPacket *));
+void RmtSetProtection U_ARGS((GLOBAL, struct DosPacket *));
+void RmtSetFileDate   U_ARGS((GLOBAL, struct DosPacket *));
+d113 11
+a123 7
+void RmtFindwrite U_ARGS((GLOBAL, struct DosPacket *));
+#define RmtFindin RmtFindWrite
+#define RmtFindout RmtFindWrite
+void RmtEnd       U_ARGS((GLOBAL, struct DosPacket *));
+void RmtRWMore    U_ARGS((GLOBAL, struct DosPacket *));
+void RmtRW        U_ARGS((GLOBAL, struct DosPacket *));
+void RmtSeek      U_ARGS((GLOBAL, struct DosPacket *));
+d126 3
+a128 2
+void RmtCreateDir U_ARGS((GLOBAL, struct DosPacket *));
+void RmtExamine   U_ARGS((GLOBAL, struct DosPacket *));
+d130 2
+a131 1
+void RmtParent    U_ARGS((GLOBAL, struct DosPacket *));
+d134 7
+a140 5
+void RmtLock      U_ARGS((GLOBAL, struct DosPacket *));
+void RmtDupLock   U_ARGS((GLOBAL, struct DosPacket *));
+void RmtUnLock    U_ARGS((GLOBAL, struct DosPacket *));
+void NameNode     U_ARGS((GLOBAL, BPTR));
+struct MsgPort *GetRDevice   U_ARGS((GLOBAL, BPTR, char *));
+d143 4
+a146 4
+void RmtInfo       U_ARGS((GLOBAL, struct DosPacket *));
+void RmtNetKludge  U_ARGS((GLOBAL, struct DosPacket *));
+void RmtNetStart   U_ARGS((GLOBAL, struct DosPacket *));
+void RmtNetStop    U_ARGS((GLOBAL, struct DosPacket *));
+d149 4
+a152 3
+int InitDevice U_ARGS((GLOBAL));
+int TermDevice U_ARGS((GLOBAL));
+void RmtDie    U_ARGS((GLOBAL, struct DosPacket *));
+d155 2
+a156 1
+void Dispatch    U_ARGS((GLOBAL, struct MsgPort *));
+d163 1
+a163 1
+void RmtInfo       U_ARGS((GLOBAL, struct DosPacket *));
+a164 6
+
+/* Server Specific Code */
+int InitRDevice    U_ARGS((GLOBAL));
+int TermRDevice    U_ARGS((GLOBAL, int));
+int ReplyRPacket   U_ARGS((GLOBAL, SESSION *, struct RPacket *));
+SESSION *AcceptRPacket  U_ARGS((GLOBAL, struct RPacket *));
+@
+
+
+1.2
+log
+@Add support for multiple sessions
+@
+text
+@d12 1
+d30 1
+d41 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d12 12
+a23 2
+/* Used to chain BPTR filehandles and locks together */
+struct BCHAIN
+d25 5
+a29 3
+   struct PCHAIN *next;
+   BPTR data;
+};
+d33 11
+a43 11
+   struct NetGlobal      n;          /* Globals in common with handler     */
+   struct RPacket       RP;          /* Data area for remote node          */
+   struct DosPacket     *pkt;        /* the packet we are processing       */
+   struct StandardPacket *stdpkt;    /* Packet to send to local handlers   */
+   struct MsgPort       *dosport;    /* msgport for DOS device to talk to  */
+   struct RPacket       *rpptr;      /* Points to msg for singlemachine v  */
+   char                 *fib;        /* For use by RmtExamine/RmtExNext    */
+   struct InfoData      *infodata;   /* For use by RmtInfo                 */
+   struct BCHAIN       *lkc;        /* Chain of locks returned to remote   */
+   struct BCHAIN       *fhc;        /* Chain of filehandles                */
+   LONG   rootlock;                  /* Lock on root of ROOT:              */
+d48 1
+d75 2
+a76 2
+void RmtRead      U_ARGS((GLOBAL, struct DosPacket *));
+void RmtWrite     U_ARGS((GLOBAL, struct DosPacket *));
+d86 5
+a90 4
+void RmtLock    U_ARGS((GLOBAL, struct DosPacket *));
+void RmtDupLock U_ARGS((GLOBAL, struct DosPacket *));
+void RmtUnLock  U_ARGS((GLOBAL, struct DosPacket *));
+void NameNode U_ARGS((GLOBAL, BPTR));
+d96 1
+d104 1
+a104 1
+void Dispatch    U_ARGS((GLOBAL));
+d112 1
+d114 1
+a114 1
+/* net#?.c */
+d117 2
+a120 2
+
+#include "drserver.h"
+@

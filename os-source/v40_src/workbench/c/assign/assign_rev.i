@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'25.4.91'
+	ENDM
+VERS	MACRO
+		dc.b	'assign 37.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'assign 37.4 (25.4.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: assign 37.4 (25.4.91)',0
+	ENDM

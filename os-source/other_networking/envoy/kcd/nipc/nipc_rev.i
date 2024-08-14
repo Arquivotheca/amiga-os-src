@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	7
+DATE	MACRO
+		dc.b	'7.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'nipc 40.7'
+	ENDM
+VSTRING	MACRO
+		dc.b	'nipc 40.7 (7.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: nipc 40.7 (7.2.94)',0
+	ENDM

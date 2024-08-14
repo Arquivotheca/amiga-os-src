@@ -1,0 +1,1735 @@
+head     1.16;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.16
+date     92.07.14.02.18.36;  author jesup;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     92.07.07.22.15.20;  author jesup;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.04.29.16.09.10;  author jesup;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.04.09.00.44.41;  author jesup;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     91.04.29.06.53.25;  author steveb;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     90.12.08.09.52.05;  author steveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.10.22.12.42.24;  author steveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.10.17.11.22.32;  author steveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.09.20.17.37.17;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.06.05.13.02.34;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.04.16.17.03.58;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.04.06.15.14.11;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.12.08.01.05.00;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.12.06.10.54.27;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.10.05.11.50.10;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.13.16.46.14;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@1.3.1
+@
+
+
+1.16
+log
+@If we need to force a validation for dircache, rewrite root as invalid
+first!
+Use the shared checksum and DirectWrite code
+@
+text
+@		SECTION	filesystem,CODE
+
+		NOLIST
+		INCLUDE	"exec/types.i"
+		INCLUDE	"exec/nodes.i"
+		INCLUDE	"exec/lists.i"
+		INCLUDE	"exec/io.i"
+		INCLUDE	"libraries/dos.i"
+
+		INCLUDE	"globals.i"
+		INCLUDE	"private.i"
+		INCLUDE	"readwrite.i"
+		INCLUDE	"moredos.i"
+		INCLUDE	"printf.mac"
+
+;		DEBUGENABLE
+
+		LIST
+
+		XDEF	AllocKeys,FreeKeys,InitBitmap,WriteMap,AlterRoot
+		XDEF	FlushBitmapBlock,AllocListKey
+
+		XREF	WriteBlockNow,_LVODoIO
+		XREF	GrabBlock,LooseBlock,DatStamp,GrabDataBlock,Checksum
+
+		XREF	GetPubMem,_LVOFreeMem,DirectRead,DirectDiscard
+		XREF	WaitFor,QueueBehind,DoDirectWrite,DoDirectRead
+
+;==============================================================================
+; key = AllocListKey(nearkey,validating)
+; d0		       d0	 d1.w
+;
+; Attempts to allocate a disk block as near as possible to nearkey.  It
+; is important to remember that this new block allocation scheme will read and
+; write the disk using the cache buffer routines.  For this reason it is NOT
+; possible to hold onto cache buffers across any AllocKeys calls.  Requires the
+; list of bitmap keys to be already set up.  Will return ERROR_NO_BITMAP if
+; this is not the case.  Returns the starting key number of disk
+; block allocated.  If key==0 then d1 will hold an error code instead.
+;
+; This is called from InsertList, so we can allocate blocks after the bitmap
+; is built but before we allow the world to get to it.  If not validating
+; we just use AllocKeys.
+;==============================================================================
+AllocListKey	move.l	d1,-(sp)
+		moveq	#1,d1			allocate 1 block
+		tst.l	(sp)+			is this a validator alloc?
+		beq.s	AllocKeys		no, handle normally
+
+		; bitmap must be valid or it can't try to allocate!
+	printf <'Block allocated during validate!'>
+		movem.l	d2-d7/a2-a3,-(sp)
+		bra.s	AllocCommon
+
+;==============================================================================
+; key/count = AllocKeys(nearkey,keycount)
+; d0	d1		   d0	   d1
+;
+; Attempts to allocate keycount disk blocks as near as possible to nearkey.  It
+; is important to remember that this new block allocation scheme will read and
+; write the disk using the cache buffer routines.  For this reason it is NOT
+; possible to hold onto cache buffers across any AllocKeys calls.  Requires the
+; list of bitmap keys to be already set up.  Will return ERROR_NO_BITMAP if
+; this is not the case.  Returns the starting key number and the count of disk
+; blocks allocated.  If key==0 then count will hold an error code instead.
+;==============================================================================
+AllocKeys	movem.l	d2-d7/a2-a3,-(sp)
+		tst.w	BitmapValid(a5)		do we have a bitmap ?
+		bne.s	AllocCommon		yes
+		moveq.l	#FALSE,d0		no, so error return
+		move.l	#ERROR_DISK_NOT_VALIDATED,d1	could be validating
+		bra	AllocKeysDone
+
+; don't try to allocate more keys than are available on the disk
+AllocCommon	cmp.l	BlocksFree(a5),d1
+		ble.s	20$			OK, we have enough
+		move.l	BlocksFree(a5),d1	not enough, truncate amount
+		bne.s	20$			but there are some left
+		moveq.l	#FALSE,d0		no space left, return error
+		move.l	#ERROR_DISK_FULL,d1
+		bra	AllocKeysDone
+
+; We have the (possibly modified) number of keys required and a key to start
+; the search on.  Find the bitmap block, lword and bit numbers for this key.
+; New addition, searching from the given NearKey can take a hell of a long
+; time if we just filled a hole in the bitmap and the disk is large.  For
+; this reason, we always save the next key to search from after an allocation
+; succeeds.  If any keys are freed then we clear this value and use the given
+; search key instead.
+20$		tst.l	StartSearch(a5)		is startsearch valid ?
+		beq.s	21$			nope, use given startkey
+		move.l	StartSearch(a5),d0	yes, start searching here
+21$		cmp.l	HighestBlock(a5),d0	possible to be out of bounds
+		ble.s	25$
+		move.l	Reserved(a5),d0		wrap to beginning of disk
+
+25$		move.l	d0,d4			save start key for search
+		move.l	d1,d5			and number of keys required
+		sub.l	Reserved(a5),d0		reserved blocks not in bitmap
+		divu.w	BlocksPerBM(a5),d0	calculate bitmap pointer offset
+		lsl.w	#2,d0			accessing longword array
+		movea.l	BitmapKeys(a5),a2	point to bitmap key array
+		adda.w	d0,a2			now (a2) is the correct bmkey
+		swap	d0			get remainder
+		moveq.l	#31,d3			calculate bit number....
+		and.w	d0,d3			...for the start key
+		lsr.w	#3,d0			and calculate longword number
+		andi.w	#$fffc,d0		but use a byte offset
+		addq.w	#4,d0			skip checksum in bitmap
+		move.w	d0,d2			d2 holds byte offset to lword
+		ext.l	d2			but whole lword compared later
+		moveq.l	#0,d6			number of keys allocated
+		moveq.l	#32,d7			frequently used value
+
+; First we have to find the start key.  Registers used throughout the rest of
+; this routine are as follows:-
+;
+;	d2 = byte offset to the current longword
+;	d3 = bit number within the current longword
+;	d4 = the key we are currently looking at
+;	d5 = the number of blocks required
+;	d6 = the number of blocks allocated so far
+;	d7 = 32 (used in loops for faster longword addition)
+;
+;	a2 = pointer to the current bitmap key array entry
+;	a3 = current bitmap block we are accessing
+;
+		move.l	(a2),d0			fetch the current bitmap block
+		bsr	GrabBitmapBlock		don't care if it's writing
+****** need to check for an error condition if the header is garbage ******
+		movea.l	d0,a3
+		move.l	a3,d0
+		beq	AllocFailure		returns d1=error
+
+		tst.w	d3			are we on a longword boundary ?
+		beq.s	FastSearch		yes, so do the fast search
+
+; special case the first longword so that we quickly get aligned on a boundary
+; this code is also used to find the free block when we know a longword has one
+		move.l	cb_SIZEOF(a3,d2.w),d0	fetch first longword
+SlowSearch	btst.l	d3,d0			is this key free ?
+		bne.s	GotFirstKey		yep, we have a start
+		addq.l	#1,d4			bump the key number
+		cmp.l	HighestBlock(a5),d4	are we in range ?
+		ble.s	SlowContinue		yes, check bit number
+
+; we've gone past end of disk, wrap back to the beginning (nothing written yet)
+RewindSearch:
+;		movea.l	BitmapKeys(a5),a0	do we need a whole new block ?
+;		cmpa.l	(a2),a0			880K floppies only use one
+;		beq.s	SameBlock		nope, stay on the same block
+;		movea.l	a3,a0
+;		moveq.l	#0,d0			not associated with anything
+;		bsr	LooseBitmapBlock	free up current block
+		movea.l	BitmapKeys(a5),a2	point back to beginning
+		move.l	(a2),d0
+		bsr	GrabBitmapBlock		and grab first bitmap block
+		tst.l	d0			did we get it ?
+		beq	AllocFailure		nope, returns nothing and d1=error
+
+		movea.l	d0,a3
+SameBlock	move.l	Reserved(a5),d4		looking at first data block
+		moveq.l	#4,d2			therefore first longword...
+		moveq.l	#0,d3			...and first bit
+		bra.s	FastSearch		so we can search quickly
+
+; still within the range of the disk, see if we are still in the same lword
+SlowContinue	addq.w	#1,d3			bump the bit number
+		andi.w	#31,d3			mask to 32 bit span
+		bne.s	SlowSearch		still in first longword
+FastContinue	addq.w	#4,d2			bump to the next longword
+		cmp.l	BlockSize(a5),d2	are we still in same block
+		blt.s	FastSearch		yep, search fast
+;		movea.l	a3,a0			nope, so...
+;		moveq.l	#0,d0			not associated with anything
+;		bsr	LooseBitmapBlock	...loose current bitmap block
+		addq.l	#4,a2			and get the next one
+		move.l	(a2),d0			it's guaranteed to be in...
+		bsr	GrabBitmapBlock		...range (tested d4 already)
+		tst.l	d0
+		beq.s	AllocFailure		something went wrong
+		movea.l	d0,a3
+		moveq.l	#4,d2			back at beginning of block
+
+; we've moved into the next longword and are aligned to do fast 32 bit tests
+FastSearch	move.l	cb_SIZEOF(a3,d2.w),d0	fetch next longword
+		bne.s	SlowSearch		something free in there
+		add.l	d7,d4			going to advance 32 blocks
+		cmp.l	HighestBlock(a5),d4	are we in range ?
+		ble.s	FastContinue		yes, get next longword
+		bra.s	RewindSearch		no, go back to beginning
+
+; We've found a free key.  Registers are the same as for the searching loop
+; with the addition of d0 holding the current bitmap longword.  Once again,
+; we special case the first longword to quickly get on a longword boundary.
+GotFirstKey	move.l	HighestBlock(a5),d1	truncate allocation to...
+		sub.l	d4,d1			...end of partition
+		addq.l	#1,d1			count includes highest block
+		cmp.l	d5,d1			saves highestblock test...
+		bge.s	FindNextKey		...in main allocation loop
+		move.l	d1,d5
+
+; Due to the little fix above, we only have to watch for running off a bitmap
+; block or running out of keys to allocate.  It nicely takes the partition
+; boundary check out of the main loop.  We can't allocate beyond the end of
+; the partition because wrapping to the beginning would not be contiguous.
+FindNextKey	bclr.l	d3,d0			allocate this bit
+		beq.s	AllocDone		already allocated, exit now
+		addq.l	#1,d6			bump allocated count
+		subq.l	#1,d5			and check if more needed
+		beq.s	AllocDone		nope, we did them all
+		addq.w	#1,d3			bump to next bit
+		andi.w	#31,d3
+		bne.s	FindNextKey		still in same longword
+
+; We've overflowed to the next longword.  Store this one back into the bitmap
+; block and start allocating 32 blocks at a time (while it's possible).
+AllocReEnter	move.l	d0,cb_SIZEOF(a3,d2.w)	store back bitmap longword
+		addq.w	#4,d2			bump to next longword
+		cmp.l	BlockSize(a5),d2	still in same block ?
+		blt.s	GetFastKeys		yep, go real quick
+		bra.s	WriteBMBlock		nope, write this one out first
+
+; completely finished, make sure d5 contains 0 as a flag for WriteBMBlock so
+; it doesn't attempt to continue allocating using the fast allocation code.
+AllocDone	moveq.l	#0,d5			no more blocks to allocate
+		move.l	d0,cb_SIZEOF(a3,d2.w)	flush saved longword
+
+; Nasty edge condition, we ran off a block just as we were about to start
+; searching quickly.  Write out this bitmap block and fetch the next one
+; ready for the top of the fast loop.  This code is re-used by the fast
+; loop when it too runs off the end of a bitmap block and also by AllocDone
+; (via GotFirstKey) so we don't duplicate too much code.
+WriteBMBlock	move.w	#-1,cb_State(a3)	will get flushed later
+		addq.l	#4,a2			bump BM key pointer
+		tst.l	d5			any work left ?
+		beq.s	AllocEnd		nope, called from AllocDone
+		move.l	(a2),d0			yes, read in next bitmap block
+		bsr	GrabBitmapBlock
+		tst.l	d0
+		beq.s	AllocFailure		something went wrong
+		movea.l	d0,a3
+		moveq.l	#4,d2			back at the first longword
+
+; We've allocated the fiddly bits.  While there's more than 32 blocks required
+; and there are 32 free keys in the current longword keep allocating them.  If
+; 32 or less keys are required or the current longword is not completely empty
+; then we do the fiddly bits again because it handles the ending case better.
+GetFastKeys	move.l	cb_SIZEOF(a3,d2.w),d0	get next longword
+		cmp.l	d7,d5			more than 32 blocks needed ?
+		ble.s	FindNextKey		nope, do slow allocations
+		cmpi.l	#-1,d0			are there 32 contiguous blocks
+		bne.s	FindNextKey		no, do slow allocations
+		sub.l	d7,d5			yes, allow for them
+		add.l	d7,d6			32 more allocated
+		moveq.l	#0,d0			actually allocate them
+		bra.s	AllocReEnter		and move to next group
+
+AllocFailure	moveq.l	#0,d0			no start key (d1=error)
+		clr.l	StartSearch(a5)
+		bra.s	AllocKeysDone
+		
+; everything completed, return the start key in d0 and the keycount in d1
+AllocEnd	bsr	AlterRoot		safety
+		move.l	d4,d0			start key
+		move.l	d6,d1			keycount
+		sub.l	d6,BlocksFree(a5)	adjust total remaining
+		add.l	d6,d4			next place to search from
+		move.l	d4,StartSearch(a5)
+
+AllocKeysDone	movem.l	(sp)+,d2-d7/a2-a3
+		rts
+
+;==============================================================================
+; count/Error = FreeKeys(startkey,keycount)
+;  d0	 d1		    d0	     d1
+;
+; Frees up the given range of bitmap keys.  Does not check for running off the
+; end of the partition because allocations are never returned that way.  Can
+; return read/write errors or ERROR_NO_BITMAP.  Error code is only valid if
+; the returned count is less than the requested keycount.
+;==============================================================================
+FreeKeys	movem.l	d2-d6/a2-a3,-(sp)
+	printf <'FreeKeys(%ld,%ld)\n'>,d0,d1
+		tst.w	BitmapValid(a5)		do we have a bitmap ?
+		bne.s	10$			yes
+		move.l	#ERROR_NO_BITMAP,d0	no, return an error
+		bra	FreeKeysDone
+
+; Find the bitmap block, longword and bit numbers for the given start key.
+10$		clr.l	StartSearch(a5)		search where caller says
+		move.l	d1,d4			save number of keys to be freed
+		sub.l	Reserved(a5),d0		reserved blocks not in bitmap
+		divu.w	BlocksPerBM(a5),d0	calculate bitmap pointer offset
+		lsl.w	#2,d0			accessing longword array
+		movea.l	BitmapKeys(a5),a2	point to bitmap key array
+		adda.w	d0,a2			now (a2) is the correct bmkey
+		swap	d0			get remainder
+		moveq.l	#31,d3			calculate bit number....
+		and.w	d0,d3			...for the start key
+		lsr.w	#3,d0			and calculate longword number
+		andi.w	#$fffc,d0		but use a byte offset
+		addq.w	#4,d0			skip checksum in bitmap
+		move.w	d0,d2			d2 holds byte offset to lword
+		ext.l	d2			but whole lword compared later
+		moveq.l	#32,d5			frequently used value
+		moveq.l	#0,d6			number of keys freed
+
+; We are ready to start freeing keys.  Register usage is as follows:-
+;	d2 = byte offset to the current longword
+;	d3 = bit number within the current longword
+;	d4 = the number of keys left to free
+;	d5 = 32 (used in loops for faster longword addition)
+;	d6 = accrued total of keys freed
+;	a2 = pointer to the current bitmap key array entry
+;	a3 = current bitmap block we are accessing
+
+		move.l	(a2),d0			fetch the current bitmap block
+		bsr	GrabBitmapBlock		don't care if it's writing
+		tst.l	d0
+		beq.s	FreeKeysDone		something went wrong
+		movea.l	d0,a3
+		tst.w	d3			are we on a longword boundary ?
+		beq.s	FastFree		yes, so do the fast freeing
+
+		move.l	cb_SIZEOF(a3,d2.w),d0	no, fetch the first longword
+FreeNextKey	bset.l	d3,d0			free this bit
+		addq.l	#1,d6			freed one more
+		subq.l	#1,d4			any more to be freed ?
+		beq.s	FreeDone		nope, we did them all
+		addq.w	#1,d3			bump to next bit
+		andi.w	#31,d3
+		bne.s	FreeNextKey		still in same longword
+
+; We've overflowed to the next longword.  Store this one back into the bitmap
+; block and start freeing 32 blocks at a time (while it's possible).
+FreeReEnter	move.l	d0,cb_SIZEOF(a3,d2.w)	store back bitmap longword
+		addq.w	#4,d2			bump to next longword
+		cmp.l	BlockSize(a5),d2	still in same block ?
+		blt.s	FastFree		yep, go real quick
+		bra.s	FreeWriteBM		nope, write this one out first
+
+; completely finished, flush the last longword and write out the bitmap block
+FreeDone	move.l	d0,cb_SIZEOF(a3,d2.w)	flush saved longword
+
+FreeWriteBM:
+		move.w	#-1,cb_State(a3)	mark as dirty
+		addq.l	#4,a2			and bump BM key pointer
+		tst.l	d4			any work left ?
+		beq.s	FreeKeyEnd		nope, called from FreeDone
+		move.l	(a2),d0			yes, read next bitmap block
+		bsr	GrabBitmapBlock
+		tst.l	d0
+		beq.s	FreeKeysDone		will return FALSE
+		movea.l	d0,a3
+		moveq.l	#4,d2			back at the first longword
+
+; We've freed the fiddly bits.  While there's more than 32 blocks need freeing
+; and there are 32 allocated in the current longword keep freeing them.  If 32
+; or less keys need freeing or the current longword is not completely full
+; then we do the fiddly bits again because it handles the ending case better.
+FastFree	move.l	cb_SIZEOF(a3,d2.w),d0	get next longword
+		cmp.l	d5,d4			more than 31 blocks to free?
+		blt.s	FreeNextKey		nope, do bitwise freeing
+		moveq.l	#-1,d0			free all 32 bits
+		add.l	d5,d6			accrued total freed
+		sub.l	d5,d4			32 less need freeing
+		beq.s	FreeDone		no more to do
+		bra.s	FreeReEnter		not finished yet
+
+; everything complete, return number of keys freed in d0 (works out as TRUE)
+FreeKeyEnd	bsr	AlterRoot		safety
+		move.l	d6,d0			return keys freed
+		add.l	d6,BlocksFree(a5)	add to the free pool
+	
+FreeKeysDone	movem.l	(sp)+,d2-d6/a2-a3
+		rts
+
+;==============================================================================
+; Error = InitBitmap()
+;  d0
+;
+; Actually part of the Restart() routine but left here because it's intimately
+; tied in with the bitmap stuff.  If the bitmap flag in the root is valid then
+; this routine reads all of the bitmap keys and fills the BitMapKeys array
+; with thier block numbers.  All of the checksums are verified and the total
+; number of blocks free is calculated.  Requires basic disk geometry to be
+; already set up (HighestBlock, Reserved, BlockSize and RootBlock etc.)
+;==============================================================================
+InitBitmap	movem.l	d2-d5/a2-a3,-(sp)
+		move.l	RootKey(a5),d0		fetch the root
+		bsr	DirectRead
+****** FIX!need to check for an error condition if the header is garbage ******
+		movea.l	d0,a2
+		move.l	a2,d0
+		beq.s	10$			error, no buffer
+
+; check to see if the dirlist type is the one we support.  If not, we must
+; force a validate, and have validate blank the entries for us, and let them
+; ALL rebuild.
+		btst.b	#2,DiskType+3(a5)	is this DCFS?
+		beq.s	3$
+		lea.l	cb_SIZEOF(a2),a3	point to end of block
+		adda.l	BlockSize(a5),a3	for accessing bitmap stuff
+		move.l	vrb_DirList(a3),d2	fetch the root dircache block
+		movea.l	a2,a0			drop root
+		bsr	DirectDiscard
+		move.l	d2,d0			dircache block
+		bsr	DirectRead
+		movea.l	d0,a0
+		move.l	a0,d0
+		beq.s	10$			error, no buffer
+		move.l	cb_SIZEOF+fhl_Type(a0),d2	save dircache type
+		bsr	DirectDiscard		(a0)
+		move.l	RootKey(a5),d0		fetch the root (again)
+		bsr	DirectRead
+		movea.l	d0,a2
+		move.l	a2,d0
+		beq.s	10$			error, no buffer
+;	printf <'root dirlist type is %ld'>,d2
+		cmp.l	#t.dirlist,d2		is this the exact right type?
+		beq.s	3$			yes, check bitmap valid bit
+
+		; invalidate bitmap - we MUST do this here, in case the 
+		; machine is reset during the validate, but after the root
+		; block's dircache block is updated...
+
+		lea.l	cb_SIZEOF(a2),a3	point to end of block
+		move.l	a3,a0			save pointer to data
+		adda.l	BlockSize(a5),a3	for accessing bitmap stuff
+		clr.l	vrb_BitmapFlag(a3)	bitmap not valid!
+		bsr	Checksum		we changed the checksum...
+		sub.l	d0,fhb_Checksum+cb_SIZEOF(a2)	and update it...
+		move.l	RootKey(a5),d0		write it back to root
+		move.l	a2,a0			buffer to write
+		bsr	DoDirectWrite
+		; we still own the buffer, and it's now marked invalid...
+		; we can fall through into the bitmap valid test.
+
+3$		; check bitmap valid flag
+		lea.l	cb_SIZEOF(a2),a3	point to end of block
+		adda.l	BlockSize(a5),a3	for accessing bitmap stuff
+		tst.l	vrb_BitmapFlag(a3)	is the bitmap valid ?
+		bne.s	have_bitmap		yes, so get all the keys
+
+; the bitmap is not validated but is probably present (though not always)
+		movea.l	a2,a0
+		bsr	DirectDiscard		done with root
+10$		move.l	#ERROR_DISK_NOT_VALIDATED,d0
+		bra	InitBitmapDone		return error to restart
+
+; OK, the root says we have a valid bitmap, we're going to believe it's true.
+; We have an array for the bitmap keys, now fill it up using the root entries
+; and any extender blocks that are present.  If any of them are not allocated
+; then we return an error and treat things as though there's no bitmap.
+have_bitmap	lea.l	vrb_Bitmap(a3),a1	a1 points to entries in root
+		movea.l	BitmapKeys(a5),a3	a3 points at bitmap key array
+		moveq.l	#ROOT_BM_COUNT,d0	# of bitmap entries in the root
+		move.w	BitmapCount(a5),d2	get total count
+		bra.s	FillEnter
+
+FillLoop	move.l	(a1)+,(a3)+		save next key
+		beq.s	FillError		something wrong
+		subq.w	#1,d2			one less block to do
+		beq.s	FillDone		all finished
+FillEnter	dbra	d0,FillLoop		until block is finished
+		move.l	(a1)+,d3		save the next key pointer
+		movea.l	a2,a0			and finish with this block
+		bsr	DirectDiscard
+		move.l	d3,d0			fetch next extender block
+		bsr	DirectRead		it's not a header
+		movea.l	d0,a2
+		move.l	a2,d0
+		beq.s	FillError		no buffer
+		tst.l	cb_Error(a2)
+		bne.s	FillError		something went wrong
+		lea.l	cb_SIZEOF(a2),a1	point to first entry
+		move.l	BlockSize(a5),d0	calculate maximum entries...
+		lsr.l	#2,d0			...in an extender block
+		subq.l	#1,d0			allow for extender block key
+		bra.s	FillEnter		and fill from this area now
+
+; something prevented us from reading in all the bitmap keys, return an error
+FillError	printf <'FillError block %ld'>,cb_Key(a2)
+		movea.l	a2,a0
+		bsr	DirectDiscard		done with current block
+		move.l	#ERROR_DISK_NOT_VALIDATED,d0
+		bra	InitBitmapDone		return error to init
+
+; We now have a complete list of bitmap keys.  Read in each bitmap block and
+; check it for consistency and use it to calculate how many blocks are free.
+FillDone	movea.l	a2,a0			finished with this block
+		bsr	DirectDiscard
+
+	printf <'FillDone'>
+		movea.l	BitmapKeys(a5),a3	point at bitmap key array
+		move.l	HighestBlock(a5),d4	assume all blocks free
+		sub.l	Reserved(a5),d4		d4 holds total blocks available
+		move.l	d4,d3			number of blocks left to check
+		moveq.l	#-1,d2			for quick comparisions
+
+BitmapLoop	move.l	(a3)+,d0		fetch next bitmap block
+		bsr	DirectRead
+		movea.l	d0,a2
+		move.l	a2,d0
+		beq.s	FillError		no buffer
+		tst.l	cb_Error(a2)
+		bne.s	FillError
+		lea.l	cb_SIZEOF(a2),a0
+		bsr	Checksum		see if checksum is OK
+		tst.l	d0
+		bne.s	FillError		discard block and exit
+
+; Bitmap checksum was OK.  Count how many blocks have been used in it.
+		lea.l	cb_SIZEOF+4(a2),a0	point at bitmap data
+		move.w	BlocksPerBM(a5),d0	assume checking the whole block
+		ext.l	d0
+		cmp.l	d0,d3			can we do that ?
+		bge.s	WholeBlock		yes
+		move.l	d3,d0			no, truncate to amount left over
+WholeBlock	lsr.l	#5,d0			d0 holds # longwords to check
+		bra.s	CountEnter		start the loop
+
+CountLoop	move.l	(a0)+,d1		get next set of keys
+		bne.s	10$			not all allocated
+		subi.l	#32,d4			all keys are allocated
+		bra.s	CountEnter
+10$		cmp.l	d1,d2			are all blocks free ?
+		beq.s	CountEnter		yes, nothing to subtract
+
+; we have a mixture of allocated and free blocks in this longword so we have
+; to count the individual bits to determine how many blocks have been used
+		moveq.l	#31,d5			checking 32 bits
+11$		btst.l	d5,d1			is this one allocated ?
+		bne.s	12$			nope
+		subq.l	#1,d4			yep
+12$		dbra	d5,11$			check next bit
+CountEnter	dbra	d0,CountLoop		check next longword
+
+; we've finished with the current block.  Free it and go back for the next one
+		move.w	BlocksPerBM(a5),d0
+		ext.l	d0
+		sub.l	d0,d3			did we do a whole block
+		ble.s	PartialWord		no, we're on the last one
+		movea.l	a2,a0			yes, free the current block
+		bsr	DirectDiscard
+		bra.s	BitmapLoop		and go for the next one
+
+; We have counted the very last block of the bitmap, check if we need to do
+; a partial longword too.
+PartialWord	add.l	d0,d3			fix because d3 <= 0
+		andi.w	#31,d3			get remaining bits
+		beq.s	AllCounted		none left, don't fetch extra
+		move.l	(a0)+,d1		fetch the next longword
+		moveq.l	#0,d5			start at bit 0
+		bra.s	LastEnter
+
+LastLoop	btst.l	d5,d1			is this one allocated
+		bne.s	10$			nope
+		subq.l	#1,d4			yes
+10$		addq.l	#1,d5			move to next bit
+LastEnter	dbra	d3,LastLoop		and keep checking
+
+; Finally finished counting those damn blocks. Store the amount of free ones
+AllCounted	movea.l	a2,a0			finished with bitmap block
+		bsr	DirectDiscard
+		move.l	d4,BlocksFree(a5)	save amount of free blocks
+		moveq.l	#FALSE,d0		no error to report
+		move.w	#TRUE,BitmapValid(a5)	bitmap is useable
+InitBitmapDone	movem.l	(sp)+,d2-d5/a2-a3
+		rts
+
+;==============================================================================
+; WriteMap()
+;
+; Called during Flush() or when the motor timeout reaches zero.  Doesn't write
+; the bitmap to disk anymore because that's done on the fly now.  Just updates
+; the rootblock's bitmap valid flag.
+;==============================================================================
+WriteMap	tst.w	FilesOpen(a5)
+		beq.s	10$			no files were opened
+		clr.w	FilesOpen(a5)		flag no files open now
+		bsr	FlushBitmapBlock	flush out bitmap
+		moveq.l	#TRUE,d0		update bitmap flag in root
+		bsr.s	WriteRoot
+10$		rts
+
+;==============================================================================
+; AlterRoot()
+;
+; Called when a file is opened for output or something has been deleted or
+; moved around.  Marks the BMValid flag in the root block as FALSE and writes
+; the root block out to disk.  This ensures that we correctly flush things out
+; when the three second timer goes off.  This is also a safeguard against a
+; crash leaving the bitmap in an indeterminate state.  Validator will know to
+; kick in when the volume is remounted with a FALSE BMValid flag.
+;==============================================================================
+AlterRoot	tst.w	FilesOpen(a5)		has this been done already ?
+		bne.s	RootAltered		yes, exit immediately
+		moveq.l	#FALSE,d0		write this to BMValid
+		bsr.s	WriteRoot
+		subq.w	#1,FilesOpen(a5)	converts it to TRUE
+RootAltered	rts
+
+;==============================================================================
+; WriteRoot( BitmapFlag )
+;		d0
+;
+; Reads in the root block, date stamps it and writes it back out with the given
+; bitmap flag to indicate whether everything on disk is valid or not.  Waits
+; for the root block to be on disk before actually returning.
+;==============================================================================
+WriteRoot	movem.l	d2/a2,-(sp)
+		move.l	d0,d2			save bitmap flag
+		move.l	RootKey(a5),d0		grab the root block
+		bsr	GrabBlock
+		movea.l	d0,a2			save the buffer address
+		lea.l	cb_SIZEOF(a2),a0	point to end of disk block
+		adda.l	BlockSize(a5),a0
+		move.l	d2,vrb_BitmapFlag(a0)	update bitmap flag
+		lea.l	vrb_DiskMod(a0),a0	date volume last modified
+		bsr	DatStamp
+		movea.l	a2,a0			this buffer
+		move.l	RootKey(a5),d0		this key
+		moveq.l	#TRUE,d1		checksummed header
+		clr.l	cb_Header(a0)		doesn't belong to a header
+		move.l	a0,-(sp)		save buffer address
+		bsr	WriteBlockNow		write immediately
+		movea.l	(sp)+,a0		get back buffer address
+
+; What if someone is already in a WaitFor on the root?  We should QueueBehind!
+		tst.l	cb_CoPkt(a0)
+		bne.s	10$
+		bsr	WaitFor			wait for it to write
+		movea.l	d0,a0			done with buffer
+		moveq.l	#0,d0			associate with no header
+		bsr	LooseBlock
+5$		movem.l	(sp)+,d2/a2
+		rts
+
+10$		; we must QueueBehind to know when the buffer is written
+	printf <'Bitmap queue behind!!!'>
+		bsr	QueueBehind		when it returns, it's written
+		bra.s	5$			buffer isn't ours, exit
+
+;==============================================================================
+; buffer = GrabBitmapBlock(block)
+;   d0			     d0
+;
+; Using new bitmap read/write schemes to separate bitmap blocks from the normal
+; cache buffer routines.  This makes sure bitmap allocation operations are
+; atomic (like the old in-memory versions).  Uses a reserved cache buffer.
+;==============================================================================
+GrabBitmapBlock	movea.l	BMBlock(a5),a0
+	printf <'GrabBitmapBlock(%ld)\n'>,d0
+		cmp.l	cb_Key(a0),d0		is this our block ?
+		beq.s	GotBMBlock		yes, return pointer
+
+; block not found, we`ll have to read it in from disk after all.  Check if we
+; have a non-dirty buffer to use right away.
+		move.l	d0,-(sp)		save required key
+		bsr.s	FlushBitmapBlock	must flush it out first
+		move.l	(sp)+,d0		restore required key
+
+; physically read the bitmap block from disk.  May need extra error processing.
+ReadBMBlock	movea.l	BMBlock(a5),a0
+		bsr	DoDirectRead		read block into buffer
+		; returns buffer in a0
+		tst.l	cb_Error(a0)
+		bne.s	BadBMBlock		some error occured
+
+; run a checksum test on the bitmap block to make sure it`s OK
+		move.l	a0,-(sp)
+		lea.l	cb_SIZEOF(a0),a0
+		bsr	Checksum
+		move.l	(sp)+,a0		restore buffer ptr
+		tst.l	d0			was checksum OK ?
+		beq.s	GotBMBlock		yes
+
+BadBMBlock	clr.l	cb_Key(a0)		so we can`t find it again
+		move.l	cb_Error(a0),d1		return error in d1
+		suba.l	a0,a0			return 0 for an error
+GotBMBlock	move.l	a0,d0			return buffer in d0
+		rts
+
+;==============================================================================
+; WriteBitmapBlock(key)
+;
+; this routine is handled in-line since it only needs the key and state setting
+;==============================================================================
+
+;==============================================================================
+; LooseBitmapBlock(buffer)
+;		     a0
+;
+; since there is only one bitmap buffer, this routine is a total nop.
+;==============================================================================
+
+;==============================================================================
+; FlushBitmapBlock()
+;
+; Checksums the current bitmap block and flushes it out to disk
+;==============================================================================
+FlushBitmapBlock:
+		movea.l	BMBlock(a5),a0
+	printf <'FlushBitmapBlock() cb_Key = %ld, state = $%lx\n'>,cb_Key(a0),cb_State-2(a0)
+		tst.w	cb_State(a0)		does it need writing?
+		beq.s	30$			nope
+
+		move.l	a0,-(sp)
+		lea.l	cb_SIZEOF(a0),a0
+		bsr	Checksum
+		move.l	(sp)+,a0		restore buffer ptr
+		sub.l	d0,cb_SIZEOF(a0)	fix checksum (1st longword)
+
+		move.l	cb_Key(a0),d0		get the key to write
+		bsr	DoDirectWrite		read block into buffer
+		; returns buffer in a0
+		tst.l	cb_Error(a0)
+		beq.s	30$			got bitmap block OK
+		clr.l	cb_Key(a0)		not valid now
+
+30$		rts
+
+		END
+@
+
+
+1.15
+log
+@support for checking the dircache subtype to see if we need to force a
+validate
+@
+text
+@d27 1
+a27 1
+		XREF	WaitFor,QueueBehind
+d422 1
+a422 1
+		bne.s	5$			no, force validate!
+d424 16
+d447 1
+a447 1
+5$		movea.l	a2,a0
+d484 2
+a485 1
+FillError	movea.l	a2,a0
+d495 1
+d657 1
+a657 1
+		beq	GotBMBlock		yes, return pointer
+d662 1
+a662 1
+		bsr	FlushBitmapBlock	must flush it out first
+d667 3
+a669 16
+		move.l	d0,cb_Key(a0)		this key in buffer
+		clr.w	cb_State(a0)		doesn`t need writing
+		clr.l	cb_Error(a0)		no errors occured yet
+		movea.l	DiskExtraDev(a5),a1	use spare IORequest
+		add.l	LowerCyl(a5),d0		add offset to first block
+		move.w	BlockShift(a5),d1
+		lsl.l	d1,d0			make into a byte offset
+		move.l	d0,IO_OFFSET(a1)
+		move.l	BlockSize(a5),IO_LENGTH(a1)
+		move.w	#CMD_READ,IO_COMMAND(a1)
+		lea.l	cb_SIZEOF(a0),a0
+		move.l	a0,IO_DATA(a1)
+		jsr	_LVODoIO(a6)		read the block
+		movea.l	BMBlock(a5),a0
+		movea.l	DiskExtraDev(a5),a1
+		move.b	IO_ERROR(a1),cb_Error+3(a0)
+d673 5
+a677 15
+		lea.l	cb_SIZEOF(a0),a1
+		move.l	BlockSize(a5),d0
+		lsr.l	#5,d0
+		moveq.l	#0,d1
+		bra.s	20$
+10$		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+20$		dbra	d0,10$
+		tst.l	d1			was checksum OK ?
+d681 1
+a681 2
+		moveq.l	#0,d1			return error in d1
+		move.b	cb_Error+3(a0),d1
+d706 1
+a706 1
+	printf <'FlushBitmapBlock() cb_Key = %ld\n'>,cb_Key(a0)
+d710 5
+a714 15
+5$		lea.l	cb_SIZEOF(a0),a1	point at data area
+		move.l	BlockSize(a5),d0
+		lsr.l	#5,d0			summing groups of 8 lwords
+		moveq.l	#0,d1			initial checksum
+		bra.s	20$
+10$		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+		add.l	(a1)+,d1
+20$		dbra	d0,10$
+		sub.l	d1,cb_SIZEOF(a0)	fix checksum
+a715 1
+		movea.l	DiskExtraDev(a5),a1	use spare IORequest
+d717 3
+a719 13
+		add.l	LowerCyl(a5),d0		
+		move.w	BlockShift(a5),d1
+		lsl.l	d1,d0			make into a byte offset
+		move.l	d0,IO_OFFSET(a1)
+		move.l	BlockSize(a5),IO_LENGTH(a1)
+		move.w	#CMD_WRITE,IO_COMMAND(a1)
+		lea.l	cb_SIZEOF(a0),a0
+		move.l	a0,IO_DATA(a1)
+		jsr	_LVODoIO(a6)		read the block
+		movea.l	BMBlock(a5),a0
+		clr.w	cb_State(a0)		not dirty anymore
+		movea.l	DiskExtraDev(a5),a1
+		move.b	IO_ERROR(a1),cb_Error+3(a0)
+d722 1
+@
+
+
+1.14
+log
+@Fixed a lost packet problem (perhaps only with DCFS) caused by WriteRoot
+not handling the case of someone already waiting for the root block to
+be written (call QueueBehind instead of WaitFor).
+@
+text
+@d396 1
+a396 1
+		beq.s	5$			error, no buffer
+d398 5
+d405 22
+d428 1
+a428 1
+		bne.s	10$			yes, so get all the keys
+a431 1
+		moveq.l	#0,d0			not associated with anything
+d433 1
+a433 1
+		move.l	#ERROR_DISK_NOT_VALIDATED,d0
+d440 1
+a440 1
+10$		lea.l	vrb_Bitmap(a3),a1	a1 points to entries in root
+a452 1
+		moveq.l	#0,d0			not associated with anything
+a475 1
+		moveq.l	#0,d0			not associated with anything
+a527 1
+		moveq.l	#0,d0			not associated with anything
+a547 1
+		moveq.l	#0,d0			not associated with anything
+@
+
+
+1.13
+log
+@Comment changes
+Added AllocListKey (works even if the disk isn't validated, so the
+validator can work).
+@
+text
+@d27 1
+a27 1
+		XREF	WaitFor
+d590 4
+d598 1
+a598 1
+		movem.l	(sp)+,d2/a2
+d600 5
+@
+
+
+1.12
+log
+@added check for GetBitmapBlock succedding (I missed one earlier)
+@
+text
+@d21 1
+a21 1
+		XDEF	FlushBitmapBlock
+d30 26
+d69 1
+a69 1
+		bne.s	10$			yes
+d75 1
+a75 1
+10$		cmp.l	BlocksFree(a5),d1
+d393 1
+a393 1
+****** need to check for an error condition if the header is garbage ******
+d592 1
+a592 1
+		moveq.l	#0,d0
+@
+
+
+1.11
+log
+@check returns from directread
+@
+text
+@d106 3
+@
+
+
+1.10
+log
+@closed holes in error checking during GrabBitmapBlock
+@
+text
+@d366 3
+d375 1
+a375 1
+		movea.l	a2,a0
+d403 2
+d434 2
+@
+
+
+1.9
+log
+@calls alterroot after succesful allocations and frees of bitmap keys.
+this ensures correct flushing for people who insist on networking
+disks across the SCSI bus.  Fixed a couple of cases where bitmap
+blocks could remain unflushed and disk removal would invalidate them
+@
+text
+@d63 1
+a63 2
+; search key instead.  This prevents the searching of large bitmaps from using
+; all the cache buffers.
+d129 3
+a131 1
+****** need to check for an error condition if the header is garbage ******
+d151 2
+a152 1
+****** need to check for an error condition if the header is garbage ******
+a206 5
+;		movea.l	a3,a0			write out this block
+;		move.l	(a2)+,d0		to this key
+;		moveq.l	#BITMAP,d1		checksum in a different place
+;		clr.l	cb_Header(a0)		not associated with anything
+;		bsr	WriteBitmapBlock	put onto the waiting queue
+d211 2
+d230 4
+d291 2
+a292 1
+****** need to check for an error condition if the header is garbage ******
+a319 5
+;		movea.l	a3,a0			write out this block
+;		move.l	(a2)+,d0		to this key
+;		moveq.l	#BITMAP,d1		checksum in a different place
+;		clr.l	cb_Header(a0)		not associated with anything
+;		bsr	WriteBitmapBlock	put onto the waiting queue
+d324 2
+a398 1
+****** need to check for an error condition if the header is garbage ******
+d400 2
+d429 2
+d572 1
+a572 1
+		beq.s	GotBMBlock		yes, return pointer
+d577 1
+a577 1
+		bsr.s	FlushBitmapBlock	must flush it out first
+d619 2
+@
+
+
+1.8
+log
+@changed bitmap code to separate bitmap and data caches.  makes bitmap
+allocation atomic
+@
+text
+@d21 1
+d232 2
+a233 1
+AllocEnd	move.l	d4,d0			start key
+d252 1
+d342 2
+a343 1
+FreeKeyEnd	move.l	d6,d0			return keys freed
+d345 1
+a345 1
+
+d566 1
+d639 1
+@
+
+
+1.7
+log
+@chainged some init procedures
+@
+text
+@@
+
+
+1.6
+log
+@mostly debugging changes for bad diskmasher bug
+
+@
+text
+@d497 1
+a497 1
+		bsr	WriteRoot
+@
+
+
+1.5
+log
+@completely rewritten to get the bitmap out of mmory and allocate more
+than one block at a time.  supports variable sized blocks too.
+@
+text
+@d71 2
+a72 4
+;		lsr.w	#5,d0			and calculate longword number
+;		lsl.w	#2,d0			but use a byte offset
+		lsr.w	#3,d0
+		andi.w	#$fffc,d0
+d394 1
+d479 1
+a479 2
+;		moveq.l	#TRUE,d0		update bitmap flag in root
+		moveq.l	#1,d0			OLDFS CHECKS FOR 1 !!!!
+d532 1
+a532 1
+
+@
+
+
+1.4
+log
+@notification added
+@
+text
+@d5 2
+d8 5
+a12 1
+		INCLUDE	"exec/alerts.i"
+a13 2
+		INCLUDE	"private.i"
+		INCLUDE	"globals.i"
+a14 1
+		LIST
+d18 1
+a18 1
+		XDEF	CountBlocks,GetKey,FreeKey,AlterRoot,WriteMap,GetKeyAddr
+d20 1
+a20 3
+		XREF	GrabBlock,DatStamp,LooseBlock,WriteBlock,CopyBlock
+		XREF	GetBlock,ClearBlock,DiscardBlock,Abort,WaitDataBlock
+		XREF	EnQueue,AddHash,Checksum
+d22 6
+d29 2
+a30 2
+; BlocksUsed = CountBlocks( bitmap )
+;     d0		      a0
+d32 7
+a38 2
+; Counts the number of blocks allocated in the given disk bitmap.  Uses the
+; global value NBlocks(a5) to determine how far to go into the bitmap.
+d40 6
+a45 9
+CountBlocks	movem.l	d2-d4,-(sp)
+		moveq.l	#0,d3			count of blocks used on disk
+		move.l	NBlocks(a5),d0
+		lsr.l	#5,d0			how many longwords for bitmap
+		divu.w	#127,d0			how many complete BM blocks ?
+		move.w	d0,d2
+		swap	d0
+		move.w	d0,-(sp)		(sp) = remaining lwords
+		bra.s	NextBlock		if 0 then will stop now
+d47 8
+a54 7
+CountBlock	moveq.l	#126,d4			number of entries -1
+		addq.l	#4,a0			skip the checksum
+10$		move.l	(a0)+,d0		get the next bitmap lword
+		bsr.s	BitsUsed		returns # 0 bits
+		add.l	d0,d3			update count of used bits
+		dbra	d4,10$			go for next longword
+NextBlock	dbra	d2,CountBlock		go for the next block
+d56 24
+a79 8
+; counted blocks used in the complete blocks, now count the partial block
+		move.w	(sp)+,d2		d2 = # lwords remaining
+		addq.l	#4,a0			skip checksum
+		bra.s	NextPartial
+ll20		move.l	(a0)+,d0
+		bsr.s	BitsUsed
+		add.l	d0,d3
+NextPartial	dbra	d2,ll20
+d81 2
+a82 32
+; counted complete longwords in the partial block, now count the partial lword
+		move.l	NBlocks(a5),d2		get remaining bits
+		andi.w	#31,d2
+		move.l	(a0),d0			get last longword
+		bra.s	NextLastBit
+ll10		lsr.l	#1,d0			lower bits = lower blocks
+		bcs.s	NextLastBit		it's a free block
+		addq.l	#1,d3
+NextLastBit	dbra	d2,ll10
+		move.l	d3,d0			return # blocks used
+		movem.l	(sp)+,d2-d4
+		rts
+
+;==============================================================================
+; Support routine for CountBlocks, returns number of 0 bits in d0
+;==============================================================================
+BitsUsed	move.l	d0,d1
+		moveq.l	#32,d0			max # of bits
+		cmpi.l	#-1,d1			all free ?
+		bne.s	20$			no, go test for all used
+		moveq.l	#0,d0			return 0 (no blocks used)
+		bra.s	30$
+10$		lsr.l	#1,d1
+		bcc.s	10$			this one was used
+		subq.w	#1,d0			a free one (1 less used)
+20$		tst.l	d1
+		bne.s	10$			still some free blocks
+30$		rts				return d0 = # 0 bits
+
+;==============================================================================
+; key = GetKey( NearKey,AvoidKey )
+; d0		  d0	  d1
+d84 16
+a99 15
+; Fetches the next free key from the bitmap and marks it as used.  Nearkey is
+; the key we would like to be close to and AvoidKey represents the cylinder we
+; would not like to be allocated on.  If NearKey == AvoidKey or AvoidKey == -1
+; then the AvoidKey is ignored and the search for keys is performed from the
+; root to the outer cylinders (we are getting a header or first data block).
+; If we are observing avoidkey then the search is done from NearKey towards the
+; inner cylinders (we are getting data blocks).
+;==============================================================================
+GetKey		movem.l	d2-d6,-(sp)
+		move.l	NBlocks(a5),d2		are there any keys free ?
+		cmp.l	UsedBlocks(a5),d2
+		beq	GetKeyFailed		can't get a key when full !!
+		move.l	Keyupb(a5),d6		is nearkey valid
+;		cmp.l	d6,d0
+;		bgt	GetKeyFailed		no, something really broke!
+d101 8
+a108 5
+		move.l	d0,d2			save nearkey
+		cmp.l	d0,d1			if AvoidKey=NearKey
+		beq	GetHeaderKey		treat as a header key fetch
+		tst.l	d1			what kind of key ?
+		bmi	GetHeaderKey		header key or first data block
+d110 16
+a125 10
+; we are fetching a new data key.  If it's on the same cylinder as the avoid
+; key, then bump to the next cylinder before beginning the search.  This is
+; quickly tested by taking the difference and checking for > NBlocksPerCyl.
+		moveq.l	#32,d4			for faster math in loops
+		move.l	d1,d0
+		sub.l	d2,d0			get difference
+		bpl.s	10$
+		neg.l	d0
+10$		cmp.l	NBlocksPerCyl(a5),d0
+		bge.s	NearKeyOK		not on same cylinder
+d127 16
+a142 10
+; quick test failed, but it is still possible that we are on a different cyl
+		move.l	d1,d0			get cylinder base of avoidkey
+		bsr	CylBase
+		move.l	d0,d3			save it for a while
+		move.l	d2,d0			get cyl base of near key
+		bsr	CylBase
+		cmp.l	d3,d0			are they the same
+		bne.s	NearKeyOK		nope, nearkey is OK as is
+		move.l	NBlocksPerCyl(a5),d2	round up to next cylinder
+		add.l	d0,d2
+d144 7
+a150 3
+;NearKeyOK	add.l	IntLeave(a5),d2		allow interleave (usually 0)
+NearKeyOK	cmp.l	d6,d2			make sure not too far
+		bgt.s	WrapDisk		wrap to beginning of disk
+d152 9
+a160 6
+; new optimisation. If nearkey still == lastkeygot then use stashed variables
+		movem.l	SaveVars(a5),a0/d0/d1	get saved values
+		cmp.l	LastGotKey(a5),d2	is this same as last time ?
+		beq.s	ReEnter			yep, regs set OK
+		move.l	d2,d0			nope, we must re-calculate
+		bsr	GetKeyAddr		find where key is in bitmap
+d162 12
+a173 2
+ReEnter		move.l	0(a0,d0.w),d3		d1 = bit offset
+		bra.s	TestBits		always test first lword by bits
+d175 7
+a181 7
+; (a0)=bitmap block, d0=offset, d1=bit number.  Loop around searching for a
+; free key and clear it to mark as allocated when we find it.
+TestLWord	move.l	0(a0,d0.w),d3		get the bitmap longword
+		bne.s	StartBits		something available in there
+		add.l	d4,d2			move on by 32 blocks
+		cmp.l	d6,d2			check we don't need to wrap
+		ble.s	NextLWord		nope, just bump to next
+d183 4
+a186 4
+WrapDisk	move.l	Keylwb(a5),d2		wrap to beginning again
+		movea.l	MemBitMap(a5),a0
+		moveq.l	#4,d0			skip the checksum
+		bra.s	TestLWord		reserved blocks not in bitmap
+d188 16
+a203 9
+StartBits	moveq.l	#0,d1			entered from TestLWord
+TestBits	btst.l	d1,d3			is this one free ?
+		bne.s	GotBit			yep, we have one
+		addq.w	#1,d1			move to next bit
+		addq.l	#1,d2			update key number
+		cmp.l	d6,d2
+		bgt.s	WrapDisk		time to wrap to beginning
+		cmp.w	d4,d1			check we haven't overflowed
+		blt.s	TestBits
+d205 13
+a217 6
+NextLWord	addq.w	#4,d0			move to next longword
+		cmpi.w	#512,d0			make sure not time to skip
+		bne.s	TestLWord		nope, still in same buffer
+		adda.w	d0,a0			point to next bitmap block
+		moveq.l	#4,d0			skip the checksum
+		bra.s	TestLWord		and keep looking
+d219 4
+a222 4
+GotBit		bclr.l	d1,d3
+		move.l	d3,0(a0,d0.w)		mark as now allocated
+		move.l	a0,(a0)			mark bitmap block for writing
+		addq.l	#1,UsedBlocks(a5)	one more in use
+d224 2
+a225 2
+		move.l	d2,LastGotKey(a5)	save the key we got
+		movem.l	a0/d0/d1,SaveVars(a5)	and pre-calculated values
+d227 14
+a240 2
+		move.l	d2,d0			return key number
+		bra	GotKey
+d242 17
+a258 9
+; We are trying to get a header key or a first data block next to a header key.
+; Always start at the cylinder base of the given key but move backwards when
+; the search fails for a whole cylinder.  This complicates things a bit but
+; prevents data keys from getting mixed up with header keys. (At least until
+; disk gets full and/or fragged).   d2=nearkey.
+GetHeaderKey	move.l	d2,d0			round down to cylinder base
+		bsr	CylBase
+		move.l	d0,d2
+		moveq.l	#32,d6			need 32 a lot
+d260 8
+a267 10
+SearchCyl	cmp.l	Keylwb(a5),d2		went past beginning ?
+		bge.s	10$
+		move.l	Keylwb(a5),d2		start at beginning of disk
+10$		move.w	NBlocksPerCyl+2(a5),d4	number of blocks to test
+		subq.w	#1,d4			fix for dbra
+		move.l	d2,d5			save cylinder base
+		move.l	d2,d0			get address in the bitmap
+		bsr	GetKeyAddr		set up a0,d0 and d1
+		move.l	0(a0,d0.w),d3		get current lword
+		bra.s	TestHeadBits		always test bits for first one
+d269 6
+a274 4
+ReSearchCyl	move.l	0(a0,d0.w),d3		get current lword
+		bne.s	TestHeadBits		something free in there
+		add.l	d6,d2			update key number
+		bra.s	NextLong		and get the next lword
+d276 8
+a283 6
+; had to add the extra test because the LWord at a time test doesn't do
+; any range checks on Keyupb plus the dbra using d4 gets bogus because
+; we bump 32 blocks at a time but don't update d4 accordingly
+******************************************************************************
+TestHeadBits	cmp.l	Keyupb(a5),d2		***** bug fix *****
+		bgt.s	NextCyl			could wrap past end of disk
+d285 7
+a291 3
+		btst.l	d1,d3			is this one free ?
+		bne.s	GotBit			yep, we have one
+		addq.l	#1,d2			update key number
+d293 2
+a294 2
+		cmp.l	Keyupb(a5),d2		***** bug fix *****
+		bgt.s	NextCyl			could wrap past end of disk
+d296 11
+a306 5
+		addq.w	#1,d1			move to next bit
+		cmp.w	d6,d1
+		beq.s	NextLong		time for next longword
+		dbra	d4,TestHeadBits		still in same longword
+		bra.s	NextCyl			finished searching cylinder
+d308 12
+a319 5
+NextLong	addq.w	#4,d0			move to next longword
+		cmpi.w	#512,d0			time for next bitmap block ?
+		bne.s	10$			nope
+		adda.w	d0,a0			move to next bitmap block
+		moveq.l	#4,d0			skip the checksum
+d321 3
+a323 2
+10$		moveq.l	#0,d1			back at bit 0
+		dbra	d4,ReSearchCyl		loop if more to check
+d325 1
+a325 15
+NextCyl		cmp.l	Keylwb(a5),d5		were we at beginning
+		bne.s	10$			nope
+		move.l	Keyupb(a5),d5		wrap to end of disk
+		addq.l	#1,d5			plus one block
+10$		sub.l	NBlocksPerCyl(a5),d5	move back one cylinder
+		move.l	d5,d2
+		bra.s	SearchCyl		and search this cylinder
+
+GetKeyFailed	moveq.l	#-1,d0			return no key available
+ 
+GotKey:
+		IFD STATISTICS
+		addq.l	#1,s_KeysAlloced(a5)
+		ENDC
+		movem.l	(sp)+,d2-d6
+d329 2
+a330 2
+; GetKeyAddr( key )
+;	      d0
+d332 6
+a337 6
+; a VERY non standard routine!!!  returns the address of a bit in the bitmap
+; corresponding to the given key.  Register return is as follows:-
+;
+;  a0.l = base address of the bitmap block containing this key
+;  d0.w = byte offset to longword containing this key
+;  d1.w = bit number of this key in the pointed to longword
+d339 74
+a412 6
+GetKeyAddr	sub.l	Keylwb(a5),d0		reserved not in bitmap
+		moveq.l	#31,d1
+		and.w	d0,d1			d1 = bit number
+		lsr.l	#5,d0			d0 = lword #
+		divu.w	#127,d0			d0 = bitmap block #
+		move.l	d0,-(sp)		upper half = lword # in block
+d414 5
+a418 9
+		lsl.l	#8,d0			make offset (512 bytes per blk)
+		lsl.l	#1,d0			d0 is offset to base of block
+		movea.l	MemBitMap(a5),a0
+		adda.l	d0,a0			a0 points to bitmap block
+		move.l	(sp)+,d0		get back longword remainder
+		swap	d0			d0.w = lword offset into block
+		lsl.w	#2,d0			convert to byte offset
+		addq.w	#4,d0			skip the checksum
+		rts
+d420 6
+a425 12
+;==============================================================================
+; key CylBase( key )
+; d0		d0
+;
+; Returns the first key of the cylinder that the given key is on
+;==============================================================================
+CylBase		move.l	d0,d1			save given key
+		divu.w	NBlocksPerCyl+2(a5),d1	only use a word anyway
+		swap	d1
+		ext.l	d1			remainder = # cyls too many
+		sub.l	d1,d0			subtract from given cylinder
+		rts				return base of cylinder key
+d427 8
+a434 9
+;==============================================================================
+; FreeKey( key )  -  frees a key in the bitmap and panics if already free.
+;	   d0
+;==============================================================================
+FreeKey		move.l	d2,-(sp)
+		bsr.s	GetKeyAddr
+		move.l	0(a0,d0.w),d2
+		bset.l	d1,d2
+		beq.s	10$
+d436 9
+a444 4
+;***** SMB  Going to change this puppy.  Don't like GURU's in the code *****
+5$		move.l	#AN_KeyFree!AT_DeadEnd,d0  panic (key already free)
+		bsr	Abort
+		bra.s	5$			keep aborting
+d446 8
+a453 3
+10$		move.l	d2,0(a0,d0.w)
+		subq.l	#1,UsedBlocks(a5)
+		move.l	a0,(a0)			mark bitmap block as changed
+d455 5
+a459 3
+		IFD STATISTICS
+		addq.l	#1,s_KeysFreed(a5)
+		ENDC
+d461 8
+a468 1
+		move.l	(sp)+,d2
+d472 5
+a476 2
+; AlterRoot() - called when a file is opened for output to ensure that the
+;		bmvalid flag in the root block is false.
+d478 23
+a500 5
+AlterRoot	tst.w	FilesOpen(a5)		unless run already
+		bne.s	RootAltered
+		moveq.l	#FALSE,d0		mark bitmap as invalid
+		bsr	WriteRoot		read it and write it
+		move.w	#TRUE,FilesOpen(a5)	mark files as open
+d504 1
+a504 1
+; WriteRoot( BMFlag )
+d507 3
+a509 2
+; Reads in the root block, datestamps it and writes it back out with the given
+; bitmap flag to say whether the bitmap on the disk is valid or not.
+d516 4
+a519 2
+		move.l	d2,cb_SIZEOF+rb_BitmapFlag(a2)	update bitmap flag
+		lea.l	cb_SIZEOF+rb_DiskMod(a2),a0	date last modified
+d523 9
+a531 3
+		moveq.l	#BUFF_INVALID,d1	put onto pending queue
+		moveq.l	#TRUE,d2		checksummed header
+		bsr	WriteBlock
+a532 166
+		rts
+
+;==============================================================================
+; WriteMap()
+;
+; Updates the bitmap on the disk if not valid.  If no space was allocated for
+; the bitmap and there is space on the disk now, then this space is allocated.
+; Bitmap blocks are written out first and then the root is written once we are
+; sure everything is safely on the disk.  This routine is called during Flush
+; or when the motor timeout gets to 0.  Validator will also call this routine
+; to put the bitmap generated in memory out onto the disk (if there is room).
+; NOTE: don't call this if the disk is write-protected !!!
+;==============================================================================
+WriteMap	movem.l	d2/a2-a3,-(sp)
+		tst.w	FilesOpen(a5)		is disk bitmap valid ?
+		beq	WriteMapExit		yes, so no work to do
+		clr.w	FilesOpen(a5)		bitmap will be valid soon
+		tst.w	BMAllocated(a5)		is bitmap already on disk
+		bne	MapToWrite		yep, no need to allocate
+		move.l	NBlocks(a5),d0		is there room to allocate
+		sub.l	UsedBlocks(a5),d0
+		move.w	BMExtend(a5),d1
+		ext.l	d1
+		cmp.l	d1,d0
+		blt	WriteMapExit		no room for map+extensions
+
+; the bitmap is not already allocated on disk (we just finished a validate ) so
+; allocate it before we write to it.  This will involve changing the root block
+; and writing to any extension blocks we may need.  We know we already have
+; room on the disk but we must allocate all the blocks we need before trying to
+; write them out.  This prevents anyone else from jumping in and grabbing them.
+		movea.l	BMList(a5),a2		where the keys are stored
+		move.w	BMExtend(a5),d2		number of blocks we need
+		move.l	RootKey(a5),d0		start near this key
+		bra.s	20$
+10$		moveq.l	#-1,d1			don't avoid anything
+		bsr	GetKey			get a key
+		move.l	d0,(a2)+		store in BMList
+20$		dbra	d2,10$			d0 contains next nearkey
+
+; all blocks are allocated and in BMList.  Write out the keys of the bitmap
+; into the root and any extender blocks that are needed
+		move.l	RootKey(a5),d0		grab the root
+		bsr	GrabBlock
+		movea.l	d0,a3
+
+		lea.l	cb_SIZEOF+rb_Bitmap(a3),a0
+		moveq.l	#25,d0			clear out key area
+25$		clr.l	(a0)+
+		dbra	d0,25$
+
+		lea.l	cb_SIZEOF+rb_Bitmap(a3),a0
+		movea.l	BMList(a5),a1		going to copy BMList
+		move.w	BMExtend(a5),d0		number to copy
+		subq.w	#1,d0
+		cmpi.w	#25,d0
+		ble.s	30$			No extenders to handle
+		moveq.l	#25,d0			truncate to Bitmap in root
+30$		move.l	(a1)+,(a0)+
+		dbra	d0,30$
+
+; bitmap keys are filled in in the root block. write root and wait for it.
+		movea.l	a3,a0			this buffer
+		move.l	RootKey(a5),d0		this key
+		moveq.l	#BUFF_INVALID,d1	put onto pending queue
+		moveq.l	#TRUE,d2		checksummed header
+		bsr	WriteBlock
+		move.w	#TRUE,BMAllocated(a5)	bitmap is allocated on disk now
+
+; Root is written, now handle any extender blocks that we have to write
+		move.w	BMExtend(a5),d2		number of bitmap blocks
+		subi.w	#26,d2			subtract number in root
+		blt.s	MapToWrite		nothing left to do
+		movea.l	BMList(a5),a2
+		lea.l	26*4(a2),a2		point to first extender data
+
+; main extender loop.  Get a cache buffer, clear it and copy the next list of
+; keys into it and write it to the key indicated by last entry in prev block.
+WriteExtend	moveq.l	#TRUE,d0		want a block whatever
+		bsr	GetBlock
+		movea.l	d0,a3
+		lea.l	cb_SIZEOF(a3),a0
+		bsr	ClearBlock		clear the block out
+		movea.l	a2,a0			where we copy from
+		lea.l	cb_SIZEOF(a3),a1	where we copy to
+		moveq.l	#127,d0			truncate to 128 entries
+		cmpi.w	#128,d2
+		bge.s	20$
+		move.w	d2,d0
+		subq.w	#1,d0
+20$		move.l	(a0)+,(a1)+
+		dbra	d0,20$
+
+		movea.l	a3,a0			this buffer
+		move.l	-4(a2),d0		this key
+		moveq.l	#BUFF_INVALID,d1	put onto pending queue
+		move.l	d2,-(sp)
+		moveq.l	#FALSE,d2		un checksummed data block
+		bsr	WriteBlock		won't cache when done
+		move.l	(sp)+,d2
+
+		lea.l	512(a2),a2		point to next section of BMList
+		subi.w	#128,d2			done this many entries
+		bgt.s	WriteExtend		more to do
+
+; we have all the space we need for bitmap blocks.  Check which ones have been
+; changed and write them out to the correct keys as indicated by BMList.
+; If we just allocated the bitmap then all blocks will be changed because the
+; validator fixed them up and marked them as such. (Even untouched blocks).
+MapToWrite	movea.l	MemBitMap(a5),a2	the memory copy of the bitmap
+		moveq.l	#0,d2			current block number
+
+CheckBlock	tst.l	(a2)			was this one changed ?
+		beq.s	NextBMBlock		no, move on to the next
+
+		moveq.l	#TRUE,d0		get a cache buffer to use
+		bsr	GetBlock
+		movea.l	d0,a3			and save it
+
+		movea.l	a2,a0			checksum this block
+		bsr	Checksum
+		sub.l	d0,(a2)			fix the checksum
+		movea.l	a2,a0
+		lea.l	cb_SIZEOF(a3),a1
+		bsr	CopyBlock		copy bitmap to buffer
+		clr.l	(a2)			mark as not changed now
+
+		move.w	d2,d0			find what key it's on
+		bsr	GetBMKey		key to write in d0
+		movea.l	a3,a0			this buffer
+		moveq.l	#BUFF_INVALID,d1	put onto pending queue
+		move.l	d2,-(sp)
+		moveq.l	#FALSE,d2		un checksummed data block
+		bsr	WriteBlock
+		move.l	(sp)+,d2
+
+NextBMBlock	addq.w	#1,d2			move on to the next BM block
+		lea.l	512(a2),a2		and in memory
+		cmp.w	BMBlocks(a5),d2		done them all yet ?
+		blt.s	CheckBlock		nope, keep looping
+
+; we have now written out all the bitmap blocks so mark bitmap as valid in root
+		moveq.l	#TRUE,d0
+		bsr	WriteRoot
+
+WriteMapExit	movem.l	(sp)+,d2/a2-a3
+		rts
+
+;==============================================================================
+; Key = GetBMKey( bmblock )
+;  d0		     d0
+;
+; Returns the key of the given bitmap block #.  Allows for the extender keys
+; which are stored with the bitmap keys in BMList.
+;==============================================================================
+GetBMKey	move.w	d0,d1
+		cmpi.w	#25,d0			need to skip first extender ?
+		blt.s	10$			nope
+		addq.w	#1,d1			skip first extender block
+		subi.w	#25,d0
+		ext.l	d0
+		divu.w	#127,d0			calculate # other extenders
+		add.w	d0,d1			add to current key offset
+10$		lsl.w	#2,d1			get offset into BMList
+		movea.l	BMList(a5),a0
+		move.l	0(a0,d1.w),d0		get the key number
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.2
+log
+@Bug fix to stop headers being allocated one block past partition end.
+@
+text
+@@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d213 8
+a220 1
+TestHeadBits	btst.l	d1,d3			is this one free ?
+@

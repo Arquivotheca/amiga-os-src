@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'23.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'locale 42.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'locale 42.1 (23.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: locale 42.1 (23.8.93)',0
+	ENDM

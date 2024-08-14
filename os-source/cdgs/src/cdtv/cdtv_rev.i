@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	16
+DATE	MACRO
+		dc.b	'21.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'cdtv 40.16'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdtv 40.16 (21.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdtv 40.16 (21.5.93)',0
+	ENDM

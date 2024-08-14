@@ -1,0 +1,441 @@
+head     40.4;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:40.4; strict;
+comment  @ * @;
+
+
+40.4
+date     94.03.08.09.40.21;  author davidj;  state Exp;
+branches ;
+next     40.3;
+
+40.3
+date     94.03.07.14.33.24;  author davidj;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     94.03.04.10.03.17;  author davidj;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     94.03.03.14.27.30;  author davidj;  state Exp;
+branches ;
+next     40.0;
+
+40.0
+date     94.03.03.10.51.42;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+40.4
+log
+@state variable
+@
+text
+@/* main.c
+ * startup routine for CDAudio
+ * Copyright (c) 1994 Commodore International Services, Co.
+ * Written by David N. Junod
+ *
+ */
+
+#include <dos/dos.h>
+#include <dos/rdargs.h>
+#include <exec/types.h>
+#include <exec/execbase.h>
+#include <exec/libraries.h>
+#include <workbench/icon.h>
+#include <workbench/startup.h>
+#include <internal/playerlibrary.h>
+
+#include <string.h>
+#include <stdio.h>
+
+#include "cdaudio.h"
+
+#define CATCOMP_NUMBERS TRUE
+#define CATCOMP_BLOCK TRUE
+#include <localestr/amigacd.h>
+
+/*****************************************************************************/
+
+/* Program version information */
+#include "cdaudio_rev.h"
+static char *version = VERSTAG;
+
+/*****************************************************************************/
+
+#define	OPT_LEFT	0
+#define	OPT_TOP		1
+#define	OPT_SMALL	2
+#define	OPT_FAKE	3
+#define	OPT_COUNT	4
+
+#define	TEMPLATE	"LEFT/K/N,TOP/K/N,SMALL/S,FAKE/S"
+
+/*****************************************************************************/
+
+struct Library *GadToolsBase;
+struct Library *GfxBase;
+struct Library *IntuitionBase;
+struct Library *LayersBase;
+struct Library *PlayerBase;
+struct Library *LocaleBase;
+struct Catalog *catalog;
+
+/*****************************************************************************/
+
+/* gui.c */
+char *sTitle = "";
+char *bTitle = APP_TITLE;
+char *buttonClassName = "button.gadget";
+char *ledClassName = "led.image";
+struct Screen *scr;
+LONG rPen, gPen, bPen;
+struct DrawInfo *dri;
+struct TextFont *tf;
+struct TextAttr ta;
+struct Window *win;
+struct RastPort *rp;
+struct Gadget *gads[MAX_GADS];
+struct Image *imgs[MAX_MATRIX];
+struct Image *trakImage;
+struct Image *timeImage;
+struct Image *frameImage;
+struct Rectangle frameRect;
+UBYTE sign = ' ';
+WORD time[2];
+WORD trak[1];
+UBYTE backPen;
+LONG timeX, timeY;
+WORD clseWidth, clseEnd;
+struct Image *img2[3] = {&imscan, &imrnd, &imloop};
+struct Image *imgt[4] = {&imt1, &imt2, &imt3, &imt4};
+struct Image *impp[3] = {&impp1, &impp2, &impp3};
+LONG spaceWidth, trackWidth;
+LONG state, numTracks;
+void *vi;
+struct Gadget *cgad, *scrollGad;
+LONG ppage = -1, page, top, total = MATRIX_ROWS, visible = MATRIX_ROWS;
+
+/* player.c */
+LONG pState;
+LONG randomseed;
+LONG rndState;
+struct PlayList DummyList;
+
+/* program global variables */
+struct MsgPort *IPort;
+struct MsgPort *TPort;
+struct timerequest *TReq;
+struct PlayList *PlayList;
+struct PlayList UndoPlayList;
+struct PlayerState PlayerState;
+struct PlayerOptions PlayerOptions;
+LONG fake;
+
+/*****************************************************************************/
+
+int main (int argc, char **argv)
+{
+    LONG top = 0, left = 0, small = 0;
+    struct Library *buttonLib;
+    struct Library *ledLib;
+    LONG error = ERR_NO_FREE_STORE;
+
+    struct WBStartup *sm = NULL;
+    BPTR oldDir;
+
+    /* Started from Workbench? */
+    if (argc == 0)
+	sm = (struct WBStartup *) argv;
+
+    /* We require Intuition 3.0 */
+    IntuitionBase = OpenLibrary ("intuition.library", 37);
+
+    if (GadToolsBase = OpenLibrary ("gadtools.library", 39))
+    {
+	GfxBase = OpenLibrary ("graphics.library", 0);
+	LayersBase = OpenLibrary ("layers.library", 0);
+	PlayerBase = OpenLibrary ("player.library", 0);
+
+	if (sm)
+	    oldDir = CurrentDir (sm->sm_ArgList->wa_Lock);
+
+	if (LocaleBase = OpenLibrary ("locale.library", 38))
+	    catalog = OpenCatalogA (NULL, "sys/amigacd.catalog", NULL);
+
+	if (buttonLib = openclass ("gadgets/button.gadget", 39))
+	{
+	    if (ledLib = openclass ("images/led.image", 39))
+	    {
+		if (IPort = CreateMsgPort ())
+		{
+		    if (TPort = CreateMsgPort ())
+		    {
+			if (TReq = CreateIORequest (TPort, sizeof (struct timerequest)))
+			{
+			    if (OpenDevice ("timer.device", 0, TReq, UNIT_MICROHZ) == 0)
+			    {
+				/* Shell startup */
+				if (argc)
+				{
+				    struct RDArgs *rdargs;
+				    char *opts[OPT_COUNT];
+
+				    memset (opts, 0, sizeof (opts));
+				    if (rdargs = ReadArgs (TEMPLATE, (LONG *) opts, NULL))
+				    {
+					if (opts[OPT_TOP])
+					    top = *(ULONG *) opts[OPT_TOP];
+					if (opts[OPT_LEFT])
+					    left = *(ULONG *) opts[OPT_LEFT];
+					if (opts[OPT_SMALL])
+					    small = 1;
+					if (opts[OPT_FAKE])
+					    fake = 1;
+					FreeArgs (rdargs);
+				    }
+				}
+				/* Workbench startup */
+				else
+				{
+				    struct Library *IconBase;
+				    struct DiskObject *dob;
+				    struct WBStartup *sm;
+				    struct WBArg *wa;
+				    char *s;
+
+				    sm = (struct WBStartup *) argv;
+				    wa = sm->sm_ArgList;
+
+				    IconBase = OpenLibrary ("icon.library", 0);
+				    if ((*wa->wa_Name) && (dob = GetDiskObject (wa->wa_Name)))
+				    {
+					if (s = (char *) FindToolType (dob->do_ToolTypes, "TOP"))
+					    StrToLong (s, &top);
+					if (s = (char *) FindToolType (dob->do_ToolTypes, "LEFT"))
+					    StrToLong (s, &left);
+					if (s = (char *) FindToolType (dob->do_ToolTypes, "SMALL"))
+					    small = 1;
+					FreeDiskObject (dob);
+				    }
+				    CloseLibrary (IconBase);
+				}
+
+				/* Do the player now */
+				DoPlayer (top, left, small);
+				error = 0;
+
+				CloseDevice (TReq);
+			    }
+			    DeleteIORequest (TReq);
+			}
+			DeleteMsgPort (TPort);
+		    }
+		    DeleteMsgPort (IPort);
+		}
+		CloseLibrary (ledLib);
+	    }
+	    else
+		error = ERR_COULDNT_OPEN_LED;
+	    CloseLibrary (buttonLib);
+	}
+	else
+	    error = ERR_COULDNT_OPEN_BUTTON;
+
+	if (catalog)
+	    CloseCatalog (catalog);
+	CloseLibrary (LocaleBase);
+
+	if (sm)
+	    CurrentDir (oldDir);
+
+	CloseLibrary (PlayerBase);
+	CloseLibrary (LayersBase);
+	CloseLibrary (GfxBase);
+	CloseLibrary (GadToolsBase);
+    }
+    else
+	error = ERR_REQUIRES_3_0;
+
+    if (error)
+	MessageBox ("%s\n", GetString (error));
+
+    CloseLibrary (IntuitionBase);
+}
+
+/*****************************************************************************/
+
+void SendTimerRequest (void)
+{
+    TReq->tr_node.io_Command = TR_ADDREQUEST;
+    TReq->tr_time.tv_secs = 0;
+    TReq->tr_time.tv_micro = 200000;
+    SendIO (TReq);
+}
+
+/*****************************************************************************/
+
+/* Try opening the class library from a number of common places */
+struct Library *openclass (STRPTR name, ULONG version)
+{
+    struct ExecBase *SysBase = (*((struct ExecBase **) 4));
+    struct Library *retval;
+    STRPTR buffer;
+
+    if ((retval = OpenLibrary (name, version)) == NULL)
+    {
+	if (buffer = (STRPTR) AllocMem (256, MEMF_CLEAR))
+	{
+	    sprintf (buffer, ":classes/%s", name);
+	    if ((retval = OpenLibrary (buffer, version)) == NULL)
+	    {
+		sprintf (buffer, "classes/%s", name);
+		retval = OpenLibrary (buffer, version);
+	    }
+	    FreeMem (buffer, 256);
+	}
+    }
+
+    return retval;
+}
+
+/*****************************************************************************/
+
+STRPTR GetString (LONG stringNum)
+{
+    STRPTR builtIn;
+    UWORD *w;
+    LONG *l;
+
+    l = (LONG *) CatCompBlock;
+    while (*l != stringNum)
+    {
+	w = (UWORD *) ((ULONG) l + 4);
+	l = (LONG *) ((ULONG) l + (ULONG) * w + 6);
+    }
+    builtIn = (STRPTR) ((ULONG) l + 6);
+    if (LocaleBase)
+	return (GetCatalogStr (catalog, stringNum, builtIn));
+    return (builtIn);
+}
+
+/*****************************************************************************/
+
+void MessageBox (void *data, ...)
+{
+    struct Process *pr = (struct Process *) FindTask (NULL);
+    ULONG *fmt, *args;
+
+    /* Find the format string and the arguments */
+    args = fmt = (ULONG *) &data;
+    args++;
+
+    if (pr->pr_CLI)
+    {
+	ULONG arg[2];
+
+	arg[0] = (ULONG) DOSBase;
+	arg[1] = (ULONG) Output ();
+	RawDoFmt ((STRPTR)*fmt, args, (void (*)())myputch, (APTR)arg);
+	Flush (Output());
+    }
+    else if (IntuitionBase)
+    {
+	struct EasyStruct es;
+
+	/* Fill in the structure */
+	es.es_StructSize = sizeof (struct EasyStruct);
+	es.es_Flags = NULL;
+	es.es_Title = APP_TITLE;
+	es.es_TextFormat = (STRPTR)*fmt;
+	es.es_GadgetFormat = "OK";
+	EasyRequestArgs (NULL, &es, NULL, args);
+    }
+}
+
+/*****************************************************************************/
+
+void __asm myputch (register __d0 char ch, register __a3 LONG *args)
+{
+#undef	DOSBase
+#define	DOSBase	args[0]
+    FPutC (args[1], (LONG)ch);
+}
+@
+
+
+40.3
+log
+@moved all globals to init in one place
+@
+text
+@d88 1
+a88 1
+LONG state;
+@
+
+
+40.2
+log
+@title changes
+@
+text
+@d54 39
+d112 7
+d127 4
+d216 4
+a250 1
+    BPTR old, lock;
+d255 1
+a255 1
+	if (buffer = (STRPTR) AllocVec (256, MEMF_CLEAR))
+a256 3
+	    lock = Lock ("PROGDIR:", ACCESS_READ);
+	    old = CurrentDir (lock);
+
+d263 1
+a263 5
+
+	    CurrentDir (old);
+	    UnLock (lock);
+
+	    FreeVec (buffer);
+@
+
+
+40.1
+log
+@used openlibrary routine instead of OpenLibrary
+@
+text
+@a31 2
+#define	APP_TITLE	"CDAudio"
+
+@
+
+
+40.0
+log
+@initial RCS
+@
+text
+@d86 1
+a86 1
+	if (buttonLib = OpenLibrary ("gadgets/button.gadget", 39))
+d88 1
+a88 1
+	    if (ledLib = OpenLibrary ("images/led.image", 39))
+d190 34
+@

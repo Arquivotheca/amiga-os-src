@@ -1,0 +1,14 @@
+VERSION		EQU	2
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'17.7.92'
+	ENDM
+VERS	MACRO
+		dc.b	'ftpd 2.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ftpd 2.1 (17.7.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ftpd 2.1 (17.7.92)',0
+	ENDM

@@ -1,0 +1,901 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.8
+date     91.04.18.10.05.34;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.03.21.14.34.17;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.13.08.53.44;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.09.20.17.43.05;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.06.05.13.05.50;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.04.06.15.23.08;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.12.08.01.08.42;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.12.06.10.48.47;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Record locking routines
+@
+
+
+1.8
+log
+@fixed blocking chain code for timed out record lock request to correctly
+deal with failing locks that are in the middle of the chain.
+@
+text
+@		SECTION	filesystem,CODE
+
+		NOLIST
+		INCLUDE	"exec/types.i"
+		INCLUDE	"exec/io.i"
+		INCLUDE	"libraries/dosextens.i"
+		INCLUDE	"globals.i"
+		INCLUDE	"private.i"
+		INCLUDE	"moredos.i"
+		INCLUDE	"actions.i"
+		INCLUDE	"readwrite.i"
+		INCLUDE	"printf.mac"
+		LIST
+
+;		DEBUGENABLE
+
+		XREF	GetPubMem,_LVOFreeMem,_LVOCopyMem,_LVOSendIO,_LVODoIO
+		XREF	_LVOAbortIO,_LVOAddTime,_LVOSubTime,_LVOCmpTime
+		XREF	ReturnPkt
+
+		XDEF	LockRecord,RelockRecord,FreeRecord,FreeAllRLocks
+
+
+;==============================================================================
+; LockRecord( packet )
+;		a0
+;
+; Attempts to lock a record associated with the given filehandle (actually an
+; rwdata structure in dp_Arg1) and performs timeout waits if required.  This
+; call sets up a timer request and associates it with a LOCK_TIMER packet so
+; that ReLockRecord can treat it as if it just returned from a timeout wait.
+;
+; dp_Arg1 = pointer to rwd_Data structure (and therefore the filehandle)
+; dp_Arg2 = start position for the lock
+; dp_Arg3 = length of the required record lock
+; dp_Arg4 = the mode of this lock
+; dp_Arg5 = timeout value if we should wait for the lock
+;
+; Returns TRUE if the record was locked, else returns FALSE
+;==============================================================================
+LockRecord	movem.l	a2-a3,-(sp)
+		movea.l	a0,a2			save packet address
+		moveq.l	#rl_SIZEOF,d0		get record lock memory
+		bsr	GetPubMem
+		movea.l	d0,a3			stash the data area
+		move.l	a3,d0
+		bne.s	10$
+
+; we couldn't get any memory for the record lock structure.  Return an error
+		move.l	#ERROR_NO_FREE_STORE,d1	this is the error
+		moveq.l	#FALSE,d0		failed to get lock
+		movea.l	a2,a0
+		bsr	ReturnPkt		return failed packet
+		movem.l	(sp)+,a2-a3		and exit
+		rts
+
+; Initialise the timer request and the fake packet (pointed to by LN_NAME of
+; the timer request).  Also initialise the record lock with a datestamp of
+; the time when we must fail the request.  This is used to ensure that the
+; timeout is done for the correct duration.  We associate the initial packet
+; with this record lock structure, it will be removed and returned by ReLock.
+10$		move.l	a2,rl_StartPacket(a3)	save given dos packet
+		movea.l	a3,a1			initialise TimerRequest
+		movea.l	TimerDev(a5),a0		just copy our ticker one
+		moveq.l	#IOTV_SIZE,d0
+		jsr	_LVOCopyMem(a6)
+		lea.l	rl_FakePacket(a3),a0	initialise fake DOS packet
+		move.w	#ACTION_LOCK_TIMER,dp_Type+2(a0)
+		move.l	a0,LN_NAME(a3)		link into TimerRequest
+		move.l	a3,dp_Link(a0)		link TimerRequest to packet
+		move.l	dp_Arg1(a2),dp_Arg1(a0)	associate with this rw_header
+		move.w	#TR_GETSYSTIME,IO_COMMAND(a3)
+		move.b	#IOF_QUICK,IO_FLAGS(a3)
+		movea.l	a3,a1			get the current time
+		jsr	_LVODoIO(a6)		we'll use IOTV_SECS later
+
+	printf <'rwd_data= %lx\n'>,dp_Arg1(a2)
+	printf <'Start   = %ld\n'>,dp_Arg2(a2)
+	printf <'Length  = %ld\n'>,dp_Arg3(a2)
+	printf <'Mode    = %ld\n'>,dp_Arg4(a2)
+	printf <'Timeout = %ld\n'>,dp_Arg5(a2)
+
+		move.l	dp_Arg1(a2),rl_rwddata(a3)	associate with file
+		move.l	dp_Arg2(a2),d0		get start position for lock
+		move.l	d0,rl_LowBound(a3)	save as lowbound
+		add.l	dp_Arg3(a2),d0		compute upper bound
+		subq.l	#1,d0
+		move.l	d0,rl_HighBound(a3)
+		move.l	dp_Arg5(a2),d1		get the timeout
+		move.l	dp_Arg4(a2),d0		get the mode
+		lsr.l	#1,d0			convert from 0-3 to 0-1
+		bcc.s	11$
+		moveq.l	#0,d1			immediate lock, ignore timeout
+11$		move.l	d0,rl_LockType(a3)
+		move.l	d1,rl_Timeout(a3)	save requested timeout
+		divu.w	#50,d1			convert DOS ticks to timeval
+		move.w	d1,rl_ESecs+2(a3)	end after this many seconds
+		swap	d1			get remainder
+		mulu.w	#20000,d1		convert ticks to micros
+		move.l	d1,rl_EMicros(a3)
+		lea.l	rl_ESecs(a3),a0		convert to absolute time
+		lea.l	IOTV_TIME+TV_SECS(a3),a1  we did getsystime earlier
+	printf <'Current time = %ld,%ld\n'>,(a1),4(a1)
+		move.l	a6,-(sp)
+		movea.l	IO_DEVICE(a3),a6
+		jsr	_LVOAddTime(a6)
+		movea.l	(sp)+,a6		restore execbase
+	printf <'Timeout time = %ld,%ld\n'>,rl_ESecs(a3),rl_EMicros(a3)
+		lea.l	rl_FakePacket(a3),a0	point to packet
+		movem.l	(sp)+,a2-a3		drop through to RelockRecord
+
+;==============================================================================
+; RelockRecord( packet )
+;		  a0
+;
+; Gets a LOCK_TIMER packet with all its associated garbage (including the
+; initial LOCK_RECORD packet in the rl_ structure).  Attempts to lock this
+; record and returns the original packet if this is possible.  If the record
+; cannot be locked checks the current time and compares it against the max
+; allowed time in the rl_struct.  If there is time remaining then the rl_
+; structure is fired off as a timer request and processed again when it comes
+; back here.  Records being unlocked can cause this timer request to be
+; aborted which will give the waiting record lock another chance.
+;==============================================================================
+RelockRecord	movem.l	d2-d4/a2-a3,-(sp)
+		movea.l	dp_Link(a0),a3		get record lock structure
+		tst.l	rl_BlockingMe(a3)	am I still being blocked ?
+		bne	MaybeTimeout		yes, may just give up
+
+; scan the whole list of record locks for this file and see if we can fit
+		movea.l	rl_rwddata(a3),a2	fetch rwd header
+		movea.l	rwd_Owner(a2),a2	get main header for file
+		move.l	rwh_RecordLocks(a2),a2	fetch first entry in list
+		move.l	rl_LowBound(a3),d2	stash low and high bounds
+		move.l	rl_HighBound(a3),d3
+	printf <'LoBound=%ld, HiBound=%ld\n'>,d2,d3
+
+SearchRLocks	move.l	a2,d0			at end of list ?
+		beq.s	CanLockRecord		yes, we can lock this record
+		cmp.l	rl_LowBound(a2),d3	if low1>hi0 not overlapping
+		blt.s	NoOverlap
+		cmp.l	rl_HighBound(a2),d2	if hi1<low0 not overlapping
+		bgt.s	NoOverlap
+; if the same filehandle was used then an overlap is allowed even for exclusive
+	printf <'Record locks overlap\n'>
+		move.l	rl_rwddata(a3),d0
+		cmp.l	rl_rwddata(a2),d0
+		beq.s	NoOverlap
+		moveq.l	#RL_EXCLUSIVE,d0	else only allowed for shared
+		cmp.l	rl_LockType(a2),d0
+		beq.s	LockOverlap
+		cmp.l	rl_LockType(a3),d0
+		beq.s	LockOverlap
+NoOverlap	move.l	(a2),a2			no overlap, keep searching
+		bra.s	SearchRLocks
+
+; we can lock this record.  Add to the head of the list and return success
+CanLockRecord	movea.l	rl_rwddata(a3),a2	fetch rwd header
+		movea.l	rwd_Owner(a2),a2	get main header for file
+		move.l	rwh_RecordLocks(a2),(a3) link into list
+		move.l	a3,rwh_RecordLocks(a2)
+		moveq.l	#0,d1			no error
+		moveq.l	#TRUE,d0		locked successfully
+		movea.l	rl_StartPacket(a3),a0
+		bsr	ReturnPkt
+		bra	RelockExit
+		
+; We have a record collision between EXCLUSIVE (write) record locks.  If the
+; record we are trying to lock has exceeded it's timeout limit then we should
+; fail it with a LOCK_TIMEOUT error.  If no timeout was set in the first
+; place then we'll just return a simple LOCK_COLLISION error.
+LockOverlap	tst.l	rl_Timeout(a3)		was a timeout requested?
+		bne.s	TryTimeout		yes, see if we have time left
+
+		move.w	#ERROR_LOCK_COLLISION,ErrorCode+2(a5)
+	printf <'ERROR_LOCK_COLLISION\n'>
+LockFail	movea.l	a3,a1			no, free the record and exit
+	printf <'LockFail called\n'>
+		movea.l	rl_StartPacket(a3),a2	stash original packet
+		moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+		move.l	ErrorCode(a5),d1
+		moveq.l	#FALSE,d0		failed
+		movea.l	a2,a0			return this packet
+		bsr	ReturnPkt
+		bra	RelockExit		and exit now
+
+; We've found a new record blocking us.  Set ourselves up on the blocking chain
+TryTimeout	tst.l	rl_Blocking(a2)		is other guy blocking another
+		beq.s	10$			nope, mark us as waiting
+		movea.l	rl_Blocking(a2),a2	yes, skip down the chain
+		bra.s	TryTimeout
+10$		move.l	a3,rl_Blocking(a2)	you're blocking me
+		move.l	a2,rl_BlockingMe(a3)	this one is blocking me
+
+; Someone is blocking us.  See if we have time left to wait around for a while
+MaybeTimeout	move.w	#TR_GETSYSTIME,IO_COMMAND(a3)
+		move.b	#IOF_QUICK,IO_FLAGS(a3)
+		movea.l	a3,a1			get the current time
+		jsr	_LVODoIO(a6)
+	printf <'Current time = %ld,%ld\n'>,IOTV_TIME+TV_SECS(a3),IOTV_TIME+TV_MICRO(a3)
+	printf <'Timeout time = %ld,%ld\n'>,rl_ESecs(a3),rl_EMicros(a3)
+		lea.l	IOTV_TIME+TV_SECS(a3),a0
+		lea.l	rl_ESecs(a3),a1
+		move.l	a6,-(sp)
+		movea.l	IO_DEVICE(a3),a6
+		jsr	_LVOCmpTime(a6)
+		movea.l	(sp)+,a6
+		tst.l	d0
+		bgt.s	CanWait
+
+; we've run out of time.  Unlink ourselves from the blocking chain (if there
+; is one) and return a lock timeout error
+CantWait	tst.l	rl_BlockingMe(a3)	anyone blocking us ?
+		beq.s	10$			no (this shouldn't happen)
+		movea.l	rl_BlockingMe(a3),a1	transfer blocking address
+		move.l	rl_Blocking(a3),a0
+		move.l	a0,rl_Blocking(a1)	maybe 0 here
+		beq.s	10$
+		move.l	a1,rl_BlockingMe(a0)	removed from middle of chain
+10$		move.w	#ERROR_LOCK_TIMEOUT,ErrorCode+2(a5)
+	printf <'ERROR_LOCK_TIMEOUT\n'>
+		bra	LockFail
+
+; we can do a timeout.  Calculate how much time we have left and wait that long
+CanWait		move.l	IOTV_TIME+TV_MICRO(a3),-(sp)
+		move.l	IOTV_TIME+TV_SECS(a3),-(sp)
+		move.l	rl_ESecs(a3),IOTV_TIME+TV_SECS(a3)
+		move.l	rl_EMicros(a3),IOTV_TIME+TV_MICRO(a3)
+		lea.l	IOTV_TIME+TV_SECS(a3),a0
+		movea.l	sp,a1
+		move.l	a6,-(sp)
+		movea.l	IO_DEVICE(a3),a6
+		jsr	_LVOSubTime(a6)
+		movea.l	(sp)+,a6
+		addq.l	#8,sp			scrap tmps on stack
+		move.w	#TR_ADDREQUEST,IO_COMMAND(a3)
+	printf <'Waiting this long = %ld,%ld\n'>,IOTV_TIME+TV_SECS(a3),IOTV_TIME+TV_MICRO(a3)
+		movea.l	a3,a1
+		jsr	_LVOSendIO(a6)		will come back later
+
+RelockExit	movem.l	(sp)+,d2-d4/a2-a3
+		rts
+
+;==============================================================================
+; success = FreeRecord(packet)
+;
+; Frees the given record lock.  Record locks that are waiting on a timeout
+; will never be sent to this routine (cause they aren`t locked yet).  If
+; rl_Blocking is non NULL the the record lock that is being pointed to will
+; have it`s pending TimerRequest returned via AbortIO.
+;
+; dp_Arg1 = rwdata structure
+; dp_Arg2 = offset
+; dp_arg3 = length
+;==============================================================================
+FreeRecord	movem.l	d2-d4/a2-a3,-(sp)
+		movea.l	a0,a2			save packet
+		movem.l	dp_Arg2(a2),d0-d1	get offset and length
+		add.l	d0,d1			convert d0/d1 to lo/hi bounds
+		subq.l	#1,d1
+		move.l	d0,d2			and save them
+		move.l	d1,d3
+		movea.l	dp_Arg1(a2),a3		fetch rwd structure
+		movea.l	rwd_Owner(a3),a0	get main header structure
+		lea.l	rwh_RecordLocks(a0),a0	point at first rlock pointer
+
+10$		move.l	(a0),d1			get next record
+		beq.s	FreeNotLocked		none, can`t be locked
+		movea.l	d1,a1
+		cmpa.l	rl_rwddata(a1),a3	does it belong to this filehand;e
+		bne.s	20$			nope, skip to next
+		cmp.l	rl_LowBound(a1),d2	is this the same rlock ?
+		bne.s	20$			nope
+		cmp.l	rl_HighBound(a1),d3
+		beq.s	FoundFree		found appropriate record
+20$		movea.l	a1,a0
+		bra.s	10$			link to next
+
+; we`ve found the appropriate record, unlink it from the locked records list
+FoundFree	move.l	(a1),(a0)		unlink from list
+		movea.l	rl_Blocking(a1),a0	are we blocking anyone
+		move.l	a0,d0
+		beq.s	NotBlocking		nope, nothing to do
+
+; someone else is waiting for this record to be freed.  Abort thier timer
+; request and clear thier rl_BlockingMe field to show that this record
+; is now available (without having to scan the list again).
+		clr.l	rl_BlockingMe(a0)	not blocking now
+		move.l	a1,-(sp)		save our record lock
+		movea.l	a0,a1			get thier TimerRequest
+		jsr	_LVOAbortIO(a6)		and abort it
+		movea.l	(sp)+,a1		restore our record
+
+; All that remains to be done is to free the memory used by the record lock
+; structure.  If it`s the last one, then we should free the header too (a3).
+NotBlocking	moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+
+; everything worked OK.  Return TRUE for no error
+FreeNoError	moveq.l	#TRUE,d0
+		bra.s	FreeDone
+FreeNotLocked	moveq.l	#FALSE,d0
+		move.w	#ERROR_RECORD_NOT_LOCKED,ErrorCode+2(a5)
+		bra.s	FreeDone
+FreeUnlockError	move.w	#ERROR_UNLOCK_ERROR,ErrorCode+2(a5)
+FreeDone	movea.l	a2,a0			return the packet
+		move.l	ErrorCode(a5),d1
+		bsr	ReturnPkt
+		movem.l	(sp)+,d2-d4/a2-a3
+		rts
+
+;==============================================================================
+; FreeAllRLocks(file,lock)
+;		 a0   a1
+;
+; Frees all record locks being held on the given file with the given filehandle
+;==============================================================================
+FreeAllRLocks	rts	***** race conditions, can't do it *****
+
+		END
+@
+
+
+1.7
+log
+@fixed problems in the time comparison for rlock timeouts.  Works good now!
+@
+text
+@d217 4
+a220 1
+		move.l	rl_Blocking(a3),rl_Blocking(a1)  maybe 0 here
+@
+
+
+1.6
+log
+@fixed crashing problem with record locking (was passing initial packet
+in the wrong place in the structure).  Copymem given random length too.
+@
+text
+@a41 1
+	printf <'LockRecord(0x%lx)\n'>,a0
+d77 6
+d103 1
+d108 1
+a125 1
+	printf <'RelockRecord(0x%lx)\n'>,a0
+d136 1
+d145 1
+a164 1
+	printf <'Relock returning pkt 0x%lx\n'>,a0
+d201 9
+a209 5
+		move.l	IOTV_TIME+TV_SECS(a3),d0
+		cmp.l	rl_ESecs(a3),d0
+		blt.s	CantWait		already past the time
+		move.l	IOTV_TIME+TV_MICRO(a3),d0
+		cmp.l	rl_EMicros(a3),d0
+d235 1
+a254 1
+	printf <'FreeRecord(0x%lx) -- '>,a0
+a305 1
+	printf <'returning (%ld,%ld)\n'>,d0,d1
+@
+
+
+1.5
+log
+@
+@
+text
+@d42 1
+d66 1
+d72 1
+d119 2
+a120 1
+		movea.l	dp_Link(a0),a2		get record lock structure
+d151 1
+a151 1
+		lea.l	rwd_Owner(a2),a2	get main header for file
+d156 2
+a157 1
+		movea.l	a3,a0
+d169 1
+d171 1
+d208 2
+a209 1
+		bra.s	LockFail
+d243 1
+d295 1
+@
+
+
+1.4
+log
+@
+@
+text
+@@
+
+
+1.3
+log
+@rewrote to use a better record locking scheme.  timeouts work properly now
+@
+text
+@d246 1
+a246 1
+		beq	FreeNotLocked		none, can`t be locked
+d296 1
+a296 1
+FreeAllRLocks	rts
+@
+
+
+1.2
+log
+@
+@
+text
+@a6 1
+		INCLUDE	"devices/timer.i"
+d11 1
+d17 3
+a19 2
+		XREF	GetPubMem,WaitCo,_LVOFreeMem,_LVOCopyMem,_LVOSendIO
+		XREF	_LVOAbortIO
+d21 1
+a21 1
+		XDEF	LockRecord,FreeRecord,FreeAllRLocks,RecordAccess
+d23 1
+d25 2
+a26 2
+; success = LockRecord(file,lock,pos,length,mode,timeout)
+;   d0			a0   a1  d0    d1    d2     d3
+d28 4
+a31 6
+; This is slightly different from the external interface because it requires
+; a lock on the file as well as the file handle.  The lock is used to find
+; the header key of the file being record locked.  If the given record is
+; lockable then returns TRUE and the record lock list is updated accordingly.
+; If there is a mode conflict or the record cannot be locked for any other
+; reason, then FALSE is returned and the record lock list is untouched.
+d33 7
+a39 2
+; All of these record routines are called as co-routines (for timeout code).
+; They will be called from the middle of the access co-routine in general.
+d41 3
+a43 12
+LockRecord	movem.l	d2-d6/a2-a4,-(sp)
+		movea.l	a0,a2			save filehandle address
+		adda.l	a1,a1			get header key number
+		adda.l	a1,a1
+		move.l	fl_Key(a1),d4
+		add.l	d0,d1			convert d0/d1 to lo/hi bounds
+		subq.l	#1,d1
+		move.l	d0,d5
+		move.l	d1,d6			save in d5/d6
+
+; allocate the memory for the record lock here, free it later if error occurs
+		moveq.l	#rl_SIZEOF,d0
+d45 1
+a45 1
+		movea.l	d0,a3			save pointer
+a47 2
+5$		move.w	#ERROR_NO_FREE_STORE,ErrorCode+2(a5)
+		bra	LockRecordDone		return false in d0
+d49 7
+a55 6
+10$		movem.l	d5/d6,rl_LowBound(a3)	save bounds
+		lsr.l	#1,d2			convert type from 0-3 to 0-1
+		bcc.s	15$			not an immediate lock
+		moveq.l	#0,d3			immediate, so ignore timeout
+15$		move.l	d2,rl_LockType(a3)	save type
+		move.l	a2,rl_FileHandle(a3)	and filehandle
+d57 17
+a73 5
+		move.l	d4,d0			see if header is available
+		bsr	FindRLHeader
+		movea.l	d0,a4
+		move.l	a4,d0			did we find it
+		bne.s	GotRLHeader		yep
+d75 26
+a100 10
+; no header is present, so we are going to have to create one
+		moveq.l	#rlh_SIZEOF,d0
+		bsr	GetPubMem
+		tst.l	d0			did we get memory
+		bne.s	20$			yep, no problems
+		movea.l	a3,a1
+		moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+		moveq.l	#0,d0
+		bra.s	5$			return no free store
+d102 17
+a118 4
+20$		movea.l	d0,a4			a4 = header
+		move.l	RLockQueue(a5),(a4)	link in to list
+		move.l	a4,RLockQueue(a5)
+		move.l	d4,rlh_HeaderKey(a4)	it belongs to this file
+d120 10
+a129 7
+; we have a record lock header.  See if there are any record collisions.  It
+; is valid to have overlapping records providing they are shared record locks.
+GotRLHeader	movea.l	a4,a0
+		movea.l	rlh_LockList(a0),a1	get head of list
+SearchOverlap	move.l	a1,d0			at end of list ?
+		beq	CanLockRecord		yep, no collisions
+		cmp.l	rl_LowBound(a1),d6	if low1 > hi0 not overlapping
+d131 1
+a131 1
+		cmp.l	rl_HighBound(a1),d5	if hi1 < lo0 not overlapping
+d133 6
+a138 9
+
+; we have an overlap, see if it`s allowed (only if both locks are shared)
+; overlap is also allowed if the same filehandle is being used for both locks
+		cmp.l	rl_FileHandle(a1),a2
+		beq.s	NoOverlap		same fh, overlap OK
+		moveq.l	#RL_EXCLUSIVE,d0
+		cmp.l	d2,d0
+		beq.s	LockOverlap		may need timeout rubbish
+		cmp.l	rl_LockType(a1),d0
+d140 4
+d145 17
+a161 3
+; no collision with this record lock, chain to the next and keep searching
+NoOverlap	movea.l	(a1),a1
+		bra.s	SearchOverlap
+a162 7
+; we have some overlap of exclusive record locks, if timeout has been enabled
+; then put a pointer to this record lock into the one that is blocking us. 
+; We fire off a timer request and mark this record as waiting.  If the offending
+; lock is freed before our timer request returns, the current record lock will
+; have had it`s BlockingMe field cleared and will be valid.
+LockOverlap	tst.l	d3			any timeout ?
+		bne.s	10$			yep, so do timeout code
+d164 2
+a165 1
+		movea.l	a3,a1
+d168 5
+a172 2
+		moveq.l	#0,d0			nope, can`t lock this record
+		bra	LockRecordDone
+d174 7
+a180 4
+10$		tst.l	rl_Blocking(a1)		is another lock already waiting
+		beq.s	20$			nope, mark us as waiting
+		movea.l	rl_Blocking(a1),a1	link to next
+		bra.s	10$
+d182 11
+a192 10
+20$		move.l	a3,rl_Blocking(a1)	point offending lock to us
+		move.l	a1,rl_BlockingMe(a3)	and point back at it
+; we are going to have to wait for this record to become available.  Allocate
+; a timer request and send it off with the appropriate timeout.  If the record
+; lock that is blocking us is freed before the timer returns, our timer request
+; will be aborted and the BlockingMe field will be cleared.
+		moveq.l	#IOTV_SIZE+dp_Arg2,d0	get a timer request + data area
+		bsr	GetPubMem		(uses dp_Type for CoBase)
+		move.l	d0,rl_Timer(a3)
+		bne.s	30$			we got the request
+d194 4
+a197 58
+; didn`t manage to get timer request, back out and exit with an error
+		movea.l	rl_BlockingMe(a3),a1
+		clr.l	rl_Blocking(a1)		not blocking now
+		movea.l	a3,a1
+		moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+		moveq.l	#0,d0
+		move.w	#ERROR_NO_FREE_STORE,ErrorCode+2(a5)
+		bra	LockRecordDone		return false in d0
+
+; We got the timer request OK.  initialise it to come back to the main rlock
+; port and send it off.  We then WaitCo and will be woken up when this timer
+; request is returned (either aborted by lock being freed or timed out).
+30$		movea.l	d0,a1			copy current TimerDev
+		movea.l	TimerDev(a5),a0		(it replies to main port)
+		moveq.l	#IOTV_SIZE,d0
+		jsr	_LVOCopyMem(a6)
+		movea.l	rl_Timer(a3),a1
+		lea.l	IOTV_SIZE(a1),a0
+		move.w	#ACTION_LOCK_TIMER,dp_Type+2(a0)
+		move.l	a0,LN_NAME(a1)		link packet to IORequest
+		move.w	#TR_ADDREQUEST,IO_COMMAND(a1)
+		move.l	CurrentCo(a5),dp_Arg1(a0)	so we can call us back
+		divu	#50,d3			get number of seconds to wait
+		move.w	d3,IOTV_TIME+TV_SECS+2(a1)
+		swap	d3
+		mulu.w	#20000,d3		convert ticks to micros
+		move.l	d3,IOTV_TIME+TV_MICRO(a1)
+		jsr	_LVOSendIO(a6)		send the request
+
+; we have created a lock, add it to the list and see if we should wait a bit
+; at this point a4 holds the record lock header and a3 holds this record lock
+CanLockRecord	move.l	rlh_LockList(a4),(a3)	add to this headers lock list
+		move.l	a3,rlh_LockList(a4)
+		tst.l	rl_Timer(a3)		are we waiting ?
+		beq	RecordLocked		nope, all done
+
+; we have sent off a timer request so now sleep this co-routine until the
+; timer request is returned.  When it does return, free the timer request
+; and see if we are still being blocked by another record lock.  If we are,
+; then free up this record lock node and return ERROR_LOCK_TIMEOUT.  If
+; rl_BlockingMe is null, then this record is now free to be Locked.
+		bsr	WaitCo			go to sleep
+		move.l	rl_Timer(a3),a1		finished with timerrequest
+		moveq.l	#IOTV_SIZE+dp_Arg2,d0
+		jsr	_LVOFreeMem(a6)
+		clr.l	rl_Timer(a3)
+		move.l	rl_BlockingMe(a3),d0	anyone still blocking
+		beq.s	RecordLocked		nope, all done
+
+; still being blocked by another record lock so wind up and back out
+		lea.l	rlh_LockList(a4),a0
+10$		cmpa.l	(a0),a3
+		beq.s	20$
+		movea.l	(a0),a0
+		bra.s	10$
+20$		move.l	(a3),(a0)		unlink from list
+
+d200 16
+d217 1
+a217 5
+		moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+		moveq.l	#0,d0
+		move.w	#ERROR_LOCK_TIMEOUT,ErrorCode+2(a5)
+		bra.s	LockRecordDone
+d219 1
+a219 3
+; This record has been successfully locked.  Just return TRUE
+RecordLocked	moveq.l	#-1,d0
+LockRecordDone	movem.l	(sp)+,d2-d6/a2-a4
+d223 1
+a223 2
+; Header = FindRLHeader( key )
+;   d0			  d0
+a224 17
+; Searches the list of record lock headers to see if there is one associated
+; with the given header key.  Returns 0 if there isn`t else returns the address
+;==============================================================================
+FindRLHeader	movea.l	RLockQueue(a5),a0
+		move.l	d0,d1
+10$		move.l	a0,d0
+		beq.s	RLHDone			this will return 0
+		cmp.l	rlh_HeaderKey(a0),d1
+		beq.s	RLHDone			this returns address of header
+		movea.l	(a0),a0
+		bra.s	10$
+RLHDone		rts
+
+;==============================================================================
+; success = FreeRecord(file,lock,pos,length )
+;   d0			a0   a1  d0    d1
+;
+d229 4
+d235 2
+a236 4
+		movea.l	a0,a2			save filehandle address
+		adda.l	a1,a1			get header key number
+		adda.l	a1,a1
+		move.l	fl_Key(a1),d4
+d241 3
+a243 5
+		move.l	d4,d0
+		bsr	FindRLHeader		find header for this file
+		movea.l	d0,a3
+		move.l	a3,d0			did we get it ?
+		beq.s	FreeUnlockError		nope, can`t find the header
+a244 1
+		lea.l	rlh_LockList(a3),a0	get first pointer
+d248 1
+a248 1
+		cmpa.l	rl_FileHandle(a1),a2	does it belong to this fh
+d268 1
+a268 1
+		movea.l	rl_Timer(a0),a1		get thier TimerRequest
+a275 11
+		tst.l	rlh_LockList(a3)	are there any more locks ?
+		bne.s	FreeNoError		yep, so we`re done
+		lea.l	RLockQueue(a5),a0	nope, so kill the header too
+10$		cmpa.l	(a0),a3			found the header ?
+		beq.s	20$			yep
+		movea.l	(a0),a0			nope, chain to next
+		bra.s	10$
+20$		move.l	(a3),(a0)		unlink from list
+		movea.l	a3,a1
+		moveq.l	#rlh_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)		and free it
+d284 4
+a287 1
+FreeDone	movem.l	(sp)+,d2-d4/a2-a3
+a289 1
+
+d296 1
+a296 133
+FreeAllRLocks	movem.l	a2-a4,-(sp)
+		movea.l	a0,a2			save filehandle
+		adda.l	a1,a1			get header key
+		adda.l	a1,a1
+		move.l	fl_Key(a1),d0
+		bsr	FindRLHeader		see if there are any rlocks
+		tst.l	d0			on this file
+		beq.s	AllRLocksFreed
+
+		movea.l	d0,a3			save list header
+		lea.l	rlh_LockList(a3),a0
+
+FreeLoop	movea.l	(a0),a1			get next record lock
+		move.l	a1,d0
+		beq.s	EndOfFree		none left
+		cmpa.l	rl_FileHandle(a1),a2	belong to this filehandle ?
+		bne.s	NextFree		nope, go to the next
+
+; found a record lock that needs freeing.  So free it and do the right stuff
+		move.l	a0,-(sp)		save current list pointer
+		move.l	(a1),(a0)		unlink from list
+		movea.l	rl_Blocking(a1),a0	are we blocking anyone
+		move.l	a0,d0
+		beq.s	10$			nope
+
+; someone else is waiting for this record to be freed.  Abort thier timer
+; request and clear thier rl_BlockingMe field to show that this record
+; is now available (without having to scan the list again).
+		clr.l	rl_BlockingMe(a0)	not blocking now
+		move.l	a1,-(sp)		save this rlock
+		movea.l	rl_Timer(a0),a1		get thier TimerRequest
+		jsr	_LVOAbortIO(a6)		and abort it
+		movea.l	(sp)+,a1
+10$		moveq.l	#rl_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)
+		movea.l	(sp)+,a0		restore current list pointer
+		bra.s	FreeLoop
+NextFree	movea.l	a1,a0
+		bra.s	FreeLoop
+
+; we`ve freed all record locks associated with the filehandle, see if there
+; are any more record locks on this file at all, if not, free the header.
+EndOfFree	tst.l	rlh_LockList(a3)	are there any more locks ?
+		bne.s	AllRLocksFreed		yep, so we`re done
+		lea.l	RLockQueue(a5),a0	nope, so kill the header too
+10$		cmpa.l	(a0),a3			found the header ?
+		beq.s	20$			yep
+		movea.l	(a0),a0			nope, chain to next
+		bra.s	10$
+20$		move.l	(a3),(a0)		unlink from list
+		movea.l	a3,a1
+		moveq.l	#rlh_SIZEOF,d0
+		jsr	_LVOFreeMem(a6)		and free it
+
+AllRLocksFreed	movem.l	(sp)+,a2-a4
+		rts
+
+
+;==============================================================================
+; NewLength = RecordAccess(filehandle,lock,position,length,R/W)
+;    d0			      a0	a1    d0      d1   d2
+;
+; Given the required read/write length, checks to see if there is any collision
+; with locked records not locked with the given filehandle.  If there is any
+; collision, the given length is truncated and ErrorCode is set up with
+; ERROR_RECORD_LOCKED (if any other error occurs later it will override this
+; error code; this is the correct behaviour).
+;
+; If access is read then errors will only occur when there are exclusive access
+; record locks in force.  d2 is TRUE for read and FALSE for write (we can use
+; the IsInput flag in access for this)
+;
+; if access mode is write then errors will occur for any record locks in force
+;==============================================================================
+RecordAccess	clr.w	ErrorCode+2(a5)		no error
+		tst.l	RLockQueue(a5)		quick test for record locks
+		bne.s	10$			got some, do longer test
+		move.l	d1,d0			nope, allow full length
+		rts
+
+10$		movem.l	d2-d4/a2,-(sp)
+		movea.l	a0,a2			save filehandle
+		move.l	d2,d4			save access mode
+		add.l	d0,d1			convert offset length...
+		subq.l	#1,d1			...to offset offset
+		move.l	d0,d2			and save them
+		move.l	d1,d3
+		adda.l	a1,a1			fetch file header key
+		adda.l	a1,a1
+		move.l	fl_Key(a1),d0
+		bsr	FindRLHeader
+		movea.l	d0,a0
+		move.l	a0,d0
+		beq.s	RAccessDone
+
+; We do have some record locks on this file.  Only check for truncation with
+; the record locks that are not associated with the given filehandle.  If a
+; record lock has a valid rl_Timer, then ignore it because that record has
+; not yet been locked.
+		movea.l	rlh_LockList(a0),a0
+20$		move.l	a0,d0
+		beq.s	RAccessDone		no more entries
+		tst.l	rl_Timer(a0)		waiting lock ?
+		bne.s	30$			yep, so find next
+		cmp.l	rl_FileHandle(a0),a2	our filehandle ?
+		beq.s	30$			yep, so ignore collisions
+		move.l	rl_LockType(a0),d0
+		beq.s	40$			always check exclusive rlocks
+		tst.l	d4			if this is write then....
+		beq.s	40$			...check for any rlock
+30$		movea.l	(a0),a0			dont check, do next rlock
+		bra.s	20$
+
+
+40$		cmp.l	rl_HighBound(a0),d2	if r/w low > rlock hi
+		bgt.s	30$			then no collision
+		cmp.l	rl_LowBound(a0),d3	if r/w hi < rlock low
+		blt.s	30$			then no collision
+		move.w	#ERROR_RECORD_LOCKED,ErrorCode+2(a5)	is a collision!
+		cmp.l	rl_LowBound(a0),d2	starting inside the lrecord ?
+		blt.s	50$			nope, just truncate
+		moveq.l	#0,d0			yep, so new length = 0
+		bra.s	RAReturnLen
+50$		move.l	rl_LowBound(a0),d3	adjust high bound of read/write
+		subq.l	#1,d3			to byte before locked record
+		movea.l	(a0),a0
+		bra.s	20$			and look for the next
+
+RAccessDone	move.l	d3,d0
+		sub.l	d2,d0			compute new length (maybe same)
+		addq.l	#1,d0
+RAReturnLen	movem.l	(sp)+,d2-d4/a2
+		rts
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@@

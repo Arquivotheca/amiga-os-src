@@ -1,0 +1,1428 @@
+head     39.13;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.13
+date     92.10.16.18.31.52;  author vertex;  state Exp;
+branches ;
+next     39.12;
+
+39.12
+date     92.05.30.12.05.20;  author vertex;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     92.05.29.15.42.14;  author vertex;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     92.04.24.10.24.40;  author vertex;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     92.04.16.11.30.32;  author vertex;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     92.04.15.11.32.36;  author vertex;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     92.04.13.13.59.53;  author vertex;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.04.07.13.53.09;  author vertex;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.03.26.15.16.05;  author peter;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.03.24.15.16.10;  author peter;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.02.20.11.51.16;  author peter;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.02.03.15.50.13;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.01.30.19.54.53;  author peter;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.11.27.13.19.00;  author peter;  state Exp;
+branches ;
+next     38.0;
+
+38.0
+date     91.07.11.12.34.39;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+39.13
+log
+@Changes for SAS/C 6.0
+@
+text
+@/*** string.c *************************************************************
+*
+*   string.c	- String gadget support routines
+*
+*   Copyright 1989, 1990, Commodore-Amiga, Inc.
+*
+*   $Id: string.c,v 39.12 92/05/30 12:05:20 vertex Exp Locker: vertex $
+*
+**************************************************************************/
+
+/*------------------------------------------------------------------------*/
+
+/*
+    Notes:
+
+    I think I should consider resetting the StringInfo->BufferPos
+    and StringInfo->DispPos during a Set...Attrs()
+*/
+
+/*------------------------------------------------------------------------*/
+
+#include "gtinclude.h"
+#include <intuition/sghooks.h>
+#include <intuition/gadgetclass.h>
+
+/* These guys haven't yet appeared in the public includes */
+/*
+#ifndef GFLG_TABCYCLE
+#define GFLG_TABCYCLE	0x0200
+#endif
+
+#ifndef STRINGA_ExitHelp
+#define STRINGA_ExitHelp	(STRINGA_Dummy + 0x0013)
+#endif
+
+#ifndef SGM_EXITHELP
+#define SGM_EXITHELP	(1L << 7)
+#endif
+*/
+
+/*------------------------------------------------------------------------*/
+
+/* Function Prototypes: */
+
+/* Internal: */
+
+struct ExtGadget *CreateStringGadgetA (struct ExtGadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist);
+struct ExtGadget *CreateIntegerGadgetA (struct ExtGadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist);
+void SetStringGadgetAttrsA (struct ExtGadget *gad, struct Window *win,
+    struct TagItem *taglist);
+void SetIntegerGadgetAttrsA (struct ExtGadget *gad, struct Window *win,
+    struct TagItem *taglist);
+
+
+/*****************************************************************************/
+
+
+/* CreateStringGadgetA() */
+
+/* NOTE VERY WELL:
+ * The need for GA_Immediate support is very compelling.  Apps need
+ * to be able to know when a string gadget went active for several
+ * reasons, including being able to re-activate the last one, and
+ * also knowing which gadgets have been touched for validation or
+ * updating reasons.  The direct setting of the GACT_IMMEDIATE flag
+ * in the gadget after creation is officially tolerated provided
+ * it is only done under V37, and provided the GA_Immediate tag was
+ * also provided.  However, it's inevitable that some will have
+ * poked this flag regardless.  This could have serious implications
+ * on underlay gadgets, since CreateGadgetA() would return the
+ * underlay gadget (which should not be made GACT_IMMEDIATE).
+ */
+struct ExtGadget *CreateStringGadgetA(struct ExtGadget *gad, struct NewGadget *ng,
+                                   struct TagItem *taglist)
+{
+struct Rectangle  rect;
+ULONG             place;
+UWORD             maxchars;
+struct Hook      *edithook;
+
+    /* Add one for the cursor, so that you'll really be able to type
+     * as many characters as you asked for
+     */
+    maxchars = getGTTagData(GTST_MaxChars, 64, taglist) + 1;
+    edithook = (struct Hook *)getGTTagData(GTST_EditHook, NULL, taglist);
+
+    /* Allocate space for the instance data and two or three buffers
+     */
+    if (gad = CreateGenericBase(gad, ng, STRING_IDATA_SIZE +
+	                        ( (edithook ? 3 : 2) * ALIGNSIZE(maxchars+1) ),
+                                taglist))
+    {
+        /* leave room for borders */
+        gad->TopEdge  += TOPTRIM + BEVELYSIZE;
+        gad->Height   -= (TBTRIM + 2 * BEVELYSIZE);
+        gad->LeftEdge += LEFTTRIM + BEVELXSIZE;
+        gad->Width    -= (LRTRIM + 2 * BEVELXSIZE);
+	gad->Flags    |= GADGIMAGE|GADGHCOMP;
+
+	/* By default, these gadgets are tab-cycling, but it can be
+	 * turned off.
+	 */
+	if ( getGATagData( GA_TabCycle, TRUE, taglist ) )
+	{
+	    gad->Flags |= GFLG_TABCYCLE;
+	}
+
+	/* Get justification of left/right/center */
+	gad->Activation = RELVERIFY | STRINGEXTEND |
+	    getSTRINGTagData(STRINGA_Justification, STRINGLEFT, taglist);
+	if ( getGATagData( GA_Immediate, FALSE, taglist ) )
+	{
+	    gad->Activation |= GACT_IMMEDIATE;
+	}
+	gad->GadgetType |= STRGADGET;
+	SGAD(gad)->sg_SetAttrs = SetStringGadgetAttrsA;
+	SGAD(gad)->sg_GetTable = String_GetTable;
+	SGAD(gad)->sg_Flags = SG_EXTRAFREE_DISPOSE | SG_EXTRAFREE_CLOSEFONT;
+
+	STID(gad)->stid_Sex.ActivePens[0] = STID(gad)->stid_Sex.Pens[0] =
+	    VI(ng->ng_VisualInfo)->vi_textPen;
+	STID(gad)->stid_Sex.ActivePens[1] = STID(gad)->stid_Sex.Pens[1] =
+	    VI(ng->ng_VisualInfo)->vi_backgroundPen;
+	/* set rect.MinY early, so we can tweak it later: */
+	rect.MinY = - (TOPTRIM + BEVELYSIZE);
+	if (ng->ng_TextAttr)
+	{
+	    STID(gad)->stid_Sex.Font = OpenFont(ng->ng_TextAttr);
+	    if (!STID(gad)->stid_Sex.Font)
+	    {
+		return(NULL);
+	    }
+	    /* The gadget imagery has a blank pixel row both above
+	     * and below the actual gadget area.  If the font is
+	     * a little too tall, we can make use first of the
+	     * bottom row, then of the top.  If that's not enough,
+	     * we have to fail:
+	     */
+	    /* Temporarily using place */
+	    place = max(0, STID(gad)->stid_Sex.Font->tf_YSize - gad->Height);
+	    gad->Height += place;
+	    place >>= 1;
+	    gad->TopEdge -= place;
+	    rect.MinY += place;
+	    if (place > 2)
+	    {
+		return(NULL);
+	    }
+	}
+	if (getSTRINGTagData(STRINGA_ReplaceMode, FALSE, taglist))
+	{
+	    STID(gad)->stid_Sex.InitialModes = SGM_REPLACE;
+	}
+
+	if (getSTRINGTagData(STRINGA_ExitHelp, FALSE, taglist))
+	{
+	    STID(gad)->stid_Sex.InitialModes |= SGM_EXITHELP;
+	}
+	STID(gad)->stid_StringInfo.Extension = &STID(gad)->stid_Sex;
+	STID(gad)->stid_StringInfo.Buffer = (UBYTE *) MEMORY_FOLLOWING(STID(gad));
+	STID(gad)->stid_StringInfo.UndoBuffer = (UBYTE *)
+	    MEMORY_N_FOLLOWING(STID(gad)->stid_StringInfo.Buffer,
+	    ALIGNSIZE(maxchars+1));
+	if (edithook)
+	{
+	    STID(gad)->stid_Sex.EditHook = edithook;
+	    STID(gad)->stid_Sex.WorkBuffer =
+		(UBYTE *) MEMORY_N_FOLLOWING(STID(gad)->stid_StringInfo.UndoBuffer,
+		ALIGNSIZE(maxchars+1));
+	}
+
+	/* This is the "extent" to the gadget visuals from the actual
+	 * gadget upper left:
+	 */
+	rect.MinX = - (LEFTTRIM + BEVELXSIZE);
+	/* rect.MinY is set already */
+	/* Don't forget, Max = size - 1. */
+	rect.MaxX = rect.MinX + ng->ng_Width - 1;
+	rect.MaxY = rect.MinY + ng->ng_Height - 1;
+	if (!(place = (ng->ng_Flags & PLACETEXT_MASK)))
+	    place = PLACETEXT_LEFT;
+	PlaceIntuiText(gad->GadgetText, &rect, place);
+	PlaceHelpBox(gad);
+
+	if ( !(gad->GadgetRender = (APTR) getBevelImage( rect.MinX, rect.MinY,
+	    ng->ng_Width, ng->ng_Height, FRAME_RIDGE ) ) )
+	{
+	    return( NULL );
+	}
+
+	STID(gad)->stid_StringInfo.MaxChars = maxchars;
+	gad->SpecialInfo = (APTR) &STID(gad)->stid_StringInfo;
+        SetStringGadgetAttrsA(gad,NULL,taglist);
+    }
+
+    return(gad);
+}
+
+
+/*****************************************************************************/
+
+
+VOID SetStringGadgetAttrsA(struct ExtGadget *gad, struct Window *win,
+                           struct TagItem *taglist)
+{
+struct TagItem *tag;
+WORD            pos;
+UWORD           selected;
+
+    if (tag = findGTTagItem(GTST_String,taglist))
+    {
+        selected = gad->Flags & GFLG_SELECTED;
+	pos = removeGadget(win,gad);
+
+	if (tag->ti_Data)
+	{
+	    stccpy(STID(gad)->stid_StringInfo.Buffer,(STRPTR)tag->ti_Data,STID(gad)->stid_StringInfo.MaxChars+1);
+	}
+	else
+	{
+	    *STID(gad)->stid_StringInfo.Buffer = '\0';
+	}
+
+        AddRefreshGadget(gad, win, pos);
+
+        if (selected && win)
+            ActivateGadget(gad,win,NULL);
+    }
+
+    TagAbleGadget(gad, win, taglist);
+}
+
+
+/*****************************************************************************/
+
+
+struct ExtGadget *CreateIntegerGadgetA(struct ExtGadget *gad, struct NewGadget *ng,
+                                       struct TagItem *taglist)
+{
+    if (gad = (struct ExtGadget *)CreateGadget(STRING_KIND,gad,ng,
+                           GTST_MaxChars, getGTTagData(GTIN_MaxChars, 10, taglist),
+                           GTST_String,   "0",
+                           TAG_MORE,      taglist))
+    {
+	SGAD(gad)->sg_SetAttrs = SetIntegerGadgetAttrsA;
+	SGAD(gad)->sg_GetTable = Integer_GetTable;
+	gad->Activation |= LONGINT;
+	SetIntegerGadgetAttrsA(gad,NULL,taglist);
+    }
+
+    return(gad);
+}
+
+
+/*****************************************************************************/
+
+
+VOID SetIntegerGadgetAttrsA(struct ExtGadget *gad, struct Window *win,
+                            struct TagItem *taglist)
+{
+struct TagItem *tag;
+WORD            pos;
+char            string[20];
+UWORD           selected;
+
+    if (tag = findGTTagItem(GTIN_Number, taglist))
+    {
+        selected = gad->Flags & GFLG_SELECTED;
+
+        pos = removeGadget(win,gad);
+
+	sprintf(string, "%ld", tag->ti_Data);
+
+	STID(gad)->stid_StringInfo.LongInt = tag->ti_Data;
+
+	stccpy(STID(gad)->stid_StringInfo.Buffer,string,STID(gad)->stid_StringInfo.MaxChars);
+
+        AddRefreshGadget(gad, win, pos);
+
+        if (selected && win)
+            ActivateGadget(gad,win,NULL);
+    }
+
+    TagAbleGadget(gad, win, taglist);
+}
+@
+
+
+39.12
+log
+@Now reactivates a string gadget if it was active when SetGadegtAttrs() was called
+  on it.
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.11 92/05/29 15:42:14 vertex Exp Locker: vertex $
+d240 1
+a240 1
+                                    struct TagItem *taglist)
+d242 1
+a242 1
+    if (gad = CreateGadget(STRING_KIND,gad,ng,
+@
+
+
+39.11
+log
+@Fixed SetGadgetAttrs() on NUMBER_KIND gadgets
+Removed requester support
+Code optimizations
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.10 92/04/24 10:24:40 vertex Exp Locker: vertex $
+d27 1
+d39 1
+a39 1
+
+d210 1
+d214 1
+d227 3
+d266 1
+d270 2
+d281 3
+@
+
+
+39.10
+log
+@Fixed help bounding box positioning
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.9 92/04/16 11:30:32 vertex Exp Locker: vertex $
+d46 1
+a46 1
+struct Gadget *CreateStringGadgetA (struct Gadget *gad, struct NewGadget *ng,
+d48 1
+a48 1
+struct Gadget *CreateIntegerGadgetA (struct Gadget *gad, struct NewGadget *ng,
+d50 4
+a53 4
+void SetStringGadgetAttrsA (struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist);
+void SetIntegerGadgetAttrsA (struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist);
+d74 1
+a74 1
+struct Gadget *CreateStringGadgetA(struct Gadget *gad, struct NewGadget *ng,
+d194 1
+a194 1
+        SetStringGadgetAttrsA(gad,NULL,NULL,taglist);
+d204 2
+a205 2
+VOID SetStringGadgetAttrsA(struct Gadget *gad, struct Window *win,
+                           struct Requester *req, struct TagItem *taglist)
+d212 1
+a212 1
+	pos = removeGList(win, gad, 1);
+d223 1
+a223 1
+        AddRefreshGadget(gad, win, req, pos);
+d226 1
+a226 1
+    TagAbleGadget(gad, win, req, taglist);
+d233 1
+a233 1
+struct Gadget *CreateIntegerGadgetA(struct Gadget *gad, struct NewGadget *ng,
+d244 1
+a244 1
+	SetIntegerGadgetAttrsA(gad,NULL,NULL,taglist);
+d254 2
+a255 2
+VOID SetIntegerGadgetAttrsA(struct Gadget *gad, struct Window *win,
+                            struct Requester *req, struct TagItem *taglist)
+d263 1
+a263 1
+        pos = removeGList(win, gad, 1);
+d271 1
+a271 1
+        AddRefreshGadget(gad, win, req, pos);
+d274 1
+a274 1
+    TagAbleGadget(gad, win, req, taglist);
+@
+
+
+39.9
+log
+@Fixed problem with incorrect positioning of the gadget labels
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.8 92/04/15 11:32:36 vertex Exp Locker: vertex $
+d184 1
+@
+
+
+39.8
+log
+@Fully implemented gadget help
+Optimized code for space
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.7 92/04/13 13:59:53 vertex Exp Locker: vertex $
+a76 1
+struct NewGadget  mod_ng;
+d179 2
+a180 2
+	rect.MaxX = mod_ng.ng_Width + (LEFTTRIM + BEVELXSIZE - 1);
+	rect.MaxY = mod_ng.ng_Height + (TOPTRIM + BEVELYSIZE - 1);
+@
+
+
+39.7
+log
+@Moved some stuff around to save bytes
+Added requester support
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.6 92/04/07 13:53:09 vertex Exp Locker: vertex $
+a49 1
+void ExtraFreeString (struct Gadget *gad);
+a88 6
+    mod_ng = *ng;
+    mod_ng.ng_TopEdge  += TOPTRIM + BEVELYSIZE;
+    mod_ng.ng_Height   -= (TBTRIM + 2 * BEVELYSIZE);
+    mod_ng.ng_LeftEdge += LEFTTRIM + BEVELXSIZE;
+    mod_ng.ng_Width    -= (LRTRIM + 2 * BEVELXSIZE);
+
+d91 1
+a91 1
+    if (gad = CreateGenericBase(gad, &mod_ng, STRING_IDATA_SIZE +
+d95 7
+a101 2
+	/* A string gadget: */
+	gad->Flags |= GADGIMAGE|GADGHCOMP;
+a117 1
+	SGAD(gad)->sg_ExtraFree = ExtraFreeString;
+d120 1
+a120 1
+	SGAD(gad)->sg_Flags = SG_EXTRAFREE_DISPOSE;
+a197 10
+}
+
+
+/*****************************************************************************/
+
+
+/* Function to do the extra freeing needed for string gadgets. */
+VOID ExtraFreeString(struct Gadget *gad)
+{
+    closeFont(STID(gad)->stid_Sex.Font);
+@
+
+
+39.6
+log
+@CreateXX() now calls SetXX() to save bytes
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.5 92/03/26 15:16:05 peter Exp Locker: vertex $
+d98 3
+a100 4
+    gad = CreateGenericBase(gad, &mod_ng, STRING_IDATA_SIZE +
+	( (edithook ? 3 : 2) * ALIGNSIZE(maxchars+1) ), taglist);
+
+    if (gad)
+d199 1
+d236 1
+a236 1
+        AddRefreshGadget(win, gad, pos);
+d284 1
+a284 1
+        AddRefreshGadget(win, gad, pos);
+@
+
+
+39.5
+log
+@Uses getBevelImage() instead of MakeBevelBox().
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.4 92/03/24 15:16:10 peter Exp Locker: peter $
+a38 1
+extern STRPTR Format20Dec;
+a55 1
+/*---------------------------------------------------------------------*/
+d57 3
+d75 2
+a76 2
+struct Gadget *CreateStringGadgetA( struct Gadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist )
+d78 5
+a82 6
+    struct NewGadget mod_ng;
+    struct Rectangle rect;
+    ULONG place;
+    UWORD maxchars;
+    STRPTR string;
+    struct Hook *edithook;
+d91 2
+a92 2
+    mod_ng.ng_TopEdge += TOPTRIM + BEVELYSIZE;
+    mod_ng.ng_Height -= (TBTRIM + 2 * BEVELYSIZE);
+d94 1
+a94 1
+    mod_ng.ng_Width -= (LRTRIM + 2 * BEVELXSIZE);
+a195 6
+	/* stccpy is Lattice's ANSI function that copies at most n
+	 * characters from the second string into the first, but
+	 * guarantees null-termination, unlike strncpy
+	 */
+	if (string = (STRPTR) getGTTagData(GTST_String, NULL, taglist))
+	    stccpy(STID(gad)->stid_StringInfo.Buffer, string, maxchars+1);
+d198 1
+a202 1
+/*---------------------------------------------------------------------*/
+d204 2
+a205 9
+/*/ ExtraFreeString()
+ *
+ * Function to do the extra freeing needed for string gadgets.
+ * This consists of a CloseFont().
+ *
+ * Created:   1-Dec-89, Peter Cherna
+ * Modified:  1-Dec-89, Peter Cherna
+ *
+ */
+d207 2
+a208 1
+void ExtraFreeString( struct Gadget *gad )
+d210 2
+a211 1
+    struct StringExtend *sex;
+a212 6
+    sex = STID(gad)->stid_StringInfo.Extension;
+    if (sex->Font)
+    {
+	CloseFont(sex->Font);
+    }
+}
+d214 1
+a215 1
+/*---------------------------------------------------------------------*/
+d217 2
+a218 2
+void SetStringGadgetAttrsA( struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist )
+d220 2
+a221 3
+    WORD pos;
+    struct StringInfo *sinfo;
+    struct TagItem *ti;
+d223 1
+a223 6
+    /* Because of a need of the listview, this function protects against
+     * win = NULL.  If win is NULL, it doesn't do any rendering or
+     * gadget addition/removal, but just adjusts its internals to
+     * account for the change.
+     */
+    if (ti = findGTTagItem(GTST_String, taglist))
+d225 1
+a225 6
+	if (win)
+	{
+	    pos = RemoveGList(win, gad, 1);
+	}
+
+	sinfo = (struct StringInfo *)gad->SpecialInfo;
+d227 1
+a227 1
+	if (ti->ti_Data)
+d229 1
+a229 1
+	    stccpy(sinfo->Buffer, (STRPTR)ti->ti_Data, sinfo->MaxChars+1);
+d233 1
+a233 1
+	    *sinfo->Buffer = '\0';
+d236 1
+a236 4
+	if (win)
+	{
+	    AddRefreshGList(win, gad, pos, 1, NULL);
+	}
+d238 1
+a238 1
+    /* Test for GA_Disabled, set GADGDISABLED and refresh accordingly */
+d243 1
+a243 1
+/*---------------------------------------------------------------------*/
+a244 1
+/* CreateIntegerGadgetA() */
+d246 2
+a247 2
+struct Gadget *CreateIntegerGadgetA( struct Gadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist )
+d249 4
+a252 9
+    char string[20];
+    LONG number = getGTTagData(GTIN_Number, 0, taglist);
+
+    sprintf(string, Format20Dec, number);
+    gad = CreateGadget(STRING_KIND, gad, ng,
+	GTST_String, string,
+	GTST_MaxChars, getGTTagData(GTIN_MaxChars, 10, taglist),
+	TAG_MORE, taglist);
+    if (gad)
+a253 1
+	/* Override a previous value: */
+a255 1
+	((struct StringInfo *) gad->SpecialInfo)->LongInt = number;
+d257 1
+d259 1
+a262 31
+/*---------------------------------------------------------------------*/
+
+void SetIntegerGadgetAttrsA( struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist )
+{
+    WORD pos;
+    struct StringInfo *sinfo;
+    char string[20];
+    struct TagItem *ti;
+
+#ifdef DEBUGGING
+    {
+	struct TagItem *ti = taglist;
+	while (ti)
+	{
+	    DP(("ti: $%lx, ti->Tag $%lx, ti->data $%lx\n", ti, ti->ti_Tag,
+		ti->ti_Data));
+	    switch (ti->ti_Tag)
+	    {
+		case TAG_DONE:
+		    ti = NULL;
+		    break;
+		case TAG_MORE:
+		    ti = (struct TagItem *)ti->ti_Data;
+		    break;
+		default:
+		    ti++;
+	    }
+	}
+    }
+#endif
+d264 1
+a264 4
+    if (ti = findGTTagItem(GTIN_Number, taglist))
+    {
+	pos = RemoveGList(win, gad, 1);
+	sprintf(string, Format20Dec, ti->ti_Data);
+a265 1
+	sinfo = (struct StringInfo *)gad->SpecialInfo;
+d267 6
+a272 1
+	sinfo->LongInt = ti->ti_Data;
+d274 9
+a282 1
+	stccpy(sinfo->Buffer, string, sinfo->MaxChars);
+d284 1
+a284 1
+	AddRefreshGList(win, gad, pos, 1, NULL);
+d286 1
+a286 1
+    /* Test for GA_Disabled, set GADGDISABLED and refresh accordingly */
+a288 3
+
+
+/*---------------------------------------------------------------------*/
+@
+
+
+39.4
+log
+@Supports GetAttrs of GTIN_Number, GTST_String, and GA_Disabled.  Moved
+more per-instance storage into the formal instance data.
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.3 92/02/20 11:51:16 peter Exp Locker: peter $
+d104 1
+a104 1
+	gad->Flags |= GADGHCOMP;
+d124 1
+a175 1
+
+d190 5
+a194 11
+	gad->GadgetRender = (APTR) MakeBevelBox( &STID(gad)->stid_BevelBox[0],
+	    rect.MinX, rect.MinY,
+	    ng->ng_Width, ng->ng_Height,
+	    BB_RAISED, VI(ng->ng_VisualInfo));
+	STID(gad)->stid_BevelBox[0].bb_ShadowBorder.NextBorder =
+	    MakeBevelBox( &STID(gad)->stid_BevelBox[1],
+	    (WORD) (rect.MinX + BEVELXSIZE),
+	    (WORD) (rect.MinY + BEVELYSIZE),
+	    (WORD) (ng->ng_Width - 2 * BEVELXSIZE),
+	    (WORD) (ng->ng_Height - 2 * BEVELYSIZE),
+	    BB_RECESSED, VI(ng->ng_VisualInfo));
+@
+
+
+39.3
+log
+@Now use SGAD() instead of SG_FROM_GAD().
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.2 92/02/03 15:50:13 peter Exp Locker: peter $
+a76 3
+    struct StringInfo *sinfo;
+    struct StringExtend *sex;
+
+a77 1
+    struct BevelBox *bbox;
+d96 1
+a96 2
+    /* Allocate space for a StringInfo, a StringExtend,
+     * a double BevelBox and the two buffers.
+d98 2
+a99 3
+    gad = CreateGenericBase(gad, &mod_ng, ( sizeof(struct StringInfo) +
+	sizeof(struct StringExtend) + 2*sizeof(struct BevelBox) +
+        (edithook ? 3 : 2) * ALIGNSIZE(maxchars+1) ), taglist);
+d123 1
+d125 4
+a128 3
+	sex = (struct StringExtend *) MEMORY_FOLLOWING(SGAD(gad));
+	sex->ActivePens[0] = sex->Pens[0] = VI(ng->ng_VisualInfo)->vi_textPen;
+	sex->ActivePens[1] = sex->Pens[1] = VI(ng->ng_VisualInfo)->vi_backgroundPen;
+d133 2
+a134 2
+	    sex->Font = OpenFont(ng->ng_TextAttr);
+	    if (!sex->Font)
+d145 1
+a145 1
+	    place = max(0, sex->Font->tf_YSize - gad->Height);
+d157 1
+a157 1
+	    sex->InitialModes = SGM_REPLACE;
+d162 1
+a162 1
+	    sex->InitialModes |= SGM_EXITHELP;
+d164 4
+a167 4
+	sinfo = (struct StringInfo *) MEMORY_FOLLOWING(sex);
+	sinfo->Extension = sex;
+	sinfo->Buffer = (UBYTE *) MEMORY_FOLLOWING(sinfo);
+	sinfo->UndoBuffer = (UBYTE *) MEMORY_N_FOLLOWING(sinfo->Buffer,
+a168 1
+	bbox = MEMORY_N_FOLLOWING(sinfo->UndoBuffer, ALIGNSIZE(maxchars+1));
+d171 5
+a175 3
+	    sex->EditHook = edithook;
+	    sex->WorkBuffer = (UBYTE *) bbox;
+	    bbox = MEMORY_N_FOLLOWING(sex->WorkBuffer, ALIGNSIZE(maxchars+1));
+d190 1
+a190 1
+	bbox = (struct BevelBox *) MakeBevelBox(bbox,
+d194 2
+a195 2
+	bbox->bb_ShadowBorder.NextBorder = MakeBevelBox((struct BevelBox *)
+	    MEMORY_FOLLOWING(bbox),
+a200 1
+	gad->GadgetRender = (APTR) bbox;
+d207 3
+a209 3
+	    stccpy(sinfo->Buffer, string, maxchars+1);
+	sinfo->MaxChars = maxchars;
+	gad->SpecialInfo = (APTR) sinfo;
+d230 1
+a230 1
+    sex = ((struct StringInfo *)gad->SpecialInfo)->Extension;
+a239 40
+/*i**** gadtools.lib/SetStringGadgetAttrs ************************************
+*
+*   NAME
+*	SetStringGadgetAttrs -- Change the attributes of string gadget. (V36)
+*
+*   SYNOPSIS
+*	SetStringGadgetAttrs(win, gad, newstring)
+*
+*	void SetStringGadgetAttrs(struct Window *, struct Gadget *,
+*	    STRPTR);
+*
+*   FUNCTION
+*	SetStringGadgetAttrs() allows the current string to be changed
+*	programmatically.
+*
+*   INPUTS
+*	win - Pointer to the Window containing the gadget.
+*	gad - Pointer to the string gadget returned by CreateStringGadget().
+*	newstring - Desired new contents of the string gadget, or NULL
+*	    to leave the gadget empty.
+*
+*   RESULT
+*	None.
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*	CreateStringGadgetA(), GT_SetGadgetAttrsA()
+*
+******************************************************************************
+*
+* Created:  27-Sep-89, Peter Cherna
+* Modified: 23-Jan-90, Peter Cherna
+*
+*/
+
+d299 1
+a306 39
+
+/*i**** gadtools.lib/SetIntegerGadgetAttrs ***********************************
+*
+*   NAME
+*	SetIntegerGadgetAttrs -- Change attributes of an integer gadget. (V36)
+*
+*   SYNOPSIS
+*	gad = SetIntegerGadgetAttrs(win, gad, newnumber)
+*
+*	struct Gadget *SetIntegerGadgetAttrs(struct Window *, struct Gadget *,
+*	    LONG);
+*
+*   FUNCTION
+*	SetIntegerGadgetAttrs() allows the number in the integer gadget to
+*	be changed programmatically.  The gadget will be refreshed for you.
+*
+*   INPUTS
+*	win - Pointer to the Window containing the gadget.
+*	gad - Pointer to the gadget returned by CreateIntegerGadget()
+*	newnumber - New number to be placed in the integer gadget.
+*
+*   RESULT
+*	None.
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*	CreateIntegerGadget()
+*
+******************************************************************************
+*
+* Created:  25-Sep-89, Peter Cherna
+* Modified:  8-Jan-90, Peter Cherna
+*
+*/
+@
+
+
+39.2
+log
+@String and integer gadgets now support GA_Immediate.
+Deleted obsolete internal autodocs.
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 39.1 92/01/30 19:54:53 peter Exp Locker: peter $
+d127 2
+a128 2
+	SG_FROM_GAD(gad)->sg_ExtraFree = ExtraFreeString;
+	SG_FROM_GAD(gad)->sg_SetAttrs = SetStringGadgetAttrsA;
+d130 1
+a130 1
+	sex = (struct StringExtend *) MEMORY_FOLLOWING(gad);
+d342 1
+a342 1
+	SG_FROM_GAD(gad)->sg_SetAttrs = SetIntegerGadgetAttrsA;
+@
+
+
+39.1
+log
+@Removed RCS log.  Re-did braces, comments, and function headers.
+Bumped to V39.
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 38.1 91/11/27 13:19:00 peter Exp Locker: peter $
+d59 1
+a59 60
+/*i**** gadtools.library/CreateStringGadgetA *********************************
+*
+*   NAME
+*	CreateStringGadgetA -- Create a string gadget. (V36)
+*
+*   SYNOPSIS
+*	gad = CreateStringGadgetA(previous, ng, taglist)
+*
+*	struct Gadget *CreateStringGadgetA(struct Gadget *, struct NewGadget *,
+*	    struct TagItem *);
+*
+*   FUNCTION
+*	Allocates and fills out a string gadget based on the supplied
+*	NewGadget structure, initial string, and buffer length.  All the
+*	buffers are allocated for you.
+*
+*   INPUTS
+*	previous - Pointer to the previous gadget.
+*	ng - Pointer to an initialized NewGadget structure describing
+*	    the desired gadget.
+*	taglist - Pointer to a TagItem list.
+*
+*   TAGS
+*	GTST_String (STRPTR) - The initial contents of the string gadget,
+*	     or NULL (default) if string is to start empty.
+*	GTST_MaxChars (UWORD) - The maximum number of characters that the
+*	    string gadget is to hold.
+*	STRINGA_Justification - Choose STRINGLEFT, STRINGRIGHT, or
+*	    STRINGCENTER to control justification (defaults to left).
+*	STRINGA_ReplaceMode (BOOL) - Set to TRUE for a string gadget
+*	    that is in replace (not insert) mode.
+*
+*   RESULT
+*	gad - Pointer to the resulting string gadget, or NULL if failure
+*	    or if previous was NULL.
+*
+*   EXAMPLE
+*
+*   NOTES
+*	maxchars is one less than the StringInfo->MaxChars, since this
+*	function will account for the extra space needed for the cursor.
+*	CreateStringGadgetA() arranges to use the font in ng_TextAttr
+*	for the contents of the gadget as well.  This font must be
+*	openable at the time CreateStringGadgetA() is called.
+*
+*	These attributes may be changed by calling GT_SetGadgetAttrsA():
+*	GTST_String (STRPTR) - New string to put into the gadget, or NULL
+*	    to clear the gadget.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	CreateGadgetA(), GT_SetGadgetAttrsA()
+*
+******************************************************************************
+*
+* Created:  10-Jul-89, Peter Cherna
+* Modified:  6-Jun-90, Peter Cherna
+*
+*/
+d61 13
+d114 1
+a114 1
+	if ( getTagData(GA_TabCycle, TRUE, taglist) )
+d122 4
+d326 1
+a326 59
+/*i**** gadtools.library/CreateIntegerGadgetA ********************************
+*
+*   NAME
+*	CreateIntegerGadgetA -- Create an integer gadget. (V36)
+*
+*   SYNOPSIS
+*	gad = CreateIntegerGadgetA(previous, ng, taglist)
+*
+*	struct Gadget *CreateIntegerGadgetA(struct Gadget *, struct NewGadget *,
+*	    struct TagItem *);
+*
+*   FUNCTION
+*	Allocates and fills out an integer gadget based on the supplied
+*	NewGadget structure, initial number, and buffer length.  All the
+*	buffers are allocated for you.
+*
+*   INPUTS
+*	previous - Pointer to the previous gadget.
+*	ng - Pointer to an initialized NewGadget structure describing
+*	    the desired gadget.
+*	taglist - Pointer to a TagItem list.
+*
+*   TAGS
+*	GTIN_Number (LONG) - The initial contents of the integer gadget
+*	    (default zero).
+*	GTIN_MaxChars (UWORD) - The maximum number of digits that the
+*	    integer gadget is to hold (defaults to 10).
+*	STRINGA_Justification - Choose STRINGLEFT, STRINGRIGHT, or
+*	    STRINGCENTER to control justification (defaults to left).
+*	STRINGA_ReplaceMode (BOOL) - Set to TRUE for an integer gadget
+*	    that is in replace (not insert) mode.
+*
+*   RESULT
+*	gad - Pointer to the resulting integer gadget, or NULL if failure
+*	    or if previous was NULL.
+*
+*   EXAMPLE
+*
+*   NOTES
+*	maxchars is one less than the StringInfo->MaxChars, since this
+*	function will account for the extra space needed for the cursor.
+*	CreateIntegerGadgetA() arranges to use the font in ng_TextAttr
+*	for the contents of the gadget as well.  This font must be
+*	openable at the time CreateIntegerGadgetA() is called.
+*
+*	These attributes may be changed by calling GT_SetGadgetAttrsA():
+*	GTIN_Number (LONG) - New number to put into the gadget.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	CreateGadgetA(), GT_SetGadgetAttrsA()
+*
+******************************************************************************
+*
+* Created:  11-Jul-89, Peter Cherna (from CreateStringGadget())
+* Modified:  4-Dec-89, Peter Cherna
+*
+*/
+@
+
+
+38.1
+log
+@AbleGadget() no longer has a 'count' parameter.
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 38.0 91/07/11 12:34:39 peter Exp Locker: peter $
+a8 67
+*   $Log:	string.c,v $
+ * Revision 38.0  91/07/11  12:34:39  peter
+ *  Initial V38 check-in (matches V37 release).
+ * 
+*   Revision 36.17  91/04/08  13:25:54  peter
+*   Where appropriate uses getGTTagData(), getSTRINGTagData(),
+*   findGTTagItem(), and findGATagItem() macros/stubs to save space.
+*   
+*   Revision 36.16  91/03/14  16:06:02  peter
+*   Now uses stack-based tags instead of array-based ones when it calls
+*   tag-based functions.
+*   
+*   Revision 36.15  91/01/07  21:01:27  peter
+*   {GA_TabCycle, FALSE} can now be used to disable the tab-cycling feature.
+*   
+*   Revision 36.14  90/12/01  20:06:22  peter
+*   String and Integer-kind gadgets now set the GFLG_TABCYCLE flag.
+*   String and Integer-kind gadgets now accept the STRINGA_ExitHelp tag.
+*   
+*   Revision 36.13  90/11/07  19:43:32  peter
+*   Now uses AddRefreshGList().
+*   
+*   Revision 36.12  90/10/12  19:41:07  peter
+*   Now uses our sprintf() instead of stcl_d to save space.
+*   Calls internal findTagItem() and getTagData() to save space.
+*   Calls internal addGlist() and refreshGList() to save space.
+*   
+*   Revision 36.11  90/09/10  13:52:40  peter
+*   Fixing string gadgets that weren't tall enough broke gadgets that were taller
+*   than required.  That is now fixed.
+*   
+*   Revision 36.10  90/08/17  11:27:07  peter
+*   Made STRING_KIND gadgets more tolerant if they're a little too small
+*   compared to the font.
+*   
+*   Revision 36.9  90/07/19  11:50:52  peter
+*   Fixed a bug in which you couldn't provide a negative number to an
+*   integer gadget, though the user could type one and you could retrieve it.
+*   (B9285)
+*   
+*   Revision 36.8  90/06/06  14:59:58  peter
+*   Fixed allocation of custom string work-buffer for ASL (it used to coincide
+*   with the gadget's Border structure!).
+*   
+*   Revision 36.7  90/05/30  13:52:15  peter
+*   Put in support for private GTST_EditHook for use by ASL.
+*   
+*   Revision 36.6  90/05/18  18:33:08  peter
+*   Put space immediately before '(' in prototypes to avoid confusing ctags.
+*   
+*   Revision 36.5  90/05/08  15:43:51  peter
+*   String and integer gadgets now support STRINGA_Justification (with tag
+*   data values STRINGCENTER, STRINGLEFT, STRINGRIGHT), and STRINGA_ReplaceMode.
+*   
+*   Revision 36.4  90/04/02  16:12:39  peter
+*   GadgetType is now OR'd in.
+*   
+*   Revision 36.3  90/03/31  06:43:14  peter
+*   Now use CreateGadgetA() instead of specific Create[xxx]GadgetA().
+*   
+*   Revision 36.2  90/03/31  00:49:27  peter
+*   Restored original string gadget design (raised rim).
+*   
+*   Revision 36.1  90/03/16  14:03:33  peter
+*   RCS Clean up.
+*   
+*
+d43 1
+a43 1
+/*  Function Prototypes: */
+d45 1
+a45 1
+/*  Internal: */
+d120 3
+a122 5
+struct Gadget *CreateStringGadgetA(struct Gadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist)
+
+
+    {
+d134 3
+a136 2
+    /*  Add one for the cursor, so that you'll really be able to type
+	as many characters as you asked for */
+d146 3
+a148 2
+    /*  Allocate space for a StringInfo, a StringExtend,
+	a double BevelBox and the two buffers. */
+d154 2
+a155 2
+	{
+	/*  A string gadget: */
+d161 1
+a161 1
+	    {
+d163 1
+a163 1
+	    }
+d165 1
+a165 1
+	/*  Get justification of left/right/center */
+d178 1
+a178 1
+	    {
+d181 1
+a181 1
+		{
+d183 8
+a190 7
+		}
+	    /*  The gadget imagery has a blank pixel row both above
+		and below the actual gadget area.  If the font is
+		a little too tall, we can make use first of the
+		bottom row, then of the top.  If that's not enough,
+		we have to fail: */
+	    /*  Temporarily using place */
+d197 1
+a197 1
+		{
+a198 1
+		}
+d200 1
+d202 1
+a202 1
+	    {
+d204 1
+a204 1
+	    }
+d207 1
+a207 1
+	    {
+d209 1
+a209 1
+	    }
+d217 1
+a217 1
+	    {
+d221 1
+a221 1
+	    }
+d223 3
+a225 2
+	/*  This is the "extent" to the gadget visuals from the actual
+	    gadget upper left: */
+d228 1
+a228 1
+	/*  Don't forget, Max = size - 1. */
+d248 4
+a251 3
+	/*  stccpy is Lattice's ANSI function that copies at most n
+	    characters from the second string into the first, but
+	    guarantees null-termination, unlike strncpy */
+d256 1
+a256 1
+	}
+d258 1
+a258 1
+    }
+d272 2
+a273 5
+void ExtraFreeString(gad)
+
+    struct Gadget *gad;
+
+    {
+d278 1
+a278 1
+	{
+a279 1
+	}
+d281 1
+d326 3
+a328 4
+void SetStringGadgetAttrsA(struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist)
+
+    {
+d333 5
+a337 4
+    /*  Because of a need of the listview, this function protects against
+	win = NULL.  If win is NULL, it doesn't do any rendering or
+	gadget addition/removal, but just adjusts its internals to
+	account for the change. */
+d339 2
+a341 2
+	if (win)
+	    {
+d343 1
+a343 1
+	    }
+d348 1
+a348 1
+	    {
+d350 1
+a350 1
+	    }
+d352 1
+a352 1
+	    {
+d354 1
+a354 1
+	    }
+d357 1
+a357 1
+	    {
+a358 1
+	    }
+d360 2
+a361 1
+    /*  Test for GA_Disabled, set GADGDISABLED and refresh accordingly */
+d363 1
+a363 1
+    }
+d428 3
+a430 4
+struct Gadget *CreateIntegerGadgetA(struct Gadget *gad, struct NewGadget *ng,
+    struct TagItem *taglist)
+
+    {
+d440 2
+a441 2
+	{
+	/*  Override a previous value: */
+d445 1
+a445 1
+	}
+d447 1
+a447 1
+    }
+d490 3
+a492 4
+void SetIntegerGadgetAttrsA(struct Gadget *gad, struct Window *win,
+    struct Requester *req, struct TagItem *taglist)
+
+    {
+d499 1
+a499 1
+	{
+d502 1
+a502 1
+	    {
+d506 1
+a506 1
+		{
+a514 1
+		}
+d517 1
+d521 1
+a521 1
+	{
+d532 2
+a533 2
+	}
+    /*  Test for GA_Disabled, set GADGDISABLED and refresh accordingly */
+d535 1
+a535 1
+    }
+@
+
+
+38.0
+log
+@ Initial V38 check-in (matches V37 release).
+@
+text
+@d7 1
+a7 1
+*   $Id: string.c,v 36.17 91/04/08 13:25:54 peter Exp $
+d10 3
+d285 1
+a285 2
+	    sex->WorkBuffer = (UBYTE *) MEMORY_N_FOLLOWING(sinfo->UndoBuffer,
+		ALIGNSIZE(maxchars+1));
+d428 2
+a429 5
+    if (ti = findGATagItem(GA_DISABLED, taglist))
+	{
+	/*  Do a regular enable/disable: */
+	AbleGadget(gad, win, req, 1, (BOOL)ti->ti_Data);
+	}
+d602 2
+a603 6
+    if (ti = findGATagItem(GA_DISABLED, taglist))
+	{
+	DP(("SIGA:  Found (GA_DISABLED, $%lx\n", (LONG)ti->ti_Data));
+	/*  Do a regular enable/disable: */
+	AbleGadget(gad, win, req, 1, (BOOL)ti->ti_Data);
+	}
+@

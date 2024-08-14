@@ -1,0 +1,424 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+1.1
+date     93.02.01.12.32.17;  author darren;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@**
+**	$Id: asm2c.asm,v 39.0 92/07/08 14:32:38 darren Exp $
+**
+**      diskfont.library assembler to C function interfaces
+**
+**      (C) Copyright 1989 Commodore-Amiga, Inc.
+**          All Rights Reserved
+**
+	SECTION	diskfont
+
+	INCLUDE	"exec/types.i"
+	INCLUDE	"exec/lists.i"
+	INCLUDE	"exec/ables.i"
+
+	INCLUDE	"graphics/text.i"
+	INCLUDE	"graphics/gfxbase.i"
+
+	INCLUDE	"diskfont.i"
+	INCLUDE	"dfdata.i"
+	INCLUDE	"macros.i"
+
+	INCLUDE "ddebug.i"
+
+	XLVO	AddFont
+
+	XDEF	_AddDiskFont
+	XDEF	_EqualAspect
+	XDEF	_DFExpungeDiskFont
+
+	XDEF	_EOpenEngine
+	XDEF	_ECloseEngine
+	XDEF	_ESetInfo
+	XDEF	_EObtainInfo
+	XDEF	_EReleaseInfo
+
+	TASK_ABLES
+
+** Private bit in gfx/text/txtdata.i
+
+	IFND	TE0B_DUPLICATE
+		BITDEF	TE0,DUPLICATE,7	; Duplicate font - differs by DPI
+	ENDC
+
+	IFND	TE0B_PRIVATE
+		BITDEF	TE0,PRIVATE,6	; Private font
+	ENDC
+
+	IFND	TE0B_VECTORED
+		BITDEF	TE0,VECTORED,4	; vectored font
+	ENDC
+
+_AddDiskFont:
+		;-- AddFont(&dfh->dfh_TF);
+		move.l	a6,-(a7)
+		move.l	8(a7),a6
+		move.l	12(a7),a1
+
+	PRINTF	DBG_ENTRY,<'AddDiskFont($%lx,$%lx)'>,A6,A1
+
+	;-- loop through font list, looking for dups of name, Y size, and
+	;-- Style/Flag combos ... mark dups as dups so they cannot
+	;-- be found by OpenFont() if called without DPI tag info
+
+			movem.l	a1-a6,-(sp)
+			
+			lea	dfh_TF(a1),a3	; TextFont
+			move.l	dfh_TF+tf_Extension(a1),a4
+
+			move.l	dfl_GfxBase(a6),a5
+			lea	gb_TextFonts(a5),a0
+			move.l	dfl_SysBase(a6),a6
+
+notadup:
+			move.l	LN_NAME(a3),a1
+
+			JSRLIB	FindName
+			tst.l	d0
+			BEQ_S	nofontdups
+
+			move.l	d0,a0
+
+	PRINTF	DBG_FLOW,<'  AddDiskFont ... Name Match ... '>
+
+	;-- check Y size
+
+
+	PUSHWORD	tf_YSize(a3)
+	PRINTF	DBG_FLOW,<'    NewFont YSize = %ld'>
+	PUSHWORD	tf_YSize(a0)
+	PRINTF	DBG_FLOW,<'    Compare YSize = %ld'>
+	POPLONG		2
+
+
+			move.w	tf_YSize(a3),d0
+			cmp.w	tf_YSize(a0),d0
+			BNE_S	notadup
+
+
+	;-- check relevant Style bits
+
+	PUSHBYTE	tf_Style(a3)
+	PRINTF	DBG_FLOW,<'    NewFont Style = $%lx'>
+	PUSHBYTE	tf_Style(a0)
+	PRINTF	DBG_FLOW,<'    Compare Style = $%lx'>
+	POPLONG		2
+
+	;-- Compare for diffs in Italic, Bold, Underlined,
+	;
+	;-- Ignore Intrinsic of COLORFONT, EXTENDED
+	;
+	;-- Ignore bits only suitable for query: FSF_TAGGED
+	;
+
+			move.b	tf_Style(a3),d0
+			move.b	tf_Style(a0),d1
+
+			and.b	#FSF_UNDERLINED!FSF_BOLD!FSF_ITALIC,d0
+			and.b	#FSF_UNDERLINED!FSF_BOLD!FSF_ITALIC,d1
+
+			cmp.b	d0,d1
+			BNE_S	notadup
+
+	;-- check relevant Flag bits?
+	;
+	;-- ROMFONT and DISKFONT are source info; they will differ
+	;-- depending on if source is/was ROM, DISK, SCALED, or OUTLINE.
+	;-- 
+	;-- REVPATH, TALLDOT, WIDEDOT, and PROPORTIONAL are set for
+	;-- an entire font family, so should not differ.
+	;--
+	;-- DESIGNED is meaningful for QUERY, and type
+	;
+	;-- REMOVED is only meaningful for fonts not on the font list.
+
+
+	PUSHBYTE	tf_Flags(a3)
+	PRINTF	DBG_FLOW,<'    NewFont Flags = $%lx'>
+	PUSHBYTE	tf_Flags(a0)
+	PRINTF	DBG_FLOW,<'    Compare Flags = $%lx'>
+	POPLONG		2
+
+
+	;-- Note that we have a possible DUP, but need to check what
+	;-- are comparing against first to see if it is already marked
+	;-- as a DUPLICATE.  If so, this one we are going to add may
+	;-- not be.
+			suba.l	a1,a1		;No tags
+			move.l	a0,a2		;cache
+			exg	a5,a6		;Use GfxBase, Cache ExecBase
+
+			JSRLIB	ExtendFont
+
+			move.l	a2,a0		;restore
+			exg	a5,a6		;Use ExecBase, Cache GfxBase
+			
+			tst.l	d0
+			BEQ_S	notadup		;what?? Low on memory
+
+			move.l	tf_Extension(a0),a1
+			btst	#TE0B_DUPLICATE,tfe_Flags0(a1)
+			BNE_S	notadup
+
+	;-- Well, we found a DUPLICATE on the list that has not been
+	;-- marked as a DUPLICATE, so this one will be added as a DUPLICATE.
+
+
+	PRINTF	DBG_FLOW,<'      NewFont marked as DUPLICATE'>
+
+			bset	#TE0B_DUPLICATE,tfe_Flags0(a4)
+nofontdups:
+			movem.l	(sp)+,a1-a6
+
+		
+		lea	dfh_TF(a1),a1
+
+		tst.w	dfl_PrivateOpen(a6)
+		beq.s	notprivate1
+
+		move.b	#-120,LN_PRI(a1)	;low priority
+notprivate1:
+		move.w	tf_Accessors(a1),-(sp)	;cache
+
+		LINKGFX	AddFont
+
+		move.w	(sp)+,d0		;restore
+
+		;-- dfh->dfh_TF.tf_Extension->tfe_Flags0 |= TE0F_NOREMFONT;
+		move.l	12(a7),a1
+		move.l	dfh_TF+tf_Extension(a1),a0
+		bset	#TE0B_NOREMFONT,tfe_Flags0(a0)
+
+		tst.w	dfl_PrivateOpen(a6)
+		beq.s	notprivate2
+
+		bset	#TE0B_PRIVATE,tfe_Flags0(a0)
+
+notprivate2:
+
+		;-- dfh->dfh_TF.tf_Accessors = 1;
+		addq.w	#1,d0
+		move.w	d0,dfh_TF+tf_Accessors(a1)
+
+	PUSHWORD	D0
+	PRINTF	DBG_FLOW,<'  AddDiskFont accessors = %ld'>
+	POPLONG		1
+
+		;-- AddTail(&DiskfontBase->dfl_DiskFonts, dfh);
+		lea	dfl_DiskFonts(a6),a0
+		ADDTAIL
+		;-- (DiskfontBase->dfl_NumLFonts)++;
+		addq.w	#1,dfl_NumLFonts(a6)
+		move.l	(a7)+,a6
+		rts
+
+_EqualAspect:
+		movem.w	4(a7),d0-d1
+		mulu	10(a7),d0
+		mulu	8(a7),d1
+		cmp.l	d0,d1
+		seq	d0
+		ext.w	d0
+		ext.l	d0
+		rts
+
+
+_EOpenEngine:
+		move.l	a6,-(a7)
+		move.l	8(a7),a6
+		jsr	-30(a6)		;_LVOOpenEngine(a6)
+		move.l	(a7)+,a6
+		rts
+
+_ECloseEngine:
+		move.l	a6,-(a7)
+		move.l	8(a7),a0
+		move.l	(a0),a6
+		jsr	-36(a6)		;_LVOCloseEngine(a6)
+		move.l	(a7)+,a6
+		rts
+
+_ESetInfo:
+		move.l	a6,-(a7)
+		lea	8(a7),a1
+		move.l	(a1)+,a0
+		move.l	(a0),a6
+		jsr	-42(a6)		;_LVOSetInfo(a6)
+		move.l	(a7)+,a6
+		rts
+
+_EObtainInfo:
+		move.l	a6,-(a7)
+		lea	8(a7),a1
+		move.l	(a1)+,a0
+		move.l	(a0),a6
+		jsr	-48(a6)		;_LVOObtainInfo(a6)
+		move.l	(a7)+,a6
+		rts
+
+_EReleaseInfo:
+		move.l	a6,-(a7)
+		lea	8(a7),a1
+		move.l	(a1)+,a0
+		move.l	(a0),a6
+		jsr	-54(a6)		;_LVOReleaseInfo(a6)
+		move.l	(a7)+,a6
+		rts
+
+******* diskfont.library/ExpungeDiskFont ******************************
+*
+*   NAME
+*       ExpungeDiskFont - Expunges a DiskFontHeader structure. (V40)
+*
+*   SYNOPSIS
+*       success = ExpungeDiskFont(font)
+*       D0                         A1
+*
+*       BOOL ExpungeDiskFont(struct TextFont *);
+*
+*   FUNCTION
+*       This function searches the list of fonts loaded by
+*       diskfont.library and compares it with the provided TextFont
+*       structure argument.  If this is a font loaded by diskfont.library,
+*       this function can be used to immediately remove the font from
+*       the public font list, strip the font via graphics/StripFont(),
+*       and the DiskFontHeader structure held by diskfont.library is
+*       expunged.
+*
+*   INPUTS
+*       font - Pointer to a TextFont structure.
+*
+*   RESULTS
+*       D0 is zero if the font is not owned by diskfont.library.
+*
+*   NOTES
+*       The font must be removable using the exec/Remove() function,
+*       so must be on the public font list.
+*
+*       This function is used by the Japanese font driver; it
+*       is being made public for use by other font drivers if
+*       needed.  See diskfont/OpenDiskFont().
+*
+*       Because the accessor count of the font must be 0, this
+*       function must be called inside of a Forbid()/Permit() pair.
+*       This function is intended for use in a font driver which
+*       would normally provide a CloseFont() function vector
+*       which decrements font accessor count, and if 0, may use this
+*	function to immediately expunge the font.  ExpungeDiskFont()
+*	does not break Forbid(), so may be used in low-memory
+*	handlers.
+*
+*	The caller is responsible for making sure that the accessor
+*	count of the font is 0, or known to be unused by a vectored
+*	font driver before calling this function.
+*
+*   BUGS
+*
+*   SEE ALSO
+*       OpenDiskFont(), graphics/CloseFont, graphics/StripFont(),
+*       exec/Remove()
+*
+***********************************************************************
+_DFExpungeDiskFont:
+
+	PRINTF	DBG_ENTRY,<'DF--ExpungeDiskFont($%lx)'>,A1
+
+		movem.l	a2/a5/a6,-(sp)
+		move.l	a6,a5
+		move.l	dfl_DiskFonts(a5),a2
+		move.l	dfl_SysBase(a5),a6
+
+		FORBID
+edf_searchdfl:
+		tst.l	(a2)			;next on list NULL?
+		BEQ_S	edf_emptydfl
+
+	; is the font passed in a match of the font we want?
+
+		lea	dfh_TF(a2),a0
+		cmpa.l	a1,a0
+		BNE_S	edf_nextdfl
+
+	PRINTF	DBG_FLOW,<'DF--Found Matching font on DFH list'>
+
+	; remove from GfxBase font list
+
+		REMOVE
+
+	; remove from DiskfontBase font list
+
+		move.l	a2,a1
+		REMOVE
+
+	; decrement diskfont font count
+
+		subq.w	#1,dfl_NumLFonts(a5)
+
+	; may now release forbid, and strip font/unloadseg it 		
+
+		PERMIT
+
+	; Strip the font before UnLoadSeg()
+
+		lea	dfh_TF(a2),a0
+		move.l	dfl_GfxBase(a5),a6
+
+	PRINTF	DBG_OSCALL,<'DF--StripFont($%lx)'>,A0
+
+		JSRLIB	StripFont
+
+	; and unload memory
+
+		move.l	dfh_Segment(a2),d1
+		move.l	dfl_DOSBase(a5),a6
+
+	PRINTF	DBG_OSCALL,<'DF--UnLoadSeg($%lx)'>,D1
+
+		JSRLIB	UnLoadSeg
+
+		moveq	#01,d0			;success!
+
+		bra.s	edf_expungeddfl
+
+edf_nextdfl:
+		move.l	(a2),a2
+		BRA_S	edf_searchdfl
+
+edf_emptydfl:
+		PERMIT
+
+		moveq	#00,d0			;return fail
+
+edf_expungeddfl:
+
+	PRINTF	DBG_EXIT,<'DF--%ld=ExpungeDiskFont()'>,D0
+
+		movem.l	(sp)+,a2/a5/a6
+		rts
+
+	END
+@

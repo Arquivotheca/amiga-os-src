@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'8.11.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ifconfig 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ifconfig 37.2 (8.11.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ifconfig 37.2 (8.11.93)',0
+	ENDM

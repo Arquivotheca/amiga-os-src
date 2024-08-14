@@ -1,0 +1,434 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.39.31;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@filesystem, log a new disk
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@SECTION "Restart"
+
+GET "LIBHDR"
+GET "IOHDR"
+GET "MANHDR"
+GET "internal/EXECLIBHDR"
+GET "RESTARTHDR"
+
+MANIFEST
+$(
+   IO.secs.p  = IO.actual >> 2
+   IO.ticks.p = IO.length >> 2
+   IO.time.upb = IO.ticks.p + 1
+   microtick = 1000000 / tickspersecond
+   tickspermin = tickspersecond * 60
+   secsperday = 24 * 60 * 60
+$)
+
+LET start ( parm.pkt ) BE
+$(
+   LET envec = parm.pkt ! pkt.arg1
+   LET IOB = VEC IO.size+2
+   LET vflag = parm.pkt!pkt.arg4
+   LET date.days, date.mins, date.ticks = 0, 0, 0
+   LET b.file.diskdate = ?
+   LET nomem = "Out of memory*X00"
+
+   initial.pkt := parm.pkt	// CARL 07SEP85
+   fhtask := parm.pkt!pkt.taskid
+   validseg := 0
+   node := 0
+
+
+
+   b.file.upb      := envec ! envec.szblk - 1
+   n.surfaces      := envec ! envec.nsur
+//   n.secsperblock  := envec ! envec.nsecblk
+   n.blockspertrk  := envec ! envec.nblktrk
+   n.resblocks     := envec ! envec.nresblk
+   lowercyl        := envec ! envec.lowcyl
+   uppercyl        := envec ! envec.upcyl
+
+   n.blockspercyl  := n.blockspertrk * n.surfaces
+   keylwb          := n.resblocks
+   keyupb          := ( uppercyl - lowercyl + 1 ) * n.blockspercyl - 1
+   n.blocks        := keyupb - keylwb + 1
+   rootkey         := ( keyupb + keylwb ) / 2
+   lowercyl        := n.blockspercyl * lowercyl
+
+   b.file.stype    := b.file.upb
+   b.file.parent   := b.file.upb - 2
+   b.file.filename := b.file.upb - 19
+   b.file.date     := b.file.upb - 22
+   b.file.cdate    := b.file.upb - 6
+   b.file.diskdate := b.file.upb - 9
+   b.dir.hashmax   := b.file.upb - 50
+   b.size.hashtab  := b.dir.hashmax - b.dir.hashtab + 1
+   b.root.bitmap   := b.file.upb - 48
+   b.root.bmvalid  := b.file.upb - 49
+   b.root.mapsize  := b.file.date - b.root.bitmap - 1   // NHG
+   BM.blocksize    := b.file.upb
+
+   mapvec          := 0
+
+   date.scan := @@date.days
+
+   unit.no  := parm.pkt ! pkt.arg2
+
+   disc.dev := IOB
+   IF OpenDevice( IOB, parm.pkt!pkt.arg3, unit.no, parm.pkt!pkt.arg5 ) = 0 THEN
+      disc.dev := 0
+
+   IF disc.dev=0 THEN
+   $( // returnpkt(parm.pkt,FALSE)  // CARL 07SEP85
+      error("Cannot open disc device*X00")
+   $)
+
+   bitmap.upb      := ( n.blocks - 1 ) / bitsperword
+
+   bitmap.alloc    := getvec ( bitmap.upb )
+   bitmap.visit    := getvec ( bitmap.upb )
+
+   bufa := getmem ( b.file.upb + 1, memf.chip )
+
+
+     IF ( bitmap.alloc = 0 ) |
+        ( bitmap.visit = 0 ) |
+        ( bufa         = 0 ) THEN
+                             $(
+                              // returnpkt( parm.pkt, FALSE ) // CARL 07SEP85
+                                error ( nomem )
+                             $)
+
+   clearbitmap(bitmap.alloc)
+   clearbitmap(bitmap.visit)
+
+   UNLESS n.blocks REM bitsperword = 0 DO
+   $(
+      LET lastword = ( NOT 0 ) >> ( bitsperword - (n.blocks REM bitsperword ))
+
+      bitmap.alloc ! bitmap.upb := lastword
+      bitmap.visit ! bitmap.upb := lastword
+   $)
+
+   usedblocks := 0
+
+   // Read block 0. This will tell us what disk type this is.
+   // Possibilities are: DOS KICK Other Unreadable
+
+   SetKey(0)
+   TEST DoIO( disc.dev )=0 THEN // It worked
+        disktype := !bufa
+   ELSE
+      disktype := type.unreadable              // have changed from zero
+
+   IF disktype=type.dos THEN
+   $( discact ( rootkey )
+      TEST ( bufa ! b.file.type  = t.short          ) &
+          ( bufa ! b.file.ownkey   = 0              ) &
+          ( bufa ! b.file.highseq  = 0              ) &
+          ( bufa ! b.file.datasize = b.size.hashtab ) &
+          ( bufa ! b.file.firstkey = 0              ) &
+          ( bufa ! b.file.stype    = st.root        ) &
+          ( bufa ! b.file.parent   = 0              ) &
+          ( 1 <= ( bufa + b.file.filename ) % 0 <= 30 ) THEN
+	  // DOS disk. Set up volume info
+     $( LET volumename = bufa + b.file.filename
+        LET cdate = bufa + b.file.cdate
+        node := rootstruct()!rtn.info!info.devicelist
+
+	// Add this volume into the list of volumes already
+	// known about.
+	UNTIL node=0 DO
+	$( 
+	   IF compstring(volumename,node!dev.name)=0       &
+	      node!dev.type        = dt.volume             &
+	      comparedate( node+dev.vol.dat, cdate)=0 THEN
+		 BREAK
+	   node := node!dev.next
+	$)
+	IF node=0 THEN  // Not there, add it
+	$( node := adddevice(volumename)
+	   if node=0 then error(nomem)
+	   node!dev.lock := 0
+	   node!dev.type := dt.volume
+	   node!dev.locklist := 0
+	   copyvec(cdate, node+dev.vol.dat,2)
+	$)
+	// If new or old, mark as now mounted
+	node!dev.task := fhtask
+     $)
+     ELSE
+        disktype := type.ndos       // Not a DOS disk at all
+   $)
+
+   // Now inform the file system of the type
+   returnpkt( parm.pkt, disktype, node )
+   initial.pkt := 0	// CARL 07SEP85
+
+   UNLESS disktype = type.dos exit(FALSE)
+
+   setdate ( bufa + b.file.date )
+   setdate ( bufa + b.file.diskdate )
+
+   putbit ( bitmap.alloc, rootkey )
+
+   bitmap.chk := checksum ( bitmap.alloc, bitmap.upb ) +
+                 checksum ( bitmap.visit, bitmap.upb )
+
+//message("Restart starting*N")
+//message("bufa!b.root.bmvalid = %n*N",bufa!b.root.bmvalid)
+
+   IF (bufa ! b.root.bmvalid) DO 
+   $(
+   LET mapsize = bitmap.upb/BM.blocksize
+   LET valid   = TRUE
+   LET ext = b.root.bitmap + b.root.mapsize
+   LET vecpos = b.root.mapsize
+   LET blocks.per.ext = BM.blocksize-1
+   LET extsize = mapsize<b.root.mapsize->0,(mapsize-b.root.mapsize)/blocks.per.ext+1
+   LET i = mapsize+1
+
+   usedblocks := 0
+
+   mapvec := getvec( mapsize+extsize )
+  
+   copyvec(bufa+b.root.bitmap, mapvec, mapsize<b.root.mapsize->mapsize,b.root.mapsize)
+
+//message("mapsize = %n BM.blocksize = %n blocks.per.ext = %n*N",mapsize,BM.blocksize, blocks.per.ext)
+//message("extsize = %n ext = %n bufa!ext = %n*N",extsize,ext,bufa!ext)
+
+   WHILE bufa ! ext \= 0 DO
+   $(
+	LET size = ?
+	mapvec!i := bufa!ext
+	discact( bufa!ext )
+	size := bufa!b.file.upb=0 -> (mapsize-b.root.mapsize) REM blocks.per.ext,
+					blocks.per.ext
+//message("vecpos = %n size = %n*N",vecpos,size)
+	copyvec(bufa+1, mapvec+vecpos, size-1)
+	ext := BM.blocksize
+	vecpos := vecpos + BM.blocksize - 1
+	i := i + 1
+   $)
+
+//message("mapvec = ")
+   FOR i = 0 TO mapsize DO
+   $(
+      LET bmkey = mapvec ! i
+      LET k = i=mapsize -> bitmap.upb REM BM.blocksize,
+                           BM.blocksize-1
+      LET bitbuf, bitbase = bufa+1, bitmap.alloc + (i*BM.blocksize)
+
+//message("%n ",bmkey)
+      IF bmkey = 0 DO
+      $(
+         valid := FALSE
+	 BREAK
+      $)
+      discact( bmkey )
+      UNLESS checksum(bufa, b.file.upb) = 0 DO
+      $(
+	 valid := FALSE
+         BREAK
+      $)
+      // Copy the bitmap over
+      UNTIL k<0 DO 
+      $( bitbase!k := bitbuf!k
+         k := k-1
+      $)
+      bmkey := bufa ! 0
+   $)
+//message("*N")
+   UNLESS valid BREAK
+   // now count the number of allocated blocks in the map
+   FOR i = 0 TO bitmap.upb-1 DO
+   $(
+      LET bmi = bitmap.alloc ! i
+      LET n = 0
+      IF bmi = 0 DO $( usedblocks := usedblocks + bitsperword; LOOP $)
+      IF bmi = (NOT 0) LOOP
+      FOR j = 0 TO bitsperword-1 DO
+         IF (bmi << j) >= 0 DO n := n + 1
+      usedblocks := usedblocks + n
+   $)
+   // do the last word separately
+   $(
+      LET bmi = bitmap.alloc ! bitmap.upb
+      LET n = 0
+      FOR j = 0 TO (n.blocks REM bitsperword) - 1 DO
+         IF (bmi & (1 << j)) = 0 DO n := n + 1
+      usedblocks := usedblocks + n
+   $)
+   exit( TRUE )
+   $) REPEAT
+
+   // At this point we should do a complete validation.
+   // One may already being going on, in which case vflag will
+   // be nonzero.
+
+   IF vflag exit(FALSE)
+
+//   freevec( mapvec )
+//   mapvec := 0
+//   clearbitmap(bitmap.alloc)
+//   UNLESS n.blocks REM bitsperword = 0 DO
+//      bitmap.alloc ! bitmap.upb := (NOT 0) >> 
+//      ( bitsperword - n.blocks REM bitsperword )
+//   putbit( bitmap.alloc, rootkey )
+// bitmap.checksum()
+   putlong( tinfo.filesystemtask, taskid(), fhtask )
+   // At this point I am going to possibly wish to swap disks
+   $( LET lock = locateobj(":")  // Stop disk going away
+      validseg := loadseg(":L/Disk-Validator")
+      IF validseg=0 THEN
+         validseg := loadseg("L:Disk-Validator")
+      if validseg=0 | globin(validseg)=0 THEN 
+      $( freeobj(lock)
+         error("Unable to load disk validator*X00")
+      $)
+      validate(lock)
+   $)
+$)
+
+AND clearbitmap(map) BE
+   FOR i = 0 TO bitmap.upb DO
+      map ! i := NOT 0
+
+AND checksum ( v, upb ) = VALOF
+$(
+   LET sum = 0
+    
+   FOR i = 0 TO upb DO sum := sum + v ! i
+	
+   RESULTIS sum
+$)
+
+AND exit ( res ) BE
+$(
+   TEST res
+   THEN bumpdate()
+   ELSE
+        freevec ( bitmap.alloc )
+
+   IF initial.pkt THEN				// CARL 07SEP85
+	returnpkt( initial.pkt, type.ndos, 0)	// CARL 07SEP85
+
+   freevec  ( bufa )
+   freevec  ( bitmap.visit )
+   sendpkt(?, fhtask, action.setmap, res, ?, bitmap.alloc, usedblocks, mapvec)
+   unless validseg=0 unloadseg(validseg)
+   CloseDevice( disc.dev )
+   deletetask( )
+$)
+
+
+AND putbit ( map, key ) BE
+$(
+   LET entry = ( key - keylwb ) / bitsperword
+   AND mask  = 1 << [ ( key - keylwb ) REM bitsperword ]
+
+   UNLESS keylwb <= key <= keyupb DO
+          error1 ( "out of range", key )
+
+   IF ( [ map ! entry ] & mask ) = 0 THEN error1 ( "already set", key )
+
+   map ! entry := [ map ! entry ] & [ NOT mask ]
+
+   bitmap.chk := bitmap.chk - mask
+$)
+
+// Two error routines, both call requestors of the form:
+//    Error validating disk
+//    Volumename
+//    block xxx out of range
+
+AND wrch(ch) BE
+$( LET s=text%0+1
+   text%s := ch
+   text%0 := s
+$)
+
+AND error1 ( mess, key ) BE
+$( LET v = VEC 10
+   text := v
+   text%0 := 0
+   writef("Key %N %S*X00",key,mess)
+   error(text)
+$)
+
+AND error ( mess ) BE report( mess ) REPEAT
+
+AND report( mess ) BE
+$( UNLESS requestor("Error validating disk*X00", 
+		     node=0 -> "*X00", node!dev.name, mess) DO
+   $( IF requestor("Disk structure corrupt*X00",
+                   "Use DISKDOCTOR to correct it*X00",0) RETURN
+      exit    ( FALSE )
+   $)
+$)
+
+/*
+AND message(f,a,b,c,d,e) BE
+$(
+        GLOBAL $( putch : -41 $)
+	LET o.wrch = wrch
+	wrch := putch
+	writef(f,a,b,c,d,e)
+	wrch := o.wrch
+$)
+*/
+
+AND discact ( key ) BE
+$( SetKey( key )
+   UNLESS keylwb <= key <= keyupb DO 
+      error1 ( "out of range", key )
+   UNTIL DoIO( disc.dev )=0 DO
+      report( "Disk is unreadable*X00")
+   UNLESS checksum(bufa,b.file.upB)=0 DO
+      error1 ( "checksum error", key )
+$)
+
+AND SetKey(key) BE
+   SetIo( disc.dev, IOC.read, bufa, Disc.sector.size, 
+          (key+lowercyl)<<Disc.sector.shift )
+
+AND setdate ( bdate ) BE 
+   IF comparedate( date.scan, bdate) < 0 THEN
+   $(
+      date.scan!0, date.scan!1, date.scan!2 := bdate!0, bdate!1, bdate!2
+   $)
+
+AND bumpdate() BE
+$(
+   LET v = VEC 2
+
+
+   datstamp( v )
+
+   // only reset the date if this is the boot disk and time is unset
+   IF unit.no = 0 & v!0 = 0 THEN
+   $(
+      IF comparedate( v, date.scan ) < 0 THEN
+      $(
+	 setdosdate( date.scan )
+      $)
+   $)
+$)
+@

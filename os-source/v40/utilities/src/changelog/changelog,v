@@ -1,0 +1,242 @@
+head     1.1;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @# @;
+
+
+1.1
+date     89.09.21.18.31.51;  author jimm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@script file to build RCS change log files
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@#!/bin/csh -f
+# Lock system, and build record file # jimm:12/23/85
+# Try to lock system and log any changes to be checked in,
+# out of date local copies, and conflicts with current version
+#
+# To "lock the system," we mean lock the rcsdirectory against
+# anybody else creating a log file using this program.
+# This is done by checking out a lockfile, which this
+# program looks for.  If it finds it, it will not proceed.
+#
+# When you are done checking in source code using the resulting logfile,
+# you must manually declare yourself done with the RCS directory
+# by checking the lock back in.  It is easy to do this using the
+# script unlocklog.
+#
+# ENVIRONMENT variables RCSDIR and RCSLOCK specify the directory
+# and basename of the lock file, respectively, for the RCS files
+# These default to ./RCS and RCSLock, and can be overidden on the
+# command line:
+#	changelog -d <rcsdir> -l <rcslock> -f <logfile> -u -D <files ...>
+# the optional -u flag makes locking ignored
+# -D enables debug
+#
+# NOTE: assumes you haven't changed your source file if it is not 
+# writable.
+
+echo logfile start
+
+    set usage = "$0 -d rcsdir -f logfile -l rcslock -u -D files ..."
+
+# Default Options
+    # RCSdir == home of RCSfiles
+    if ($?RCSDIR) then
+	set RCSdir = $RCSDIR
+    else
+	set RCSdir = ./RCS
+    endif
+
+    if ($?RCSLOCK) then
+	set rcslock = $RCSLOCK
+    else
+	set rcslock = RCSLock
+    endif
+
+    if ($?RCSDBUG) then
+	set dbug = $RCSDBUG
+    else
+	set dbug = 0
+    endif
+
+    if ($?RCSLOG) then
+	set logfile = $RCSLOG
+    else
+	set logfile = Log
+    endif
+
+# Arguments
+
+    set nolock = 0
+    while ($#argv > 0)
+	switch ($argv[1])
+	case -u:
+	    set nolock = 1
+	    breaksw
+	case -d:
+	    if ($#argv == 1) then
+		echo RCS directory specifier missing
+		echo usage: $usage
+		exit (1)
+	    endif
+	    set RCSdir = $argv[2]
+	    if ($dbug) echo RCSdir = $RCSdir
+	    shift
+	    breaksw
+	case -l:
+	    if ($#argv == 1) then
+		echo lock file name missing
+		echo usage: $usage
+		exit (1)
+	    endif
+	    set rcslock = $argv[2]
+	    if ($dbug) echo rcslock = $rcslock
+	    shift
+	    breaksw
+	case -f:
+	    if ($#argv == 1) then
+		echo logfile name missing
+		echo usage: $usage
+		exit (1)
+	    endif
+	    set logfile = $argv[2]
+	    if ($dbug) echo logfile = $logfile
+	    shift
+	    breaksw
+	case -D:
+	    set dbug = 1
+	    breaksw
+	default:
+	    # this and rest of arguments are files
+	    goto RestAreFiles
+	endsw
+	shift
+    end
+
+RestAreFiles:
+
+# sed command strings
+# get version from checked out file
+set sedstr = \
+'/.*Header: [^ 	][^ 	]* \([^ 	][^ 	]* \).*$/{s//\1/p; q; }'
+
+# get version from output of rlog
+set sedstr2 = \
+'/^head:[ 	][ 	]* \([^ 	][^ 	]*\)$/{s//\1/p;q;}'
+
+# get version directly from *,v files
+set sedstr3 = \
+'/^head[ 	][ 	]* \([^ 	][^ 	]*\);$/{s//\1/p;q;}'
+
+# Variables
+    @@ anyconflict = 0
+    @@ anynewer = 0
+    @@ anychanged = 0
+    @@ anymissing = 0
+
+    # OK, so it's a little vulnerable to collision:
+    #	fix co -l to do $status != 0
+    if (! $nolock) then
+	if ($dbug) echo locking RCS directory $RCSdir
+	if (-f $RCSdir/$rcslock) then
+	    echo "Lockfile $RCSdir/$rcslock exists"
+	    exit (2)
+	else
+	    echo -n "---" > $logfile
+	    co -l $RCSdir/$rcslock,v $RCSdir/$rcslock
+	    sed -n -e '/^.*Header.*,v/s//Lock:/p' < $RCSdir/$rcslock > $logfile
+	endif
+    else
+	echo not locking RCS directory $RCSdir
+	echo 'RCS log (NO LOCK):' `date` > $logfile
+    endif
+
+    foreach file ($*)
+
+	# FIX: use basename? 
+	set rcsfile = $RCSdir/$file,v
+	if ($dbug) then
+	    echo ""
+	    echo rcsfile $rcsfile
+	endif
+
+	# local file exists?
+	if (! -f $file) then
+	    echo ${0}: file $file not found
+	    continue
+	endif
+
+	# "official source" exists under RCS?
+	if (! -f $rcsfile) then
+	    if ($dbug) echo $file MISSING
+	    echo $file MISSING >> $logfile
+	    @@ anymissing = $anymissing + 1
+	    continue
+	endif
+
+	# get version numbers
+	# set currev = `rlog -h $rcsfile | sed -n -e "$sedstr2"`
+	# faster, but cheaper:
+
+	set currev = `sed -n -e "$sedstr3" $rcsfile`
+	if ($dbug) echo current revision under RCS:  $currev
+
+	set locrev = ` sed -n -e  "$sedstr" $file`
+	if ($dbug) echo revision of local copy: $locrev
+
+	# check if version out of date
+	if ($currev != $locrev) then
+
+	    if ($dbug) echo versions do not match.
+
+	    # if no change to your copy flag NEWVERSION
+	    if (!(-w $file && \
+		! {(co -p$locrev $RCSdir/$file,v | cmp -s - $file)})) then
+
+		if ($dbug) echo $file NEWVERSION  $locrev $currev
+		echo $file NEWVERSION $locrev $currev >> $logfile
+		@@ anynewer = $anynewer + 1
+
+	    else # flag CONFLICT
+		if ($dbug) echo $file CONFLICT $locrev $currev
+		echo $file CONFLICT $locrev $currev >> $logfile
+		@@ anyconflict = $anyconflict + 1
+	    endif
+
+	# no new version has been created, and yours has changed
+	else if ( -w $file ) then
+	    if ( ! {(co -p$locrev $RCSdir/$file,v | cmp -s - $file)} ) then
+		if ($dbug) echo $file CHANGED $locrev
+		echo $file CHANGED $locrev >> $logfile    
+		@@ anychanged = $anychanged + 1
+	    else
+		if ($dbug) echo $file NOTCHANGED
+		
+	    endif
+
+	# completely up to date: same version, not writable
+	else if ($dbug) echo $file UPTODATE
+	    
+	endif
+    end
+
+    echo "done."
+    if ($anynewer != 0) echo local versions out of date: $anynewer
+    if ($anychanged != 0) echo changed: $anychanged
+    if ($anyconflict != 0) echo conflicts: $anyconflict
+    if ($anymissing != 0) echo missing: $anymissing
+
+@

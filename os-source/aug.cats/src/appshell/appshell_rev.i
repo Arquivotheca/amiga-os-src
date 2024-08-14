@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	1088
+DATE	MACRO
+		dc.b	'7.9.92'
+	ENDM
+VERS	MACRO
+		dc.b	'appshell 37.1088'
+	ENDM
+VSTRING	MACRO
+		dc.b	'appshell 37.1088 (7.9.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: appshell 37.1088 (7.9.92)',0
+	ENDM

@@ -1,0 +1,336 @@
+head     1.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.0
+date     91.02.22.14.18.50;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Initial RCS check-in.
+@
+
+
+
+1.0
+log
+@Initial revision
+@
+text
+@	INCLUDE	"exec/types.i"
+	INCLUDE	"exec/tasks.i"
+	INCLUDE "exec/execbase.i"
+	INCLUDE "exec/memory.i"
+	INCLUDE "calls.i"
+
+CALLSYS	macro	*
+	jsr	LVO\1(a6)
+	endm
+
+JUMPSYS macro	*
+	jmp	LVO\1(a6)
+	endm
+
+GURU	macro	*
+	move.l	4,a6			; Load ExecBase address
+	move.l	#\1,d7			; Load Guru number
+	CALLSYS	Alert
+	endm
+
+CHANGE	macro	*
+	movea.l	4,a1
+	movea.w	#LVO\1,a0
+	move.l	#_New\1,d0
+	CALLSYS	SetFunction
+	move.l	d0,_\1Pointer
+	endm
+
+	OPT	p=68030
+
+LVOSupervisor	EQU	-30
+LVOAlert	EQU	-$6c
+LVOSetFunction	EQU	-$1a4
+LVOAllocate	EQU	-$ba
+LVODeallocate	EQU	-$c0
+LVOAllocMem	EQU	-$c6
+LVOFreeMem	EQU	-$d2
+LVOTypeOfMem	EQU	-$216
+LVOAllocAbs	EQU	-$cc
+LVOAvailMem	EQU	-$d8
+
+LVODebug	EQU	-114
+LVORawMayGetChar EQU	-510
+LVORawPutChar	EQU	-516
+
+LVOAllocVec	EQU	-684
+LVOFreeVec	EQU	-690
+
+
+MEMF_VIRTUAL	EQU	3
+
+;======================================================================
+;
+;	section text,code
+;	csect	text,0,,0,4
+;		name,type,align,rtype,rsize
+;				0 = Absolute short or long address
+;				1 = PC-relative offset
+;				2 = Address-register-relative offset
+;
+;======================================================================
+
+	;---- defined in amiga.lib
+
+	XREF	_serdat
+	XREF	_serdatr
+
+	;---- defines in angel.c
+
+	XREF	_layers_start
+	XREF	_layers_end
+
+	XREF	_C_AllocMem
+	XREF	_C_AllocVec
+	XREF	_C_FreeMem
+	XREF	_C_FreeVec
+	XREF	_C_AllocAbs
+	XREF	_C_AvailMem
+	XREF	_C_Permit
+
+	XREF	_AllocMemPointer
+	XREF	_AllocVecPointer
+	XREF	_FreeMemPointer
+	XREF	_FreeVecPointer
+	XREF	_AllocAbsPointer
+	XREF	_AvailMemPointer
+	XREF	_PermitPointer
+
+	XREF	_PrintNotPMMU
+	XREF	_LVOSchedule
+	XREF	_LVOSupervisor
+
+	XDEF	_NewAllocMem
+	XDEF	_NewAllocVec
+	XDEF	_NewFreeMem
+	XDEF	_NewFreeVec
+	XDEF	_NewAllocAbs
+	XDEF	_NewAvailMem
+	XDEF	_NewRawPutChar
+	XDEF	_NewPermit
+
+	section text,code
+
+;---------------------------------------------------------------------------
+;  memoryBlock = AllocVec( byteSize, requirements )
+;  D0                      D0        D1
+;---------------------------------------------------------------------------
+
+_NewAllocVec:
+
+;Allocate, but leave size at -4 from the returned address
+
+		ADDQ.L	#4,D0
+		MOVE.L	D0,-(SP)
+		jsr	LVOAllocMem(a6)
+		BEQ.S	ac_fail
+		MOVE.L	D0,A0
+		MOVE.L	(SP),(A0)+
+		MOVE.L	A0,D0
+ac_fail:	ADDQ.L	#4,SP
+		RTS
+
+;---------------------------------------------------------------------------
+;  memoryBlock = AllocMem( byteSize, requirements )
+;  D0                      D0        D1
+;---------------------------------------------------------------------------
+
+_NewAllocMem:
+
+	movea.l	_layers_start,a0	; Get start of layers library
+	cmp.l	(sp),a0			; Is return address inferior?
+	bhi.s	2$			; Branch if so
+	movea.l	_layers_end,a0		; Get end of layers library
+	cmp.l	(sp),a0			; Is return address superior?
+	bcs.s	2$			; Branch if so
+
+	; We have deternimed that the return address is within layers.
+	; Therefore we shall call the old AllocMem if chip ram is not
+	; specifically requested.
+
+	btst.l	#MEMB_CHIP,d1	; Is CHIP memory asked for?
+	beq.s	1$		; Branch if not
+2$
+	movem.l	d0/d1,-(sp)
+	jsr	_C_AllocMem
+;				bra.s	0$	; Do not allow AllocMem to succeed
+	tst.l	d0
+	bne.s	0$
+	movem.l	(sp)+,d0/d1
+1$
+	move.l	_AllocMemPointer,a0
+	jmp	(a0)
+0$
+	addq.l	#8,sp
+	rts
+
+;---------------------------------------------------------------------------
+;  FreeVec( memoryBlock,)
+;           A1
+;---------------------------------------------------------------------------
+
+;FreeVec assumes the block size is at -4 from the passed address
+;Note strange register to match FreeMem()
+
+_NewFreeVec:
+		MOVE.L	A1,D1		;Test for NULL
+		BEQ.S	0$
+		MOVE.L	-(A1),D0
+		;[fall into FreeMem]
+		jmp	_NewFreeMem
+0$
+		rts
+
+;---------------------------------------------------------------------------
+;  FreeMem( memoryBlock, byteSize )
+;           A1           D0
+;---------------------------------------------------------------------------
+
+_NewFreeMem:
+	movem.l	d0/a1,-(sp)
+	jsr	_C_FreeMem
+	tst.l	d0
+	bne.s	0$
+	movem.l	(sp)+,d0/a1
+	move.l	_FreeMemPointer,a0
+	jmp	(a0)
+0$
+	addq.l	#8,sp
+	rts
+
+;---------------------------------------------------------------------------
+;  memoryBlock = AllocAbs( byteSize, location )
+;  D0                      D0        A1
+;---------------------------------------------------------------------------
+
+_NewAllocAbs:
+	movem.l	d0/a1,-(sp)
+	jsr	_C_AllocAbs
+	tst.l	d0
+	bne.s	0$
+	movem.l	(sp)+,d0/a1
+	move.l	_AllocAbsPointer,a0
+	jmp	(a0)
+0$
+	addq.l	#8,sp
+	rts
+
+;---------------------------------------------------------------------------
+;  size = AvailMem( requirements )
+;  D0               D1
+;---------------------------------------------------------------------------
+
+_NewAvailMem:
+	movem.l	d1,-(sp)
+	jsr	_C_AvailMem
+	tst.l	d0
+	bne.s	0$
+	movem.l	(sp)+,d1
+	move.l	_AvailMemPointer,a0
+	jmp	(a0)
+0$
+	addq.l	#4,sp
+	rts
+
+;---------------------------------------------------------------------------
+;  Permit()
+;---------------------------------------------------------------------------
+
+_NewPermit:
+	movem.l	d0-d7/a0-a6,-(sp)
+	jsr	_C_Permit
+	movem.l	(sp)+,d0-d7/a0-a6
+
+	    SUBQ.B  #1,TDNestCnt(A6)
+	    BGE.S   pm_exit
+	    TST.B   IDNestCnt(A6)
+	    BGE.S   pm_exit
+	    TST.W   SysFlags(A6)
+	    BMI.S   pm_UserSched
+pm_exit:
+	    RTS
+
+pm_UserSched:
+	    MOVE.L  A5,-(SP)
+	    JSRTRAP userSched(PC)
+	    MOVE.L  (SP)+,A5
+	    RTS
+
+userSched:
+	    BTST.B  #(13-8),(SP)        * check SR for super
+	    BEQ.S   us_notSup
+	    RTE
+us_notSup:
+	    JMPSELF Schedule		* does not return to here
+
+
+;---------------------------------------------------------------------------
+;  RawPutChar( char )
+;              D0
+;---------------------------------------------------------------------------
+
+_NewRawPutChar:
+		tst.b	d0		; Is the character to send a NULL?
+		beq.s	pc_exit		; Branch if so
+
+		move.w	d0,-(sp)	; Save this register
+		cmp.b	#10,d0		; Is it a newline?
+		bne.s	pc_norm		; Branch if not
+		moveq.w	#13,d0		; Send a return first
+		bsr.s	putc		; ...and then a newline
+pc_norm:	move.w	(sp)+,d0	; Restore this register
+		;fall-thru
+putc:
+pc_wait:
+		move.w	_serdatr,d1
+		btst	#13,d1
+		beq.s	pc_wait
+
+;	and.b	#$7f,d1
+		cmp.b	#$18,d1 	; Check for CAN (^X)
+		beq.s	pc_exit
+
+		cmp.b	#$13,d1 	; Check for Xoff
+		beq.s	pc_wait
+
+		and.w	#$ff,d0
+		or.w	#$100,d0
+		move.w	d0,_serdat
+
+		jsr	LVORawMayGetChar(a6)
+pc_hold:
+		cmp.b	#('S'-'A'+1),d0
+		bne.s	pc_debug
+		bsr.s	RawGetChar
+		bra.s	pc_hold
+pc_debug:
+		cmp.b	#$7f,d0 	; del
+		bne.s	pc_exit
+		jsr	LVODebug(a6)
+		bra.s	pc_hold
+pc_exit:
+		rts
+
+RawGetChar:
+		jsr	LVORawMayGetChar(a6)
+		tst.l	d0
+		bmi.s	RawGetChar
+		rts
+
+	END
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'5.3.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ramlib 40.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ramlib 40.2 (5.3.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ramlib 40.2 (5.3.93)',0
+	ENDM

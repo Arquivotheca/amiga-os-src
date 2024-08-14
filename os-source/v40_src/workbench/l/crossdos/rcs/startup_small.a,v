@@ -1,0 +1,278 @@
+head	38.15;
+access;
+symbols;
+locks; strict;
+
+
+38.15
+date	92.12.16.01.15.14;	author LPOMA;	state Exp;
+branches;
+next	38.10;
+
+38.10
+date	92.08.07.01.15.13;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.17.26;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+38.15
+log
+@Fixed a small problem of freeing memory allocated by the process spawned by
+the FileSystem_status process. This could cause memory shared to be reused
+when it was still needed. The fix was to add the memory entry list to the
+filesystem_status process which is the last process to exit.
+@
+text
+@**  startup_small.a  *****************************************************
+** Copyright 1991 CONSULTRON
+*
+*  small c.o-type code.  Sets up base relative data register (A4).
+*
+*****/ 
+    include "FS:FS.i"
+    include "dos/dosextens.i"
+    include "exec/resident.i"
+
+AbsExecBase EQU 4
+SEG_SZ      EQU -8
+
+        xref    _LinkerDB       ; linker defined base value
+        xref    _StackSwitchIn
+        xref    _StackSwitchOut
+
+***** main startup code ******/
+
+**********************************************************************
+*   Here's were we begin.  CODE section
+**********************************************************************/
+        section text,CODE
+
+        xref    _LVOFindTask
+        xref    _LVOAllocEntry
+        xref    @@FileSystem_Status
+
+start:
+        movem.l d2/a0/a1/a2/a4/a6,-(sp)
+        lea     _LinkerDB,a4        ; load data seg base register
+
+        suba.l  a1,a1               ; clear a1
+        move.l  AbsExecBase,a6
+        move.l  a6,_SysBase(a4)
+        jsr     _LVOFindTask(a6)    ; do FindTask(0)
+
+        move.l  d0,a2               ; move process pointer into register
+
+allocate_new_data_seg:      ; allocate neew data segment for resident compatibility
+        lea.l   MemEntryList(a4),a0 ; move MemEntry List for allocating new mem
+
+        move.l  SEG_SZ(a4),d0       ; get data segment size
+        addi.l  #SEG_SZ,d0          ; adjust for seg size and next seg ptr fields = true size
+        move.l  d0,mes_data_seg(a0) ; load new data segment size
+
+allocate_new_mem:      ; allocate more memory needed
+        jsr     _LVOAllocEntry(a6)  ; do AllocEntry()
+
+        bclr    #31,d0              ; check if error occurred
+        bne.s   fini                ; mem allocate failed
+
+        move.l  d0,a1               ; move allocated MemEntry ptr to reg
+
+make_new_data_seg:
+        move.l  me_data_seg(a1),a0  ; move new data seg ptr to reg
+        move.l  mes_data_seg(a1),d0 ; move new data seg size to reg
+        lsr.l   #2,d0               ; make into longwords
+        subq.l  #1,d0               ; adjust for dbf instruction
+cpy_data_seg:
+        move.l  (a4)+,(a0)+         ; move longwords from old data seg to new data seg
+        dbf     d0,cpy_data_seg     ; 
+        move.l  me_data_seg(a1),a4  ; make new data seg base reg
+
+AddHead_mementry:
+        move.l  a1,_MemEntry(a4)    ; store MemEntry
+        lea.l   TC_MEMENTRY(a2),a0  ; point to tc_MemEntry of new process
+        ADDHEAD                     ; do AddHead() macro; a1 = _MemEntry ptr  a0=ptr to tc_MemEntry(_Proc)
+
+        move.l  a2,_StatusProc(a4)  ; save Status Process ptr
+        lea.l   pr_MsgPort(a2),a0   ; point to Status Process msg port
+        move.l  a0,_StatusPort(a4)  ; store Status Process msg port ptr
+        move.l  me_FS(a1),_fsys(a4) ; copy struct FS ptr to static data
+
+chk_stk:
+        moveq.l #0,d2
+        move.l  TC_SPUPPER(a2),d1   ; get upper limit of stack
+        sub.l   TC_SPLOWER(a2),d1   ; sub lower limit of stack
+        move.l  #MIN_STATUS_STACK_SZ,d0    ; load minimum stack size for status process
+        cmp.l   d0,d1               ;  compare current stack against minimum
+        bge.s   ss_main             ; don't switch stack. Enough allocated
+
+stk_swtch_in:
+    ; d0 contains new stack size needed.
+        jsr     _StackSwitchIn(PC)      ; switch in the new stack
+        move.l  d0,d2                   ; save old stack ptr
+ss_main:
+        jsr     @@FileSystem_Status(PC)
+
+restore_stk:
+        tst.l   d2                  ; chk if old stack value in reg = 0
+        beq.s   fini                ; go if using the old stack
+
+        movea.l d2,a0               ; pass old stack to function
+        jsr     _StackSwitchOut(PC) ; Switch out the new stack for the old one
+fini:
+        movem.l (sp)+,d2/a0/a1/a2/a4/a6
+        rts
+
+
+        ;--------------------------------------------------------------------
+        ; This is a  romtag structure.  Exec and 'ramlib' use this structure
+        ; to find out about you (such as where to start running from...) and
+        ; stores this structure to make the device resident when subsequent 
+        ; Open()s are made.
+        ;--------------------------------------------------------------------
+
+ROMTag:
+                                ;STRUCTURE RT,0
+        dc.w    RTC_MATCHWORD   ;UWORD  RT_MATCHWORD
+        dc.l    ROMTag          ;APTR   RT_MATCHTAG
+        dc.l    0               ;APTR   RT_ENDSKIP
+        dc.b    RTF_AUTOINIT    ;UBYTE  RT_FLAGS
+        dc.b    VERSION         ;UBYTE  RT_VERSION
+        dc.b    NT_PROCESS      ;UBYTE  RT_TYPE
+        dc.b    10              ;BYTE   RT_PRI
+        dc.l    0               ;APTR   RT_NAME
+        dc.l    idString        ;APTR   RT_IDSTRING
+        dc.l    start           ;APTR   RT_INIT
+                                ;LABEL  RT_SIZE
+        dc.b    '$VER: '
+idString:       VSTRING ;VERSTAG
+
+
+**********************************************************************
+*   NewProc_code() -- small c.o-type code for the FS process to handle
+*       device IO packets.
+**********************************************************************/
+        xref    @@FileSystem
+
+        cnop    0,4
+        DC.L    16	;Segment "length" (faked)
+NewProc_seglist:
+        DC.L    0	;Pointer to next segment
+
+NewProc_code:
+        movem.l a0/a1/a2/a4/a6,-(sp)
+
+        suba.l  a1,a1               ; clear a1
+        move.l  AbsExecBase,a6          ; store AbsExecBase ptr in reg
+        jsr     _LVOFindTask(a6)    ; do FindTask(0)
+
+        move.l  d0,a2               ; move process pointer into register
+        move.l  TC_Userdata(a2),a4  ; get data seg ptr
+
+        move.l  a2,_Proc(a4)        ; store Process ptr
+        lea.l   pr_MsgPort(a2),a0   ; point to Process msg port
+        move.l  a0,_DOSPort(a4)     ; store Process msg port ptr
+
+        jsr     @@FileSystem(PC)     ; go do filesystem code
+
+        movem.l (sp)+,a0/a1/a2/a4/a6
+        rts
+
+
+**********************************************************************
+*  DATA section
+**********************************************************************/
+        section __MERGED,DATA
+*
+        xdef    _Data_seg
+        xdef    _SysBase
+        xdef    _StatusProc
+        xdef    _StatusPort
+        xdef    _Proc
+        xdef    _DOSPort
+        xdef    _MemEntry
+        xdef    _fsys
+        xdef    _NewProc_seglist
+
+*
+_Data_seg:
+_SysBase        dc.l    0
+_StatusProc     dc.l    0
+_StatusPort     dc.l    0
+_Proc           dc.l    0
+_DOSPort        dc.l    0
+_MemEntry       dc.l    0
+_fsys           dc.l    0
+_NewProc_seglist dc.l   NewProc_seglist     ; pointer to new process seglist
+
+MIN_STACK_SZ    equ     4000
+MIN_STATUS_STACK_SZ    equ     2000
+MemEntryList:
+        ds.b    LN_SIZE
+        dc.w    2
+        dc.l    MEMF_PUBLIC             ; resident data segment mem req
+        dc.l    0                       ; resident data segment size
+        dc.l    MEMF_PUBLIC+MEMF_CLEAR  ; struct FS mem ptr
+        dc.l    FS_SIZE                 ; struct FS size
+        cnop    0,2
+
+               END
+@
+
+
+38.10
+log
+@Added stack size checking and stack swapping.
+@
+text
+@d35 1
+d65 1
+d67 3
+d94 1
+a94 1
+        movea.l d2,a0               ; pass old sstack to function
+a149 4
+        move.l  _MemEntry(a4),a1    ; get MemEntry
+        lea.l   TC_MEMENTRY(a2),a0  ; point to tc_MemEntry of new process
+        ADDHEAD                     ; do AddHead() macro; a1 = _MemEntry ptr  a0=ptr to tc_MemEntry(_Proc)
+
+d162 1
+d173 1
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d15 2
+d30 1
+a30 1
+        movem.l a0/a1/a2/a4/a6,-(sp)
+d33 1
+a34 2
+
+        suba.l  a1,a1               ; clear a1
+a52 1
+        move.l  a1,_MemEntry(a4)    ; store MemEntry
+d64 1
+d70 12
+d85 6
+d92 1
+a92 1
+        movem.l (sp)+,a0/a1/a2/a4/a6
+a132 1
+        move.l  AbsExecBase,a6          ; store AbsExecBase ptr in reg
+d135 1
+d180 1
+@

@@ -1,0 +1,857 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     93.07.21.14.07.42;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Checkin of Greg's unreleased work
+(this appears to be ancient)
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@
+#include        <stdio.h>
+#include        <string.h>
+#include        <exec/types.h>
+#include        <exec/memory.h>
+#include        <dos/dos.h>
+#include        <pragmas/exec_pragmas.h>
+#include        <pragmas/dos_pragmas.h>
+#include        <pragmas/utility_pragmas.h>
+#include        <pragmas/nipc_pragmas.h>
+#include        <clib/exec_protos.h>
+#include        <clib/dos_protos.h>
+#include        <clib/utility_protos.h>
+#include        <clib/nipc_protos.h>
+#include        "/fs.h"
+#include        "fsdbase.h"
+
+#define ERROR_EXECUTE_PROTECTED ERROR_READ_PROTECTED;
+
+BPTR GetALock(BSTR a, BPTR b, struct MountedFSInfo *c, LONG type);
+
+void DoDosPacket(struct Transaction *t,struct MountedFSInfo *mi)
+{
+    struct TPacket *tp;
+
+    t->trans_RespDataActual = sizeof(struct TPacket);
+    tp = (struct TPacket *) t->trans_RequestData;
+
+    switch (tp->tp_Type)
+    {
+
+
+/* FINDOUTPUT needs to set the default r/w/e flags for group, other */
+/* FINDOUTPUT ALSO needs to set the UID/GID of the creator of a file! */
+        case ACTION_FINDINPUT:
+        case ACTION_FINDOUTPUT:
+        case ACTION_FINDUPDATE:
+        {
+            struct FileHandle *fh;
+            ULONG perms=15L, needed=15L;
+            tp->tp_Arg3 = MKBADDR( (ULONG) tp->tp_Arg3 + (ULONG) tp );
+            if (!tp->tp_Arg2)
+                tp->tp_Arg2 = (LONG) mi->mfsi_BaseLock;
+            else
+            {
+                if (!(tp->tp_Arg2+1))
+                {
+                    tp->tp_Arg2 = 0L;
+                }
+            }
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                ULONG perms, needed=0L;
+                perms = BestPermFromLock((struct FileLock *)tp->tp_Arg2,mi);
+                if (tp->tp_Type == ACTION_FINDINPUT)
+//                    needed |= FIBF_READ;
+                    needed |= 0L;
+                /* If Delete isn't set, I ought to try to lock the item they're trying
+                 * to create -- if it's there, and they're trying FINDOUTPUT,
+                 * fail.  FIXME. */
+                if (tp->tp_Type == ACTION_FINDOUTPUT)
+                    needed |= FIBF_WRITE;
+                if (tp->tp_Type == ACTION_FINDUPDATE)
+                    needed |= FIBF_READ|FIBF_WRITE;
+            }
+
+            if (perms & needed)
+            {
+                if ((tp->tp_Arg4) || (mi->mfsi_Flags))
+                {
+                    if (SameLock((BPTR)tp->tp_Arg2,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME)
+                    {
+                        char fname[128];
+                        char *p= (char *) BADDR(tp->tp_Arg3);
+                        if (p[0] < 128)
+                        {
+                            CopyMem(&p[1],&fname[0],p[0]);
+                            fname[p[0]] = 0;
+                        }
+
+                        if ((tp->tp_Arg4 & MFSIF_NOBACKDROP) || (mi->mfsi_Flags & MFSIF_NOBACKDROP))
+                        {
+                            if (!Strnicmp(&fname[0],".backdrop",128))
+                            {
+                                tp->tp_Res1 = DOSFALSE;
+                                if (tp->tp_Type == ACTION_FINDINPUT)
+                                    tp->tp_Res2 = ERROR_OBJECT_NOT_FOUND;
+                                else
+                                    tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+                                break;
+                            }
+                        }
+                        if ((tp->tp_Arg4 & MFSIF_NODISKINFO) || (mi->mfsi_Flags & MFSIF_NODISKINFO))
+                        {
+                            if (!Strnicmp(&fname[0],"Disk.info",128))
+                            {
+                                tp->tp_Res1 = DOSFALSE;
+                                if (tp->tp_Type == ACTION_FINDINPUT)
+                                    tp->tp_Res2 = ERROR_OBJECT_NOT_FOUND;
+                                else
+                                    tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+                                break;
+                            }
+
+                        }
+                    }
+                }
+                fh = (struct FileHandle *) AllocMem(sizeof(struct FileHandle),MEMF_CLEAR|MEMF_PUBLIC);
+                tp->tp_Arg1 = MKBADDR(fh);
+                if (!fh)
+                {
+                    tp->tp_Res1 = DOSFALSE;
+                    tp->tp_Res2 = ERROR_NO_FREE_STORE;
+                    break;
+                }
+                else
+                {
+                    fh->fh_Pos = -1L;
+                    fh->fh_End = -1L;
+                    fh->fh_Type = ((struct FileLock *) BADDR(mi->mfsi_BaseLock))->fl_Task;
+                    tp->tp_Res1 =
+                        DoPkt((((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                    tp->tp_Res2 = IoErr();
+
+                    if (!tp->tp_Res1)
+                        FreeMem(fh,sizeof(struct FileHandle));
+                    else
+                    {
+                        tp->tp_Res1 = (LONG) fh;
+                        KeepFH(fh,mi);
+                        TackPathFH(tp->tp_Arg2,fh,t);
+                    }
+                }
+            }
+            else
+            {
+                ULONG g;
+                tp->tp_Res1 = 0L;
+                g =  ((needed ^ perms) & perms);
+                if (g & FIBF_WRITE)
+                    tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+                if (g & FIBF_READ)
+                    tp->tp_Res2 = ERROR_READ_PROTECTED;
+                /* If both were needed, in the case of FINDUPDATE,
+                 * and neither were supplied, it'll error with a READ_PROT.
+                 */
+            }
+            break;
+        }
+        case ACTION_WRITE:
+        {
+            struct FileHandle *fh;
+            fh = (struct FileHandle *) tp->tp_Arg1;
+            tp->tp_Arg2 += (LONG) tp;
+            tp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,fh->fh_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            t->trans_RespDataActual = sizeof(struct TPacket);
+            break;
+        }
+        case ACTION_READ:
+        {
+            struct FileHandle *fh;
+            struct TPacket *rtp;
+            fh = (struct FileHandle *) tp->tp_Arg1;
+            tp->tp_Arg2 = (LONG) t->trans_ResponseData + sizeof(struct TPacket);
+            rtp = (struct TPacket *) t->trans_ResponseData;
+            rtp->tp_Type = tp->tp_Type;
+            rtp->tp_DosPacket = tp->tp_DosPacket;
+            rtp->tp_Arg4 = tp->tp_Arg4;
+            rtp->tp_Arg3 = tp->tp_Arg3;
+            rtp->tp_Arg1 = tp->tp_Arg1;
+            rtp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,fh->fh_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            rtp->tp_Res2 = IoErr();
+            if ((rtp->tp_Res1) && (rtp->tp_Res1 + 1))   /* If res1 != 0 and != -1 */
+                t->trans_RespDataActual = rtp->tp_Res1 + sizeof(struct TPacket);
+            break;
+        }
+        case ACTION_SEEK:
+        {
+            struct FileHandle *fh;
+            fh = (struct FileHandle *) tp->tp_Arg1;
+            tp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,fh->fh_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            break;
+        }
+        case ACTION_END:
+        {
+            struct FileHandle *fh;
+            fh = (struct FileHandle *) tp->tp_Arg1;
+            tp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,fh->fh_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            NukeFH(fh,mi);
+            FreeMem(fh,sizeof(struct FileHandle));
+            break;
+        }
+
+        case ACTION_FLUSH:
+        {
+            tp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            break;
+        }
+
+
+        case ACTION_FREE_LOCK:
+        case ACTION_PARENT:
+        case ACTION_COPY_DIR:
+        {
+
+            ULONG needed=15L, perms=15L;
+
+            if (tp->tp_Type == ACTION_PARENT)
+            {
+                if (SameLock((BPTR)tp->tp_Arg1,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME)
+                {
+                    tp->tp_Res1 = 0L;
+                    tp->tp_Res2 = 0L;
+                    break;
+                }
+            }
+
+            if (!tp->tp_Arg1)
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                perms = BestPermFromLock((struct FileLock *) tp->tp_Arg1,mi);
+                switch (tp->tp_Type)
+                {
+                    case ACTION_FREE_LOCK:
+                        perms = 15;
+                        break;
+                    case ACTION_PARENT:
+                    case ACTION_COPY_DIR:
+                        needed = FIBF_EXECUTE;
+                        break;
+                }
+            }
+
+            if (needed & perms)
+            {
+                if (tp->tp_Type == ACTION_FREE_LOCK)
+                    NukeLock((APTR)tp->tp_Arg1,mi);
+                tp->tp_Res1 =
+                    DoPkt((((struct FileLock *)BADDR(tp->tp_Arg1))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                tp->tp_Res2 = IoErr();
+                if ((tp->tp_Type != ACTION_FREE_LOCK) && (tp->tp_Res1))
+                {
+                    KeepLock((APTR)tp->tp_Res1,mi);
+                    TackPathLock((APTR)tp->tp_Res1,t);
+                }
+            }
+            else
+            {
+                tp->tp_Res1 = 0L;
+                tp->tp_Res2 = ERROR_EXECUTE_PROTECTED;
+            }
+
+            break;
+        }
+        case ACTION_RENAME_OBJECT:
+        {
+            ULONG needed = 15L, perms = 15L;
+
+            if (!tp->tp_Arg1)
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+            if (!tp->tp_Arg3)
+                tp->tp_Arg3 = (LONG) mi->mfsi_BaseLock;
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                perms = BestPermFromLock((struct FileLock *)tp->tp_Arg3,mi);
+                needed = FIBF_WRITE;
+            }
+
+            if (needed & perms)
+            {
+                tp->tp_Arg2 += (LONG) tp;
+                tp->tp_Arg2 = MKBADDR(tp->tp_Arg2);
+                tp->tp_Arg4 += (LONG) tp;
+                tp->tp_Arg4 = MKBADDR(tp->tp_Arg4);
+
+                tp->tp_Res1 =
+                    DoPkt((((struct FileLock *)BADDR(tp->tp_Arg1))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                tp->tp_Res2 = IoErr();
+            }
+            else
+            {
+                tp->tp_Res1 = 0L;
+                tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+            }
+            break;
+
+        }
+        case ACTION_CREATE_DIR:
+        case ACTION_DELETE_OBJECT:
+        case ACTION_LOCATE_OBJECT:
+        {
+            ULONG needed = 15L, perms = 15L;
+            BPTR locktocheck;
+            BOOL gotalock = FALSE;
+
+            tp->tp_Arg2 += (LONG) tp;
+            tp->tp_Arg2 = MKBADDR(tp->tp_Arg2);
+            if (!tp->tp_Arg1)
+            {
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+            }
+            else
+            {
+                if (!(tp->tp_Arg1+1))
+                    tp->tp_Arg1 = 0L;
+            }
+            locktocheck = (BPTR) tp->tp_Arg1;
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                if (tp->tp_Type == ACTION_DELETE_OBJECT)
+                {
+                    /* If delete_object, we need to be sure that the object to be deleted actually has delete permissions -- not the directory in which it resides */
+                    locktocheck =
+                        DoPkt((((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task),ACTION_LOCATE_OBJECT,tp->tp_Arg1,tp->tp_Arg2,ACCESS_READ,tp->tp_Arg4,tp->tp_Arg5);
+                    if (!locktocheck)
+                    {
+                        tp->tp_Res1 = 0L;
+                        tp->tp_Res2 = ERROR_OBJECT_NOT_FOUND;
+                        break;
+                    }
+                    gotalock = TRUE;
+                }
+                perms = BestPermFromLock((struct FileLock *)locktocheck,mi);
+                if (gotalock)
+                    DoPkt((((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task),ACTION_FREE_LOCK,locktocheck,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+
+                switch (tp->tp_Type)
+                {
+                    case ACTION_CREATE_DIR:
+                        needed = FIBF_WRITE;
+                        break;
+                    case ACTION_DELETE_OBJECT:
+                        needed = FIBF_DELETE;
+                        break;
+                    case ACTION_LOCATE_OBJECT:
+                    {
+                        needed = FIBF_EXECUTE;
+                        break;
+                    }
+                }
+            }
+
+            if (needed & perms)
+            {
+                if (tp->tp_Type == ACTION_LOCATE_OBJECT)
+                {
+                    char fname[128];
+                    char *p= (char *) BADDR(tp->tp_Arg2);
+                    if (p[0] < 128)
+                    {
+                        CopyMem(&p[1],&fname[0],p[0]);
+                        fname[p[0]] = 0;
+                    }
+
+                    if ((tp->tp_Arg4 & MFSIF_NOBACKDROP) || (mi->mfsi_Flags & MFSIF_NOBACKDROP))
+                    {
+                        if (!Strnicmp(&fname[0],".backdrop",128))
+                        {
+                            tp->tp_Res1 = DOSFALSE;
+                            tp->tp_Res2 = ERROR_OBJECT_NOT_FOUND;
+                            break;
+                        }
+                    }
+                    if (SameLock((BPTR)tp->tp_Arg1,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME)
+                    {
+                        if ((tp->tp_Arg4 & MFSIF_NODISKINFO) || (mi->mfsi_Flags & MFSIF_NODISKINFO))
+                        {
+                            if (!Strnicmp(&fname[0],"Disk.info",128))
+                            {
+                                tp->tp_Res1 = DOSFALSE;
+                                tp->tp_Res2 = ERROR_OBJECT_NOT_FOUND;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (tp->tp_Type != ACTION_LOCATE_OBJECT)
+                {
+                    tp->tp_Res1 =
+                        DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                    tp->tp_Res2 = IoErr();
+                }
+                else
+                {
+                    tp->tp_Res1 = GetALock((BSTR) tp->tp_Arg2, tp->tp_Arg1,mi,tp->tp_Arg3);
+                    tp->tp_Res2 = IoErr();
+                }
+
+                if ((tp->tp_Res1) && (tp->tp_Type != ACTION_DELETE_OBJECT))
+                {
+                    KeepLock((APTR)tp->tp_Res1,mi);
+                    TackPathLock((APTR)tp->tp_Res1,t);
+                }
+            }
+            else
+            {
+                tp->tp_Res1 = 0L;
+                switch (tp->tp_Type)
+                {
+                    case ACTION_LOCATE_OBJECT:
+                        tp->tp_Res2 = ERROR_EXECUTE_PROTECTED;
+                        break;
+                    case ACTION_DELETE_OBJECT:
+                        tp->tp_Res2 = ERROR_DELETE_PROTECTED;
+                        break;
+                    case ACTION_CREATE_DIR:
+                        tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+                        break;
+                }
+            }
+            break;
+        }
+        case ACTION_SET_PROTECT:
+        {
+            ULONG perms = 15L, needed = 15L;
+
+            tp->tp_Arg3 += (LONG) tp;
+            tp->tp_Arg3 = MKBADDR(tp->tp_Arg3);
+
+            if (!tp->tp_Arg2)
+                tp->tp_Arg2 = (LONG) mi->mfsi_BaseLock;
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                perms = (ULONG) (mi->mfsi_UID == UIDFromLock((struct FileLock *) tp->tp_Arg2));
+                needed = 1L;
+            }
+
+            if (needed & perms)
+            {
+                tp->tp_Res1 =
+                    DoPkt((((struct FileLock *)BADDR(tp->tp_Arg2))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                tp->tp_Res2 = IoErr();
+            }
+            else
+            {
+                tp->tp_Res1 = 0L;
+                tp->tp_Res2 = ERROR_WRITE_PROTECTED;
+            }
+            break;
+        }
+        case ACTION_SET_COMMENT:
+        {
+            ULONG perms = 15L, needed = 15L;
+            tp->tp_Arg3 += (LONG) tp;
+            tp->tp_Arg3 = MKBADDR(tp->tp_Arg3);
+            tp->tp_Arg4 += (LONG) tp;
+            tp->tp_Arg4 = MKBADDR(tp->tp_Arg4);
+            if (!tp->tp_Arg2)
+                tp->tp_Arg2 = (LONG) mi->mfsi_BaseLock;
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                perms = BestPermFromLock((struct FileLock *) tp->tp_Arg2,mi);
+                needed = FIBF_WRITE;
+            }
+            if (needed & perms)
+            {
+                tp->tp_Res1 =
+                    DoPkt((((struct FileLock *)BADDR(tp->tp_Arg2))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                tp->tp_Res2 = IoErr();
+            }
+            else
+            {
+                tp->tp_Arg1 = 0L;
+                tp->tp_Arg2 = ERROR_WRITE_PROTECTED;
+            }
+            break;
+        }
+
+        case ACTION_SET_DATE:
+        {
+            ULONG needed = 15L, perms=15L;
+            tp->tp_Arg3 = MKBADDR((ULONG) tp->tp_Arg3 + (ULONG) tp); /* Add offset to tp, make into a bptr */
+            if (!tp->tp_Arg2)
+                tp->tp_Arg2 = (LONG) mi->mfsi_BaseLock;
+            tp->tp_Arg4 =( (ULONG) tp->tp_Arg4 + (ULONG) tp);
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                perms = BestPermFromLock((struct FileLock *)tp->tp_Arg2,mi);
+                needed = FIBF_WRITE;
+            }
+            if (needed & perms)
+            {
+                tp->tp_Res1 =
+                    DoPkt((((struct FileLock *)BADDR(tp->tp_Arg2))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                tp->tp_Res2 = IoErr();
+                break;
+            }
+            else
+            {
+                tp->tp_Arg1 = 0L;
+                tp->tp_Arg2 = ERROR_WRITE_PROTECTED;
+            }
+
+        }
+
+        case ACTION_SAME_LOCK:
+        {
+            if (!tp->tp_Arg1)
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+
+            if (!tp->tp_Arg2)
+                tp->tp_Arg2 = (LONG) mi->mfsi_BaseLock;
+
+            tp->tp_Res1 =
+                DoPkt((((struct FileLock *)BADDR(tp->tp_Arg2))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+
+            break;
+        }
+
+        case ACTION_INFO:
+        {
+            if (!tp->tp_Arg1)
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+
+            tp->tp_Arg2 = MKBADDR((ULONG) tp->tp_Arg2 + (ULONG) tp);
+            tp->tp_Res1 =
+                DoPkt((((struct FileLock *)BADDR(tp->tp_Arg1))->fl_Task),tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            t->trans_RespDataActual = (sizeof(struct TPacket)+sizeof(struct InfoData));
+            break;
+
+        }
+
+        case ACTION_DISK_INFO:
+        {
+            tp->tp_Arg1 = MKBADDR((ULONG) tp->tp_Arg1 + (ULONG) tp);
+            tp->tp_Res1 =
+                DoPkt(((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task,tp->tp_Type,tp->tp_Arg1,tp->tp_Arg2,tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+            tp->tp_Res2 = IoErr();
+            t->trans_RespDataActual = (sizeof(struct TPacket)+sizeof(struct InfoData));
+            break;
+
+        }
+
+        case ACTION_EXAMINE_NEXT:
+        case ACTION_EXAMINE_OBJECT:
+        {
+            BOOL rootdir=FALSE;
+            BOOL loop=TRUE;
+            ULONG perms=15L, needed=15L;
+
+            if (!tp->tp_Arg1)
+                tp->tp_Arg1 = (LONG) mi->mfsi_BaseLock;
+
+            if (mi->mfsi_Flags & MFSIF_SECURITYON)
+            {
+                if (tp->tp_Type == ACTION_EXAMINE_NEXT)
+                {
+                    perms = BestPermFromLock((struct FileLock *)tp->tp_Arg1,mi);
+                    needed = FIBF_READ;
+                }
+            }
+
+            if (needed & perms)
+            {
+                if (tp->tp_Type == ACTION_EXAMINE_OBJECT)
+                    if (SameLock((BPTR)tp->tp_Arg1,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME)
+                        rootdir = TRUE;
+                tp->tp_Arg2 = MKBADDR((ULONG) tp->tp_Arg2 + (ULONG) tp); /* Add offset to tp, make into a bptr */
+
+                while(loop)
+                {
+                    loop = FALSE;
+                    tp->tp_Res1 =
+                        DoPkt((((struct FileLock *)BADDR(tp->tp_Arg1))->fl_Task),tp->tp_Type,tp->tp_Arg1,MKBADDR(mi->mfsi_FIB),tp->tp_Arg3,tp->tp_Arg4,tp->tp_Arg5);
+                    tp->tp_Res2 = IoErr();
+                    CopyMem(mi->mfsi_FIB, BADDR(tp->tp_Arg2), sizeof(struct FileInfoBlock));
+                    if ((tp->tp_Res1) && (rootdir))
+                    {
+                        struct FileInfoBlock *myfib=(struct FileInfoBlock *) BADDR(tp->tp_Arg2);
+                        myfib->fib_DirEntryType = ST_ROOT;
+                        strncpy((char *)&myfib->fib_FileName[1],(char *)mi->mfsi_VolumeName,106);
+                        myfib->fib_FileName[0]=strlen(&myfib->fib_FileName[1]);
+                    }
+                    if (tp->tp_Res1)
+                    {
+                        /* Convert from a BSTR to a CSTR */
+                        struct FileInfoBlock *myfib=(struct FileInfoBlock *) BADDR(tp->tp_Arg2);
+                        char fname[128];
+                        char *p= (char *) &myfib->fib_FileName[0];
+                        if (p[0] < 128)
+                        {
+                            CopyMem(&p[1],&fname[0],p[0]);
+                            fname[p[0]] = 0;
+                        }
+
+                        if ((tp->tp_Arg4 & MFSIF_NOBACKDROP) || (mi->mfsi_Flags & MFSIF_NOBACKDROP))
+                        {
+                            if ((!Strnicmp(&fname[0],".backdrop",107)) && (tp->tp_Type == ACTION_EXAMINE_NEXT))
+                                loop = TRUE;
+                        }
+                        if ((tp->tp_Arg4 & MFSIF_NODISKINFO) || (mi->mfsi_Flags & MFSIF_NODISKINFO))
+                        {
+                            if (SameLock((BPTR)tp->tp_Arg1,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME)
+                                if ((!Strnicmp(&fname[0],"Disk.info",107)) && (tp->tp_Type == ACTION_EXAMINE_NEXT))
+                                    loop = TRUE;
+                        }
+                    }
+                }
+
+//                t->trans_RespDataActual = t->trans_ReqDataLength;
+                t->trans_RespDataActual = ((ULONG)(BADDR(tp->tp_Arg2))+sizeof(struct FileInfoBlock))-(ULONG)tp;
+                /* ^^^ Only send back what we need! */
+            }
+            else
+            {
+                tp->tp_Res1 = 0L;
+                tp->tp_Res2 = ERROR_READ_PROTECTED;
+            }
+            break;
+        }
+        case ACTION_UIDTOUSER:
+        case ACTION_GIDTOGROUP:
+        case ACTION_USERTOUID:
+        case ACTION_GROUPTOGID:
+        /* Fill me in when security stuff is available */
+            break;
+    }
+}
+
+
+/* My replacement for NameFromLock.  Lets me get away with NameFromLock'ing something with
+ * a parent that's exclusively locked.  Bugs:  Doesn't check for <len>!!  Fixme!
+ */
+BOOL GNameFromLock(ULONG lock, char * buffer, ULONG len)
+{
+
+    ULONG tlock, nlock;
+    struct FileInfoBlock *fib;
+    char tempstring[256], *temp;
+
+    fib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,0L);
+    buffer[0]=0;
+
+    if (!fib)
+        return(FALSE);
+
+    temp = &tempstring[0];
+
+    tlock = lock;
+    while (tlock)
+    {
+        int l;
+        nlock = ParentDir(tlock);
+        Examine(tlock,fib);
+        l = strlen(fib->fib_FileName);
+        if ((tlock != lock) || ((tlock == lock) && (!nlock)))
+        {
+            strcpy(temp+l+1,buffer);
+            memcpy(temp,fib->fib_FileName,l);
+            if (nlock)
+                temp[l]='/';
+            else
+                temp[l]=':';
+        }
+        else
+        {
+            strcpy(temp+l,buffer);
+            memcpy(temp,fib->fib_FileName,l);
+        }
+        strcpy(buffer,temp);
+
+        if (tlock != lock)
+            UnLock(tlock);
+        tlock = nlock;
+
+    }
+
+    FreeDosObject(DOS_FIB,fib);
+    return(TRUE);
+}
+
+
+
+void TackPathLock(struct FileLock *f,struct Transaction *t)
+{
+    UBYTE *p;
+    p = &(((UBYTE *)t->trans_ResponseData)[sizeof(struct TPacket)]);
+
+    if (GNameFromLock((ULONG)f,p,t->trans_RespDataLength-sizeof(struct TPacket)))
+    {
+        t->trans_RespDataActual = sizeof(struct TPacket) + strlen(p) + 1;
+    }
+
+}
+
+
+/*
+ * TackPathFH - finds the complete path to a file, and stores that in
+ * the free data area at the end of a TPacket.
+ *
+ * I can't simply use NameFromFH, though.  It's possible to
+ * CreateDir(), and Open() a file in that dir.  This causes NameFromFH
+ * to fail, because CreateDir() yields an EXCLUSIVE lock on the directory.
+ * (Actually, NameFromFH works by using ParentFH to find the directory
+ * in which the file exists, NameFromLock to find the name of that, and
+ * ExamineFH to find the filename.  ParentFH complains about the
+ * exclusive lock.  I get around this by almost duplicating NameFromFH,
+ * (what little of it there is), except that since I already have the
+ * parent directory locked, I needn't bother with ParentFH.
+ *
+ */
+
+void TackPathFH(ULONG l,struct FileHandle *f,struct Transaction *t)
+{
+    UBYTE *p;
+    struct FileInfoBlock *myfib;
+    p = &(((UBYTE *)t->trans_ResponseData)[sizeof(struct TPacket)]);
+    p[0]=0;
+
+    myfib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,0L);
+    if (myfib)
+    {
+        if (GNameFromLock(l,p,t->trans_RespDataLength-sizeof(struct TPacket)))
+        {
+            if (ExamineFH(MKBADDR(f),myfib))
+            {
+                AddPart(p,myfib->fib_FileName,t->trans_RespDataLength-sizeof(struct TPacket));
+                t->trans_RespDataActual = sizeof(struct TPacket) + strlen(p) + 1;
+            }
+        }
+        FreeDosObject(DOS_FIB,myfib);
+    }
+
+}
+
+BPTR GetALock(BSTR q, BPTR relative, struct MountedFSInfo *mi, LONG type)
+{
+
+    STRPTR x;
+    STRPTR g = (STRPTR) BADDR(q);
+    UBYTE one[256],twox[264], *two;
+    UBYTE FullPath[512];
+    BPTR CurrentLock, NewLock;
+    BOOL firstthrough = TRUE;
+    CurrentLock = relative;
+
+
+    two = (UBYTE *) (((ULONG)&twox[0] & (ULONG) ~7L)+8);
+
+    CopyMem(&g[1], &FullPath[0], g[0]);
+    FullPath[g[0]] = 0;
+
+    x = &FullPath[0];
+    while (TRUE)
+    {
+        STRPTR y;
+        ULONG l;
+        y = x;
+        while ((*y != ':') && (*y != '/') && (*y))
+            y++;
+
+        if ((*y == ':') || (*y == '/'))
+            y++;
+
+        l = (ULONG) y - (ULONG) x;
+        if (l > 255)
+            return(0);
+
+        strncpy(&one[0],x,l);
+        one[l]=0;
+
+        strcpy(&two[1],one);
+        two[0] = strlen(one);
+
+        if (mi->mfsi_Flags & MFSIF_SECURITYON)
+        {
+            if (!(BestPermFromLock((struct FileLock *)CurrentLock,mi) & FIBF_EXECUTE))
+            {
+                if (!firstthrough)
+                    UnLock(CurrentLock);
+                ((struct Process *) FindTask(0L))->pr_Result2 = ERROR_EXECUTE_PROTECTED;
+                return(0L);
+            }
+        }
+
+        if ((l == 1) && (one[0] == '/'))
+        {
+            /* Find out if the user is trying to jump back a directory from a mountpoint */
+            /* If so, return with a NULL lock and an error of 'obj not found'. */
+            if (SameLock((BPTR) CurrentLock,(BPTR) mi->mfsi_BaseLock) == LOCK_SAME)
+            {
+                if (!firstthrough)
+                    UnLock(CurrentLock);
+                ((struct Process *) FindTask(0L))->pr_Result2 = ERROR_OBJECT_NOT_FOUND;
+                return(0L);
+            }
+            NewLock = ParentDir(CurrentLock);
+        }
+        else
+            NewLock = DoPkt((((struct FileLock *)BADDR(mi->mfsi_BaseLock))->fl_Task),ACTION_LOCATE_OBJECT,(LONG) CurrentLock,(LONG) MKBADDR(two),ACCESS_READ,0,0);
+
+        if (!firstthrough)
+            UnLock(CurrentLock);
+
+        if (!NewLock)
+        {
+            return(0L);
+        }
+
+        CurrentLock = NewLock;
+
+        firstthrough = FALSE;
+
+        x = y;
+        if (!(*x))
+            break;
+    }
+    return(CurrentLock);
+
+}
+
+
+@

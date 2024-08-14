@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	41
+DATE	MACRO
+		dc.b	'14.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'catslha 1.41'
+	ENDM
+VSTRING	MACRO
+		dc.b	'catslha 1.41 (14.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: catslha 1.41 (14.7.93)',0
+	ENDM

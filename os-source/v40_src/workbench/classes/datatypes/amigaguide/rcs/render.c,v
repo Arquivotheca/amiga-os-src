@@ -1,0 +1,1768 @@
+head     39.18;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.18; strict;
+comment  @ * @;
+
+
+39.18
+date     93.09.22.15.40.19;  author davidj;  state Exp;
+branches ;
+next     39.17;
+
+39.17
+date     93.06.17.14.01.43;  author davidj;  state Exp;
+branches ;
+next     39.16;
+
+39.16
+date     93.05.25.12.38.03;  author davidj;  state Exp;
+branches ;
+next     39.15;
+
+39.15
+date     93.05.03.10.46.38;  author davidj;  state Exp;
+branches ;
+next     39.14;
+
+39.14
+date     93.04.30.15.28.45;  author davidj;  state Exp;
+branches ;
+next     39.13;
+
+39.13
+date     93.03.22.16.15.19;  author davidj;  state Exp;
+branches ;
+next     39.12;
+
+39.12
+date     92.12.08.11.40.31;  author davidj;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     92.12.07.09.52.57;  author davidj;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     92.12.04.17.05.59;  author davidj;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     92.10.28.15.10.09;  author davidj;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     92.08.13.13.12.56;  author davidj;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     92.08.10.16.19.25;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.08.03.16.42.20;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.07.23.17.05.25;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.07.15.22.34.55;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.06.22.10.56.16;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.19.04.06.26;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.05.04.20.46;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.31.37;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.18
+log
+@can now turn off the control panel
+@
+text
+@/* render.c
+ *
+ */
+
+#include "amigaguidebase.h"
+#include <graphics/gfxmacros.h>
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+#define	EG(o)	((struct ExtGadget *)(o))
+
+/*****************************************************************************/
+
+VOID prepareRastPorts (struct AGLib * ag, Class * cl, Object * o)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G(o)->SpecialInfo;
+    struct TextFont *font;
+    struct ClientData *cd;
+    struct NodeData *nd;
+
+    cd = INST_DATA (cl, o);
+
+    if (cd->cd_Window && cd->cd_Window->RPort && (cd->cd_Flags & AGF_NEWSIZE))
+    {
+	/* clear it */
+	cd->cd_Flags &= ~AGF_NEWSIZE;
+
+	/* Get the data pointers */
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+	/* Get the font information */
+	if (nd->nd_Font)
+	    font = nd->nd_Font;
+	else if (cd->cd_Font)
+	    font = cd->cd_Font;
+	else
+	    font = cd->cd_GInfo.gi_DrInfo->dri_Font;
+
+	/* Exclusive access to the work rastport */
+	ObtainSemaphore (&si->si_Lock);
+
+	/* Initialize text RastPort */
+	cd->cd_Render = *cd->cd_Window->RPort;
+	SetFont (&cd->cd_Render, font);
+	SetABPenDrMd (&cd->cd_Render, cd->cd_GInfo.gi_DrInfo->dri_Pens[TEXTPEN], cd->cd_GInfo.gi_DrInfo->dri_Pens[BACKGROUNDPEN], JAM2);
+	cd->cd_Render.Mask = 0xFF;
+
+	/* Initialize control panel RastPort */
+	cd->cd_Control = *(&cd->cd_Render);
+	SetFont (&cd->cd_Control, cd->cd_GInfo.gi_DrInfo->dri_Font);
+	cd->cd_ControlHeight = cd->cd_GInfo.gi_DrInfo->dri_Font->tf_YSize + 3;
+
+	/* Initialize clear RastPort */
+	cd->cd_Clear = *(&cd->cd_Render);
+	SetAPen (&cd->cd_Clear, cd->cd_GInfo.gi_DrInfo->dri_Pens[BACKGROUNDPEN]);
+
+	/* Initialize highlight RastPort */
+	cd->cd_Highlight = *(&cd->cd_Render);
+	SetDrMd (&cd->cd_Highlight, COMPLEMENT);
+	cd->cd_Highlight.Mask = 0x1;
+
+	/* Initialize temporary RastPort */
+	cd->cd_RPort = *(&cd->cd_Render);
+
+	/* OK, they can use it now */
+	ReleaseSemaphore (&(si->si_Lock));
+    }
+}
+
+/*****************************************************************************/
+
+static struct Region *r_installClipRegion (struct AGLib *ag, struct Window *w, struct Layer *l, struct Region *r)
+{
+    BOOL refresh = FALSE;
+    struct Region *or;
+
+    if (w->Flags & WINDOWREFRESH)
+    {
+	EndRefresh (w, FALSE);
+	refresh = TRUE;
+    }
+    or = InstallClipRegion (l, r);
+    if (refresh)
+	BeginRefresh (w);
+    return (or);
+}
+
+/*****************************************************************************/
+
+static LONG r_renderLine (struct AGLib * ag, struct ClientData *cd, struct RastPort *rp, struct Line *ln, UWORD x, UWORD y, UWORD rmarg)
+{
+    Move (rp, x, y);
+    Text (rp, ln->ln_Text, ln->ln_TextLen);
+
+    if (rp->cp_x < rmarg)
+    {
+	RectFill (&cd->cd_Clear,
+		  rp->cp_x, y - rp->TxBaseline - 1,
+		  rmarg, y - rp->TxBaseline + rp->TxHeight);
+    }
+
+    return ((LONG) rp->cp_x);
+}
+
+/*****************************************************************************/
+
+LONG r_renderLink (struct AGLib *ag, struct ClientData *cd, struct Line *line, LONG x, LONG y, UWORD rmarg)
+{
+    struct RastPort *trp = &cd->cd_Render;
+    LONG lx;
+
+    /* Is this the active line */
+    if (line == cd->cd_ActiveLine)
+    {
+	/* Use cd_Highlight as the rast port */
+	trp = &cd->cd_RPort;
+
+	/* Prepare the rastport */
+	SetABPenDrMd (trp, cd->cd_DrawInfo->dri_Pens[FILLPEN], cd->cd_DrawInfo->dri_Pens[FILLPEN], JAM2);
+
+	/* Clear that little area between the border and the text */
+	RectFill (trp,
+		  x + line->ln_Box.Left,
+		  y - cd->cd_Render.TxBaseline,
+		  x + line->ln_Box.Left + 2,
+		  y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 2);
+
+	/* Prepare for text */
+	SetABPenDrMd (trp, cd->cd_DrawInfo->dri_Pens[FILLTEXTPEN], cd->cd_DrawInfo->dri_Pens[FILLPEN], JAM2);
+    }
+    else
+    {
+	/* NEW */
+	SetABPenDrMd (trp, cd->cd_GInfo.gi_DrInfo->dri_Pens[TEXTPEN], cd->cd_GInfo.gi_DrInfo->dri_Pens[BACKGROUNDPEN], JAM2);
+
+	/* Clear that little area between the border and the text */
+	RectFill (&cd->cd_Clear,
+		  x + line->ln_Box.Left,
+		  y - cd->cd_Render.TxBaseline,
+		  x + line->ln_Box.Left + 2,
+		  y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 2);
+    }
+
+    /* Text with button */
+    lx = r_renderLine (ag, cd, trp, line, x + line->ln_Box.Left + 2, y, rmarg) + 2;
+
+    /* Now draw the button */
+    drawbevel (ag, NULL, &cd->cd_RPort, cd->cd_DrawInfo,
+	       x + line->ln_Box.Left, y - line->ln_Font->tf_Baseline - 1,
+	       line->ln_Box.Width, cd->cd_LineHeight, TRUE);
+
+    return (lx);
+}
+
+/*****************************************************************************/
+
+void r_makeNewActive (struct AGLib *ag, Class *cl, Object *o, struct ClientData *cd, struct Line *oln, struct Line *nln, BOOL scroll)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G(o)->SpecialInfo;
+    struct RastPort *rp = &cd->cd_RPort;
+    struct Rectangle rect;
+    struct Region *old_r;
+    struct IBox *d;
+    struct IBox *b;
+    LONG x, y;
+    LONG vta;
+
+    ULONG vt = TAG_IGNORE;
+    ULONG ht = TAG_IGNORE;
+    LONG topv, toph;
+
+    /* Make this the active link */
+    cd->cd_ActiveLine = nln;
+    cd->cd_ActiveNum  = nln->ln_LinkNum;
+
+    /* Get the domain */
+    GetAttr (DTA_Domain, o, (ULONG *)&b);
+
+    /* Calculate top adjustment */
+    vta = UMult32 (si->si_TopVert, cd->cd_LineHeight);
+
+    /* Calculate the default x/y */
+    x = (LONG) b->Left - si->si_TopHoriz;
+    y = (LONG) (cd->cd_Top + cd->cd_RPort.TxBaseline + 1);
+
+    /* Set up the rectangle */
+    rect.MinX = b->Left;
+    rect.MinY = cd->cd_Top;
+    rect.MaxX = b->Left + b->Width - 1;
+    rect.MaxY = cd->cd_Top + cd->cd_UsefulHeight - 1;
+    ClearRegion (cd->cd_Region);
+    OrRectRegion (cd->cd_Region, &rect);
+    old_r = r_installClipRegion (ag, cd->cd_Window, rp->Layer, cd->cd_Region);
+
+    /* Update the visuals of the old button */
+    r_renderLink (ag, cd, oln, x, y + (LONG)oln->ln_Box.Top - vta, 0);
+
+    /* Update the visuals of the new button */
+    r_renderLink (ag, cd, nln, x, y + (LONG) nln->ln_Box.Top - vta, 0);
+
+    /* Restore the previous clipping region */
+    r_installClipRegion (ag, cd->cd_Window, cd->cd_RPort.Layer, old_r);
+
+    /* End early if we aren't supposed to scroll */
+    if (!scroll)
+	return;
+
+    /* Get the current values */
+    topv = si->si_TopVert;
+    toph = si->si_TopHoriz;
+
+    /* See if the link is visible */
+    d = &nln->ln_Box;
+
+    /* See if the button can be seen in the horizontal plane */
+    if (x + d->Left + d->Width - 1 < b->Left)
+    {
+	toph = (LONG) d->Left;
+	ht = DTA_TopHoriz;
+    }
+    else if (x + d->Left > b->Left + b->Width - 1)
+    {
+	toph = (LONG) d->Left;
+	ht = DTA_TopHoriz;
+    }
+
+    /* See if the button can be seen in the vertical plane */
+    if ((LONG)(d->Top + d->Height - 1) - vta < 0)
+    {
+	topv = (LONG) d->Top / cd->cd_LineHeight;
+	vt = DTA_TopVert;
+    }
+    else if ((LONG)d->Top - vta > cd->cd_UsefulHeight - cd->cd_LineHeight)
+    {
+	topv = ((LONG)d->Top / cd->cd_LineHeight) - si->si_VisVert + 1;
+	vt = DTA_TopVert;
+    }
+
+    if ((vt != TAG_IGNORE) || (ht != TAG_IGNORE))
+    {
+	/* Tell the world about our new data */
+	notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+			   GA_ID, G (o)->GadgetID,
+			   ht, toph,
+			   vt, topv,
+			   TAG_DONE);
+    }
+}
+
+/*****************************************************************************/
+
+struct Line *r_activateLink (struct AGLib *ag, Class *cl, Object *o, struct ClientData *cd, LONG dir)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G(o)->SpecialInfo;
+    struct Line *oln;
+    struct Line *ln;
+
+    /* Can't handle this while in layout */
+    if (si->si_Flags & DTSIF_LAYOUT)
+	return NULL;
+
+    /* If there isn't an active link to begin with, that means that there aren't any links */
+    if ((ln = oln = cd->cd_ActiveLine) == NULL)
+	return NULL;
+
+    /* Exclusive access to the work rastport */
+    ObtainSemaphore (&si->si_Lock);
+
+    /* Find the button to activate */
+    if (dir > 0)
+    {
+	while (TRUE)
+	{
+	    ln = (struct Line *) ln->ln_Link.mln_Succ;
+	    if (ln->ln_Link.mln_Succ == NULL)
+		ln = (struct Line *) cd->cd_LineList.mlh_Head;
+
+	    if (ln->ln_Flags & LNF_LINK)
+		break;
+	}
+    }
+    else if (dir < 0)
+    {
+	while (TRUE)
+	{
+	    ln = (struct Line *) ln->ln_Link.mln_Pred;
+	    if (ln->ln_Link.mln_Pred == NULL)
+		ln = (struct Line *) cd->cd_LineList.mlh_TailPred;
+
+	    if (ln->ln_Flags & LNF_LINK)
+		break;
+	}
+    }
+
+    /* Make this the new active button */
+    r_makeNewActive (ag, cl, o, cd, oln, ln, TRUE);
+
+    /* OK, they can use it now */
+    ReleaseSemaphore (&(si->si_Lock));
+
+    return (ln);
+}
+
+/*****************************************************************************/
+
+UWORD ghost_pattern[] = {0x4444, 0x1111, 0x4444, 0x1111};
+
+/*****************************************************************************/
+
+static void r_renderControls (struct AGLib * ag, Class * cl, Object * o, struct gpRender *msg)
+{
+    struct Window *win = msg->gpr_GInfo->gi_Window;
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct Region *old_r = NULL;
+    register struct Controls *c;
+    struct Rectangle rect;
+    BOOL clip = FALSE;
+    struct IBox *box;
+    UWORD i;
+
+    GetAttr (DTA_Domain, o, (ULONG *) & box);
+
+    for (i = 0; (i < MAX_CONTROLS) && !clip; i++)
+    {
+	c = &cd->cd_Controls[i];
+	if (((c->c_Left + cd->cd_BoxWidth - 1) > box->Width) ||
+	    ((c->c_Top + cd->cd_ControlHeight - 1) > box->Height))
+	{
+	    clip = TRUE;
+	}
+    }
+
+    /* SET UP CLIPPING REGION */
+    if (clip)
+    {
+	/* Set up the rectangle */
+	rect.MinX = box->Left;
+	rect.MinY = box->Top;
+	rect.MaxX = box->Left + box->Width - 1;
+	rect.MaxY = MIN (box->Top + box->Height - 1, cd->cd_Top);
+	ClearRegion (cd->cd_Region);
+	OrRectRegion (cd->cd_Region, &rect);
+	old_r = r_installClipRegion (ag, win, msg->gpr_RPort->Layer, cd->cd_Region);
+    }
+
+    for (i = 0; i < MAX_CONTROLS; i++)
+    {
+	c = &cd->cd_Controls[i];
+
+	/* Draw the frame around the button */
+	drawbevel (ag, cd->cd_Frame, msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo,
+		   box->Left + c->c_Left, c->c_Top, cd->cd_BoxWidth, cd->cd_ControlHeight, TRUE);
+
+	/* Render the text for the button */
+	Move (&cd->cd_Control, box->Left + c->c_TLeft, c->c_Top + cd->cd_Control.TxBaseline + 2);
+	Text (&cd->cd_Control, c->c_Label, c->c_LabelLen);
+
+	/* Ghost the button if it is disabled */
+	if (c->c_Flags & CF_DISABLED)
+	{
+	    /* Ghost it */
+	    SetAfPt (msg->gpr_RPort, ghost_pattern, 2);
+	    SetABPenDrMd (msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo->dri_Pens[TEXTPEN], 0, JAM1);
+	    RectFill (msg->gpr_RPort,
+		      box->Left + c->c_Left + 2,
+		      c->c_Top + 1,
+		      box->Left + c->c_Left + cd->cd_BoxWidth - 3,
+		      c->c_Top + cd->cd_ControlHeight - 2);
+	    SetAfPt (msg->gpr_RPort, NULL, 0);
+	}
+    }
+
+#if 0
+    /* Draw the white separator line */
+    SetABPenDrMd (msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo->dri_Pens[SHADOWPEN], 0, JAM1);
+    RectFill (msg->gpr_RPort, box->Left, cd->cd_Top - 2, box->Left + box->Width - 1, cd->cd_Top - 2);
+
+#else
+    /* Draw the white separator line */
+    SetABPenDrMd (msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo->dri_Pens[SHINEPEN], 0, JAM1);
+    RectFill (msg->gpr_RPort, box->Left, cd->cd_Top - 3, box->Left + box->Width - 1, cd->cd_Top - 3);
+
+    /* Draw the black separator line */
+    SetABPenDrMd (msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo->dri_Pens[SHADOWPEN], 0, JAM1);
+    RectFill (msg->gpr_RPort, box->Left, cd->cd_Top - 2, box->Left + box->Width - 1, cd->cd_Top - 2);
+#endif
+
+    if (clip)
+	r_installClipRegion (ag, win, msg->gpr_RPort->Layer, old_r);
+}
+
+/*****************************************************************************/
+
+void r_MakeActiveVisible (struct AGLib *ag, Class *cl, Object *o, struct ClientData *cd, struct IBox *box)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G(o)->SpecialInfo;
+    register struct Line *aline = cd->cd_ActiveLine;
+    register struct Line *line;
+    struct Line *fline = NULL;
+    struct Line *lline = NULL;
+    register LONG i;
+    LONG x, y, vta;
+    BOOL visible;
+
+    i = si->si_TopVert;
+    line = (struct Line *) cd->cd_LineList.mlh_Head;
+    while (line->ln_Link.mln_Succ && i)
+    {
+	if (line->ln_Flags & LNF_LF)
+	    i--;
+	line = (struct Line *) line->ln_Link.mln_Succ;
+    }
+
+    i = si->si_VisVert;
+    x = (LONG) box->Left - si->si_TopHoriz;
+    while (line->ln_Link.mln_Succ && i)
+    {
+	if (line->ln_Flags & LNF_LINK)
+	{
+	    /* See if it is in the horizontal view area */
+	    visible = FALSE;
+	    if ((x + line->ln_Box.Left < box->Left + box->Width - 1) &&
+		(x + line->ln_Box.Left + line->ln_Box.Width - 1 > box->Left))
+		visible = TRUE;
+
+	    if (visible)
+	    {
+		if (aline == line)
+		    return;
+
+		if (fline == NULL)
+		    fline = line;
+		lline = line;
+	    }
+	}
+
+	if (line->ln_Flags & LNF_LF)
+	    i--;
+	line = (struct Line *) line->ln_Link.mln_Succ;
+    }
+
+    if (fline && lline)
+    {
+	struct RastPort *rp = &cd->cd_RPort;
+	struct Rectangle rect;
+	struct Region *old_r;
+
+	if (cd->cd_ActiveNum < fline->ln_LinkNum)
+	{
+	    cd->cd_ActiveLine = line = fline;
+	    cd->cd_ActiveNum  = fline->ln_LinkNum;
+	}
+	else if (cd->cd_ActiveNum > lline->ln_LinkNum)
+	{
+	    cd->cd_ActiveLine = line = lline;
+	    cd->cd_ActiveNum  = lline->ln_LinkNum;
+	}
+
+	/* Calculate the y position of the active button */
+	vta = UMult32 (si->si_TopVert, cd->cd_LineHeight);
+	y = (LONG) (cd->cd_Top + cd->cd_RPort.TxBaseline + 1) + (LONG) line->ln_Box.Top - vta;
+
+	/* Set up the rectangle */
+	rect.MinX = box->Left;
+	rect.MinY = cd->cd_Top;
+	rect.MaxX = box->Left + box->Width - 1;
+	rect.MaxY = cd->cd_Top + cd->cd_UsefulHeight - 1;
+	ClearRegion (cd->cd_Region);
+	OrRectRegion (cd->cd_Region, &rect);
+	old_r = r_installClipRegion (ag, cd->cd_Window, rp->Layer, cd->cd_Region);
+
+	/* Highlight the active button */
+	r_renderLink (ag, cd, line, (LONG) box->Left - si->si_TopHoriz, y, 0);
+
+	/* Restore the previous clipping region */
+	r_installClipRegion (ag, cd->cd_Window, rp->Layer, old_r);
+    }
+}
+
+/*****************************************************************************/
+
+ULONG renderMethod (struct AGLib * ag, Class * cl, Object * o, struct gpRender * msg)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G(o)->SpecialInfo;
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct GadgetInfo *gi = msg->gpr_GInfo;
+    struct Window *win = gi->gi_Window;
+    struct Layer *l = win->WLayer;
+    struct IBox *box = NULL;
+    struct TextFont *font;
+    struct Rectangle rect;
+    struct Region *old_r;
+    struct Hook *oldhook;
+    struct NodeData *nd;
+    struct Line *line;
+    struct IBox *sel;
+    UWORD rmarg;
+    ULONG style;
+    LONG i, j;
+    LONG x, y;
+    LONG lx;
+    WORD cox;
+    WORD cw;
+
+    /***************************/
+    /* Make sure we can render */
+    /***************************/
+    prepareRastPorts (ag, cl, o);
+
+    /* Make sure we have a current node */
+    if (cd->cd_CurrentNode == NULL)
+	return (0);
+
+    if (!(cd->cd_Flags & AGF_LAYOUT))
+	return (0);
+
+    if ((si->si_Flags & DTSIF_LAYOUT) || (!AttemptSemaphoreShared (&(si->si_Lock))))
+    {
+	cd->cd_Flags |= AGF_RENDER;
+	return (0);
+    }
+
+    if (cd->cd_Flags & AGF_RENDER)
+    {
+	cd->cd_Flags ^= AGF_RENDER;
+	msg->gpr_Redraw = GREDRAW_REDRAW;
+    }
+
+    /*************************/
+    /* Initialize the domain */
+    /*************************/
+    nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+    GetAttr (DTA_Domain, o, (ULONG *) & box);
+
+    if (nd->nd_Font)
+	font = nd->nd_Font;
+    else if (cd->cd_Font)
+	font = cd->cd_Font;
+    else
+	font = cd->cd_GInfo.gi_DrInfo->dri_Font;
+
+    rmarg = box->Left + box->Width;
+
+    /****************************/
+    /* Start with a fresh slate */
+    /****************************/
+    if (msg->gpr_Redraw == GREDRAW_REDRAW)
+    {
+	/* Clear the box */
+	RectFill (&cd->cd_Clear,
+		  box->Left, box->Top,	// cd->cd_Top,
+		  box->Left + box->Width - 1, box->Top + box->Height - 1);
+
+	/* Draw the controls */
+	if (cd->cd_Flags & AGF_CONTROLS)
+	    r_renderControls (ag, cl, o, msg);
+    }
+
+    /* See if we have an embedded object */
+    if (nd->nd_Object)
+    {
+	DoMethodA (nd->nd_Object, msg);
+    }
+    else if (msg->gpr_Redraw == GREDRAW_TOGGLE)
+    {
+	si->si_Flags |= DTSIF_HIGHLIGHT;
+	getdtattrs (ag, o, DTA_SelectDomain, &sel, TAG_DONE);
+	si->si_Flags &= ~DTSIF_HIGHLIGHT;
+	DrawBox (ag, cl, o, &cd->cd_Highlight, box, sel, DBS_DOWN);
+    }
+    else
+    {
+	/* Calculate sizes */
+	si->si_VisVert      = UDivMod32 (cd->cd_Height, cd->cd_LineHeight);
+	cd->cd_UsefulHeight = UMult32 (si->si_VisVert, cd->cd_LineHeight);
+
+	/* if we at least one line and one column to render in... */
+	if (cd->cd_UsefulHeight && box->Width)
+	{
+	    cw = box->Width;
+	    cox = 0;
+
+	    /* get a pointer to the first line currently visible */
+	    line = (struct Line *) cd->cd_LineList.mlh_Head;
+	    i = si->si_TopVert;
+	    while (line->ln_Link.mln_Succ && i)
+	    {
+		if (line->ln_Flags & LNF_LF)
+		    i--;
+		line = (struct Line *) line->ln_Link.mln_Succ;
+	    }
+
+	    /* Default to no drawing */
+	    i = j = 0;
+
+	    /* Calculate the default xy */
+	    x = (LONG) box->Left - si->si_TopHoriz;
+	    y = (LONG) (cd->cd_Top + font->tf_Baseline + 1);
+
+	    /* Give ourselves a NULL backfill hook */
+	    oldhook = InstallLayerHook (l, LAYERS_NOBACKFILL);
+
+	    if ((msg->gpr_Redraw == GREDRAW_REDRAW)
+		|| (si->si_TopVert >= cd->cd_OTopVert + si->si_VisVert - 1)
+		|| ((cd->cd_OTopVert > si->si_VisVert) && (si->si_TopVert <= cd->cd_OTopVert - si->si_VisVert + 1))
+		|| (si->si_TopHoriz >= cd->cd_OTopHoriz + si->si_VisHoriz - 1)
+		|| ((cd->cd_OTopHoriz > si->si_VisHoriz) && (si->si_TopHoriz <= cd->cd_OTopHoriz - si->si_VisHoriz + 1))
+		|| ((si->si_TopHoriz != cd->cd_OTopHoriz) && (si->si_TopVert != cd->cd_OTopVert)))
+	    {
+		/* the whole display must be redrawn */
+		i = si->si_VisVert;
+	    }
+	    /* VERTICAL */
+	    else if (si->si_TopVert < cd->cd_OTopVert)
+	    {
+		/* we just need to scroll the text */
+		ScrollRasterBF (msg->gpr_RPort,
+				    0, -(LONG) UMult32 ((cd->cd_OTopVert - si->si_TopVert), cd->cd_LineHeight),
+				    box->Left,
+				    cd->cd_Top,
+				    box->Left + box->Width - 1,
+				    cd->cd_Top + cd->cd_UsefulHeight - 1);
+
+		/* indicates what section needs to be redrawn */
+		i = cd->cd_OTopVert - si->si_TopVert;
+	    }
+	    else if (si->si_TopVert > cd->cd_OTopVert)
+	    {
+		/* we just need to scroll the text */
+		ScrollRasterBF (msg->gpr_RPort,
+				    0, UMult32 ((si->si_TopVert - cd->cd_OTopVert), cd->cd_LineHeight),
+				    box->Left,
+				    cd->cd_Top,
+				    box->Left + box->Width - 1,
+				    cd->cd_Top + cd->cd_UsefulHeight - 1);
+
+		/* indicates what section needs to be redrawn */
+		i = si->si_VisVert - (si->si_TopVert - cd->cd_OTopVert);
+		while (line->ln_Link.mln_Succ && i)
+		{
+		    if (line->ln_Flags & LNF_LF)
+			i--;
+		    line = (struct Line *) line->ln_Link.mln_Succ;
+		}
+
+		y = (LONG) (cd->cd_Top + font->tf_Baseline + UMult32 (cd->cd_LineHeight, (si->si_VisVert - (si->si_TopVert - cd->cd_OTopVert))) + 1);
+		i = si->si_TopVert - cd->cd_OTopVert;
+	    }
+	    /* HORIZONTAL */
+	    else if (si->si_TopHoriz < cd->cd_OTopHoriz)
+	    {
+		/* indicates what section needs to be redrawn */
+		j = cd->cd_OTopHoriz - si->si_TopHoriz;
+		i = si->si_VisVert;
+		cw = (WORD) j;
+
+		/* we just need to scroll the text */
+		ScrollRasterBF (msg->gpr_RPort,
+				    -(j), 0,
+				    box->Left,
+				    cd->cd_Top,
+				    box->Left + box->Width - 1,
+				    cd->cd_Top + cd->cd_UsefulHeight - 1);
+	    }
+	    else if (si->si_TopHoriz > cd->cd_OTopHoriz)
+	    {
+		/* indicates what section needs to be redrawn */
+		j = si->si_TopHoriz - cd->cd_OTopHoriz;
+		i = si->si_VisVert;
+		cw = (WORD) j;
+		cox = box->Width - cw;
+
+		/* we just need to scroll the text */
+		ScrollRasterBF (msg->gpr_RPort,
+				    j, 0,
+				    box->Left,
+				    cd->cd_Top,
+				    box->Left + box->Width - 1,
+				    cd->cd_Top + cd->cd_UsefulHeight - 1);
+	    }
+
+	    if (i)
+	    {
+		/* Make sure a visible node is active */
+		r_MakeActiveVisible (ag, cl, o, cd, box);
+
+		/* Set up the rectangle */
+		rect.MinX = box->Left + cox;
+		rect.MinY = cd->cd_Top;
+		rect.MaxX = rect.MinX + cw - 1;
+		rect.MaxY = box->Top + box->Height - 1;
+		ClearRegion (cd->cd_Region);
+		OrRectRegion (cd->cd_Region, &rect);
+		old_r = r_installClipRegion (ag, win, cd->cd_Render.Layer, cd->cd_Region);
+
+		/* Make sure all the attributes are properly set. */
+		SetABPenDrMd (&cd->cd_Render, line->ln_FgPen, line->ln_BgPen, JAM2);
+		SetSoftStyle (&cd->cd_Render, style = line->ln_Style, 0xFF);
+
+		/* render all the lines we need */
+		lx = x;
+		while (line->ln_Link.mln_Succ && i)
+		{
+		    /* Set the line attributes */
+		    SetABPenDrMd (&cd->cd_Render, line->ln_FgPen, line->ln_BgPen, JAM2);
+		    if (style != line->ln_Style)
+			SetSoftStyle (&cd->cd_Render, style = line->ln_Style, 0xFF);
+
+		    /* Clear before the line */
+		    if (lx < (x + line->ln_Box.Left))
+		    {
+			RectFill (&cd->cd_Clear,
+				  lx, y - cd->cd_Render.TxBaseline - 1,
+				  x + line->ln_Box.Left, y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 2);
+		    }
+
+		    if (x + line->ln_Box.Left < box->Left + box->Width)
+		    {
+			if (line->ln_Flags & LNF_LINK)
+			{
+			    lx = r_renderLink (ag, cd, line, x, y, rmarg);
+			}
+			else
+			{
+			    /* See if we need to clear away any garbage */
+			    if (msg->gpr_Redraw != GREDRAW_REDRAW)
+			    {
+				/* Clear above the text */
+				RectFill (&cd->cd_Clear,
+				      x + line->ln_Box.Left,
+				      y - cd->cd_Render.TxBaseline - 1,
+				      x + line->ln_Box.Left + line->ln_Box.Width,
+				      y - cd->cd_Render.TxBaseline);
+
+				/* Clear below the text */
+				RectFill (&cd->cd_Clear,
+				      x + line->ln_Box.Left,
+				      y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 3,
+				      x + line->ln_Box.Left + line->ln_Box.Width,
+				      y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 2);
+			    }
+
+			    /* Just plain text */
+			    lx = r_renderLine (ag, cd, &cd->cd_Render, line, x + line->ln_Box.Left, y, rmarg);
+			}
+		    }
+
+		    if (line->ln_Flags & LNF_LF)
+		    {
+			lx = x;
+			y += cd->cd_LineHeight;
+			i--;
+		    }
+
+		    line = (struct Line *) line->ln_Link.mln_Succ;
+		}
+
+		/* Restore the soft style */
+		SetSoftStyle (&cd->cd_Render, FS_NORMAL, 0xFF);
+
+		/* Remove the clipping region */
+		r_installClipRegion (ag, win, cd->cd_Render.Layer, old_r);
+	    }
+
+	    /* Restore the original backfill hook */
+	    InstallLayerHook (l, oldhook);
+	}
+
+	si->si_OTopVert = cd->cd_OTopVert = si->si_TopVert;
+	si->si_OTopHoriz = cd->cd_OTopHoriz = si->si_TopHoriz;
+    }
+
+    ReleaseSemaphore (&si->si_Lock);
+    return (1L);
+}
+@
+
+
+39.17
+log
+@default button logic
+@
+text
+@d560 2
+a561 1
+	r_renderControls (ag, cl, o, msg);
+@
+
+
+39.16
+log
+@clean up
+@
+text
+@a10 1
+#define	MAKE_VISIBLE	FALSE
+a170 1
+    LONG hta;
+a184 1
+    hta = si->si_TopHoriz;
+d206 1
+a206 1
+    r_installClipRegion (ag, cd->cd_Window, rp->Layer, old_r);
+d220 1
+a220 1
+    if ((LONG)(d->Left + d->Width - 1) - hta < 0)
+d225 1
+a225 1
+    else if ((LONG)d->Left - hta >= b->Width)
+d227 1
+a227 1
+	toph = (LONG) (d->Left + d->Width - 1);
+d377 14
+a390 6
+    /* Draw the separator line */
+    RectFill (&cd->cd_Render,
+	      box->Left,
+	      cd->cd_Top - 2,
+	      box->Left + box->Width - 1,
+	      cd->cd_Top - 2);
+d398 88
+a500 4
+#if MAKE_VISIBLE
+    struct Line *fln;
+    struct Line *lln;
+#endif
+d553 7
+d561 1
+a580 14
+	/* If we were called because of damage, we must erase any left over garbage */
+	if (msg->gpr_Redraw == GREDRAW_REDRAW)
+	{
+#if MAKE_VISIBLE
+	    /* Clear it */
+	    fln = lln = NULL;
+#endif
+
+	    /* Clear the box */
+	    RectFill (&cd->cd_Clear,
+		      box->Left, cd->cd_Top,
+		      box->Left + box->Width - 1, box->Top + box->Height - 1);
+	}
+
+d688 3
+a725 9
+
+#if MAKE_VISIBLE
+			    if (msg->gpr_Redraw == GREDRAW_REDRAW)
+			    {
+				if (fln == NULL)
+				    fln = line;
+				lln = line;
+			    }
+#endif
+a763 16
+
+#if MAKE_VISIBLE
+		if ((msg->gpr_Redraw == GREDRAW_REDRAW) && cd->cd_ActiveLine)
+		{
+		    if (cd->cd_ActiveNum < fln->ln_LinkNum)
+		    {
+			cd->cd_ActiveLine = fln;
+			cd->cd_ActiveNum  = fln->ln_LinkNum;
+		    }
+		    else if (cd->cd_ActiveNum > lln->ln_LinkNum)
+		    {
+			cd->cd_ActiveLine = lln;
+			cd->cd_ActiveNum  = lln->ln_LinkNum;
+		    }
+		}
+#endif
+@
+
+
+39.15
+log
+@was using the wrong pen number for active button text.
+@
+text
+@d11 1
+d112 1
+a112 1
+static LONG r_renderLink (struct AGLib *ag, struct ClientData *cd, struct Line *line, LONG x, LONG y, UWORD rmarg)
+d138 3
+d408 4
+d487 5
+d640 9
+d681 1
+d687 16
+@
+
+
+39.14
+log
+@now handles active gadget.
+@
+text
+@d133 1
+a133 1
+	SetAPen (trp, cd->cd_DrawInfo->dri_Pens[TEXTPEN]);
+@
+
+
+39.13
+log
+@cleaned up garbage
+@
+text
+@d20 1
+d43 3
+d65 6
+d76 1
+a76 2
+/* Render a single line of text at a given position */
+VOID RenderLine (struct AGLib * ag, struct ClientData *cd, UWORD x, UWORD y, UWORD w, STRPTR text, ULONG len)
+d78 15
+a92 1
+    struct RastPort *rp = &cd->cd_Render;
+d94 2
+d97 1
+a97 1
+    Text (rp, text, len);
+d99 1
+a99 1
+    if (rp->cp_x < w)
+d103 40
+a142 1
+		  w, y - rp->TxBaseline + rp->TxHeight);
+d144 107
+d255 1
+a255 1
+struct Region *installclipregion (struct AGLib *ag, struct Window *w, struct Layer *l, struct Region *r)
+d257 23
+a279 2
+    BOOL refresh = FALSE;
+    struct Region *or;
+d281 5
+a285 1
+    if (w->Flags & WINDOWREFRESH)
+d287 9
+a295 2
+	EndRefresh (w, FALSE);
+	refresh = TRUE;
+d297 8
+a304 4
+    or = InstallClipRegion (l, r);
+    if (refresh)
+	BeginRefresh (w);
+    return (or);
+d313 1
+a313 1
+VOID renderButtons (struct AGLib * ag, Class * cl, Object * o, struct gpRender *msg)
+d346 1
+a346 1
+	old_r = installclipregion (ag, win, msg->gpr_RPort->Layer, cd->cd_Region);
+d384 1
+a384 1
+	installclipregion (ag, win, msg->gpr_RPort->Layer, old_r);
+d391 1
+a395 1
+    struct DTSpecialInfo *si;
+a423 1
+    si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+d456 1
+a456 1
+	renderButtons (ag, cl, o, msg);
+d599 1
+a599 1
+		old_r = installclipregion (ag, win, cd->cd_Render.Layer, cd->cd_Region);
+d615 1
+a615 1
+		    if (lx < (x + line->ln_XOffset))
+d619 1
+a619 1
+				  x + line->ln_XOffset, y - cd->cd_Render.TxBaseline + cd->cd_LineHeight);
+d622 1
+a622 1
+		    if (x + line->ln_XOffset < box->Left + box->Width)
+d626 1
+a626 13
+			    /* Clear that little area between the border and the text */
+			    RectFill (&cd->cd_Clear,
+				      x + line->ln_XOffset,
+				      y - cd->cd_Render.TxBaseline,
+				      x + line->ln_XOffset + 4,
+				      y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 2);
+
+			    /* Text with button */
+			    RenderLine (ag, cd, x + line->ln_XOffset + 4, y, rmarg, line->ln_Text, line->ln_TextLen);
+			    lx = cd->cd_Render.cp_x + 4;
+			    drawbevel (ag, NULL, msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo,
+				       x + line->ln_XOffset, y - font->tf_Baseline - 1,
+				       line->ln_Width, cd->cd_LineHeight, TRUE);
+d630 6
+a635 3
+			    /* Clear above the text */
+			    RectFill (&cd->cd_Clear,
+				      x + line->ln_XOffset,
+d637 1
+a637 1
+				      x + line->ln_XOffset + line->ln_Width,
+d640 3
+a642 3
+			    /* Clear below the text */
+			    RectFill (&cd->cd_Clear,
+				      x + line->ln_XOffset,
+d644 1
+a644 1
+				      x + line->ln_XOffset + line->ln_Width,
+d646 1
+d649 1
+a649 2
+			    RenderLine (ag, cd, x + line->ln_XOffset, y, rmarg, line->ln_Text, line->ln_TextLen);
+			    lx = cd->cd_Render.cp_x;
+d666 1
+a666 1
+		installclipregion (ag, win, cd->cd_Render.Layer, old_r);
+@
+
+
+39.12
+log
+@missing line in the clear rectfill.
+@
+text
+@a10 3
+#define	DR(x)	;
+#define	DN(x)	;
+#define	DX(x)	;
+a27 2
+	DB (kprintf ("  prepareRastPorts begin\n"));
+
+a60 2
+
+	DB (kprintf ("  prepareRastPorts end\n"));
+a116 1
+    DB (kprintf ("renderButtons\n"));
+a141 1
+    DB (kprintf ("draw controls\n"));
+a207 1
+    DR (kprintf ("renderMethod\n"));
+d210 1
+a211 2
+    {
+	DR (kprintf ("no current node\n"));
+a212 1
+    }
+a214 2
+    {
+	DR (kprintf ("agf_layout not set\n"));
+a215 1
+    }
+a219 1
+	DR (kprintf ("layout in progress\n"));
+d252 1
+a254 1
+	DX (kprintf ("render embedded object\n"));
+a255 7
+	if (EG (nd->nd_Object)->MoreFlags & GMORE_SCROLLRASTER)
+	{
+	    EG (o)->MoreFlags |= GMORE_SCROLLRASTER;
+	    EG (nd->nd_Object)->MoreFlags &= ~GMORE_SCROLLRASTER;
+	}
+	setattrs (ag, nd->nd_Object, ICA_TARGET, cd->cd_Glue, TAG_DONE);
+	DX (kprintf ("render complete\n"));
+a302 3
+#if 0
+	    LockLayerInfo (l->LayerInfo);
+#endif
+a318 1
+		EG (o)->MoreFlags |= GMORE_SCROLLRASTER;
+a331 1
+		EG (o)->MoreFlags |= GMORE_SCROLLRASTER;
+a359 1
+		EG (o)->MoreFlags |= GMORE_SCROLLRASTER;
+a375 1
+		EG (o)->MoreFlags |= GMORE_SCROLLRASTER;
+a400 1
+		DR (kprintf ("  line=%08lx, succ=%08lx\n", line, line->ln_Link.mln_Succ));
+d420 7
+d465 3
+a473 3
+#if 0
+	    UnlockLayerInfo (l->LayerInfo);
+#endif
+d476 2
+a477 2
+	cd->cd_OTopVert = si->si_TopVert;
+	cd->cd_OTopHoriz = si->si_TopHoriz;
+@
+
+
+39.11
+log
+@removed LockLayerInfo() calls
+@
+text
+@d443 1
+a443 1
+				  lx, y - cd->cd_Render.TxBaseline,
+@
+
+
+39.10
+log
+@render speedup.
+@
+text
+@d326 1
+d328 1
+d495 1
+d497 1
+@
+
+
+39.9
+log
+@changed ScrollWindowRaster to ScrollRasterBF()
+@
+text
+@d13 1
+d15 2
+d50 1
+a50 3
+	SetDrMd (&cd->cd_Render, JAM2);
+	SetAPen (&cd->cd_Render, cd->cd_GInfo.gi_DrInfo->dri_Pens[TEXTPEN]);
+	SetBPen (&cd->cd_Render, cd->cd_GInfo.gi_DrInfo->dri_Pens[BACKGROUNDPEN]);
+d74 18
+a91 1
+VOID RenderLine (struct AGLib * ag, struct RastPort * rp, UWORD x, UWORD y, STRPTR text, ULONG len)
+d93 12
+a104 2
+    Move (rp, x, y);		/* move the cursor to the position */
+    Text (rp, text, len);	/* write to the window */
+d111 2
+a116 1
+    struct Region *new_r = NULL;
+a119 1
+    BOOL refresh = FALSE;
+d138 1
+a138 1
+    if (clip && (new_r = NewRegion ()))
+a140 1
+	DB (kprintf ("set up clipping\n"));
+d145 3
+a147 17
+
+	DB (kprintf ("(r1) OrRectRegion\n"));
+	OrRectRegion (new_r, &rect);
+	if (win->Flags & WINDOWREFRESH)
+	{
+	    EndRefresh (win, FALSE);
+	    refresh = TRUE;
+	}
+
+	if (msg->gpr_RPort->Layer == NULL)
+	{
+	    DN (kprintf ("render.c 129: layer == NULL\n"));
+	}
+
+	DB (kprintf ("(r1) InstallClipRegion\n"));
+	old_r = InstallClipRegion (msg->gpr_RPort->Layer, new_r);
+	DB (kprintf ("(r1) done\n"));
+d159 3
+a161 3
+	/* Render the text */
+	RenderLine (ag, &cd->cd_Control, box->Left + c->c_TLeft, c->c_Top + cd->cd_Control.TxBaseline + 2,
+		    c->c_Label, c->c_LabelLen);
+d168 1
+a168 2
+	    SetDrMd (msg->gpr_RPort, JAM1);
+	    SetAPen (msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo->dri_Pens[TEXTPEN]);
+d185 2
+a186 10
+    /* REMOVE THE CLIPPING REGION */
+    if (new_r)
+    {
+	DB (kprintf ("(r2) InstallClipRegion\n"));
+	InstallClipRegion (msg->gpr_RPort->Layer, old_r);
+	DB (kprintf ("(r2) done\n"));
+	if (refresh)
+	    BeginRefresh (win);
+	DisposeRegion (new_r);
+    }
+d196 1
+a196 2
+    struct Region *new_r;
+    struct Region *old_r = NULL;
+d201 2
+a202 1
+    BOOL refresh = FALSE;
+a203 1
+    BOOL total = FALSE;
+d206 1
+a207 2
+    BYTE fgpen;
+    BYTE bgpen;
+d260 2
+d270 1
+d277 2
+d289 5
+d302 1
+a302 9
+	/**************************/
+	/* Calculate prop gadgets */
+	/**************************/
+	si->si_VisVert = UDivMod32 (cd->cd_Height, cd->cd_LineHeight);
+	cd->cd_UsefulHeight = UMult32 (si->si_VisVert, cd->cd_LineHeight);
+
+	/*******************/
+	/* Render the text */
+	/*******************/
+d305 3
+a310 3
+	    cw = box->Width;
+	    cox = 0;
+	    DR (kprintf (" top is %ld\n", i));
+d321 8
+a336 2
+		x = (LONG) box->Left - si->si_TopHoriz;
+		y = (LONG) (cd->cd_Top + font->tf_Baseline + 1);
+a337 1
+		total = TRUE;
+a338 1
+
+a339 1
+
+a343 3
+#if 0
+		ScrollWindowRaster (gi->gi_Window,
+#else
+a344 1
+#endif
+a351 2
+		x = (LONG) box->Left - si->si_TopHoriz;
+		y = (LONG) (cd->cd_Top + font->tf_Baseline + 1);
+a357 3
+#if 0
+		ScrollWindowRaster (gi->gi_Window,
+#else
+a358 1
+#endif
+a366 1
+		DR (kprintf ("  si->si_TopVis=%ld\n", i));
+a373 1
+		x = (LONG) box->Left - si->si_TopHoriz;
+a376 1
+
+a377 1
+
+a380 2
+		x = (LONG) box->Left - si->si_TopHoriz;
+		y = (LONG) (cd->cd_Top + font->tf_Baseline + 1);
+a386 3
+#if 0
+		ScrollWindowRaster (gi->gi_Window,
+#else
+a387 1
+#endif
+a396 2
+		x = (LONG) box->Left - si->si_TopHoriz;
+		y = (LONG) (cd->cd_Top + font->tf_Baseline + 1);
+a403 3
+#if 0
+		ScrollWindowRaster (gi->gi_Window,
+#else
+a404 1
+#endif
+d414 9
+d424 1
+a424 2
+		SetAPen (&cd->cd_Render, fgpen = line->ln_FgPen);
+		SetBPen (&cd->cd_Render, bgpen = line->ln_BgPen);
+a426 29
+		/* SET UP CLIPPING REGION HERE */
+		if (new_r = NewRegion ())
+		{
+		    /* Set up the rectangle */
+		    rect.MinX = box->Left + cox;
+		    rect.MinY = cd->cd_Top;
+		    rect.MaxX = rect.MinX + cw - 1;
+#if 0
+		    rect.MaxY = rect.MinY + cd->cd_Height - 1;
+#else
+		    rect.MaxY = box->Top + box->Height - 1;
+#endif
+		    OrRectRegion (new_r, &rect);
+		    if (win->Flags & WINDOWREFRESH)
+		    {
+			EndRefresh (win, FALSE);
+			refresh = TRUE;
+		    }
+
+		    if (cd->cd_Render.Layer == NULL)
+		    {
+			DN (kprintf ("render.c 448: layer == NULL\n"));
+		    }
+
+		    DR (kprintf ("(r3) InstallClipRegion\n"));
+		    old_r = InstallClipRegion (cd->cd_Render.Layer, new_r);
+		    DR (kprintf ("(r3) done\n"));
+		}
+
+d432 2
+a433 4
+		    if (fgpen != line->ln_FgPen)
+			SetAPen (&cd->cd_Render, fgpen = line->ln_FgPen);
+		    if (bgpen != line->ln_BgPen)
+			SetBPen (&cd->cd_Render, bgpen = line->ln_BgPen);
+d437 2
+a438 1
+		    if (total && (lx < (x + line->ln_XOffset)))
+d442 1
+a442 1
+				  x + line->ln_XOffset, y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 1);
+d450 3
+a452 1
+			    drawbevel (ag, cd->cd_Frame, msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo,
+a454 2
+			    RenderLine (ag, &cd->cd_Render, x + line->ln_XOffset + 4, y, line->ln_Text, line->ln_TextLen);
+			    lx = cd->cd_Render.cp_x + 4;
+d473 1
+a473 1
+			    RenderLine (ag, &cd->cd_Render, x + line->ln_XOffset, y, line->ln_Text, line->ln_TextLen);
+a479 9
+			if (total && (cd->cd_Render.cp_x < box->Left + box->Width))
+			{
+			    RectFill (&cd->cd_Clear,
+				      cd->cd_Render.cp_x,
+				      y - cd->cd_Render.TxBaseline - 1,
+				      box->Left + box->Width - 1,
+				      y - cd->cd_Render.TxBaseline + cd->cd_LineHeight - 1);
+			}
+
+d487 2
+a488 10
+		/* REMOVE THE CLIPPING REGION */
+		if (new_r)
+		{
+		    DR (kprintf ("(r4) InstallClipRegion\n"));
+		    InstallClipRegion (cd->cd_Render.Layer, old_r);
+		    DR (kprintf ("(r4) done\n"));
+		    if (refresh)
+			BeginRefresh (win);
+		    DisposeRegion (new_r);
+		}
+d490 4
+d495 1
+d499 1
+@
+
+
+39.8
+log
+@tracks help group
+@
+text
+@d337 1
+d339 3
+d357 1
+d359 3
+d396 1
+d398 3
+d419 1
+d421 3
+@
+
+
+39.7
+log
+@blocks input during busy
+@
+text
+@d20 1
+a20 2
+    struct TextFont *font = NULL;
+    struct DatabaseData *dbd;
+a34 1
+	dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+a181 1
+	new_r = NULL;
+d192 1
+a192 1
+    struct Region *new_r = NULL;
+a193 1
+    struct DatabaseData *dbd;
+a247 1
+    dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+a327 1
+		j = si->si_VisHoriz;
+@
+
+
+39.6
+log
+@was referencing rastport before valid.
+@
+text
+@d12 1
+a19 1
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+d29 2
+a31 1
+	DB (kprintf ("  prepareRastPorts\n"));
+d67 2
+d128 6
+a428 1
+#if 1
+a429 3
+#else
+		if ((dbd->dbd_Flags & DBDF_LAYER) && (new_r = NewRegion ()))
+#endif
+d435 1
+d437 3
+a439 1
+
+d446 6
+@
+
+
+39.5
+log
+@fixed control clipping
+@
+text
+@d11 1
+d17 54
+d210 12
+a221 2
+    DB (kprintf ("renderMethod\n"));
+    if ((cd->cd_CurrentNode == NULL) || !(cd->cd_Flags & AGF_LAYOUT))
+d223 2
+d228 1
+a257 1
+    {
+a258 1
+    }
+a289 1
+#if 1
+a290 16
+#else
+	if (si->si_VisVert > si->si_TotVert)
+	{
+	    cd->cd_UsefulHeight = UMult32 (si->si_TotVert, cd->cd_LineHeight);
+	    si->si_TopVert = 0;
+	}
+	else if (si->si_TopVert + si->si_VisVert > si->si_TotVert)
+	{
+	    si->si_TopVert = (si->si_TotVert - si->si_VisVert);
+	    cd->cd_UsefulHeight = UMult32 ((si->si_TotVert - si->si_TopVert), cd->cd_LineHeight);
+	}
+	else
+	{
+	    cd->cd_UsefulHeight = UMult32 (si->si_VisVert, cd->cd_LineHeight);
+	}
+#endif
+d302 1
+d359 1
+d438 1
+a438 1
+		    DB (kprintf ("(r3) InstallClipRegion\n"));
+d440 1
+a440 1
+		    DB (kprintf ("(r3) done\n"));
+d445 1
+d516 1
+a516 1
+		    DB (kprintf ("(r4) InstallClipRegion\n"));
+d518 1
+a518 1
+		    DB (kprintf ("(r4) done\n"));
+@
+
+
+39.4
+log
+@*** empty log message ***
+@
+text
+@d61 1
+a61 1
+	rect.MaxY = cd->cd_Top;
+d104 7
+a191 6
+
+	RectFill (&cd->cd_Render,
+		  box->Left,
+		  cd->cd_Top - 2,
+		  box->Left + box->Width - 1,
+		  cd->cd_Top - 2);
+@
+
+
+39.3
+log
+@toggle of highlight added
+@
+text
+@a40 1
+
+d57 1
+d75 1
+@
+
+
+39.2
+log
+@ghost buttons
+@
+text
+@a10 2
+#define	DL(x)	;
+#define	DR(x)	;
+a12 3
+#ifndef	GMORE_SCROLLRASTER
+#define	GMORE_SCROLLRASTER	4
+#endif
+d40 2
+d63 1
+d70 1
+d72 1
+d106 1
+d108 1
+d134 1
+d147 1
+a161 1
+    DR (kprintf ("\nag : renderMethod %ld win=0x%lx\n", msg->gpr_Redraw, cd->cd_Window));
+a193 1
+	DL (kprintf ("ag : rendMethod nd_Object\n"));
+d201 7
+a209 1
+	DB (kprintf ("ag : render\n"));
+d385 1
+d387 1
+d462 1
+d464 1
+@
+
+
+39.1
+log
+@*** empty log message ***
+@
+text
+@d6 1
+d22 1
+a22 1
+VOID RenderLine (struct AGLib * ag, struct RastPort *rp, UWORD x, UWORD y, STRPTR text, ULONG len)
+d24 1
+a24 1
+    Move (rp, x, y);	/* move the cursor to the position */
+d30 86
+d166 1
+a166 1
+    GetAttr (DTA_Domain, o, (ULONG *) &box);
+d180 1
+a180 38
+	register struct Controls *c;
+
+	/* SET UP CLIPPING REGION */
+	if (new_r = NewRegion ())
+	{
+	    /* Set up the rectangle */
+	    rect.MinX = box->Left;
+	    rect.MinY = box->Top;
+	    rect.MaxX = box->Left + box->Width - 1;
+	    rect.MaxY = cd->cd_Top;
+
+	    OrRectRegion (new_r, &rect);
+	    if (win->Flags & WINDOWREFRESH)
+	    {
+		EndRefresh (win, FALSE);
+		refresh = TRUE;
+	    }
+	    old_r = InstallClipRegion (msg->gpr_RPort->Layer, new_r);
+	}
+
+	for (i = 0; i < 6; i++)
+	{
+	    c = &cd->cd_Controls[i];
+	    drawbevel (ag, cd->cd_Frame, msg->gpr_RPort, msg->gpr_GInfo->gi_DrInfo,
+		       box->Left + c->c_Left, c->c_Top, cd->cd_BoxWidth, cd->cd_ControlHeight, TRUE);
+	    RenderLine (ag, &cd->cd_Control, box->Left + c->c_TLeft, c->c_Top + cd->cd_Control.TxBaseline + 2,
+			c->c_Label, c->c_LabelLen);
+	}
+
+	/* REMOVE THE CLIPPING REGION */
+	if (new_r)
+	{
+	    InstallClipRegion (msg->gpr_RPort->Layer, old_r);
+	    if (refresh)
+		BeginRefresh (win);
+	    DisposeRegion (new_r);
+	    new_r = NULL;
+	}
+d193 1
+a193 1
+	if (EG(nd->nd_Object)->MoreFlags & GMORE_SCROLLRASTER)
+d195 2
+a196 2
+	    EG(o)->MoreFlags |= GMORE_SCROLLRASTER;
+	    EG(nd->nd_Object)->MoreFlags &= ~GMORE_SCROLLRASTER;
+d273 1
+a273 1
+		EG(o)->MoreFlags |= GMORE_SCROLLRASTER;
+d289 1
+a289 1
+		EG(o)->MoreFlags |= GMORE_SCROLLRASTER;
+d323 1
+a323 1
+		EG(o)->MoreFlags |= GMORE_SCROLLRASTER;
+d342 1
+a342 1
+		EG(o)->MoreFlags |= GMORE_SCROLLRASTER;
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d9 1
+d11 1
+d57 1
+a57 2
+    DL (kprintf ("renderMethod\n"));
+    if (cd->cd_CurrentNode == NULL)
+d62 1
+a62 1
+	DL (kprintf ("layout\n"));
+d66 7
+d110 1
+a110 1
+	    old_r = InstallClipRegion (cd->cd_Render.Layer, new_r);
+d125 1
+a125 1
+	    InstallClipRegion (cd->cd_Render.Layer, old_r);
+d141 1
+a141 1
+	DL (kprintf ("rendMethod nd_Object\n"));
+d151 1
+d164 3
+d181 1
+d412 1
+a412 2
+    ReleaseSemaphore (&(si->si_Lock));
+
+@

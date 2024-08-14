@@ -1,0 +1,575 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+39.7
+date     93.09.13.19.10.27;  author spence;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.08.11.17.20.08;  author spence;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     93.07.19.11.46.44;  author spence;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     93.07.06.18.34.18;  author spence;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     93.07.02.17.28.35;  author spence;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     93.06.30.13.39.33;  author spence;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     93.05.11.11.02.05;  author spence;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     93.03.17.12.08.56;  author spence;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@AnimateFX() code. Does the actual animations.
+@
+
+
+39.7
+log
+@Added copper list double buffering.
+@
+text
+@********************************************************************************
+*
+*	$Id: AnimateFX.asm,v 39.6 93/08/11 17:20:08 spence Exp Locker: spence $
+*
+********************************************************************************
+
+	opt	p=68020
+	section	code
+
+	include	'exec/types.i'
+	include	'exec/ables.i'
+	include	'graphics/view.i'
+	include	'graphics/copper.i'
+	include	'graphics/gfxbase.i'
+	include	'utility/tagitem.i'
+
+	include	"SpecialFXBase.i"
+	include	"SpecialFX.i"
+	include	"SpecialFX_internal.i"
+
+	xdef	_LVOAnimateFX
+	xref	_LVOObtainSemaphore
+	xref	_LVOReleaseSemaphore
+	xref	_intena
+
+******* specialfx.library/AnimateFX ********************************************
+*
+*   NAME
+*	AnimateFX -- Animate an list of 'Special Effects'
+*
+*   SYNOPSIS
+*	AnimateFX(DisplayHandle)
+*	          a0
+*
+*	void AnimateFX(APTR);
+*
+*   FUNCTION
+*	To animate the list of 'Special Effects' pointed to by the Handle
+*	obtained from InstallFXA().
+*
+*   INPUTS
+*	DisplayHandle - The handle obtained from InstallFXA().
+*
+*   RESULT
+*
+*   NOTES
+*	This function will update the display according to the input. There is
+*	no need to remake the display yourself afterwards.
+*
+*	The method of animation varies depending on the 'Special Effect' type.
+*	Each is described in <libraries/specialfx.h>.
+*
+*	This function will also update the intermediate copper lists in the
+*	ViewPort, so that when a screen is dragged by the user, the latest
+*	changes are preserved. However, this consumes processor time, as the
+*	list needs to be updated for every call to AnimateFX(). Under
+*	graphics.library V40, you can use the VC_IntermediateCLUpdate
+*	VideoControl() tag to disable intermediate copperlist updates.
+*
+*   SEE ALSO
+*	<libraries/specialfx.h> RemoveFX() InstallFXA()
+*	graphics.library/VideoControl() <graphics/videocontrol.h>
+*
+********************************************************************************
+
+_LVOAnimateFX:
+	movem.l	d2-d7/a2-a6,-(sp)
+	move.l	a0,a5
+	; locking:
+	move.l	a6,a4
+	move.l	sfxb_GfxBase(a6),a0
+	move.l	gb_ActiViewCprSemaphore(a0),a0
+	move.l	a0,-(sp)
+	move.l	sfxb_ExecBase(a6),a6
+	jsr	_LVOObtainSemaphore(a6)
+
+	move.l	sfxb_AHListSemaphore(a4),a0
+	move.l	a0,-(sp)
+	jsr	_LVOObtainSemaphore(a6)
+	move.l	a4,a6
+
+	; walk through the list and FXHandles
+	lea	AnimHandle_SIZEOF(a5),a2
+	move.l	ah_HandleCount(a5),d7
+	bra.s	anim_loop.
+anim_loop:
+	move.l	(a2)+,a3		; get the next FXHandle
+	btst.b	#AHB_CALCOFFSET,ah_Flags+1(a5)
+	bne.s	2$
+	tst.l	fxh_Offset(a3)		; has the offset been calculated yet?
+	bne.s	no_offset_calc
+	; calculate the offset value
+2$:
+	move.l	fxh_UCopList(a3),a1
+	move.l	ucl_FirstCopList(a1),a1
+	move.l	cl_CopLStart(a1),d0	; first copper instruction of this effect
+	move.l	ah_View(a5),a1
+	move.l	v_LOFCprList(a1),a1
+	sub.l	crl_start(a1),d0	; offset value
+	move.l	d0,fxh_Offset(a3)
+no_offset_calc:
+	move.l	fxh_Type(a3),d0
+	add.w	d0,d0
+	add.w	d0,d0
+	move.l	sfxb_AnimateVectors(a6),a1
+	move.l	-4(a1,d0),a1
+	jsr	(a1)
+anim_loop.:
+	dbra.s	d7,anim_loop
+
+	; if the View of this AnimHandle is the same as GfxBase->ActiView,
+	; then display this copperlist.
+	move.l	sfxb_GfxBase(a6),a0
+	move.l	sfxb_ExecBase(a6),a6
+	move.l	gb_ActiView(a0),d0	
+	cmp.l	ah_View(a5),d0
+	bne.s	no_toggle_copper
+	move.w	ah_CopperToUse(a5),d0
+	asl.w	#3,d0
+	
+	; ensure integrity of the two pointers in GfxBase by disabling
+	; interrupts.
+	DISABLE
+	move.l	ah_Copper1L(a5,d0.w),gb_LOFlist(a0)
+	move.l	ah_Copper1S(a5,d0.w),gb_SHFlist(a0)
+	ENABLE
+
+no_toggle_copper:
+	; toggle the Copper list to use next time.
+	eor.w	#1,ah_CopperToUse(a5)
+
+	; reset the CALCOFFSET flag
+	bclr.b	#AHB_CALCOFFSET,ah_Flags+1(a5)
+
+	move.l	(sp)+,a0		; sfxb_AHListSemaphore
+	jsr	_LVOReleaseSemaphore(a6)
+
+	move.l	(sp)+,a0		; gb_ActiViewCprSemaphore
+	jsr	_LVOReleaseSemaphore(a6)
+	movem.l	(sp)+,d2-d7/a2-a6
+	rts
+
+@
+
+
+39.6
+log
+@Autodoc change <specialfx/...> -> <libraries/...>
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.5 93/07/19 11:46:44 spence Exp Locker: spence $
+d11 1
+d24 1
+d73 1
+d76 4
+d88 14
+d111 2
+a113 1
+	move.l	gb_ActiViewCprSemaphore(a0),a0
+d115 24
+@
+
+
+39.5
+log
+@Autodoc cleanup
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.4 93/07/06 18:34:18 spence Exp Locker: spence $
+d49 1
+a49 1
+*	Each is described in <specialfx/specialfx.h>.
+d59 1
+a59 1
+*	<specialfx/specialfx.h> RemoveFX() InstallFXA()
+@
+
+
+39.4
+log
+@Calls the vectors through the table off SpecialFXBase
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.3 93/07/02 17:28:35 spence Exp Locker: spence $
+d24 1
+a24 1
+******* SpecialFX.library/AnimateFX ********************************************
+d37 1
+a37 1
+*	obtained from DisplayFXA().
+d49 1
+a49 1
+*	Each is described in <SpecialFX/SpecialFX.h>.
+d59 1
+a59 1
+*	<SpecialFX/SpecialFX.h> RemoveFX() InstallFXA()
+@
+
+
+39.3
+log
+@Autodoc change
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.2 93/06/30 13:39:33 spence Exp Locker: spence $
+a23 3
+	xref	AnimateColours
+	xref	AnimateIntControl
+
+a63 16
+* Table of pointers to functions to Animate the system copperlists for each
+* tag type.
+*
+* Each function takes:
+* a3 -> FXHandle
+* a5 -> AnimHandle
+* a6 -> SFXBase
+*
+* For speed optimisation, they can all trash
+* a0-a1/a3-a4/d0-d6
+
+AnimateTable:
+	dc.l	AnimateColours
+	dc.l	0		; linecontrol
+	dc.l	AnimateIntControl
+
+d84 1
+a84 1
+	lea	AnimateTable(pc),a1
+@
+
+
+39.2
+log
+@AnimateIntControl for InterruptControl
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.1 93/05/11 11:02:05 spence Exp Locker: spence $
+d43 1
+a43 1
+*	DisplayHandle - The handle obtained from DisplayFXA().
+d62 1
+a62 1
+*	<SpecialFX/SpecialFX.h> RemoveFX() DisplayFXA()
+@
+
+
+39.1
+log
+@NOw table driven, with the ColourRange code moved to ColourRange.asm
+@
+text
+@d3 1
+a3 1
+*	$Id: AnimateFX.asm,v 39.0 93/03/17 12:08:56 spence Exp Locker: spence $
+d25 1
+d80 2
+@
+
+
+39.0
+log
+@Initial log in.
+Just ColourRange for now.
+@
+text
+@d3 1
+a3 1
+*	$Id: DisplayFX.asm,v 39.0 93/03/12 19:13:16 spence Exp Locker: spence $
+a9 10
+BPLCON3	equ	$dff106
+COLOUR0	equ	$dff180
+BPLMOD0	equ	$dff108
+BPLMOD1	equ	$dff10a
+BPLCON1	equ	$dff102
+DDFSTRT equ	$dff092
+FMODE	equ	$dff1fc
+BPL1PTH	equ	$dff0e0
+BPL2PTH	equ	$dff0e4
+
+d24 2
+d66 14
+d98 5
+a102 2
+	subq.l	#1,d0
+	beq.s	AnimateColours
+a112 218
+	; **********************************************************************
+	;
+	;                         AnimateColours
+	;
+	; Change the system copperlist, and optionally the intermediate
+	; copperlist.
+	; 
+	; Takes - a3 -> FXHandle
+	;	  a5 -> AnimHandle
+	;	  a6 -> SFXBase
+	;
+	; **********************************************************************
+
+AnimateColours:
+	movem.l	d7/a2/a6,-(sp)
+	move.l	sfxb_GfxBase(a6),a6
+	move.l	fxh_First(a3),a4
+	move.l	ah_ViewPort(a5),a2
+	move.w	vp_Modes(a2),d0
+	and.w	#V_VP_HIDE,d0
+	bne.s	no_hw_colour_update	; ViewPort is hidden, so don't update the h/w copperlist
+	move.l	vp_UCopIns(a2),a2
+	move.l	ucl_FirstCopList(a2),a2
+	movem.l	a2/a4,-(sp)
+	move.l	cl_CopSStart(a2),d0
+	beq.s	1$			; no copper list?
+	move.l	d0,a2			; here is the first WAIT in the colour list.
+	moveq	#-1,d2			; flag to disable updating the cache
+	bsr.s	do_change_colours
+	movem.l	(sp),a2/a4
+1$:
+	move.l	cl_CopLStart(a2),d0
+	beq.s	2$
+	move.l	d0,a2
+	moveq	#0,d2
+	bsr.s	do_change_colours
+2$:
+	movem.l	(sp)+,a2/a4
+no_hw_colour_update:
+	movem.l	(sp)+,d7/a2/a6
+	bra	colour_change_interm
+
+do_change_colours:
+	move.w	fxh_Num(a3),d2
+	; skip over the WAIT (there may be more than 1 if this is line 256).
+2$:
+	btst.b	#0,2(a2)
+	beq.s	1$
+	addq.l	#4,a2
+	bra.s	2$
+1$:
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a6)
+	beq.s	change_ecs_colours
+	; now we know we are changing a AA copperlist
+
+	moveq	#-2,d4			; FFFF FFFE terminator
+	moveq	#12,d6			; to add to the copper pointer for each colour change
+	bra.s	no_colour_change2
+change_colours:
+	btst.b	#CORB_MODIFY,cor_Flags+3(a4)
+	beq.s	no_colour_change1
+	move.l	con3_hi(a4),d5
+	move.w	pen_hi(a4),d7
+
+2$:	; find a MOVE BPLCON3
+	move.l	(a2)+,d3
+	cmp.l	d3,d4
+	beq.s	done_colour_anim		; end of copperlist
+	cmp.l	d3,d5
+	bne.s	2$
+	; check it's the right one
+	move.w	(a2),d3
+	cmp.w	d3,d7
+	bne.s	2$
+
+3$:
+	; calculate the Hi colour bits
+	move.w	cor_Red(a4),d0
+	lsr.w	#4,d0
+	move.b	cor_Blue(a4),d1
+	lsr.b	#4,d1
+	move.b	cor_Green(a4),d0
+	bfins	d1,d0{28:4}
+	move.w	d0,2(a2)		; into the copperlist
+	tst.l	d2
+	bmi.s	4$			; don't update the cache for the SHF
+	move.w	d0,pen_hi+2(a4)		; into the cache
+
+4$:
+	; calculate the Lo colour bits
+	move.w	cor_Red(a4),d0
+	and.w	#$f00,d0
+	move.b	cor_Green(a4),d0
+	asl.b	#4,d0
+	move.b	cor_Blue(a4),d1
+	bfins	d1,d0{28:4}
+	move.w	d0,10(a2)
+	tst.l	d2
+	bmi.s	no_colour_change
+	move.w	d0,pen_lo+2(a4)
+
+no_colour_change:
+	add.l	d6,a2
+	lea	CorPrivate_SIZE(a4),a4
+no_colour_change2:
+	dbra.s	d2,change_colours
+done_colour_anim:
+	rts
+no_colour_change1:
+	addq.l	#4,a2
+	bra.s	no_colour_change
+
+change_ecs_colours:
+	moveq	#-2,d4			; FFFF FFFE terminator
+	bra.s	no_ecs_colour_change1
+ecs_change_colours:
+	cmp.l	#-1,cor_Pen(a4)
+	beq.s	done_colour_anim
+	move.w	pen_hi(a4),d7
+2$:
+	move.l	(a2)+,d3
+	cmp.l	d3,d4
+	beq.s	done_colour_anim		; end of copperlist
+	swap	d3
+	cmp.w	d3,d7
+	bne.s	2$
+
+	btst.b	#CORB_MODIFY,cor_Flags+3(a4)
+	beq.s	no_ecs_colour_change
+	; calculate the Hi colour bits
+	move.w	cor_Red(a4),d0
+	lsr.w	#4,d0
+	move.b	cor_Green(a4),d0
+	and.b	#$f0,d0
+	move.b	cor_Blue(a4),d1
+	lsr.b	#4,d1
+	or.b	d1,d0
+	move.w	d0,-2(a2)		; into the copperlist
+	tst.l	d2
+	bmi.s	no_ecs_colour_change
+	move.w	d0,pen_hi+2(a4)		; into the cache
+no_ecs_colour_change:
+	lea	CorPrivate_SIZE(a4),a4
+no_ecs_colour_change1:
+	dbra.s	d2,ecs_change_colours
+	bra.s	done_colour_anim
+
+	; ******************************************************************
+	;
+	; This code will update the intermediate copper list in
+	; vp->ClrIns
+	;
+	; ******************************************************************
+
+colour_change_interm:
+	; now update the intermediate copperlists
+	move.l	ah_ViewPort(a5),a1
+	move.l	vp_ColorMap(a1),d0
+	beq.s	colour_load
+	move.l	d0,a0
+	tst.b	cm_Type(a0)
+	beq.s	colour_load
+	btst.b	#CMAB_NO_INTERMED_UPDATE,cm_AuxFlags(a0)
+	bne	anim_loop.
+colour_load:
+	move.w	fxh_Num(a3),d2
+	move.l	fxh_UCopList(a3),a0	; look for this UCopList
+	move.l	vp_UCopIns(a1),d0
+find_ucoplist:
+	cmp.l	a0,d0
+	beq.s	found_ucoplist
+	move.l	d0,a1
+	move.l	ucl_Next(a1),d0
+	bra.s	find_ucoplist
+found_ucoplist:
+	move.l	ucl_FirstCopList(a0),a0
+	move.l	cl_CopIns(a0),a0
+	move.l	sfxb_GfxBase(a6),a1
+	btst.b	#GFXB_AA_LISA,gb_ChipRevBits0(a1)
+	bne.s	10$
+	bra.s	update_ecs_copins
+
+8$:
+	btst.b	#0,ci_OpCode+1(a0)
+	bne.s	6$			; a WAIT
+	btst.b	#CORB_MODIFY,cor_Flags+3(a4)
+	beq.s	9$
+	lea	ci_SIZEOF(a0),a0	; skip the bplcon3
+	move.l	pen_hi(a4),ci_DestAddr(a0)
+	lea	ci_SIZEOF*2(a0),a0	; skip the PenHi and Con3
+	move.l	pen_lo(a4),ci_DestAddr(a0)
+7$:
+	lea	CorPrivate_SIZE(a4),a4
+6$:
+	lea	ci_SIZEOF(a0),a0	; skip the PenLo
+	bra.s	8$
+9$:
+	lea	ci_SIZEOF*4(a0),a0
+	lea	CorPrivate_SIZE(a4),a4
+10$:
+	dbra.s	d2,8$
+	bra	anim_loop.
+
+do_ecs_copins:
+	btst.b	#0,ci_OpCode+1(a0)
+	bne.s	ecs_wait			; a WAIT
+	btst.b	#CORB_MODIFY,cor_Flags+3(a4)
+	beq.s	70$
+	move.l	pen_hi(a4),ci_DestAddr(a0)
+70$:
+	lea	CorPrivate_SIZE(a4),a4
+	lea	ci_SIZEOF(a0),a0
+update_ecs_copins:
+	dbra.s	d2,do_ecs_copins
+	bra	anim_loop.
+ecs_wait:
+	lea	ci_SIZEOF(a0),a0
+	bra.s	do_ecs_copins
+@

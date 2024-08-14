@@ -1,0 +1,954 @@
+head     1.16;
+branch   ;
+access   ;
+symbols  V36_50:1.16 L35_48:1.14 L35_47:1.13 L35_44:1.10 L35_43:1.8 L35_42:1.8 L35_38:1.7 L35_37:1.6;
+locks    ; strict;
+comment  @*   @;
+
+
+1.16
+date     90.04.06.19.58.20;  author daveb;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     88.10.24.14.15.52;  author daveb;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     88.07.01.11.16.11;  author daveb;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     88.06.28.13.18.41;  author daveb;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     88.06.28.13.17.25;  author daveb;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     88.06.26.15.01.53;  author daveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     88.06.05.19.58.27;  author daveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     88.05.06.18.55.47;  author daveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     88.04.15.17.22.08;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.04.06.09.06.50;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     88.01.15.15.56.05;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     87.11.18.09.54.43;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     87.11.18.09.44.58;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.11.17.13.17.05;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.10.01.09.12.31;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.09.09.07.24.03;  author daveb;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     87.09.09.06.47.36;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 3 release
+@
+
+
+1.16
+log
+@for rcs 4.x header change
+@
+text
+@/*
+	CALCOMP ColorMaster2 driver (requires LOTS of memory).
+	David Berezowski - Sept/87.
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define MAXCOLORBUFS	3	/* max # of color buffers */
+#define STARTLEN	4	/* # of start cmd bytes */
+#define ORGLEN		7	/* # of origin cmd bytes */
+
+#define DEBUG0	0
+#define DEBUG1	0
+#define DEBUG2	0
+#define DEBUG3	0
+#define DEBUG4	0
+#define DEBUG5	0
+#define DEBUG7	0
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	static ULONG ColorSize, BufSize, TotalBufSize, dataoffset;
+	static ULONG colors[MAXCOLORBUFS]; /* color ptrs */
+	static UWORD DataSize, RowSize, NumDiscardCmd, YOrg;
+	static UWORD NumColorBufs, NumFFCmd, Aspect, NumStartCmd, NumTotalCmd;
+	static UWORD oldprintaspect, oldxdpi, oldydpi;
+	static ULONG oldxmax, oldymax;
+	/*
+		00-00	\002	enter raster gfx mode
+		01-01	\000	required padding after cmd byte
+		02-02	\000	enter landscape/portrait raster gfx mode
+		03-03	\000	required padding after cmd byte
+	*/
+	static UBYTE StartCmd[STARTLEN] = "\002\000\000\000";
+	/*
+		00-01	\033\117	set origin
+		02-03	\000\000	y origin
+		04-05	\000\000	x origin
+		06-06	\000		required padding after cmd byte
+	*/
+	static UBYTE OrgCmd[ORGLEN] = "\033\117\000\000\000\000\000";
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start, *ptr3;
+	int i, j, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+#if DEBUG0
+			kprintf("0: ct=%lx, x=%ld, y=%ld, YOrg=%ld\n",
+				ct, x, y, YOrg);
+#endif DEBUG0
+			StartCmd[2] = (Aspect == ASPECT_HORIZ) ? 0x50 : 0x4c;
+			if (Aspect != ASPECT_HORIZ) {
+				NumDiscardCmd = 0;
+			}
+			NumStartCmd = 4 + NumDiscardCmd;
+			NumTotalCmd = NumStartCmd + NUMENDCMD;
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				NumColorBufs = MAXCOLORBUFS;
+				NumFFCmd = 1;
+			}
+			else {
+				NumColorBufs = 1;
+				NumFFCmd = 0;
+			}
+			DataSize = (x + 7) / 8;
+			RowSize = DataSize + NumTotalCmd;
+			ColorSize = RowSize * y + NumFFCmd;
+			BufSize = ColorSize * NumColorBufs;
+			TotalBufSize = BufSize;
+			for (i=0; i<NumColorBufs; i++) {
+				colors[i] = ColorSize * i;
+			}
+#if DEBUG0
+			kprintf("DataSize=%ld, RowSize=%ld, ColorSize=%ld\n",
+				DataSize, RowSize, ColorSize);
+			kprintf("BufSize=%ld, TotalBufSize=%ld, y=%ld\n",
+				BufSize, TotalBufSize, y);
+#endif DEBUG0
+			PD->pd_PrintBuf = AllocMem(TotalBufSize,
+				MEMF_PUBLIC|MEMF_CLEAR);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+		}
+			else {
+				dataoffset = NumStartCmd;
+				if (YOrg == 0) { /* if first dump */
+					PrinterReady();
+					/* enter raster graphics mode */
+					err = (*(PD->pd_PWrite))(StartCmd,
+						STARTLEN);
+					PrinterReady();
+				}
+				else { /* not first, set origin for succs. */
+					/* set origin */
+					OrgCmd[2] = YOrg / 256;
+					OrgCmd[3] = YOrg & 255;
+					PrinterReady();
+					err = (*(PD->pd_PWrite))
+						(OrgCmd, ORGLEN);
+					PrinterReady();
+				}
+				YOrg += y;
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- color code.
+				y	- row # (0 to Height - 1).
+			*/
+#if DEBUG1
+			kprintf("1: ct=%lx, x=%ld, y=%ld, do=%ld, y*RS=%ld\n",
+				ct, x, y, dataoffset, y * RowSize);
+#endif DEBUG1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors,
+				RowSize);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+#if DEBUG2
+			kprintf("2: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG2
+			ptr3 = &PD->pd_PrintBuf[dataoffset];
+			ptr2start = ptr2 = ptr3 - NumStartCmd;
+			x = 0; /* flag no transfer required yet */
+			for (ct=0; ct<NumColorBufs; ct++, ptr3 += ColorSize) {
+				ptrstart = ptr3;
+				for (j=0; j<y; j++, ptrstart += RowSize) {
+					i = DataSize;
+					ptr = ptrstart + i - 1;
+					while (i > 0 && *ptr == 0) {
+						i--;
+						ptr--;
+					}
+					if (i != 0) { /* if data */
+						ptr = ptrstart - NumStartCmd;
+						*ptr++ = 27;
+						*ptr++ = 'K';
+						*ptr++ = (i + NumDiscardCmd)
+							>> 8;
+						*ptr = (i + NumDiscardCmd)
+							& 0xff;
+						i += NumTotalCmd;
+						/* if must transfer data */
+						if (x != 0) {
+							/* get src start */
+							ptr = ptrstart -
+								NumStartCmd;
+							/* xfer and update...*/
+							do { /* dest ptr */
+								*ptr2++ =
+								*ptr++;
+							} while (--i);
+						}
+						/* no transfer required */
+						else {
+							/* update dest ptr */
+							ptr2 += i;
+						}
+					}
+					else { /* blank line, no data */
+						*ptr2++ = 10; /* lf */
+					}
+					/* if compacted or 0 */
+					if (i != DataSize + NumTotalCmd) {
+						/* we need to xfer next time */
+						x = 1;
+					}
+				}
+				if (NumFFCmd && ct < NumColorBufs - 1) {
+					/* advance to next color panel */
+					*ptr2++ = 12;
+				}
+			}
+#if DEBUG2
+			kprintf("2: sending %ld bytes to printer\n",
+				ptr2 - ptr2start);
+#endif DEBUG2
+			/*
+				Under V1.3 the parallel device generates
+				continuous interrupts and locks the machine
+				for the duration of the write.  That is why
+				I've broken the write up into n byte blocks.
+			*/
+			i = ptr2 - ptr2start;
+			do {
+				j = i < 1000 ? i : 1000;
+				PrinterReady();
+				err = (*(PD->pd_PWrite))(ptr2start, j);
+				ptr2start += j;
+				i -= j;
+			} while (err == PDERR_NOERR && i > 0);
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG3
+			kprintf("3: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG3
+			/* the clear is handled by 'MEMF_CLEAR' in case '0' */
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print*/
+			if (ct != PDERR_CANCEL) {
+				/* if do not want to unload paper */
+				if (x & SPECIAL_NOFORMFEED) {
+					/* if color */
+					if (NumColorBufs == MAXCOLORBUFS) {
+						PrinterReady();
+						/* Advance Color Panel */
+						err = (*(PD->pd_PWrite))
+							("\014\000", 2);
+						PrinterReady();
+					}
+				}
+				else { /* eject paper */
+					YOrg = 0;
+					PrinterReady();
+					/* End of Transmission */
+					err = (*(PD->pd_PWrite))("\004\000",
+						2);
+					PrinterReady();
+				}
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+#if DEBUG4
+			kprintf("4: ct=%lx, x=%ld, y=%ld, YOrg=%ld\n",
+				ct, x, y, YOrg);
+#endif DEBUG4
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			if (ct != 0) { /* if not case 5 open */
+				/* save original value */
+				oldprintaspect =
+					PD->pd_Preferences.PrintAspect;
+				oldxmax = PED->ped_MaxXDots;
+				oldymax = PED->ped_MaxYDots;
+				oldxdpi = PED->ped_XDotsInch;
+				oldydpi = PED->ped_YDotsInch;
+
+				if ((Aspect = PD->pd_Preferences.PrintAspect)
+					== ASPECT_VERT) { /* if sideways */
+					/*
+					   This is a neat trick we play.
+					   Horizontal printing is MUCH
+					   faster than vertical printing
+					   since the printer device uses
+					   the blitter to read an entire
+					   row of pixel data.  This printer
+					   has the ability to take a
+					   horizontally oriented picture
+					   and print it vertically.  So
+					   we fool the printer device into
+					   thinking that we are doing a
+					   horizontal printout by temporarily
+					   changing the PrintAspect to
+					   ASPECT_HORIZ.  We then tell the
+					   printer to print the image
+					   vertically.  We MUST put code in
+					   case 7 to undo what we've done
+					   here to keep things in sync.
+					*/
+					PD->pd_Preferences.PrintAspect =
+						ASPECT_HORIZ; /* force horz */
+					/* swap x and y stuff */
+					PED->ped_MaxXDots = oldymax;
+					PED->ped_MaxYDots = oldxmax;
+					PED->ped_XDotsInch = oldydpi;
+					PED->ped_YDotsInch = oldxdpi;
+				}
+			}
+			else { /* case 5 open */
+				YOrg = 0;
+				if (PD->pd_Preferences.PaperSize ==
+					W_TRACTOR) {
+					/* CalComp_ColorView-5912 */
+					/* 11 x 17 inch paper (B/A3 size) */
+					PED->ped_MaxXDots = 2048;
+					PED->ped_MaxYDots = 3200;
+					NumDiscardCmd = 0;
+				}
+				else {
+					/* 8.5 x 11 inch paper (A/A4 size) */
+					PED->ped_MaxXDots = 1600;
+					PED->ped_MaxYDots = 2000;
+					NumDiscardCmd = 8;
+				}
+			}
+#if DEBUG5
+			kprintf("5: ct=%lx, x=%ld, y=%ld, YOrg=%ld\n",
+				ct, x, y, YOrg);
+#endif DEBUG5
+			PED->ped_NumRows = PED->ped_MaxYDots;
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		/*
+			This is a NEW case that was added after the offical
+			V1.3 release of the printer device and this driver.
+			Although this driver will work with the official
+			V1.3 printer device (version 35.562); it may not
+			print full size vertical pictures correctly since
+			it does not contain a 'case 7' call.  The printer
+			device version 35.564 (and beyond) contains a
+			'case 7' call.
+		*/
+		case 7 : /* Restore any values we may have temp. changed */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG7
+			kprintf("7: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG7
+			/* restore what we may have altered in case 5 */
+			PD->pd_Preferences.PrintAspect = oldprintaspect;
+			PED->ped_MaxXDots = oldxmax;
+			PED->ped_MaxYDots = oldymax;
+			PED->ped_XDotsInch = oldxdpi;
+			PED->ped_YDotsInch = oldydpi;
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.15
+log
+@added code to fix problem with printing full size pictures sideways.
+This includes the code for the new 'case 7' call.
+/.
+@
+text
+@@
+
+
+1.14
+log
+@set NumDiscardCmd to 0 for ColorView-5912
+set NumRows = MaxYDots
+V1.3 Gamma 20
+@
+text
+@d24 1
+d38 2
+d278 8
+d288 20
+d310 5
+d317 1
+a317 1
+			else {
+d319 14
+a333 14
+			if (PD->pd_Preferences.PaperSize == W_TRACTOR) {
+				/* CalComp_ColorView-5912 */
+				/* 11 x 17 inch paper (B/A3 size) */
+				PED->ped_MaxXDots = 2048;
+				PED->ped_MaxYDots = 3200;
+				NumDiscardCmd = 0;
+			}
+			else {
+				/* 8.5 x 11 inch paper (A/A4 size) */
+				PED->ped_MaxXDots = 1600;
+				PED->ped_MaxYDots = 2000;
+				NumDiscardCmd = 8;
+			}
+			PED->ped_NumRows = PED->ped_MaxYDots;
+d338 29
+@
+
+
+1.13
+log
+@V1.3 Gamma 20
+@
+text
+@d66 3
+a68 1
+			NumDiscardCmd = (Aspect == ASPECT_HORIZ) ? 8 : 0;
+d97 1
+a97 1
+			}
+d127 2
+a128 1
+			kprintf("1: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d285 1
+d289 1
+d295 1
+d297 1
+@
+
+
+1.12
+log
+@changed dataoffset from UWORD to ULONG to support bigger prints
+V1.3 Gamma 20
+@
+text
+@d18 1
+a18 1
+#define DEBUG0	1
+d20 4
+a23 4
+#define DEBUG2	1
+#define DEBUG3	1
+#define DEBUG4	1
+#define DEBUG5	1
+@
+
+
+1.11
+log
+@added support for B/A3 size paper
+V1.3 Gamma 20
+@
+text
+@d18 1
+a18 1
+#define DEBUG0	0
+d20 4
+a23 4
+#define DEBUG2	0
+#define DEBUG3	0
+#define DEBUG4	0
+#define DEBUG5	0
+d33 1
+a33 1
+	static ULONG ColorSize, BufSize, TotalBufSize;
+d35 1
+a35 1
+	static UWORD DataSize, RowSize, dataoffset, NumDiscardCmd, YOrg;
+@
+
+
+1.10
+log
+@V1.3 Gamma 15
+@
+text
+@d281 10
+@
+
+
+1.9
+log
+@added code to write buffer out in 1000 byte blocks to prevent machine
+from locking up during the one big write
+V1.3 Gamma 15
+@
+text
+@d110 2
+a111 2
+					err = (*(PD->pd_PWrite))(OrgCmd,
+						ORGLEN);
+@
+
+
+1.8
+log
+@fixed docs for devcon 
+V1.3 Gamma 13
+@
+text
+@d197 14
+a210 3
+			PrinterReady();
+			err = (*(PD->pd_PWrite))(ptr2start, ptr2 - ptr2start);
+			PrinterReady();
+@
+
+
+1.7
+log
+@added landscape/portrait mode support
+added code for SPECIAL_NOFORMFEED
+V1.3 Gamma 10 release
+@
+text
+@a18 1
+#define DEBUG0a	0
+a20 1
+#define DEBUG2a	0
+a22 1
+#define DEBUG4a	0
+a98 3
+#if DEBUG0a
+	kprintf("Start Raster Gfx\n");
+#endif DEBUG0a
+a105 3
+#if DEBUG0a
+	kprintf("SetOrigin(0,%ld)\n", YOrg);
+#endif DEBUG0a
+d157 4
+a160 2
+						*ptr++ = (i + NumDiscardCmd) >> 8;
+						*ptr = (i + NumDiscardCmd) & 0xff;
+d162 9
+a170 4
+						if (x != 0) { /* if must transfer data */
+							ptr = ptrstart - NumStartCmd; /* get src start */
+							do { /* transfer and update dest ptr */
+								*ptr2++ = *ptr++;
+d173 4
+a176 2
+						else { /* no transfer required */
+							ptr2 += i; /* update dest ptr */
+d182 4
+a185 2
+					if (i != DataSize + NumTotalCmd) { /* if compacted or 0 */
+						x = 1; /* flag that we need to transfer next time */
+d189 2
+a190 4
+#if DEBUG2a
+	kprintf("2: Advance Color Panel\n");
+#endif DEBUG2a
+					*ptr2++ = 12; /* advance to next color panel */
+d194 2
+a195 1
+			kprintf("2: sending %ld bytes to printer\n", ptr2 - ptr2start);
+a227 3
+#if DEBUG4a
+	kprintf("Advance Color Panel\n");
+#endif DEBUG4a
+a235 3
+#if DEBUG4a
+	kprintf("End of Transmission\n");
+#endif DEBUG4a
+@
+
+
+1.6
+log
+@fixed multiple dump bug by sending a NULL after each command byte
+added code to check that the printer is ready before and after
+each PWrite
+V1.3 Gamma 6 release
+@
+text
+@d13 1
+a13 3
+#define NUMSTARTCMD		12	/* # of cmd bytes before binary data */
+#define NUMENDCMD		0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD)	/* total of above */
+d15 2
+d19 1
+d22 1
+d25 1
+d29 1
+a29 3
+ULONG ct;	/* color type or ptr to ior */
+ULONG x, y;	/* x,y co-ords or pc,pr print values, or special */
+ULONG status;/* control code */
+d38 16
+a53 2
+	static UWORD DataSize, RowSize, dataoffset;
+	static UWORD NumColorBufs, NumFFCmd;
+d60 1
+a60 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d65 2
+a66 1
+			kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d68 4
+d81 1
+a81 1
+			RowSize = DataSize + NUMTOTALCMD;
+d94 2
+a95 1
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC|MEMF_CLEAR);
+d97 1
+a97 5
+#if DEBUG0
+				kprintf("Couldn't get %ld bytes for printer buf\n",
+					TotalBufSize);
+#endif DEBUG0
+				err = PDERR_BUFFERMEMORY;
+d100 24
+a123 8
+				dataoffset = NUMSTARTCMD;
+				PrinterReady(); /* make sure prt ready before writing */
+#if DEBUG0
+				kprintf("entering raster graphics mode\n");
+#endif DEBUG0
+				/* enter raster graphics mode */
+				err = (*(PD->pd_PWrite))("\002\000", 2);
+				PrinterReady(); /* make sure prt ready after writing */
+d131 1
+a131 1
+				y	- row #.
+d136 2
+a137 1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors, RowSize);
+d143 3
+a145 8
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+
+				White-space strip.
+				For each color buf, scan backwards through the buffer
+				for the first non-zero data byte.  Compact up to this
+				point, then send the entire compacted buffer in one go.
+d150 2
+a151 2
+			ptr3 = &PD->pd_PrintBuf[dataoffset];	/* ptr to data */
+			ptr2start = ptr2 = ptr3 - NUMSTARTCMD;	/* ptr to buf start */
+a161 3
+#if DEBUG22
+					kprintf("i=%ld, ", i);
+#endif DEBUG22
+d163 1
+a163 1
+						ptr = ptrstart - NUMSTARTCMD;
+d166 3
+a168 4
+						/* printer ignores first 8 bytes */
+						*ptr++ = (i + 8) >> 8;
+						*ptr = (i + 8) & 0xff;
+						i += NUMTOTALCMD;
+d170 1
+a170 4
+#if DEBUG22
+							kprintf("transferring %ld bytes\n", i);
+#endif DEBUG22
+							ptr = ptrstart - NUMSTARTCMD; /* get src start */
+a175 4
+#if DEBUG22
+							kprintf("no transfer, advancing ptr2 by %ld\n",
+								i);
+#endif DEBUG22
+d182 1
+a182 1
+					if (i != DataSize + NUMTOTALCMD) { /* if compacted or 0 */
+d187 3
+d196 1
+a196 1
+			PrinterReady(); /* make sure prt ready before writing */
+d198 1
+a198 1
+			PrinterReady(); /* make sure prt ready after writing */
+d203 3
+a205 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d217 2
+a218 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+a219 3
+#if DEBUG4
+			kprintf("4: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG4
+d221 2
+a222 1
+			if (ct != PDERR_CANCEL) { /* if user did not cancel the print*/
+d225 11
+a235 7
+					PrinterReady(); /* make sure prt ready before writing */
+#if DEBUG4
+					kprintf("4: advancing color panel\n");
+#endif DEBUG4
+					/* Advance Color Panel (does not eject paper) */
+					err = (*(PD->pd_PWrite))("\014\000", 2);
+					PrinterReady(); /* make sure prt ready after writing */
+d238 9
+a246 7
+					PrinterReady(); /* make sure prt ready before writing */
+#if DEBUG4
+					kprintf("4: ejecting paper\n");
+#endif DEBUG4
+					/* End of Transmission (ejects paper) */
+					err = (*(PD->pd_PWrite))("\004\000", 2);
+					PrinterReady(); /* make sure prt ready after writing */
+d249 1
+a249 1
+			(*(PD->pd_PBothReady))(); /* wait for both buffers to empty */
+d253 4
+d261 3
+a263 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d265 10
+d276 2
+a277 1
+			kprintf("5: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+@
+
+
+1.5
+log
+@V1.3 Gamma 3 release
+@
+text
+@d84 4
+d89 2
+a90 1
+				err = (*(PD->pd_PWrite))("\002", 1);
+d175 1
+d177 1
+d203 1
+a203 1
+			if (ct != PDERR_CANCEL) { /* if user did not cancel the print */
+d206 4
+d211 2
+a212 1
+					err = (*(PD->pd_PWrite))("\014", 1);
+d214 5
+a218 1
+				else {
+d220 2
+a221 1
+					err = (*(PD->pd_PWrite))("\004", 1);
+@
+
+
+1.4
+log
+@removed setting of NumRows
+V1.3 Gamma 3 release
+@
+text
+@d18 6
+a23 6
+#define DEBUG0	1
+#define DEBUG1	1
+#define DEBUG2	1
+#define DEBUG3	1
+#define DEBUG4	1
+#define DEBUG5	1
+@
+
+
+1.3
+log
+@V1.3 Gamma 3 release
+@
+text
+@d18 6
+a23 6
+#define DEBUG0	0
+#define DEBUG1	0
+#define DEBUG2	0
+#define DEBUG3	0
+#define DEBUG4	0
+#define DEBUG5	0
+d38 1
+a38 1
+	static UWORD NumColorBufs, NumRows, NumFFCmd;
+a59 1
+			NumRows = y;
+d62 1
+a62 1
+			ColorSize = RowSize * NumRows + NumFFCmd;
+d71 2
+a72 2
+			kprintf("BufSize=%ld, TotalBufSize=%ld, NumRows=%ld\n",
+				BufSize, TotalBufSize, NumRows);
+a82 1
+				PED->ped_NumRows = NumRows;
+d121 1
+a121 1
+				for (j=0; j<NumRows; j++, ptrstart += RowSize) {
+@
+
+
+1.2
+log
+@V1.3 beta 4 check-in
+@
+text
+@d108 1
+a108 1
+				y	- # of rows sent.
+@
+
+
+1.1
+log
+@turned off debugging
+@
+text
+@d10 1
+a11 2
+#include "../printer/printer.h"
+#include "../printer/prtprivate.h"
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d19 1
+a19 1
+#define DEBUG0	1
+d21 1
+a21 1
+#define DEBUG2	1
+@

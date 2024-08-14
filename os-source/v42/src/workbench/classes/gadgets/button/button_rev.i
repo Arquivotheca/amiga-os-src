@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'7.3.94'
+	ENDM
+VERS	MACRO
+		dc.b	'button 42.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'button 42.2 (7.3.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: button 42.2 (7.3.94)',0
+	ENDM

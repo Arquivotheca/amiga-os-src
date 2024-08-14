@@ -1,0 +1,127 @@
+head	38.1;
+access;
+symbols;
+locks; strict;
+
+
+38.1
+date	91.12.04.18.24.00;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       UnitTask.a  -- device Unit Task code. Queued requests are handled
+*           in this Task.
+*
+**************************************************************************
+        section ,CODE
+        include "mfm.i"
+        include "mfm_ext.i"
+
+        XDEF    UnitTask_code
+        XDEF    _EndCode
+        XREF    _PerformIO
+
+;--------------------------------------------------------------------------
+; Unit Task Section
+;
+; A task is provided so that queued requests may be Processed at a later time.
+; 
+; Inputs:
+; =======
+; None
+;
+; Register Usage:       
+; ===============
+; ( Since this is a new task, only the stack pointer (a7) is passed as an arg)
+; a2 = IOReq pointer
+; a3 = unit pointer = unit msg port pointer
+; a4 = own task pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;--------------------------------------------------------------------------
+        cnop    0,4
+
+UnitTask_code:
+        move.l  _AbsExecBase,AbsExecBase  ; store AbsExecBase ptr in reg
+
+        sub.l   a1,a1                   ; = 0
+        CALLSYS FindTask                ; find this task = FindTask(0)
+
+        move.l  d0,Task                 ; store task ptr in reg
+
+******** get device and unit ptrs out of tc_Userdata of Task struct.
+        move.l  TC_Userdata(Task),Unit  ; store unit ptr in reg
+                                        ;  = msg port ptr reg
+        move.l  mdu_Device(Unit),Device ; store device ptr in reg
+
+
+        ;--------------------------------------------------------------------
+        ; The main loop of the queued unit IO driver
+        ;
+        ; 1     wait for message
+        ; 2     check if device stopped
+        ; 3     get a message
+        ; 4     If no message, go to 1
+        ;         else perform the message (ioreq)
+        ; 5     go to 3
+
+        bra.s   UnitTask_CheckStatus
+
+UnitTask_WaitPort:
+        ;----- Wait for msg to be put in port
+        move.l  Unit,ArgA0              ; pass msg port
+        CALLSYS WaitPort                ; wait for next msg to come into port
+                                        ; and allow task switching to occur
+UnitTask_CheckStatus:
+        ;----- see if unit stopped
+        btst    #MDUB_STOPPED,UNIT_FLAGS(Unit)
+        bne.s   UnitTask_WaitPort       ; unit stopped
+
+UnitTask_NextMessage:
+        ;----- get the next msg from port
+        move.l  Unit,ArgA0              ; pass msg port
+        CALLSYS GetMsg 
+        tst.l   RetD0
+        beq.s   UnitTask_Unlock         ; go if no message available
+
+        ;----- do the IO request
+        move.l  RetD0,ArgA2             ; pass message ptr
+        jsr     _PerformIO              ; go do IO
+
+        bra.s   UnitTask_CheckStatus
+
+UnitTask_Unlock:
+        ;----- allow the unit to be used by the parent task.
+        andi.b  #~(UNITF_ACTIVE|UNITF_INTASK),UNIT_FLAGS(Unit)  
+                                                ; clr unit busy flag
+                                                ; allow device to use unit
+                                                ; directly
+        bra.s   UnitTask_WaitPort
+
+UnitTask_End:
+        rts
+
+;--------------------------------------------------------------------------
+; EndCode marker.  Used by the ROMTAG structure to be placed at the end of 
+; the code for the entire device driver.
+;--------------------------------------------------------------------------
+
+_EndCode:
+
+        end
+@

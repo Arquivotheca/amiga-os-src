@@ -1,0 +1,319 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  V36_4:1.2 L35_8:1.0;
+locks    ; strict;
+comment  @*   @;
+
+
+1.3
+date     90.04.06.20.19.49;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     88.10.06.18.08.22;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     88.08.12.21.00.49;  author daveb;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     88.06.26.18.38.56;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to RCS
+@
+
+
+1.3
+log
+@for rcs 4.x header change
+@
+text
+@/*
+	Seiko_5300 driver.
+	David Berezowski - June/88.
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+
+#define STARTLEN	51	/* # of start cmd bytes */
+#define MCPOSN		5	/* posn of machine control data */
+#define HSPOSN		23	/* posn of horizontal size data */
+#define VSPOSN		34	/* posn of vertical size data */
+#define COLORPOSN	43	/* posn of color format */
+
+#define DEBUG0	0
+#define DEBUG1	0
+#define DEBUG2	0
+#define DEBUG3	0
+#define DEBUG4	0
+#define DEBUG5	0
+#define DEBUG6	0
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+
+	extern struct PrinterData *PD;
+
+	static UWORD DataSize, RowSize, BufSize, TotalBufSize, dataoffset;
+	static UWORD pass;
+	static UBYTE CBuf[3] = "\034Y:";
+	static UBYTE CCodes[3] = "YMC";
+	/*
+		00-00	\001	SOH (Start Of Header)
+		01-05	MC1.3	Machine Control
+		06-09	,PRM	prime engine
+		10-14	,MAG1	magnification to 1
+		15-19	,TRN1	transmission mode 1
+		20-26	,HS0000	horizontal size (width)
+		27-30	,HO0	horizontal offset
+		31-37	,VS0000	vertical size (height)
+		38-41	,VO0	vertical offset
+		42-45	,xxx	color format
+		46-49	,SB1	byte structure
+		50	\002	STX (Start of Text)
+	*/
+	static UBYTE StartCmd[STARTLEN] =
+	"\001MC1.3,PRM,MAG1,TRN1,HS0000,HO0,VS0000,VO0,xxx,SB1\002";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+#if DEBUG0
+			kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG0
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				StartCmd[COLORPOSN] = 'Y';
+				StartCmd[COLORPOSN + 1] = 'M';
+				StartCmd[COLORPOSN + 2] = 'C';
+			}
+			else {
+				StartCmd[COLORPOSN] = 'M';
+				StartCmd[COLORPOSN + 1] = 'N';
+				StartCmd[COLORPOSN + 2] = 'O';
+			}
+			DataSize = (x + 7) / 8;
+			RowSize = DataSize;
+			BufSize = RowSize;
+			TotalBufSize = BufSize * 2;
+#if DEBUG0
+			kprintf("DataSize=%ld, RowSize=%ld, \n",
+				DataSize, RowSize);
+			kprintf("BufSize=%ld, TotalBufSize=%ld, y=%ld\n",
+				BufSize, TotalBufSize, y);
+#endif DEBUG0
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = 0;
+				x = (x + 7) / 8 * 8;
+				StartCmd[HSPOSN] = (x / 1000) + '0';
+				StartCmd[HSPOSN + 1] = (x % 1000) / 100 + '0';
+				StartCmd[HSPOSN + 2] = (x % 100) / 10 + '0';
+				StartCmd[HSPOSN + 3] = (x % 10) + '0';
+				StartCmd[VSPOSN] = (y / 1000) + '0';
+				StartCmd[VSPOSN + 1] = (y % 1000) / 100 + '0';
+				StartCmd[VSPOSN + 2] = (y % 100) / 10 + '0';
+				StartCmd[VSPOSN + 3] = (y % 10) + '0';
+				PrinterReady();
+				if ((err = (*(PD->pd_PWrite))(StartCmd, STARTLEN)) == PDERR_NOERR) {
+					PrinterReady();
+					CBuf[1] = CCodes[pass++];
+					err = (*(PD->pd_PWrite))(CBuf, 3);
+				}
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- color code.
+				y	- row # (0 to Height - 1).
+			*/
+#if DEBUG1
+			kprintf("1: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], x);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+#if DEBUG2
+			kprintf("2: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG2
+			PrinterReady();
+			err = (*(PD->pd_PWrite))
+				(&PD->pd_PrintBuf[dataoffset], BufSize);
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == 0 ? BufSize : 0);
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG3
+			kprintf("3: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG3
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = RowSize;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+#if DEBUG4
+			kprintf("4: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG4
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print*/
+			if (ct != PDERR_CANCEL) {
+				PrinterReady();
+				/* ETX (End Of Text) */
+				err = (*(PD->pd_PWrite))("\003", 1);
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+#if DEBUG5
+			kprintf("5: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG5
+			StartCmd[MCPOSN] =
+				SetDensity(x & SPECIAL_DENSITYMASK);
+			pass = 0;
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 6 : /* Switch to Next Color */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG6
+			kprintf("6: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG6
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				CBuf[1] = CCodes[pass++];
+				PrinterReady();
+				err = (*(PD->pd_PWrite))(CBuf, 3);
+			}
+			err = PDERR_NOERR; /* all ok*/
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.2
+log
+@got rid of NUMENDCMD, NumTotalCmd, and color (they were not needed)
+Finally fixed the dreaded bug!  TotalBufSize was being set to
+BufSize NOT BufSize * 2 (as it should have been).  STUPID!!!
+@
+text
+@@
+
+
+1.1
+log
+@removed # of copies cmd from header
+@
+text
+@a12 1
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+d35 1
+a35 1
+	static UWORD NumTotalCmd, pass, color;
+d67 1
+a67 1
+			if (color = (PD->pd_Preferences.PrintShade == SHADE_COLOR)) {
+a76 1
+			NumTotalCmd = NUMENDCMD;
+d79 2
+a80 2
+			BufSize = RowSize + NumTotalCmd;
+			TotalBufSize = BufSize;
+d204 1
+a204 1
+			if (color) {
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d14 1
+a14 1
+#define STARTLEN	56	/* # of start cmd bytes */
+d16 3
+a18 3
+#define HSPOSN		28	/* posn of horizontal size data */
+#define VSPOSN		39	/* posn of vertical size data */
+#define COLORPOSN	48	/* posn of color format */
+d43 9
+a51 10
+		10-14	,CNT1	1 copy
+		15-19	,MAG1	magnification to 1
+		20-24	,TRN1	transmission mode 1
+		25-31	,HS0000	horizontal size (width)
+		32-35	,HO0	horizontal offset
+		36-42	,VS0000	vertical size (height)
+		43-46	,VO0	vertical offset
+		47-50	,xxx	color format
+		51-54	,SB1	byte structure
+		55	\002	STX (Start of Text)
+d54 1
+a54 1
+	"\001MC1.3,PRM,CNT1,MAG1,TRN1,HS0000,HO0,VS0000,VO0,xxx,SB1\002";
+@

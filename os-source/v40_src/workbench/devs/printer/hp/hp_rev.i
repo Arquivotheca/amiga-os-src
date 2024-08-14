@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'13.5.92'
+	ENDM
+VERS	MACRO
+		dc.b	'hp 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'hp 37.2 (13.5.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: hp 37.2 (13.5.92)',0
+	ENDM

@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'25.1.93'
+	ENDM
+VERS	MACRO
+		dc.b	'sound 39.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'sound 39.5 (25.1.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: sound 39.5 (25.1.93)',0
+	ENDM

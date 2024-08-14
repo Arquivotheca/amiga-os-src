@@ -1,0 +1,591 @@
+head     38.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.7
+date     92.08.03.17.13.50;  author davidj;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     92.07.09.15.07.36;  author davidj;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.06.24.17.30.07;  author davidj;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.06.24.02.02.54;  author davidj;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.06.16.14.59.06;  author davidj;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.06.10.02.19.56;  author davidj;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.11.12.10.53.53;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@clipboard support
+@
+
+
+38.7
+log
+@add remap control
+@
+text
+@/* clipboard.c
+ *
+ */
+
+#include "wbpattern.h"
+
+#define	DR(x)	;
+
+/*****************************************************************************/
+
+ULONG __stdargs DoMethodA (Object * o, Msg msg);
+
+/*****************************************************************************/
+
+EdStatus EraseFunc (EdDataPtr ed)
+{
+
+    /* Store the image before erasing it */
+    setgadgetattrs (ed, ed->ed_GSketch,
+		    SPA_Store, TRUE,
+		    SPA_Erase, TRUE,
+		    TAG_DONE);
+
+    /* Update the sketchpad graphic */
+    UpdateSketch (ed);
+
+    return (ES_NORMAL);
+}
+
+/*****************************************************************************/
+
+EdStatus CopyFunc (EdDataPtr ed)
+{
+    EdStatus result = ES_NOCLIPBOARD;
+    struct ColorRegister *cmap;
+    struct BitMapHeader *bmhd;
+    ULONG modeid = LORES_KEY;
+    struct dtGeneral dtg;
+    struct BitMap *bm;
+    WORD i, ncolors;
+    LONG *cregs;
+    Object *o;
+
+    /* How many colors do we have */
+    ncolors = 1 << ed->ed_Depth;
+
+    /* Allocate the bitmap */
+    if (bm = AllocBitMap (ed->ed_Width, ed->ed_Height, ed->ed_Depth, BMF_CLEAR, NULL))
+    {
+	/* Should be DTA_GroupID, GID_PICTURE */
+	if (o = newdtobject (ed, PORT_NAME,
+			     DTA_SourceType, DTST_RAM,
+			     DTA_GroupID, GID_PICTURE,
+			     PDTA_NumColors, ncolors,
+			     PDTA_BitMap, bm,
+			     PDTA_ModeID, modeid,
+			     TAG_DONE))
+	{
+	    /* Get a pointer to the data that we must prepare */
+	    if ((getdtattrs (ed, o,
+			     PDTA_BitMapHeader, &bmhd,
+			     PDTA_ColorRegisters, (ULONG) & cmap,
+			     PDTA_CRegs, &cregs,
+			     TAG_DONE)) == 3)
+	    {
+		/* Prepare the bitmap header */
+		bmhd->bmh_Width = ed->ed_Width;
+		bmhd->bmh_Height = ed->ed_Height;
+		bmhd->bmh_Depth = ed->ed_Depth;
+		bmhd->bmh_PageWidth = 320;
+		bmhd->bmh_PageHeight = 200;
+
+		/* Make them the same as our screen */
+		GetRGB32 (ed->ed_Screen->ViewPort.ColorMap, 0, ncolors, cregs);
+
+		/* Set the colors */
+		DR (kprintf ("wbpattern save\n"));
+		for (i = 0; i < ncolors; i++)
+		{
+		    /* Set the master color table */
+		    cmap->red = (UBYTE) (cregs[i * 3 + 0] >> 24);
+		    cmap->green = (UBYTE) (cregs[i * 3 + 1] >> 24);
+		    cmap->blue = (UBYTE) (cregs[i * 3 + 2] >> 24);
+		    DR (kprintf ("%2ld) r=0x%02lx g=0x%02lx b=0x%02lx : r=0x%08lx g=0x%08lx b=0x%08lx\n",
+				 (LONG) i,
+				 (ULONG) cmap->red, (ULONG) cmap->green, (ULONG) cmap->blue,
+				 cregs[i * 3 + 0], cregs[i * 3 + 1], cregs[i * 3 + 2]));
+		    cmap++;
+		}
+		DR (kprintf ("\n"));
+
+		/* Copy our data into it */
+		bltbm (&ed->ed_PrefsWork.ep_BMap, ed->ed_Which, 0,
+		       bm, 0, 0, ed->ed_Width, ed->ed_Height,
+		       0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+		/* Copy it to the clipboard */
+		dtg.MethodID = DTM_COPY;
+		DoDTMethodA (o, NULL, NULL, &dtg);
+
+		/* Show that we were successful */
+		result = ES_NORMAL;
+	    }
+	    DisposeDTObject (o);
+	}
+	else
+	{
+	    FreeBitMap (bm);
+	}
+    }
+    return (result);
+}
+
+/*****************************************************************************/
+
+EdStatus CutFunc (EdDataPtr ed)
+{
+    EdStatus result;
+
+    /* Copy the image to the clipboard */
+    if ((result = CopyFunc (ed)) == ES_NORMAL)
+    {
+	/* Erase the image */
+	result = EraseFunc (ed);
+    }
+
+    return (result);
+}
+
+/*****************************************************************************/
+
+#define	PATHNAMESIZE	300
+
+/*****************************************************************************/
+
+BOOL SelectImage (EdDataPtr ed, ULONG tag1,...)
+{
+    if (!ed->ed_ImageReq)
+	ed->ed_ImageReq = AllocAslRequest (ASL_FileRequest, NULL);
+
+    return (AslRequest (ed->ed_ImageReq, (struct TagItem *) & tag1));
+}
+
+/*****************************************************************************/
+
+EdStatus PasteFunc (EdDataPtr ed, EdCommand ec)
+{
+    EdStatus result = ES_NOCLIPBOARD;
+    struct BitMapHeader *bmhd;
+    char path[PATHNAMESIZE];
+    struct gpLayout gpl;
+    struct BitMap *bm;
+    struct Hook hook;
+    ULONG stype;
+    BPTR lock;
+    APTR name;
+    Object *o;
+
+    if (ec == EC_PASTE)
+    {
+	name = (APTR) ed->ed_ClipUnit;
+	stype = DTST_CLIPBOARD;
+    }
+    else
+    {
+	strcpy (path, ed->ed_ImageBuf);
+	*PathPart (path) = 0;
+	hook.h_Entry = IntuiHook;
+
+	if (SelectImage (ed,
+			  ASLFR_TitleText,	GetString (&ed->ed_LocaleInfo, MSG_WBP_REQ_LOAD_IMAGE),
+			  ASLFR_Window,		ed->ed_Window,
+			  ASLFR_InitialDrawer,	path,
+			  ASLFR_InitialFile,	FilePart (ed->ed_ImageBuf),
+			  ASLFR_IntuiMsgFunc,	&hook,
+			  ASLFR_SleepWindow,	TRUE,
+			  ASLFR_RejectIcons,	TRUE,
+			  ASLFR_FilterFunc,	&ed->ed_FilterHook,
+			  TAG_DONE))
+	{
+	    strcpy (path, ed->ed_ImageReq->fr_Drawer);
+	    AddPart (path, ed->ed_ImageReq->fr_File, sizeof (path));
+	    if (lock = Lock (path, ACCESS_READ))
+	    {
+		if (NameFromLock (lock, path, sizeof (path)))
+		{
+		    strcpy (ed->ed_ImageBuf, path);
+		    name = (APTR) ed->ed_ImageBuf;
+		    stype = DTST_FILE;
+		}
+		UnLock (lock);
+	    }
+	}
+	else
+	{
+	    result = ES_NORMAL;
+	}
+    }
+
+    if (result != ES_NORMAL)
+    {
+	/* Get a pointer to the object */
+	if (o = newdtobject (ed, name,
+			     DTA_SourceType, stype,
+			     DTA_GroupID, GID_PICTURE,
+			     PDTA_Screen, ed->ed_Screen,
+			     PDTA_NumSparse, MIN ((1 << ed->ed_Screen->BitMap.Depth), 8),
+			     PDTA_SparseTable, ed->ed_ColorTable,
+			     PDTA_Remap, ed->ed_RemapImage,
+			     TAG_DONE))
+	{
+	    /* Tell the object to remap */
+	    gpl.MethodID = DTM_PROCLAYOUT;
+	    gpl.gpl_GInfo = NULL;
+	    gpl.gpl_Initial = 1;
+	    if (DoMethodA (o, &gpl))
+	    {
+		if ((getdtattrs (ed, o,
+				 PDTA_BitMapHeader, &bmhd,
+				 PDTA_BitMap, &bm,
+				 TAG_DONE) == 2) && bm)
+		{
+		    result = ES_NORMAL;
+
+		    /* Store the current image */
+		    Store (ed);
+
+		    /* Clear the old image */
+		    SetPrefsRast (ed, 0);
+
+		    /* Copy in the new */
+		    bltbm (bm, 0, 0,
+			   &ed->ed_PrefsWork.ep_BMap, ed->ed_Which, 0,
+			   MIN (bmhd->bmh_Width, ed->ed_Width),
+			   MIN (bmhd->bmh_Height, ed->ed_Height),
+			   0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+		    /* Update the sketchpad graphic */
+		    UpdateSketch (ed);
+		}
+	    }
+	    DisposeDTObject (o);
+	}
+	else
+	{
+	    /* Clipboard doesn't contain graphics */
+	    if (ec == EC_PASTE)
+		result = ES_NOGRAPHIC;
+	    else
+		result = ES_NOT_A_PICTURE;
+	}
+    }
+    return (result);
+}
+@
+
+
+38.6
+log
+@*** empty log message ***
+@
+text
+@d209 1
+@
+
+
+38.5
+log
+@added Load Image...
+@
+text
+@d246 4
+a249 1
+	    result = ES_NOGRAPHIC;
+@
+
+
+38.4
+log
+@use DTM_PROCLAYOUT instead of GM_LAYOUT
+@
+text
+@d11 4
+d17 1
+d52 5
+a56 5
+			     DTA_SourceType,	DTST_RAM,
+			     DTA_GroupID,	GID_PICTURE,
+			     PDTA_NumColors,	ncolors,
+			     PDTA_BitMap,	bm,
+			     PDTA_ModeID,	modeid,
+d61 1
+a61 1
+			     PDTA_BitMapHeader,	&bmhd,
+d63 1
+a63 1
+			     PDTA_CRegs,	&cregs,
+d67 1
+a67 1
+		bmhd->bmh_Width  = ed->ed_Width;
+d69 2
+a70 2
+		bmhd->bmh_Depth  = ed->ed_Depth;
+		bmhd->bmh_PageWidth  = 320;
+d81 3
+a83 3
+		    cmap->red   = (UBYTE)(cregs[i * 3 + 0] >> 24);
+		    cmap->green = (UBYTE)(cregs[i * 3 + 1] >> 24);
+		    cmap->blue  = (UBYTE)(cregs[i * 3 + 2] >> 24);
+d85 3
+a87 3
+			(LONG)i,
+			(ULONG)cmap->red, (ULONG)cmap->green, (ULONG)cmap->blue,
+			cregs[i * 3 + 0], cregs[i * 3 + 1], cregs[i * 3 + 2]));
+d132 15
+a146 1
+EdStatus PasteFunc (EdDataPtr ed)
+d150 1
+d153 4
+d159 42
+a200 8
+    /* Get a pointer to the object */
+    if (o = newdtobject (ed, (APTR) ed->ed_ClipUnit,
+			 DTA_SourceType,	DTST_CLIPBOARD,
+			 DTA_GroupID,		GID_PICTURE,
+			 PDTA_Screen,		ed->ed_Screen,
+			 PDTA_NumSparse,	MIN ((1 << ed->ed_Screen->BitMap.Depth), 8),
+			 PDTA_SparseTable,	ed->ed_ColorTable,
+			 TAG_DONE))
+d202 8
+a209 5
+	/* Tell the object to remap */
+	gpl.MethodID = DTM_PROCLAYOUT;
+	gpl.gpl_GInfo = NULL;
+	gpl.gpl_Initial = 1;
+	if (DoMethodA (o, &gpl))
+d211 5
+a215 4
+	    if ((getdtattrs (ed, o,
+			     PDTA_BitMapHeader, &bmhd,
+			     PDTA_BitMap, &bm,
+			     TAG_DONE) == 2) && bm)
+d217 6
+a222 1
+		result = ES_NORMAL;
+d224 2
+a225 2
+		/* Store the current image */
+		Store (ed);
+d227 9
+a235 9
+		/* Clear the old image */
+		SetPrefsRast (ed, 0);
+
+		/* Copy in the new */
+		bltbm (bm, 0, 0,
+		       &ed->ed_PrefsWork.ep_BMap, ed->ed_Which, 0,
+		       MIN (bmhd->bmh_Width, ed->ed_Width),
+		       MIN (bmhd->bmh_Height, ed->ed_Height),
+		       0xC0, 0xFF, NULL, ed->ed_GfxBase);
+d237 3
+a239 2
+		/* Update the sketchpad graphic */
+		UpdateSketch (ed);
+d241 6
+a247 6
+	DisposeDTObject (o);
+    }
+    else
+    {
+	/* Clipboard doesn't contain graphics */
+	result = ES_NOGRAPHIC;
+@
+
+
+38.3
+log
+@now uses datatypes.library
+@
+text
+@d63 1
+a63 1
+		bmhd->bmh_Height = ed->ed_Width;
+d145 1
+a145 1
+	gpl.MethodID = GM_LAYOUT;
+@
+
+
+38.2
+log
+@cleaned up
+@
+text
+@d7 1
+a7 1
+#define	ID_ILBM	MAKE_ID('I','L','B','M')
+a10 68
+struct IFFHandle *OpenClip (EdDataPtr ed)
+{
+    struct IFFHandle *iff;
+
+    if (iff = AllocIFF ())
+    {
+	if (iff->iff_Stream = (ULONG) OpenClipboard (ed->ed_ClipUnit))
+	{
+	    InitIFFasClip (iff);
+	}
+	else
+	{
+	    FreeIFF (iff);
+	    iff = NULL;
+	}
+    }
+
+    return (iff);
+}
+
+/*****************************************************************************/
+
+VOID CloseClip (EdDataPtr ed, struct IFFHandle * iff)
+{
+
+    if (iff)
+    {
+	if (iff->iff_Stream)
+	    CloseClipboard ((struct ClipboardHandler *) iff->iff_Stream);
+
+	FreeIFF (iff);
+    }
+}
+
+/*****************************************************************************/
+
+LONG QueryClip (EdDataPtr ed, struct IFFHandle * iff, ULONG * clipType, ULONG * clipID)
+{
+    struct ClipboardHandle *cbh = (struct ClipboardHandle *) iff->iff_Stream;
+    ULONG data[5];
+
+    cbh->cbh_Req.io_Command = CMD_READ;
+    cbh->cbh_Req.io_Error = 0;
+    cbh->cbh_Req.io_ClipID = 0;
+    cbh->cbh_Req.io_Offset = 0;
+    cbh->cbh_Req.io_Data = (APTR) data;
+    cbh->cbh_Req.io_Length = 20;
+    DoIO (&cbh->cbh_Req);
+
+    *clipID = (ULONG) cbh->cbh_Req.io_ClipID;
+    *clipType = 0;
+
+    if ((cbh->cbh_Req.io_Actual >= 8) && (cbh->cbh_Req.io_Error == 0))
+    {
+	*clipType = data[2];
+    }
+
+    /* indicate that we're done reading */
+    cbh->cbh_Req.io_Offset = 0x7FFFFFF0;
+    cbh->cbh_Req.io_Length = 1;
+    cbh->cbh_Req.io_Data = NULL;
+    DoIO (&cbh->cbh_Req);
+
+    return (TRUE);
+}
+
+/*****************************************************************************/
+
+d19 3
+d30 65
+a94 1
+    struct IFFHandle *iff;
+d96 9
+a104 10
+    /* Open the clipboard */
+    if (iff = OpenClip (ed))
+    {
+#if 0
+	/* Place it in the clipboard */
+	result = WritePrefs (ed, iff);
+#endif
+
+	/* Close the clipboard */
+	CloseClip (ed, iff);
+a105 1
+
+d130 4
+a133 2
+    struct IFFHandle *iff;
+    ULONG type, id;
+d135 14
+a148 6
+    /* Open the clipboard */
+    if (iff = OpenClip (ed))
+    {
+	/* See what is in the clipboard */
+	QueryClip (ed, iff, (ULONG *) & type, (ULONG *) & id);
+	if (type == ID_ILBM)
+d150 6
+a155 3
+#if 0
+	    /* Store the current image */
+	    Store (ed);
+d157 14
+a170 4
+	    /* Get it from the clipboard */
+	    if ((result = ReadPrefs (ed, iff)) == ES_NORMAL)
+	    {
+		/* Move from temp to work */
+a172 1
+#endif
+d174 6
+a179 8
+	else
+	{
+	    /* Clipboard doesn't contain graphics */
+	    result = ES_NOGRAPHIC;
+	}
+
+	/* Close the clipboard */
+	CloseClip (ed, iff);
+a180 1
+
+@
+
+
+38.1
+log
+@initial rcs checkin
+@
+text
+@d7 1
+a7 1
+#define	DB(x)	;
+d100 1
+d103 1
+d143 1
+d153 1
+@

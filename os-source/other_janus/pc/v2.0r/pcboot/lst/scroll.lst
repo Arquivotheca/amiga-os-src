@@ -1,0 +1,1012 @@
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-1
+
+
+				TITLE	SCROLL  -  COPYRIGHT (C) 1986 - 1988 Co
+				mmodore Amiga Inc.  
+				PAGE	60,132	 
+				;***************************************************************************** 
+				; SCROLL handler: 
+				;  
+				; SCROLL handles BIOS INT10 function on PC 
+				; ------ 
+				; 
+				; Will be called from PC.  
+				; 
+				; Called from INT 10: 	Entry 
+				;		     	- Jump to old INT10 if we don't scroll the last line 
+				;		       	- Send PC_Scroll interrupt 
+				;			- Call old INT10 
+				;			- Send PC_Stop_Scroll interrupt 
+				;			- Execute IRET  
+				; 
+				; 
+				; 
+				; New code :   8-feb-88  TB 
+				; 1.Update :   
+				; 2.Update :     
+				; 
+				;****************************************************************************** 
+				 
+				public	       UpdateInt, Scroll_INT 
+				 
+				 
+ 0000				cseg segment   para public 'code' 
+				 
+				     assume    cs:cseg,ss:cseg,ds:cseg,es:nothing 
+				 
+				extrn	       JanusIntHandler:near	     ; Dispatcher for janus ints 
+				extrn	       JanIntDis:near		     ; disable janus interrupts 
+				extrn	       JanIntEn:near		     ; enable janus interrupts 
+				; 
+				; external utilities 
+				; 
+				extrn	       outhxw:near		     ; prints hex word in ax 
+				extrn	       outint:near		     ; prints integer in ax 
+				extrn	       newline:near		     ; prints cr,lf 
+				extrn	       pstrng:near		     ; prints out string 
+				extrn	       change_int:near	 	     ; modify interrupt vector	 
+					 
+ =				w	       equ     word ptr 
+				 
+				include        janus\janusvar.inc 
+			     C	;************************************************************************* 
+			     C	; (PC side file) 
+			     C	; 
+			     C	; janusvar.inc -- the software data structures for the janus board 
+			     C	; 
+			     C	; Copyright (c) 1986, Commodore Amiga Inc.,  All rights reserved. 
+			     C	; 
+			     C	; Date       Name 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-2
+
+
+			     C	; --------   -------------	--------------------------------------------- 
+			     C	; 07-15-88 - Bill Koester  - Modified for self inclusion of required files 
+			     C	; 07-26-88 - Bill Koester  - Added ja_Reserved to JanusAmiga 
+			     C	;                            Added ja_AmigaState, ja_PCState and related 
+			     C	; 10-05-88 - Bill Koester  - Added Rev/Ver fields to JanusAmiga struc				
+										flags to JanusAmiga 
+			     C	; 10-06-88 - Bill Koester  - Added HandlerLoaded field to Janus Amiga 
+			     C	;************************************************************************* 
+			     C	 
+			     C	;NOTE Needs Memory.inc 
+			     C	 
+			     C	; all bytes described here are described in the byte order of the 8088. 
+			     C	; Note that words and longwords in these structures will be accessed from 
+			     C	; the word access space to preserve the byte order in a word -- the 8088 
+			     C	; will access longwords by reversing the words : like a 68000 access to the 
+			     C	; word access memory 
+			     C	 
+			     C	JanusAmiga  struc 
+			     C	 
+ 0000  00                    C	   ja_Lock           db 0        ; also used to handshake at 8088 reset 
+ 0001  00                    C	   ja_8088Go         db 0        ; unlocked to signal 8088 to initialize 
+			     C	;------------------------------- JanusMemHead of ParamMem 
+ 0002  00                    C	   jpm_Lock          db 0 
+ 0003  00                    C	   jpm_pad0          db 0 
+ 0004  00000000              C	   jpm_68000Base     dd 0 
+ 0008  0000                  C	   jpm_8088Segment   dw 0 
+ 000A  0000                  C	   jpm_First         dw 0 
+ 000C  0000                  C	   jpm_Max           dw 0 
+ 000E  0000                  C	   jpm_Free          dw 0 
+			     C	;------------------------------- JanusMemHead of BufferMem 
+ 0010  00                    C	   jbm_Lock          db 0 
+ 0011  00                    C	   jbm_pad0          db 0 
+ 0012  00000000              C	   jbm_68000Base     dd 0 
+ 0016  0000                  C	   jbm_8088Segment   dw 0 
+ 0018  0000                  C	   jbm_First         dw 0 
+ 001A  0000                  C	   jbm_Max           dw 0 
+ 001C  0000                  C	   jbm_Free          dw 0 
+			     C	;------------------------------- 
+ 001E  0000                  C	   ja_Interrupts     dw 0 
+ 0020  0000                  C	   ja_Parameters     dw 0 
+ 0022  0000                  C	   ja_NumInterrupts  dw 0 
+			     C	 
+			     C	   ; This field is used by Janus.library to communicate Amiga states 
+			     C	   ; to the PC. The bits of this field may be read by anyone, but 
+			     C	   ; may be written only by janus.library. 
+			     C	    
+ 0024  0000                  C	   ja_AmigaState	dw 0 
+			     C	   ; This field is used by the PC to communicate PC states 
+			     C	   ; to the Amiga. The bits of this field may be read by anyone, but 
+			     C	   ; may be written only by the PC operating system. 
+			     C	    
+ 0026  0000                  C	   ja_PCState	dw 0 
+			     C	 
+			     C	   ; These fields are set by janus.library and the PC Janus handler so 
+			     C	   ; they can read each others version numbers. 
+			     C	   ; 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-3
+
+
+ 0028  0000                  C	   ja_JLibRev		dw	0 
+ 002A  0000                  C	   ja_JLibVer		dw	0 
+ 002C  0000                  C	   ja_JHandlerRev	dw	0 
+ 002E  0000                  C	   ja_JHandlerVer	dw	0 
+			     C	 
+			     C	   ; This field is zero before the PC is running and is set to nonzero 
+			     C	   ; when the PC's JanusHandler has finished initializing. 
+			     C	   ; 
+ 0030  0000                  C	   ja_HandlerLoaded	dw	0 
+			     C	    
+ 0032  0004[                 C	   ja_Reserved dd 4 dup (0) 
+	   00000000          C	
+			 ]   C	
+			     C	
+			     C	 
+ 0042                        C	JanusAmiga  ends 
+			     C	 
+			     C	; === AmigaState Definitions ===  
+ = FFFE                      C	AMIGASTATE_RESERVED	= 0FFFEh 
+ = 0001                      C	AMIGA_NUMLOCK_SET	= 0001h 
+ = 0000                      C	AMIGA_NUMLOCK_SETn      = 0 
+ = 0002                      C	AMIGA_NUMLOCK_RESET     = 0002h 
+ = 0001                      C	AMIGA_NUMLOCK_RESETn    = 1 
+			     C	 
+			     C	; === PCState Definitions ===  
+ = FFFF                      C	PCSTATE_RESERVED	= 0FFFFh 
+			     C	 
+			     C	 
+			     C	;------ constant to set to indicate a pending software interrupt 
+			     C	 
+ = 007F                      C	JSETINT  	=   07fh 
+			     C	 
+			     C	 
+				 
+				include	       janus\services.inc 
+			     C	;* *** services.inc ******************************************************** 
+			     C	;* (PC side file) 
+			     C	;* 
+			     C	;* services.inc -- Service Definitions and Data Structures 
+			     C	;* 
+			     C	;* Copyright (c) 1986, 1987, 1988, Commodore Amiga Inc., All rights reserved 
+			     C	;*  
+			     C	;* HISTORY 
+			     C	;* Date       name               Description 
+			     C	;* ---------  -----------------  ------------------------------------------- 
+			     C	;* early 86 - Burns/Katin clone - Created this file 
+			     C	;* 02-22-88 - RJ Mical          - Added service data structures 
+			     C	;* 07-25-88 - Bill Koester      - Added ServiceCustomer structure 
+			     C	;* 07-26-88 - Bill Koester      - Added sd_PCUserCount to ServiceData 
+			     C	;*                                Changed sd_UserCount to sd_AmigaUserCount 
+			     C	;*                                Added sd_ReservedByte to ServiceData 
+			     C	;* 10-05-88 - Bill Koester	- Added SERVICE_PCWAIT flag definitions 
+			     C	;* 10-09-88 - Bill Koester      - Added PC/AMIGA_EXCLUSVIE & SERVICE_ADDED 
+			     C	;*                                flag definitions. 
+			     C	;*                              - Added sd_Semaphore field to ServiceData 
+			     C	;* ************************************************************************* 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-4
+
+
+			     C	 
+			     C	 
+			     C	;* As a coding convenience, we assume a maximum of 32 handlers. 
+			     C	;* People should avoid using this in their code, because we want 
+			     C	;* to be able to relax this constraint in the future.  All the 
+			     C	;* standard commands' syntactically support any number of interrupts, 
+			     C	;* but the internals are limited to 32. 
+			     C	 
+			     C	 
+ = 0020                      C	MAXHANDLER   =   32 
+			     C	 
+			     C	 
+			     C	;* 
+			     C	;* this is the table of hard coded services.  Other services may exist 
+			     C	;* that are dynamically allocated. 
+			     C	;* 
+			     C	 
+			     C	 
+			     C	;* service numbers constrained by hardware  
+			     C	 
+ = 0000                      C	JSERV_MINT           =      0  ; monochrome display written to 
+ = 0001                      C	JSERV_GINT           =      1  ; color display written to 
+ = 0002                      C	JSERV_CRT1INT        =      2  ; mono display's control registers changed 
+ = 0003                      C	JSERV_CRT2INT        =      3  ; color display's control registers changed 
+ = 0004                      C	JSERV_ENBKB          =      4  ; keyboard ready for next character 
+ = 0005                      C	JSERV_LPT1INT        =      5  ; parallel control register 
+ = 0006                      C	JSERV_COM2INT        =      6  ; serial control register 
+			     C	 
+			     C	;* hard coded service numbers  
+			     C	 
+ = 0007                      C	JSERV_PCBOOTED       =      7  ; PC is ready to service soft interrupts 
+ = 0008                      C	JSERV_SCROLL         =      8  ; PC is scrolling its screen 
+ = 0009                      C	JSERV_HARDDISK       =      9  ; Amiga reading PC hard disk 
+ = 000A                      C	JSERV_READAMIGA      =      10 ; PC reading Amiga mem 
+ = 000B                      C	JSERV_READPC         =      11 ; Amiga reading PC mem 
+ = 000C                      C	JSERV_AMIGACALL      =      12 ; PC causing Amiga function call 
+ = 000D                      C	JSERV_PCCALL         =      13 ; Amiga causing PC interrupt 
+ = 000E                      C	JSERV_AMIGASERVICE   =      14 ; PC initiating Amiga side of a service 
+ = 000F                      C	JSERV_PCSERVICE      =      15 ; Amiga initiating PC side of a service 
+ = 0010                      C	JSERV_PCDISK         =      16 ; PC using AmigaDos files 
+ = 0011                      C	JSERV_AMOUSE         =      17 ; AMouse Communications 
+			     C	 
+			     C	 
+			     C	;--- JANUS PC Function calls ----------- 
+			     C	; 
+			     C	; This is the table of function codes. These functions allow controlling 
+			     C	; of dynamically allocated services (dyn-service). 
+			     C	;  
+			     C	; 1.Generation:	(befor Mai'88) 
+			     C	; 
+ = 0000                      C	JFUNC_GETSERVICE1	=	 0	; not supported any more    	 
+ = 0001                      C	JFUNC_GETBASE		=	 1	; report segments, offset of janus mem 
+ = 0002                      C	JFUNC_ALLOCMEM		=	 2	; allocate janus memory 
+ = 0003                      C	JFUNC_FREEMEM		=	 3	; free janus memory 
+ = 0004                      C	JFUNC_SETPARAM		=	 4	; set pointer to service parameter 
+ = 0005                      C	JFUNC_SETSERVICE	=	 5	; not supported any more    	 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-5
+
+
+ = 0006                      C	JFUNC_STOPSERVICE	=	 6	; not supported any more    	 
+ = 0007                      C	JFUNC_CALLAMIGA		=	 7	; call service on Amiga side 
+ = 0008                      C	JFUNC_WAITAMIGA		=	 8 	; wait for service becomes ready 
+ = 0009                      C	JFUNC_CHECKAMIGA	=	 9	; check service status 
+			     C	;					 
+			     C	; 2.Generation: 
+			     C	; 
+ = 000A                      C	JFUNC_ADDSERVICE	=	10	; add a dyn-service  
+ = 000B                      C	JFUNC_GETSERVICE	=	11	; link to a dyn-service 
+ = 000C                      C	JFUNC_CALLSERVICE	=	12	; call a dyn-service 
+ = 000D                      C	JFUNC_RELEASESERVICE	=	13	; unlink from a dyn-service 
+ = 000E                      C	JFUNC_DELETESERVICE	=	14	; delete a dyn-service 
+ = 000F                      C	JFUNC_LOCKSERVICEDATA	=	15	; lock private mem of a dyn-service 
+ = 0010                      C	JFUNC_UNLOCKSERVICEDATA	=	16	; unlock private mem of a dyn-service 
+			     C	 
+ = 0010                      C	JFUNC_MAX		=	16 	; Last function (for range check only) 
+			     C	 
+ = 000B                      C	JFUNC_JINT		=	0bh 
+			     C	 
+			     C	;* === ServiceData Structure ===============================================  
+			     C	;* The ServiceData structure is used to share data among all callers of  
+			     C	;* all of the Service routines.  One of these is allocated in janus memory  
+			     C	;* for each service.   
+			     C	 
+			     C	ServiceData struc 
+			     C	 
+			     C	   ; The ServiceData ID numbers are used to uniquely identify 
+			     C	   ; application-specific services.  There are two ID numbers: 
+			     C	   ; the global ApplicationID and the application's local LocalID. 
+			     C	   ; 
+			     C	   ; The ApplicationID is a 32-bit number which *must* be assigned to 
+			     C	   ; an application designer by Commodore-Amiga. 
+			     C	   ; Once a service ApplicationID is assigned to an application 
+			     C	   ; designer, that designer "owns" that ID number forever. 
+			     C	   ; Note that this will provide unique ServiceData identification 
+			     C	   ; numbers only for the first 4.3 billion ServiceData designers 
+			     C	   ; after that, there's some risk of a collision. 
+			     C	   ; 
+			     C	   ; The LocalID, defined by the application designer, is a local 
+			     C	   ; subcategory of the global ApplicationID.  These can mean anything 
+			     C	   ; at all.  There are 65,536 of these local ID's. 
+ 0000  00000000              C	   sd_ApplicationID  dd 0 
+ 0004  0000                  C	   sd_LocalID        dw 0 
+			     C	 
+			     C	 
+			     C	   ; The flag bits are defined below.  Some of these are set by the 
+			     C	   ; application programs which use the service, and some are set 
+			     C	   ; by the system. 
+ 0006  0000                  C	   sd_Flags    dw 0 
+			     C	 
+			     C	 
+			     C	   ; This field is initialized by the system for you, and then  
+			     C	   ; is never touched by the system again.  Users of the  
+			     C	   ; service can agree by convention that they have to obtain  
+			     C	   ; this lock before using the service.   
+			     C	   ; If you are the AddService() caller and you want this lock  
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-6
+
+
+			     C	   ; to be locked before the service is linked into the system,  
+			     C	   ; set the AddService() ADDS_LOCKDATA argument flag.   
+ 0008  00                    C	   sd_ServiceDataLock   db 0 
+			     C	 
+			     C	 
+			     C	   ; This tracks the number of users currently connected  
+			     C	   ; to this service. 
+ 0009  00                    C	   sd_AmigaUserCount   db 0 
+ 000A  00                    C	   sd_PCUserCount      db 0 
+ 000B  00                    C	   sd_ReservedByte     db 0 
+			     C	 
+			     C	   ; These are the standard janus memory descriptions, which describe 
+			     C	   ; the parameter memory associated with this service.  This memory 
+			     C	   ; (if any) will be allocated automatically by the system when the 
+			     C	   ; service if first added.  The creator of the service 
+			     C	   ; (the one who calls AddService()) supplies the MemSize and 
+			     C	   ; MemType values; after the service is added the MemPtr field 
+			     C	   ; will point to the parameter memory.  GetService() callers, after 
+			     C	   ; the service comes available, will find all of these fields 
+			     C	   ; filled in with the appropriate values. 
+			     C	   ; The AmigaMemPtr and PCMemPtr both point to the same location 
+			     C	   ; of Janus memory; an Amiga program should use the AmigaMemPtr, 
+			     C	   ; and a PC program should use the PCMemPtr 
+ 000C  0000                  C	   sd_MemSize        dw 0 
+ 000E  0000                  C	   sd_MemType        dw 0 
+ 0010  0000                  C	   sd_MemOffset      dw 0 
+ 0012  00000000              C	   sd_AmigaMemPtr    dd 0 
+ 0016  00000000              C	   sd_PCMemPtr       dd 0 
+			     C	 
+			     C	 
+			     C	   ; This offset is used as the key for calls to AllocServiceMem()  
+			     C	   ; and FreeServiceMem().  This key can be used by any one  
+			     C	   ; who's learned about this service via either AddService()  
+			     C	   ; or GetService().  The system makes no memory allocations  
+			     C	   ; using this key, so it's completely under application control. 
+			     C	   ; Any memory attached to this key by calls to AllocServiceMem()  
+			     C	   ; will be freed automatically after the service has been  
+			     C	   ; deleted and all users of the service have released the service.   
+ 001A  0000                  C	   sd_JRememberKey   dw 0 
+			     C	 
+			     C	 
+			     C	   ; These pointers are for the system-maintained lists of 
+			     C	   ; structures.  If you disturb any of these pointers, you will be 
+			     C	   ; tickling the guru's nose, and when the guru sneezes ... 
+ 001C  0000                  C	   sd_NextServiceData      dw 0 
+ 001E  00000000              C	   sd_FirstPCCustomer      dd 0 
+ 0022  00000000              C	   sd_FirstAmigaCustomer   dd 0 
+			     C	 
+			     C	   ; 
+			     C	   ; Semaphore structure pointer for services that allow multiple customers 
+			     C	   ; 
+ 0026  00000000              C	   sd_Semaphore 	   dd 0 
+			     C	 
+			     C	   ; These fields are reserved for future use  
+ 002A  0004[                 C	   sd_ZaphodReserved    dd 4 dup (0) 
+	   00000000          C	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-7
+
+
+			 ]   C	
+			     C	
+			     C	 
+ 003A                        C	ServiceData ends 
+			     C	 
+			     C	 
+			     C	;* === Flag Definitions ===  
+			     C	 
+ = 0001                      C	SERVICE_DELETED      =   00001h    ; Owner of this service deleted it 
+ = 0000                      C	SERVICE_DELETEDn     =   0 
+ = 0002                      C	EXPUNGE_SERVICE      =   00002h    ; Owner of service should delete 
+ = 0001                      C	EXPUNGE_SERVICEn     =   1 
+ = 0004                      C	SERVICE_AMIGASIDE    =   00004h    ; Set if Amiga created the service 
+ = 0002                      C	SERVICE_AMIGASIDEn   =   2 
+ = 0008                      C	SERVICE_PCWAIT	     =   00008h	   ; Set when PC calls a service 
+ = 0003                      C	SERVICE_PCWAITn      =   3	   ; Cleared when service replys 
+ = 0010                      C	AMIGA_EXCLUSIVE      =   00010h    ; Only one Amiga customer allowed   
+ = 0004                      C	AMIGA_EXCLUSIVEn     =   4 
+ = 0020                      C	PC_EXCLUSIVE         =   00020h    ; Only one PC customer allowed      
+ = 0005                      C	PC_EXCLUSIVEn        =   5 
+ = 0040                      C	SERVICE_ADDED        =   00040h    ; Set when service is added         
+ = 0006                      C	SERVICE_ADDEDn       =   6 
+			     C	 
+			     C	 
+			     C	;* === ServiceCustomer Structure ===========================================  
+			     C	;* A ServiceCustomer structure is created for each "customer" of a given  
+			     C	;* channel 
+			     C	 
+			     C	ServiceCustomer	struc 
+			     C	 
+ 0000  00000000              C		scs_NextCustomer 	dd 0 
+			     C	 
+ 0004  0000                  C		scs_Flags		dw 0 
+			     C	 
+ 0006  00000000              C		scs_Task			dd 0 ;This points to the task of the customer  
+ 000A  00000000              C		scs_SignalBit		dd 0 ;Signal the customer with this bit  
+			     C	 
+ 000E  0004[                 C		scs_JazzReserved  	dd 4 dup (0) 
+	   00000000          C	
+			 ]   C	
+			     C	
+			     C	 
+ 001E                        C	ServiceCustomer	ends 
+			     C	 
+			     C	;* === Flag Definitions === * 
+			     C	;* These flags are set/cleared by the system 
+ = 0100                      C	CALL_TOPC_ONLY       =   0100h 
+ = 0008                      C	CALL_TOPC_ONLYn      =   8 
+ = 0200                      C	CALL_FROMPC_ONLY     =   0200h 
+ = 0009                      C	CALL_FROMPC_ONLYn    =   9 
+ = 0400                      C	CALL_TOAMIGA_ONLY    =   0400h 
+ = 000A                      C	CALL_TOAMIGA_ONLYn   =   10 
+ = 0800                      C	CALL_FROMAMIGA_ONLY  =   0800h 
+ = 000B                      C	CALL_FROMAMIGA_ONLYn =   11 
+			     C	 
+			     C	; === AddService() Flags ================================================== 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-8
+
+
+			     C	; These are the definitions of the flag arguments that can be passed to the  
+			     C	; AddService() function. 
+			     C	 
+ = 0001                      C	ADDS_EXCLUSIVE       = 00001h ; You want to be the *only* Amiga customer 
+ = 0000                      C	ADDS_EXCLUSIVEn      = 0 
+ = 0002                      C	ADDS_TOPC_ONLY       = 00002h ; You want to send signals only to the PC 
+ = 0001                      C	ADDS_TOPC_ONLYn      = 1 
+ = 0004                      C	ADDS_FROMPC_ONLY     = 00004h ; You want to get signals only from the PC 
+ = 0002                      C	ADDS_FROMPC_ONLYn    = 2 
+ = 0008                      C	ADDS_TOAMIGA_ONLY    = 00008h ; You want to send signals only to the Amiga 
+ = 0003                      C	ADDS_TOAMIGA_ONLYn   = 3 
+ = 0010                      C	ADDS_FROMAMIGA_ONLY  = 00010h ; You want to get signals only from the Amiga 
+ = 0004                      C	ADDS_FROMAMIGA_ONLYn = 4 
+ = 0020                      C	ADDS_LOCKDATA        = 00020h ; S'DataLock locked before linking to system 
+ = 0005                      C	ADDS_LOCKDATAn       = 5 
+			     C	 
+			     C	;* These are the system's AddService() Flags  
+ = 0100                      C	SD_CREATED           = 00100h 
+ = 0008                      C	SD_CREATEDn          = 8 
+			     C	 
+			     C	 
+			     C	 
+			     C	; === GetService() Flags ==================================================  
+			     C	; These are the definitions of the flag arguments that can be passed to the  
+			     C	; GetService() function. 
+			     C	 
+ = 0001                      C	GETS_WAIT            = 00001h ; If service not yet available, you'll wait 
+ = 0000                      C	GETS_WAITn           = 0 
+ = 0002                      C	GETS_TOPC_ONLY       = 00002h ; You want to send signals only to the PC 
+ = 0001                      C	GETS_TOPC_ONLYn      = 1 
+ = 0004                      C	GETS_FROMPC_ONLY     = 00004h ; You want to get signals only from the PC 
+ = 0002                      C	GETS_FROMPC_ONLYn    = 2 
+ = 0008                      C	GETS_TOAMIGA_ONLY    = 00008h ; You want to send signals only to the Amiga 
+ = 0003                      C	GETS_TOAMIGA_ONLYn   = 3 
+ = 0010                      C	GETS_FROMAMIGA_ONLY  = 00010h ; You want to get signals only from the Amiga 
+ = 0004                      C	GETS_FROMAMIGA_ONLYn = 4 
+ = 0020                      C	GETS_EXCLUSIVE       = 00020h ; You want to be the *only* Amiga customer 
+ = 0005                      C	GETS_EXCLUSIVEn      = 5 
+ = 0040                      C	GETS_ALOAD_A         = 00040h ; Autoload the service on the Amiga side 
+ = 0006                      C	GETS_ALOAD_An        = 6 
+ = 0080                      C	GETS_ALOAD_PC        = 00080h ; Autoload the service on the PC side 
+ = 0007                      C	GETS_ALOAD_PCn       = 7 
+			     C	 
+			     C	 
+			     C	 
+			     C	; === Service() Result Codes ==========================================  
+			     C	; These are the result codes that may be returned by a call to a Service  
+			     C	; 
+ =-0001                      C	JSERV_NOFUNCTION	= -1 	; Tried to call a not supported function 
+ = 0000                      C	JSERV_OK         	=  0  	; All is well 
+ = 0000                      C	JSERV_PENDING	 	=  0  	; Called service still pending on Amiga side 
+ = 0001                      C	JSERV_FINISHED	 	=  1  	; Called service is finished on Amiga side 
+ = 0002                      C	JSERV_NOJANUSBASE	=  2  	; ServiceBase structure not defined 
+ = 0003                      C	JSERV_NOJANUSMEM 	=  3  	; We ran out of Janus memory 
+ = 0004                      C	JSERV_NOAMIGAMEM 	=  4  	; On the Amiga side we ran out of Amiga memory 
+ = 0005                      C	JSERV_NOPCMEM    	=  5  	; On the PC side we ran out of PC memory 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-9
+
+
+ = 0006                      C	JSERV_NOSERVICE  	=  6  	; Tried to get a service that doesn't exist 
+ = 0007                      C	JSERV_DUPSERVICE 	=  7  	; Tried to add a service that already existed 
+ = 0008                      C	JSERV_ILLFUNCTION	=  8	; Tried to call an illegal function 
+ = 0009                      C	JSERV_NOTEXCLUSIVE      =  9  ; Wanted to but couldn't be exclusive user  
+ = 000A                      C	JSERV_BADAUTOLOAD       =  10 ; Wanted to autoload but couldn't 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include        macros.inc 
+			     C	;***************************************************************************** 
+			     C	; 
+			     C	; macros.inc	        
+			     C	; 
+			     C	;***************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include        vars_ext.inc 
+			     C	;***************************************************************************** 
+			     C	; 
+			     C	; vars_ext.inc declares variable datas of PC janus handler as external; 
+			     C	;	       these datas are defined in vars.inc	    
+			     C	; 
+			     C	;--- external data ----------------------------------------------------------- 
+			     C	.list 
+			     C	 
+			     C	 
+				 
+				include        equ.inc 
+			     C	;****************************************************************************** 
+			     C	; 
+			     C	; equ.inc contains equals, flag bits and register addresses  
+			     C	; 
+			     C	;****************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include	       debug.inc 
+			     C	;****************************************************************************** 
+			     C	; 
+			     C	; Debug.inc contains flag to enable debug messageses  
+			     C	; 
+			     C	;****************************************************************************** 
+			     C	 
+			     C	include		mes.inc			; includes all message offsets 
+			     C	;**************************************************************************** 
+			     C	; 
+			     C	; mes.inc contains external messages for PC janus handler 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-10
+
+
+			     C	; 
+			     C	;**************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-1
+
+
+Macros:
+
+		N a m e			Lines
+
+ICALL  . . . . . . . . . . . . .  	   2
+IFLAGS . . . . . . . . . . . . .  	  13
+INFO . . . . . . . . . . . . . .  	  13
+INFO_AX  . . . . . . . . . . . .  	  16
+INFO_AX_BX . . . . . . . . . . .  	  20
+JLOCK  . . . . . . . . . . . . .  	   8
+POPAC  . . . . . . . . . . . . .  	   4
+POPALL . . . . . . . . . . . . .  	   6
+PUSHAC . . . . . . . . . . . . .  	   4
+PUSHALL  . . . . . . . . . . . .  	   6
+UNLOCK . . . . . . . . . . . . .  	   1
+
+Structures and Records:
+
+                N a m e                 Width   # fields
+                                        Shift   Width   Mask    Initial
+
+JANUSAMIGA . . . . . . . . . . .  	0042	001B
+  JA_LOCK  . . . . . . . . . . .  	0000
+  JA_8088GO  . . . . . . . . . .  	0001
+  JPM_LOCK . . . . . . . . . . .  	0002
+  JPM_PAD0 . . . . . . . . . . .  	0003
+  JPM_68000BASE  . . . . . . . .  	0004
+  JPM_8088SEGMENT  . . . . . . .  	0008
+  JPM_FIRST  . . . . . . . . . .  	000A
+  JPM_MAX  . . . . . . . . . . .  	000C
+  JPM_FREE . . . . . . . . . . .  	000E
+  JBM_LOCK . . . . . . . . . . .  	0010
+  JBM_PAD0 . . . . . . . . . . .  	0011
+  JBM_68000BASE  . . . . . . . .  	0012
+  JBM_8088SEGMENT  . . . . . . .  	0016
+  JBM_FIRST  . . . . . . . . . .  	0018
+  JBM_MAX  . . . . . . . . . . .  	001A
+  JBM_FREE . . . . . . . . . . .  	001C
+  JA_INTERRUPTS  . . . . . . . .  	001E
+  JA_PARAMETERS  . . . . . . . .  	0020
+  JA_NUMINTERRUPTS . . . . . . .  	0022
+  JA_AMIGASTATE  . . . . . . . .  	0024
+  JA_PCSTATE . . . . . . . . . .  	0026
+  JA_JLIBREV . . . . . . . . . .  	0028
+  JA_JLIBVER . . . . . . . . . .  	002A
+  JA_JHANDLERREV . . . . . . . .  	002C
+  JA_JHANDLERVER . . . . . . . .  	002E
+  JA_HANDLERLOADED . . . . . . .  	0030
+  JA_RESERVED  . . . . . . . . .  	0032
+SERVICECUSTOMER  . . . . . . . .  	001E	0005
+  SCS_NEXTCUSTOMER . . . . . . .  	0000
+  SCS_FLAGS  . . . . . . . . . .  	0004
+  SCS_TASK . . . . . . . . . . .  	0006
+  SCS_SIGNALBIT  . . . . . . . .  	000A
+  SCS_JAZZRESERVED . . . . . . .  	000E
+SERVICEDATA  . . . . . . . . . .  	003A	0012
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-2
+
+
+  SD_APPLICATIONID . . . . . . .  	0000
+  SD_LOCALID . . . . . . . . . .  	0004
+  SD_FLAGS . . . . . . . . . . .  	0006
+  SD_SERVICEDATALOCK . . . . . .  	0008
+  SD_AMIGAUSERCOUNT  . . . . . .  	0009
+  SD_PCUSERCOUNT . . . . . . . .  	000A
+  SD_RESERVEDBYTE  . . . . . . .  	000B
+  SD_MEMSIZE . . . . . . . . . .  	000C
+  SD_MEMTYPE . . . . . . . . . .  	000E
+  SD_MEMOFFSET . . . . . . . . .  	0010
+  SD_AMIGAMEMPTR . . . . . . . .  	0012
+  SD_PCMEMPTR  . . . . . . . . .  	0016
+  SD_JREMEMBERKEY  . . . . . . .  	001A
+  SD_NEXTSERVICEDATA . . . . . .  	001C
+  SD_FIRSTPCCUSTOMER . . . . . .  	001E
+  SD_FIRSTAMIGACUSTOMER  . . . .  	0022
+  SD_SEMAPHORE . . . . . . . . .  	0026
+  SD_ZAPHODRESERVED  . . . . . .  	002A
+STACKFRAME . . . . . . . . . . .  	0012	0009
+  REGAX  . . . . . . . . . . . .  	0000
+  REGBX  . . . . . . . . . . . .  	0002
+  REGCX  . . . . . . . . . . . .  	0004
+  REGDX  . . . . . . . . . . . .  	0006
+  REGBP  . . . . . . . . . . . .  	0008
+  REGDI  . . . . . . . . . . . .  	000A
+  REGSI  . . . . . . . . . . . .  	000C
+  REGDS  . . . . . . . . . . . .  	000E
+  REGES  . . . . . . . . . . . .  	0010
+
+Segments and Groups:
+
+                N a m e         	Length	 Align	Combine Class
+
+CSEG . . . . . . . . . . . . . .  	00C7	PARA	PUBLIC	'CODE'
+
+Symbols:            
+
+                N a m e         	Type	 Value	 Attr
+
+ACKINT . . . . . . . . . . . . .  	NUMBER	007F	
+ACTIVEFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+ADDS_EXCLUSIVE . . . . . . . . .  	NUMBER	0001	
+ADDS_EXCLUSIVEN  . . . . . . . .  	NUMBER	0000	
+ADDS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+ADDS_FROMAMIGA_ONLYN . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLYN  . . . . . . .  	NUMBER	0002	
+ADDS_LOCKDATA  . . . . . . . . .  	NUMBER	0020	
+ADDS_LOCKDATAN . . . . . . . . .  	NUMBER	0005	
+ADDS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+ADDS_TOAMIGA_ONLYN . . . . . . .  	NUMBER	0003	
+ADDS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+ADDS_TOPC_ONLYN  . . . . . . . .  	NUMBER	0001	
+ALLOCPARAM . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+ALREADYCALLED  . . . . . . . . .  	NUMBER	0054	
+AMIGA  . . . . . . . . . . . . .  	NUMBER	000A	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-3
+
+
+AMIGAADDMSG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGACALLMSG . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGADELETEMSG . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGAINT . . . . . . . . . . . .  	NUMBER	0004	
+AMIGASTATE_RESERVED  . . . . . .  	NUMBER	FFFE	
+AMIGA_EXCLUSIVE  . . . . . . . .  	NUMBER	0010	
+AMIGA_EXCLUSIVEN . . . . . . . .  	NUMBER	0004	
+AMIGA_NUMLOCK_RESET  . . . . . .  	NUMBER	0002	
+AMIGA_NUMLOCK_RESETN . . . . . .  	NUMBER	0001	
+AMIGA_NUMLOCK_SET  . . . . . . .  	NUMBER	0001	
+AMIGA_NUMLOCK_SETN . . . . . . .  	NUMBER	0000	
+
+BASEMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+BELL . . . . . . . . . . . . . .  	NUMBER	0007	
+BIOS_INT10 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT13 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT16 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT1C . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BOOT_INT . . . . . . . . . . . .  	NUMBER	0019	
+BS . . . . . . . . . . . . . . .  	NUMBER	0008	
+BUFFERMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+CALLAMIGASERVICE . . . . . . . .  	V BYTE	0000	CSEG	External
+CALLEDFIRST  . . . . . . . . . .  	NUMBER	0042	
+CALL_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0800	
+CALL_FROMAMIGA_ONLYN . . . . . .  	NUMBER	000B	
+CALL_FROMPC_ONLY . . . . . . . .  	NUMBER	0200	
+CALL_FROMPC_ONLYN  . . . . . . .  	NUMBER	0009	
+CALL_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0400	
+CALL_TOAMIGA_ONLYN . . . . . . .  	NUMBER	000A	
+CALL_TOPC_ONLY . . . . . . . . .  	NUMBER	0100	
+CALL_TOPC_ONLYN  . . . . . . . .  	NUMBER	0008	
+CHAIN_VEC  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+CHANGE_INT . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+CHANNELMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+CR . . . . . . . . . . . . . . .  	NUMBER	000D	
+
+DBG_ALLOCPARAM . . . . . . . . .  	NUMBER	0000	
+DBG_AMIGAADDMSG  . . . . . . . .  	NUMBER	0000	
+DBG_AMIGACALLMSG . . . . . . . .  	NUMBER	0000	
+DBG_AMIGADELETEMSG . . . . . . .  	NUMBER	0000	
+DBG_BASEMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_BLOCKMOVE  . . . . . . . . .  	NUMBER	0000	
+DBG_BUFFERMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_CALLAMIGASERVICE . . . . . .  	NUMBER	0000	
+DBG_COPYMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_DISKMSG1 . . . . . . . . . .  	NUMBER	0000	
+DBG_DOSMSGA  . . . . . . . . . .  	NUMBER	0000	
+DBG_DOSMSGN  . . . . . . . . . .  	NUMBER	0000	
+DBG_EXEINTMES  . . . . . . . . .  	NUMBER	0000	
+DBG_EXITSDMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_FOUNDINTMES  . . . . . . . .  	NUMBER	0000	
+DBG_GOTSERVICEINT  . . . . . . .  	NUMBER	0000	
+DBG_HANDLERMSG . . . . . . . . .  	NUMBER	0000	
+DBG_HANDLERVERSIONMSG  . . . . .  	NUMBER	0001	
+DBG_HDPART . . . . . . . . . . .  	NUMBER	0000	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-4
+
+
+DBG_HWMSGP . . . . . . . . . . .  	NUMBER	0000	
+DBG_HWMSGPC  . . . . . . . . . .  	NUMBER	0000	
+DBG_HWMSGR . . . . . . . . . . .  	NUMBER	0000	
+DBG_IDLEMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_INITPOINTERS . . . . . . . .  	NUMBER	0000	
+DBG_INITWAITPOINTERS . . . . . .  	NUMBER	0000	
+DBG_INTCTRLMES . . . . . . . . .  	NUMBER	0000	
+DBG_INTSMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_INTTBLMES  . . . . . . . . .  	NUMBER	0000	
+DBG_JPARTBASE  . . . . . . . . .  	NUMBER	0000	
+DBG_LIBVERSIONMSG  . . . . . . .  	NUMBER	0001	
+DBG_LOADMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_MAKESERVICE  . . . . . . . .  	NUMBER	0000	
+DBG_MEMCHUNK . . . . . . . . . .  	NUMBER	0000	
+DBG_NEXTSLOTMSG  . . . . . . . .  	NUMBER	0000	
+DBG_NOBASEMSG  . . . . . . . . .  	NUMBER	0001	
+DBG_NOINTMES . . . . . . . . . .  	NUMBER	0000	
+DBG_NOSERVICEBASEMSG . . . . . .  	NUMBER	0001	
+DBG_PARASMSG . . . . . . . . . .  	NUMBER	0000	
+DBG_PASTLOCK . . . . . . . . . .  	NUMBER	0000	
+DBG_PRELOCK  . . . . . . . . . .  	NUMBER	0000	
+DBG_REGMSG . . . . . . . . . . .  	NUMBER	0000	
+DBG_REMOVEMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_SCROLL . . . . . . . . . . .  	NUMBER	0000	
+DBG_SERVICEADDED . . . . . . . .  	NUMBER	0000	
+DBG_SERVICEAVAILABLE . . . . . .  	NUMBER	0000	
+DBG_SERVICEDELETED . . . . . . .  	NUMBER	0000	
+DBG_SERVICESEARCH  . . . . . . .  	NUMBER	0000	
+DBG_UCOUNTMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_UPDATEMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_WAITSTATUS . . . . . . . . .  	NUMBER	0000	
+DBG_WRONGVERSIONMSG  . . . . . .  	NUMBER	0001	
+DISKMSG1 . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+DISK_INT . . . . . . . . . . . .  	NUMBER	0013	
+DOS  . . . . . . . . . . . . . .  	NUMBER	0080	
+DOS12  . . . . . . . . . . . . .  	NUMBER	0001	
+DOS16  . . . . . . . . . . . . .  	NUMBER	0004	
+DOSMSGA  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+DOSMSGN  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+DOS_INT28  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+DUMMYFLAG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+D_SEG  . . . . . . . . . . . . .  	NUMBER	D000	
+
+EOI  . . . . . . . . . . . . . .  	NUMBER	0020	
+ESC_CHAR . . . . . . . . . . . .  	NUMBER	001B	
+ESDI_MES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+EXEINTMES  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+EXITSDMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+EXIT_SCROLL  . . . . . . . . . .  	L NEAR	0098	CSEG
+EXPUNGE_SERVICE  . . . . . . . .  	NUMBER	0002	
+EXPUNGE_SERVICEN . . . . . . . .  	NUMBER	0001	
+
+FAKEDOSFLAG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+FOUNDINTMES  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+F_SEG  . . . . . . . . . . . . .  	NUMBER	F000	
+
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-5
+
+
+GETS_ALOAD_A . . . . . . . . . .  	NUMBER	0040	
+GETS_ALOAD_AN  . . . . . . . . .  	NUMBER	0006	
+GETS_ALOAD_PC  . . . . . . . . .  	NUMBER	0080	
+GETS_ALOAD_PCN . . . . . . . . .  	NUMBER	0007	
+GETS_EXCLUSIVE . . . . . . . . .  	NUMBER	0020	
+GETS_EXCLUSIVEN  . . . . . . . .  	NUMBER	0005	
+GETS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+GETS_FROMAMIGA_ONLYN . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLYN  . . . . . . .  	NUMBER	0002	
+GETS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+GETS_TOAMIGA_ONLYN . . . . . . .  	NUMBER	0003	
+GETS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+GETS_TOPC_ONLYN  . . . . . . . .  	NUMBER	0001	
+GETS_WAIT  . . . . . . . . . . .  	NUMBER	0001	
+GETS_WAITN . . . . . . . . . . .  	NUMBER	0000	
+GOTSERVICEINT  . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+HANDLERMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HANDLERPTR . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+HANDLERVERSIONMSG  . . . . . . .  	V BYTE	0000	CSEG	External
+HWMSGP . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HWMSGPC  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HWMSGR . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+IDLE . . . . . . . . . . . . . .  	NUMBER	0000	
+IDLEDOS  . . . . . . . . . . . .  	NUMBER	0010	
+IDLEMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+IDLE_INT . . . . . . . . . . . .  	NUMBER	0028	
+INFOLEVEL  . . . . . . . . . . .  	NUMBER	000A	
+INITPOINTERS . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INITWAITPOINTERS . . . . . . . .  	V BYTE	0000	CSEG	External
+INTCOUNT . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+INTCTRLMES . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INTEN_REG  . . . . . . . . . . .  	NUMBER	0379	
+INTSMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INTTBLMES  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INT_ACTIVE . . . . . . . . . . .  	NUMBER	0001	
+INT_ENABLE . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+INT_REQ  . . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+IRQ3EN . . . . . . . . . . . . .  	NUMBER	FFF7	
+IRQ3RESET  . . . . . . . . . . .  	NUMBER	03B0	
+
+JANINT8  . . . . . . . . . . . .  	NUMBER	0008	
+JANINTDIS  . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+JANINTEN . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+JANPCINT . . . . . . . . . . . .  	NUMBER	0040	
+JANUS  . . . . . . . . . . . . .  	NUMBER	0040	
+JANUSINTHANDLER  . . . . . . . .  	L NEAR	0000	CSEG	External
+JANUS_BASE_SEG . . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_BUFFER_SEG . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PARAM_SEG  . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PART_BASE  . . . . . . . .  	V WORD	0000	CSEG	External
+JFUNC_ADDSERVICE . . . . . . . .  	NUMBER	000A	
+JFUNC_ALLOCMEM . . . . . . . . .  	NUMBER	0002	
+JFUNC_CALLAMIGA  . . . . . . . .  	NUMBER	0007	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-6
+
+
+JFUNC_CALLSERVICE  . . . . . . .  	NUMBER	000C	
+JFUNC_CHECKAMIGA . . . . . . . .  	NUMBER	0009	
+JFUNC_DELETESERVICE  . . . . . .  	NUMBER	000E	
+JFUNC_FREEMEM  . . . . . . . . .  	NUMBER	0003	
+JFUNC_GETBASE  . . . . . . . . .  	NUMBER	0001	
+JFUNC_GETSERVICE . . . . . . . .  	NUMBER	000B	
+JFUNC_GETSERVICE1  . . . . . . .  	NUMBER	0000	
+JFUNC_JINT . . . . . . . . . . .  	NUMBER	000B	
+JFUNC_LOCKSERVICEDATA  . . . . .  	NUMBER	000F	
+JFUNC_MAX  . . . . . . . . . . .  	NUMBER	0010	
+JFUNC_RELEASESERVICE . . . . . .  	NUMBER	000D	
+JFUNC_SETPARAM . . . . . . . . .  	NUMBER	0004	
+JFUNC_SETSERVICE . . . . . . . .  	NUMBER	0005	
+JFUNC_STOPSERVICE  . . . . . . .  	NUMBER	0006	
+JFUNC_UNLOCKSERVICEDATA  . . . .  	NUMBER	0010	
+JFUNC_WAITAMIGA  . . . . . . . .  	NUMBER	0008	
+JSERV_AMIGACALL  . . . . . . . .  	NUMBER	000C	
+JSERV_AMIGASERVICE . . . . . . .  	NUMBER	000E	
+JSERV_AMOUSE . . . . . . . . . .  	NUMBER	0011	
+JSERV_BADAUTOLOAD  . . . . . . .  	NUMBER	000A	
+JSERV_COM2INT  . . . . . . . . .  	NUMBER	0006	
+JSERV_CRT1INT  . . . . . . . . .  	NUMBER	0002	
+JSERV_CRT2INT  . . . . . . . . .  	NUMBER	0003	
+JSERV_DUPSERVICE . . . . . . . .  	NUMBER	0007	
+JSERV_ENBKB  . . . . . . . . . .  	NUMBER	0004	
+JSERV_FINISHED . . . . . . . . .  	NUMBER	0001	
+JSERV_GINT . . . . . . . . . . .  	NUMBER	0001	
+JSERV_HARDDISK . . . . . . . . .  	NUMBER	0009	
+JSERV_ILLFUNCTION  . . . . . . .  	NUMBER	0008	
+JSERV_LPT1INT  . . . . . . . . .  	NUMBER	0005	
+JSERV_MINT . . . . . . . . . . .  	NUMBER	0000	
+JSERV_NOAMIGAMEM . . . . . . . .  	NUMBER	0004	
+JSERV_NOFUNCTION . . . . . . . .  	NUMBER	-0001	
+JSERV_NOJANUSBASE  . . . . . . .  	NUMBER	0002	
+JSERV_NOJANUSMEM . . . . . . . .  	NUMBER	0003	
+JSERV_NOPCMEM  . . . . . . . . .  	NUMBER	0005	
+JSERV_NOSERVICE  . . . . . . . .  	NUMBER	0006	
+JSERV_NOTEXCLUSIVE . . . . . . .  	NUMBER	0009	
+JSERV_OK . . . . . . . . . . . .  	NUMBER	0000	
+JSERV_PCBOOTED . . . . . . . . .  	NUMBER	0007	
+JSERV_PCCALL . . . . . . . . . .  	NUMBER	000D	
+JSERV_PCDISK . . . . . . . . . .  	NUMBER	0010	
+JSERV_PCSERVICE  . . . . . . . .  	NUMBER	000F	
+JSERV_PENDING  . . . . . . . . .  	NUMBER	0000	
+JSERV_READAMIGA  . . . . . . . .  	NUMBER	000A	
+JSERV_READPC . . . . . . . . . .  	NUMBER	000B	
+JSERV_SCROLL . . . . . . . . . .  	NUMBER	0008	
+JSETINT  . . . . . . . . . . . .  	NUMBER	007F	
+
+KEYB_INT . . . . . . . . . . . .  	NUMBER	0016	
+
+LF . . . . . . . . . . . . . . .  	NUMBER	000A	
+LIBVERSIONMSG  . . . . . . . . .  	V BYTE	0000	CSEG	External
+LOADERRMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+MAKESERVICE  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-7
+
+
+MAXHANDLER . . . . . . . . . . .  	NUMBER	0020	
+MAXINT . . . . . . . . . . . . .  	NUMBER	0020	
+MEMCHUNK . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MEMLOCK  . . . . . . . . . . . .  	NUMBER	00FF	
+MEMUNLOCK  . . . . . . . . . . .  	NUMBER	007F	
+
+NEWLINE  . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+NEXTSLOTMSG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOBASEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NODRIVEMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOHANMES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOINTMES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOPARTMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOSERVICEBASEMSG . . . . . . . .  	V BYTE	0000	CSEG	External
+NO_SCROLL  . . . . . . . . . . .  	L NEAR	0049	CSEG
+NO_UPDATE_I  . . . . . . . . . .  	L NEAR	00B3	CSEG
+NULL . . . . . . . . . . . . . .  	NUMBER	0000	
+
+OUTHXW . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+OUTINT . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+PARASMSG . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+PCSTATE_RESERVED . . . . . . . .  	NUMBER	FFFF	
+PC_EXCLUSIVE . . . . . . . . . .  	NUMBER	0020	
+PC_EXCLUSIVEN  . . . . . . . . .  	NUMBER	0005	
+PIC_00 . . . . . . . . . . . . .  	NUMBER	0020	
+PIC_01 . . . . . . . . . . . . .  	NUMBER	0021	
+PSTRNG . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+REGMSG . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+REMOVEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+SCROLL . . . . . . . . . . . . .  	NUMBER	0000	
+SCROLLFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SCROLLING  . . . . . . . . . . .  	NUMBER	0006	
+SCROLL_INT . . . . . . . . . . .  	F PROC	0000	CSEG	Global	Length = 00C7
+SD_CREATED . . . . . . . . . . .  	NUMBER	0100	
+SD_CREATEDN  . . . . . . . . . .  	NUMBER	0008	
+SERIAL . . . . . . . . . . . . .  	NUMBER	0000	
+SERIAL_INT . . . . . . . . . . .  	NUMBER	0014	
+SERVICEADDED . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICEAVAILABLE . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICEDELETED . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICESEARCH  . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICE_ADDED  . . . . . . . . .  	NUMBER	0040	
+SERVICE_ADDEDN . . . . . . . . .  	NUMBER	0006	
+SERVICE_AMIGASIDE  . . . . . . .  	NUMBER	0004	
+SERVICE_AMIGASIDEN . . . . . . .  	NUMBER	0002	
+SERVICE_DELETED  . . . . . . . .  	NUMBER	0001	
+SERVICE_DELETEDN . . . . . . . .  	NUMBER	0000	
+SERVICE_PCWAIT . . . . . . . . .  	NUMBER	0008	
+SERVICE_PCWAITN  . . . . . . . .  	NUMBER	0003	
+SERVSTATTAB  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SIGNALCUSTOMER . . . . . . . . .  	NUMBER	0055	
+SPACE  . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SRV_INT  . . . . . . . . . . . .  	NUMBER	000B	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:35:56
+SCROLL  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-8
+
+
+SSTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+STACKLENGTH  . . . . . . . . . .  	NUMBER	4000	
+STATUSREG  . . . . . . . . . . .  	NUMBER	0062	
+STOPSCROLL . . . . . . . . . . .  	NUMBER	00FF	
+
+TESTINTMES . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+TICKS  . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+TIME_INT . . . . . . . . . . . .  	NUMBER	001C	
+
+UCOUNTMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+UPDATEINT  . . . . . . . . . . .  	L NEAR	0099	CSEG	Global
+UPDATEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+UPDATERATE . . . . . . . . . . .  	NUMBER	0BB8	
+USTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+
+VIDEO  . . . . . . . . . . . . .  	NUMBER	0001	
+VIDEO_INT  . . . . . . . . . . .  	NUMBER	0010	
+
+W  . . . . . . . . . . . . . . .  	TEXT  word ptr		
+WAITFLAG . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+WAITSTATUS . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+WAIT_FREE_LOOP . . . . . . . . .  	NUMBER	0064	
+WRITE_TTY  . . . . . . . . . . .  	NUMBER	000E	
+WRONGVERSIONMSG  . . . . . . . .  	V BYTE	0000	CSEG	External
+
+@FILENAME  . . . . . . . . . . .  	TEXT  scroll		
+
+
+   1062 Source  Lines
+   1095 Total   Lines
+    382 Symbols
+
+  46590 + 199138 Bytes symbol space free
+
+      0 Warning Errors
+      0 Severe  Errors

@@ -1,0 +1,1252 @@
+head     37.3;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+37.3
+date     91.04.25.18.20.45;  author andy;  state Exp;
+branches ;
+next     37.2;
+
+37.2
+date     91.04.19.16.02.42;  author eric;  state Exp;
+branches ;
+next     37.1;
+
+37.1
+date     91.01.30.15.05.01;  author eric;  state Exp;
+branches ;
+next     37.0;
+
+37.0
+date     91.01.30.15.04.56;  author eric;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.3
+log
+@fixed up prototypes to use our standard ones
+@
+text
+@/************************************************************************
+ *									*
+ *	Copyright (c) 1989 Enhanced Software Technologies, Inc.		*
+ *			   All Rights Reserved				*
+ *									*
+ *	This software and/or documentation is protected by U.S.		*
+ *	Copyright Law (Title 17 United States Code).  Unauthorized	*
+ *	reproduction and/or sales may result in imprisonment of up	*
+ *	to 1 year and fines of up to $10,000 (17 USC 506).		*
+ *	Copyright infringers may also be subject to civil liability.	*
+ *									*
+ ************************************************************************
+ */
+
+#include "standard.h"
+
+#include <rexx/storage.h>
+#include <rexx/rxslib.h>
+#include <rexx/errors.h>
+
+#include "backup.h"
+#include "bailout.h"
+#include "bru_ipc.h"
+#include "brureq.h"
+#include "brushell.h"
+#include "dirtree.h"
+#include "eventloop.h"
+#include "mainwin.h"
+#include "rexxcom.h"
+#include "scansort.h"
+#include "dbug.h"
+#include "usermsg.h"
+#include "reqs.h"
+#include "libfuncs.h"
+
+#include <clib/alib_protos.h>
+
+#define MONITOR		0
+	/* Define as 1 for seeing BRU communications.  Development only. */
+
+
+/*
+ *	These are external Rexx functions not declared in any
+ *	header file in prototype form.
+ */
+
+extern struct RexxMsg *CreateRexxMsg PROTO((struct MsgPort *, char *, char *));
+extern void DeleteRexxMsg PROTO((struct RexxMsg *));
+extern struct RexxArg *CreateArgstring PROTO((char *, ULONG));
+extern void DeleteArgstring PROTO((struct RexxArg *));
+extern BOOL IsRexxMsg PROTO((struct RexxMsg *));
+
+#pragma libcall RexxSysBase CreateArgstring 7e 802
+#pragma libcall RexxSysBase DeleteArgstring 84 801
+#pragma libcall RexxSysBase CreateRexxMsg 90 a9803
+#pragma libcall RexxSysBase DeleteRexxMsg 96 801
+#pragma libcall RexxSysBase IsRexxMsg a8 801
+
+
+
+/*
+ *	Local function prototypes.
+ */
+
+static void cmd_status PROTO((void));
+static void cmd_filename PROTO((void));
+static void cmd_querymsg PROTO((void));
+static void cmd_errormsg PROTO((void));
+static void cmd_root PROTO((void));
+static void cmd_path PROTO((void));
+static void cmd_files PROTO((void));
+static void cmd_volume PROTO((void));
+static void cmd_finished PROTO((void));
+
+static void dispatch PROTO((char *));
+static void process_rexx_message PROTO((struct RexxMsg *));
+static BOOL talk_to_bru( void );
+static void set_result PROTO((int, char *));
+
+
+
+struct CmdFunction {
+	char	*Name;					/* The function name. */
+
+	void	(*Func)(void);			/* Vector to the function's 'C'
+									 * code.
+									 */
+};
+
+
+
+struct MsgPort *ipcport = NULL;		/* Our public port */
+ULONG ipc_sig_bit = 0;
+
+struct Task *bru_tcb = NULL;
+
+static int result_code;
+static char *result_string;
+
+/* The primary return code will be set to this. */
+static LONG rexx_result1;
+
+/* The secondary return code will be set to this. */
+static struct RexxArg *rexx_result2;
+
+static BOOL from_arexx;
+
+/* General purpose string buffer */
+static char buf[80];
+
+struct RxsLib *RexxSysBase = NULL;
+
+
+
+static struct CmdFunction func_table[] = {
+	{ "STATUS", cmd_status },
+    { "PATH", cmd_path },
+    { "ROOT", cmd_root },
+    { "FILES", cmd_files },
+    { "VOLUME", cmd_volume },
+
+    /* These keywords are only valid when a backup is in progress */
+    { "ERRORMSG", cmd_errormsg },
+    { "QUERYMSG", cmd_querymsg },
+    { "FILENAME", cmd_filename },
+    { "FINISHED", cmd_finished },
+
+	/* End of table */
+	{ NULL, NULL }
+};
+
+
+static char cmdline[1024];
+static char *myargv[10];
+static int myargc;
+
+
+
+/* Call this whenever we suspect we have received something at
+ * the IPC port.
+ */
+
+void check_ipc_port()
+{
+	struct Message *message;
+	struct BruMessage *brumsg;
+
+
+    DBUG_ENTER ("check_ipc_port");
+
+	/* get 'em all */
+    while(  ( message = GetMsg( ipcport ) ) != NULL  )
+	{
+		if(  ( RexxSysBase != NULL ) &&
+			IsRexxMsg( (struct RexxMsg *)message )  )
+		{
+			/* The message is from an ARexx program */
+			DBUG_PRINT ("rexx", ("message from ARexx at IPC port"));
+			process_rexx_message( (struct RexxMsg *)message );
+    	}
+		else
+		{
+			/* This had better be a message in our private format! */
+
+			brumsg = (struct BruMessage *)message;
+
+			if( is_bru_message( brumsg ) == TRUE )
+			{
+				DBUG_PRINT ("rexx", ("Private msg at IPC port"));
+				bru_tcb = message->mn_ReplyPort->mp_SigTask;
+				set_result( 0, NULL );
+				from_arexx = FALSE;
+				dispatch( &brumsg->cmd[0] );
+				reply_bru_message( brumsg, result_code, result_string );
+		    }
+			else
+			{
+				/* What in the world is this?  Send it back... */
+				DBUG_PRINT ("rexx", ("Rogue msg at IPC port"));
+				ReplyMsg( message );
+			}
+		}
+	}
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+/* This routine is called with the message recieved at our public port
+ * if it is an ARexx-format message.
+ */
+
+static void process_rexx_message (rexxmsg)
+struct RexxMsg *rexxmsg;
+{
+    DBUG_ENTER ("process_rexx_message");
+
+
+    rexx_result1 = RC_OK;
+   	rexx_result2 = 0;
+	from_arexx = TRUE;
+
+    DBUG_PRINT ("rexx", ("action %lx", rexxmsg -> rm_Action));
+   	DBUG_PRINT ("rexx", ("result %s", rexxmsg -> rm_Args[0]));
+
+    /* 
+   	 * Just to be squeaky clean, since Bill says to affect only the
+     * result fields, copy this into a buffer for parsing
+   	 */
+    strlcpy (cmdline, ARG0 (rexxmsg), 1024);
+
+
+	dispatch( cmdline );
+
+
+    rexxmsg -> rm_Result1 = rexx_result1;
+
+   	if( FlagIsSet (rexxmsg -> rm_Action, RXFF_RESULT) )
+	{
+		/* Caller asked for result string, give it if one was set. */
+
+		DBUG_PRINT ("rexx", ("result string requested"));
+		DBUG_PRINT ("rexx", ("result is '%s'", rexx_result2));
+		rexxmsg -> rm_Result2 = (LONG) rexx_result2;
+    }
+	else
+	{
+		/* Caller did not ask for a result string */
+
+		if( (rexx_result1 == RC_OK) && (rexx_result2 != 0) )
+		{
+		    /* Well, even though we set a result string, the
+	    	 * caller does not want it, free it ourselves.
+		     * This is also an error!
+		     */
+		    DeleteArgstring (rexx_result2);
+		    rexxmsg -> rm_Result1 = RXERR_RESULTS;
+		}
+	}
+
+    ReplyMsg ((struct Message *)rexxmsg);
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+/* When passed a command line, this will parse and dispatch it.
+ * The keyword and arguments are placed in an array similar to
+ * argv[] by this routine, and are accessed the same way.
+ */
+
+static void dispatch (line)
+char *line;
+{
+	int i, match=-1;
+
+
+    DBUG_ENTER ("dispatch");
+
+    DBUG_PRINT ("IPC", ("command line ->%s<-", line));
+
+#if MONITOR
+		printf( "From BRU: \"%s\"\n", line );
+#endif
+
+	/* Parse the command line */
+    myargc = parse_inplace (line, myargv, 10);
+
+    DBUG_PRINT ("IPC", ("%d args passed", myargc));
+
+    if (myargc == 0) {
+	set_result( RXERR_UNKNOWN_CMD, NULL );
+	DBUG_VOID_RETURN;
+    }
+
+
+	/* Find the keyword */
+
+	for( i=0; func_table[i].Name != NULL; i++ )
+	{
+		if(  stricmp( func_table[i].Name, myargv[0] ) == 0  )
+		{
+			/* A match */
+			match = i;
+			break;
+		}
+	}
+
+	if( match == -1 )
+	{
+		/* Function not found */
+	    set_result( RXERR_UNKNOWN_CMD, NULL );
+	    DBUG_VOID_RETURN;
+	}
+
+
+	/* Vector to the function */
+	(*(func_table[match].Func))();
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+static void cmd_path()
+{
+    DBUG_ENTER ("cmd_path");
+    set_result( 0, current_path );
+    DBUG_VOID_RETURN;
+}
+
+static void cmd_root()
+{
+    DBUG_ENTER ("cmd_root");
+    sprintf (buf, "%ld", root_node);
+	set_result( 0, buf );
+    DBUG_VOID_RETURN;
+}
+
+static void cmd_files()
+{
+    DBUG_ENTER ("cmd_files");
+    sprintf (buf, "%d", file_selected_count);
+	set_result( 0, buf );
+    DBUG_VOID_RETURN;
+}
+
+static void cmd_volume()
+{
+    DBUG_ENTER ("cmd_volume");
+	set_result( 0, root_name );
+    DBUG_VOID_RETURN;
+}
+
+static void cmd_finished()
+{
+    DBUG_ENTER ("cmd_finished");
+    if ( talk_to_bru() == TRUE ) {
+	finished_flag = TRUE;
+	/* Don't affect result fields, default is OKAY */
+    } else {
+	set_result( RXERR_FAILED, NULL );
+    }
+    DBUG_VOID_RETURN;
+}
+
+static void cmd_status ()
+{
+    DBUG_ENTER ("cmd_status");
+    if (myargc < 2) {
+	set_result( RXERR_NO_ARG, NULL );
+	DBUG_VOID_RETURN;
+    }
+    switch (*myargv[1]) {
+	case 'N': 
+	case 'n': 
+	    node_status (root_node);
+	    sprintf (buf, "%d %ld %d %d",
+		    node_count, node_memsize, node_entrys, most_entrys);
+		set_result( 0, buf );
+	    break;
+	case 'F': 
+	case 'f': 
+	    file_status (root_node);
+	    sprintf (buf, "%d %ld %d %ld",
+		    file_count, file_size,
+		    file_selected_count, file_selected_size);
+		set_result( 0, buf );
+	    break;
+	default: 
+		set_result( RXERR_INVALID_ARG, NULL );
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+static void cmd_errormsg ()
+{
+    DBUG_ENTER ("cmd_errormsg");
+
+    if( talk_to_bru() == FALSE )
+	{
+		set_result( RXERR_FAILED, NULL );
+		DBUG_VOID_RETURN;
+    }
+    
+    if( myargc < 2 )
+	{
+		set_result( RXERR_NO_ARG, NULL );
+		DBUG_VOID_RETURN;
+    }
+
+	errormsg_from_bru( myargv[1] );
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+/*
+ * This gets called with the name of a file which was not backed up
+ * properly due to an error while BRU tried to back it up.
+ */
+
+void file_failure (name)
+char *name;
+{
+    struct TreeEntry *te;
+
+
+    DBUG_ENTER ("file_failure");
+
+    te = find_filename (root_node, name);
+    if (te == NULL)
+	{
+		/* How odd.  File not found in tree??? */
+		mention_error ("A File status's may be invalid.  Internal Error.",
+			ERC_NONE | ERR35);
+    }
+	else
+	{
+		switch( mode )
+		{
+			case BACKUP_INPROGRESS:
+				sprintf (buf, "* Error *  %s NOT backed up.",
+					name);
+				mention_error (buf, 0);
+				ClearFlag (te -> Flags, ENTRY_BACKEDUP | ENTRY_SELECTED);
+				break;
+
+			case RESTORE_INPROGRESS:
+				sprintf (buf, "* Error *.  %s NOT properly restored.",
+					name);
+				mention_error (buf, 0);
+				ClearFlag (te -> Flags, ENTRY_RESTORED | ENTRY_SELECTED);
+				break;
+
+			default:
+				mention_error( "Failure message recieved at invalid time",
+					ERC_NONE | ERR57 );
+				break;
+		}
+    }
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+static void cmd_querymsg ()
+{
+    DBUG_ENTER ("cmd_querymsg");
+
+    if( talk_to_bru() == FALSE )
+	{
+		set_result( RXERR_FAILED, NULL );
+		DBUG_VOID_RETURN;
+    }
+    
+    if( myargc < 2 )
+	{
+		set_result( RXERR_NO_ARG, NULL );
+		DBUG_VOID_RETURN;
+    }
+
+	set_result(  0, querymsg_from_bru( myargv[1] )  );    
+
+    DBUG_VOID_RETURN;
+}
+
+
+
+/* DTM_NEW */
+
+static BOOL talk_to_bru( void )
+{
+	if(  ( mode == BACKUP_INPROGRESS ) ||
+		( mode == RESTORE_INPROGRESS ) )
+	{
+		return( TRUE );
+	}
+
+	return( FALSE );
+}
+
+
+
+static void cmd_filename ()
+{
+    DBUG_ENTER ("cmd_filename");
+
+    if( talk_to_bru() == FALSE )
+	{
+		/* If a backup is not in progress, this is an illegal command. */
+		set_result( RXERR_FAILED, NULL );
+    }
+
+
+    if(  ( tree_end_flag == FALSE ) && ( user_cancel_flag == FALSE )  )
+	{
+		/* Send a filename */
+
+		if( need_to_embed_logfile == TRUE )
+		{
+			/* Special case.  Pass the logfile name to BRU. */
+			set_result( 0, EMBED_LOGNAME );
+			need_to_embed_logfile = FALSE;
+			DBUG_VOID_RETURN;
+		}
+
+		if ((myargc > 1) && ((*myargv[1] == 'A') || (*myargv[1] == 'a')))
+		{
+	    	/* Absolute volume/path/filename requested */
+			set_result( 0, current_path );
+		}
+		else
+		{
+	    	/* Default to relative path and filename */
+			set_result( 0, current_file );
+		}
+    }
+	else
+	{
+		/* Tell BRU there are no more files */
+		set_result( 0, "::::" );
+    }
+
+    filename_sent = TRUE;
+
+    DBUG_VOID_RETURN;
+}
+
+ERRORCODE init_ipc ()
+{
+    DBUG_ENTER ("init_ipc");
+    /*   Open Rexx library   */
+    if (!(RexxSysBase = (struct RxsLib *) OpenLibrary (RXSNAME, 0L))) {
+	DBUG_PRINT ("rexx", ("no rexx lib"));
+    }
+    /* Now setup our public port */
+    if ((ipcport = CreatePort (ipcport_name, 0L)) == NULL) {
+	DBUG_RETURN (ERC_NO_PORT | ERR28);
+    }
+    /* Set a bit mask that we can wait on */
+    ipc_sig_bit = 1L << ipcport -> mp_SigBit;
+    DBUG_RETURN (0);
+}
+
+void cleanup_ipc ()
+{
+	struct Message *msg;
+
+
+    DBUG_ENTER ("cleanup_ipc");
+    if (ipcport) {
+	Forbid ();
+	while (  ( msg = GetMsg (ipcport) ) != NULL  ) {
+	ReplyMsg (msg);
+	}
+	DeletePort (ipcport);
+	Permit ();
+    }
+    if (RexxSysBase) {
+	CloseLibrary ((struct Library *) RexxSysBase);
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+
+/* DTM_NEW */
+
+/* Call this to set the result.  If the code is non-zero, it
+ * will be returned as an error.
+ * If zero, the string will be returned.
+ */
+
+static void set_result( code, string )
+int code;
+char *string;
+{
+	if( code != 0 )
+	{
+#if MONITOR
+		printf( "Result code set: %d\n", code );
+#endif
+	    if( from_arexx == TRUE )
+		{
+			rexx_result1 = code;
+		}
+		else
+		{
+			result_code = code;
+		}
+
+		return;
+	}
+
+	if( string != NULL )
+	{
+#if MONITOR
+		printf( "Result string set: \"%s\"\n", string );
+#endif
+	    if( from_arexx == TRUE )
+		{
+			rexx_result2 = CreateArgstring( string, strlen(string) );
+		}
+		else
+		{
+			result_string = string;
+		}
+	}
+}
+
+
+
+@
+
+
+37.2
+log
+@New from Don Meyer 19 April 1991
+@
+text
+@d36 1
+@
+
+
+37.1
+log
+@New from Don Meyer 30 Jan 1991
+@
+text
+@d36 5
+d263 4
+d418 1
+a418 1
+		mention_error ("File status's may be invalid.  Internal Error.",
+d426 1
+a426 1
+				sprintf (buf, "* Warning *.  %30.30s NOT backed up.",
+d433 1
+a433 1
+				sprintf (buf, "* Warning *.  %30.30s NOT restored up.",
+d585 3
+d602 3
+a604 2
+/*		printf( "Result string set: \"%s\"\n", string ); */
+
+a617 35
+#if 0
+
+struct BruMsg {
+    USHORT Type;
+    char *Text;
+};
+
+struct BruMsg brumsg {
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL },
+    { 0, NULL }
+}
+#endif
+@
+
+
+37.0
+log
+@added to rcs
+@
+text
+@d23 2
+d47 8
+a58 2
+static void parse_rexx PROTO((int));
+static void process_rexx_message PROTO((struct RexxMsg *));
+d60 8
+a67 11
+static void cmd_debug PROTO((void));
+static void bru_filename PROTO((void));
+static void bru_query PROTO((void));
+static void bru_error PROTO((void));
+static void bru_msg_parse PROTO((char *));
+static void file_failure PROTO((char *));
+static struct RexxMsg *create_rexxmsg PROTO((struct MsgPort *, char *, char *));
+static void delete_rexxmsg PROTO((struct RexxMsg *));
+static struct RexxArg *create_argstring PROTO((char *, ULONG));
+static void delete_argstring PROTO((struct RexxArg *));
+static BOOL is_rexxmsg PROTO((struct RexxMsg *));
+d69 4
+a72 2
+struct MsgPort *rexxport = NULL;	/* Our public port */
+ULONG rexx_sig_bit = 0;
+a73 2
+static struct MsgPort *rexx_replyport = NULL;	/* Our private reply port */
+static ULONG rexx_reply_sig_bit = 0;
+d75 19
+d100 2
+a106 1
+static USHORT debug_flags = 0;
+d108 8
+a115 10
+static char *keywords[] = {
+    "STATUS",
+    "null",
+    "DEBUG",
+    "null",
+    "null",
+    "PATH",
+    "ROOT",
+    "FILES",
+    "VOLUME",
+d117 7
+a123 4
+    "ERRORMSG",
+    "QUERYMSG",
+    "FILENAME",
+    "FINISHED"
+a125 3
+static int msg_num;
+static char *msg_text;
+static char lasterr_text[81];
+a126 3
+static char querybuf[80];
+static char query_msg_buf[80];
+
+a130 3
+/* Flag bits for the global variable  debug_flags  */
+#define DEBUG_ON	0x0001
+#define DEBUG_PAUSE	0x0002
+d132 6
+a137 2
+void check_rexx_port (rexxmsg)
+struct RexxMsg *rexxmsg;
+d139 38
+a176 25
+    DBUG_ENTER ("check_rexx_port");
+    rexx_result1 = RC_OK;
+    rexx_result2 = 0;
+    if (is_rexxmsg (rexxmsg)) {
+	/* The message is from an ARexx program */
+	DBUG_PRINT ("rexx", ("message from ARexx at rexx port"));
+    } else {
+	DBUG_PRINT ("rexx", ("non-ARexx msg at rexx port"));
+    }
+    process_rexx_message (rexxmsg);
+    rexxmsg -> rm_Result1 = rexx_result1;
+    if (FlagIsSet (rexxmsg -> rm_Action, 1L << RXFB_RESULT)) {
+	/* Caller asked for result string, give it if one * was set. */
+	DBUG_PRINT ("rexx", ("result string requested"));
+	DBUG_PRINT ("rexx", ("result is '%s'", rexx_result2));
+	rexxmsg -> rm_Result2 = (LONG) rexx_result2;
+    } else {
+	/* Caller did not ask for a result string */
+	if ((rexx_result1 == RC_OK) && (rexx_result2 != 0)) {
+	    /* Well, even though we set a result string, the
+	     * caller does not want it, free it ourselves.
+	     * This is also an error!
+	     */
+	    delete_argstring (rexx_result2);
+	    rexxmsg -> rm_Result1 = RXERR_RESULTS;
+d178 1
+a178 2
+    }
+    ReplyMsg ((struct Message *) rexxmsg);
+a181 1
+/* This routine is called with the message recieved at our public port */
+d183 5
+d191 1
+a191 1
+    int i;
+d193 5
+a197 1
+    DBUG_ENTER ("process_rexx_message");
+d199 2
+a200 1
+    DBUG_PRINT ("rexx", ("result %s", rexxmsg -> rm_Args[0]));
+d202 1
+a202 1
+     * Just to be squeaky clean, since Bill says to affect only the
+d204 1
+a204 1
+     */
+d206 57
+a262 3
+    /* Parse the command string */
+    myargc = parse_inplace (cmdline, myargv, 10);
+    DBUG_PRINT ("rexx", ("%d args passed", myargc));
+d264 1
+a264 1
+	rexx_result1 = RXERR_UNKNOWN_CMD;
+d267 12
+a278 3
+    for (i = 0; i < (sizeof (keywords) / sizeof (char *)); i++) {
+	if (strequal (keywords[i], myargv[0]) == TRUE) {
+	    break;
+d280 12
+a291 2
+    }
+    parse_rexx (i + 1);
+a294 4
+/*
+ * This routine does the keyword actions for all ________ commands
+ * recieved at the ARexx port
+ */
+d296 2
+a297 2
+static void parse_rexx (keycode)
+int keycode;
+d299 36
+a334 44
+    DBUG_ENTER ("parse_rexx");
+    switch (keycode) {
+	case 1: 		/* STATUS */
+	    cmd_status ();
+	    break;
+	case 3: 		/* DEBUG */
+	    cmd_debug ();
+	    break;
+	case 6: 		/* PATH */
+	    rexx_result2 = create_argstring (current_path,
+					    (long) strlen (current_path));
+	    break;
+	case 7: 		/* ROOT */
+	    sprintf (buf, "%ld", root_node);
+	    rexx_result2 = create_argstring (buf, (long) strlen (buf));
+	    break;
+	case 8: 		/* FILES */
+	    sprintf (buf, "%d", file_selected_count);
+	    rexx_result2 = create_argstring (buf, (long) strlen (buf));
+	    break;
+	case 9: 		/* VOLUME */
+	    rexx_result2 = create_argstring (root_name,
+					    (long) strlen (root_name));
+	    break;
+	case 10: 		/* ERRORMSG */
+	    bru_error ();
+	    break;
+	case 11: 		/* QUERYMSG */
+	    bru_query ();
+	    break;
+	case 12: 		/* FILENAME */
+	    bru_filename ();
+	    break;
+	case 13: 		/* FINISHED */
+	    if (mode == BACKUP_INPROGRESS) {
+		finished_flag = TRUE;
+		/* Don't affect result fields, default is OKAY */
+	    } else {
+		rexx_result1 = RXERR_FAILED;
+	    }
+	    break;
+	default: 		/* No match */
+	    rexx_result1 = RXERR_UNKNOWN_CMD;
+	    break;
+d343 1
+a343 1
+	rexx_result1 = RXERR_NO_ARG;
+d352 1
+a352 1
+	    rexx_result2 = create_argstring (buf, (long) strlen (buf));
+d360 1
+a360 1
+	    rexx_result2 = create_argstring (buf, (long) strlen (buf));
+d363 1
+a363 1
+	    rexx_result1 = RXERR_INVALID_ARG;
+d368 2
+a369 1
+static void cmd_debug ()
+d371 6
+a376 4
+    DBUG_ENTER ("cmd_debug");
+    if (myargc < 2) {
+	rexx_result1 = RXERR_NO_ARG;
+	DBUG_VOID_RETURN;
+d378 5
+a382 3
+    if (strequal (myargv[1], "on")) {
+	SetFlag (debug_flags, DEBUG_ON);
+	DBUG_VOID_RETURN;
+a383 15
+    if (strequal (myargv[1], "off")) {
+	ClearFlag (debug_flags, DEBUG_ON);
+	DBUG_VOID_RETURN;
+    }
+    if (strequal (myargv[1], "pause")) {
+	SetFlag (debug_flags, DEBUG_PAUSE);
+	DBUG_VOID_RETURN;
+    }
+    if (strequal (myargv[1], "nopause")) {
+	ClearFlag (debug_flags, DEBUG_PAUSE);
+	DBUG_VOID_RETURN;
+    }
+    rexx_result1 = RXERR_INVALID_ARG;
+    DBUG_VOID_RETURN;
+}
+d385 2
+a386 67
+static void bru_error ()
+{
+    DBUG_ENTER ("bru_error");
+    if (mode != BACKUP_INPROGRESS) {
+	rexx_result1 = RXERR_FAILED;
+	DBUG_VOID_RETURN;
+    }
+    if (myargc < 2) {
+	rexx_result1 = RXERR_NO_ARG;
+	DBUG_VOID_RETURN;
+    }
+    DBUG_PRINT ("rexx", ("error message '%s' from bru", myargv[1]));
+    /* Parse the error string. */
+    bru_msg_parse (myargv[1]);
+    switch (msg_num) {
+	/* An error occured while saving a file */
+	case MSG_EACCESS: 
+	case MSG_OPEN: 
+	case MSG_READ: 
+	case MSG_FGREW: 
+	case MSG_WRITE: 
+	case MSG_RACCESS: 
+	case MSG_FIRST: 
+	case MSG_UWERR: 
+	    file_failure (msg_text);
+	    strcpy (lasterr_text, " ");
+	    break;
+	case MSG_DATAOVW: 
+	    sprintf (lasterr_text,
+		    "Warning!  All data on %2s will be overwritten!",
+		    msg_text);
+	    strcpy (querybuf, "c");
+	    break;
+	case MSG_WRTPROT: 
+	    sprintf (lasterr_text,
+		    "The destination media appears to be write-protected.");
+	    strcpy (querybuf, "DF0:");
+	    break;
+	case MSG_WACCESS: 
+	    sprintf (lasterr_text, "Cannot access file for write.");
+	    strcpy (querybuf, "");
+	    break;
+	case MSG_AROPEN: 
+	    sprintf (lasterr_text, "Error opening Archive.");
+	    strcpy (querybuf, "");
+	    break;
+	case MSG_AEOV: 
+	    sprintf (lasterr_text, "Assuming end-of-volume.");
+	    strcpy (querybuf, "");
+	    break;
+	case MSG_STACK:
+	    sprintf (buf, "BRU stack (%s) may be too small.", msg_text);
+	    mention_error (buf, 0);
+	    break;
+	default: 
+	    strcpy (lasterr_text, "Odd error from BRU");
+	    strcpy (querybuf, "");
+#if 0
+	    /* pass text thru to window */
+	    fprintf (progress_con, msg_text);
+	    fprintf (progress_con, "\n");
+#endif
+	    break;
+    }
+    /* pass text thru to window */
+    fprintf (progress_con, "%d  ===  %s  ===  %s\n",
+	    msg_num, msg_text, lasterr_text);
+d390 2
+d397 1
+a397 1
+static void file_failure (name)
+d402 1
+d404 1
+d406 5
+a410 7
+    if (te == NULL) {
+	mention_error ("File status's may be invalid.  Internal Error.",
+		ERC_NONE | ERR35);
+    } else {
+	sprintf (buf, "* Warning *.  %30.30s NOT backed up.", name);
+	mention_error (buf, 0);
+	ClearFlag (te -> Flags, ENTRY_BACKEDUP | ENTRY_SELECTED);
+d412 25
+d440 3
+a442 1
+static void bru_query ()
+d444 6
+a449 4
+    DBUG_ENTER ("bru_query");
+    if (mode != BACKUP_INPROGRESS) {
+	rexx_result1 = RXERR_FAILED;
+	DBUG_VOID_RETURN;
+d451 5
+a455 3
+    if (myargc < 2) {
+	rexx_result1 = RXERR_NO_ARG;
+	DBUG_VOID_RETURN;
+d457 3
+a459 17
+    DBUG_PRINT ("rexx", ("query message '%s'", myargv[1]));
+    bru_msg_parse (myargv[1]);
+    switch (msg_num) {
+	case MSG_LOADVOL: 
+	    strcpy (query_msg_buf, "Load Volume ");
+	    strcat (query_msg_buf, msg_text);
+	    strcpy (querybuf, "DF0:");
+	    break;
+	default: 
+	    strcpy (query_msg_buf, "Query ->  ");
+	    strcat (query_msg_buf, msg_text);
+	    break;
+    }
+    /* At the moment, even if the user says "cancel", we don't. */
+    do_bru_query_req (lasterr_text, query_msg_buf, querybuf);
+    strcat (querybuf, "\n");
+    rexx_result2 = create_argstring (querybuf, (long) strlen (querybuf));
+d463 5
+a467 2
+static void bru_msg_parse (p)
+char *p;
+d469 7
+a475 9
+    DBUG_ENTER ("bru_msg_parse");
+    /* Index to first numeric character */
+    while ((*p < '0') || (*p > '9')) {
+	p++;
+    }
+    msg_num = atoi (p);
+    /* Index to the text */
+    msg_text = strchr (p, ' ') + 1;
+    DBUG_VOID_RETURN;
+d478 3
+a480 1
+static void bru_filename ()
+d482 6
+a487 4
+    DBUG_ENTER ("bru_filename");
+    if (mode != BACKUP_INPROGRESS) {
+	/* If a backup is not in progress, this is an illegal command. */
+	rexx_result1 = RXERR_FAILED;
+d489 24
+a512 14
+    if (tree_end_flag == FALSE) {
+	/* Send a filename */
+	if ((myargc > 1) && ((*myargv[1] == 'A') || (*myargv[1] == 'a'))) {
+	    /* Absolute volume/path/filename requested */
+	    rexx_result2 = create_argstring (current_path,
+					    (long) strlen (current_path));
+	} else {
+	    /* Default to relative path and filename */
+	    rexx_result2 = create_argstring (current_file,
+		    (long) strlen (current_file));
+	}
+    } else {
+	/* Tell BRU there are no more files */
+	rexx_result2 = create_argstring ("::::", 4L);
+d514 6
+d521 1
+d525 1
+a525 1
+ERRORCODE init_rexx ()
+d527 1
+a527 1
+    DBUG_ENTER ("init_rexx");
+d530 1
+a530 1
+	DBUG_PRINT ("rexx", ("no rexx lib, using substitutes"));
+d533 1
+a533 1
+    if ((rexxport = CreatePort (REXXPORT_NAME, 0L)) == NULL) {
+d537 1
+a537 1
+    rexx_sig_bit = 1L << rexxport -> mp_SigBit;
+d541 1
+a541 1
+void cleanup_rexx ()
+d543 11
+a553 3
+    DBUG_ENTER ("cleanup_rexx");
+    if (rexxport) {
+	DeletePort (rexxport);
+a554 3
+    if (rexx_replyport) {
+	DeletePort (rexx_replyport);
+    }
+a560 1
+/* ARexx Library Flex Functions	*/
+a561 6
+static struct RexxMsg *create_rexxmsg (rport, ext, host)
+struct MsgPort *rport;
+char *ext;
+char *host;
+{
+    struct RexxMsg *rm;
+d563 1
+a563 20
+    DBUG_ENTER ("create_rexxmsg");
+    if (RexxSysBase) {
+	/* Use Bill's routine */
+	rm = CreateRexxMsg (rport, ext, host);
+	DBUG_RETURN (rm);
+    } else {
+	/* Or use our own... */
+	rm = AllocMem ((ULONG) sizeof (struct RexxMsg),
+			 MEMF_PUBLIC | MEMF_CLEAR);
+	if (rm == NULL) {
+	    DBUG_RETURN (rm);
+	}
+	rm -> rm_Node.mn_Length = sizeof (struct RexxMsg);
+	rm -> rm_Node.mn_Node.ln_Type = NT_MESSAGE;
+	rm -> rm_Node.mn_ReplyPort = rport;
+	rm -> rm_FileExt = (STRPTR) ext;
+	rm -> rm_CommAddr = (STRPTR) host;
+	DBUG_RETURN (rm);
+    }
+}
+d565 4
+a568 14
+static void delete_rexxmsg (rexxmsg)
+struct RexxMsg *rexxmsg;
+{
+    DBUG_ENTER ("delete_rexxmsg");
+    if (rexxmsg == NULL) {
+	DBUG_VOID_RETURN;
+    }
+    if (RexxSysBase) {
+	DeleteRexxMsg (rexxmsg);
+    } else {
+	FreeMem (rexxmsg, (ULONG) (rexxmsg -> rm_Node.mn_Length));
+    }
+    DBUG_VOID_RETURN;
+}
+d570 2
+a571 1
+static struct RexxArg *create_argstring (string, length)
+a572 1
+ULONG length;
+d574 10
+a583 2
+    struct RexxArg *ra;
+    ULONG size;
+d585 1
+a585 9
+    DBUG_ENTER ("create_argstring");
+    if (RexxSysBase) {
+	ra = CreateArgstring (string, length);
+	DBUG_RETURN (ra);
+    } else {
+	size = sizeof (struct RexxArg) + length - 7L;
+	ra = AllocMem (size, MEMF_PUBLIC | MEMF_CLEAR);
+	if (ra == NULL) {
+	    DBUG_RETURN (ra);
+a586 9
+	ra -> ra_Size = size;
+	ra -> ra_Length = length;
+	CopyMem (string, &ra -> ra_Buff[0], length);
+	/* Insure we end in a NULL, if will be used as 'C' string */
+	ra -> ra_Buff[length] = '\0';
+	ra = (struct RexxArg *) & ra -> ra_Buff[0];
+	DBUG_RETURN (ra);
+    }
+}
+d588 3
+a590 4
+static void delete_argstring (argstring)
+struct RexxArg *argstring;
+{
+    UBYTE *ra;
+d592 9
+a600 8
+    DBUG_ENTER ("delete_argstring");
+    if (RexxSysBase) {
+	DeleteArgstring (argstring);
+    } else {
+	ra = ((UBYTE *) argstring) - 8L;
+	FreeMem (ra, ((struct RexxArg *) ra) -> ra_Size);
+    }
+    DBUG_VOID_RETURN;
+a602 11
+static BOOL is_rexxmsg (rexxmsg)
+struct RexxMsg *rexxmsg;
+{
+    BOOL rtnval = FALSE;
+
+    DBUG_ENTER ("is_rexxmsg");
+    if (RexxSysBase) {
+	rtnval = IsRexxMsg (rexxmsg);
+    }
+    DBUG_RETURN (rtnval);
+}
+@

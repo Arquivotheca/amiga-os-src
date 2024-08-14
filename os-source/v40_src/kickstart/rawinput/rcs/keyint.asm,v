@@ -1,0 +1,882 @@
+head     36.11;
+branch   ;
+access   ;
+symbols  V36_14:36.5 V36_13:36.3 V36_11:36.2 L36_5:35.3;
+locks    ; strict;
+comment  @*   @;
+
+
+36.11
+date     90.12.14.15.28.17;  author darren;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.04.13.12.44.07;  author kodiak;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.04.02.13.00.42;  author kodiak;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     89.08.31.18.24.56;  author kodiak;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     89.08.31.17.27.28;  author kodiak;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     89.07.31.17.14.39;  author kodiak;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     89.03.25.14.08.48;  author kodiak;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     89.03.16.15.57.59;  author kodiak;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.02.20.16.11.33;  author kodiak;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     88.11.03.12.35.34;  author kodiak;  state Exp;
+branches ;
+next     35.3;
+
+35.3
+date     88.08.02.12.21.38;  author kodiak;  state Exp;
+branches ;
+next     35.2;
+
+35.2
+date     88.01.25.11.36.43;  author kodiak;  state Exp;
+branches ;
+next     35.1;
+
+35.1
+date     87.11.12.13.36.24;  author kodiak;  state Exp;
+branches ;
+next     35.0;
+
+35.0
+date     87.10.26.11.32.20;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.11
+log
+@*** empty log message ***
+@
+text
+@	TTL	'$Id: keyint.asm,v 36.10 90/04/13 12:44:07 kodiak Exp Locker: darren $
+**********************************************************************
+*
+*			---------------
+*   keyint.asm		KEYBOARD DEVICE		keyboard interrupt code
+*			---------------
+*
+*   Copyright 1985, 1987 Commodore-Amiga Inc.
+*
+*   Source Control	$Locker: darren $
+*
+*   $Log:	keyint.asm,v $
+*   Revision 36.10  90/04/13  12:44:07  kodiak
+*   use Id instead of Header for 4.x rcs
+*   
+*   Revision 36.9  90/04/02  13:00:42  kodiak
+*   for rcs 4.x header change
+*   
+*   Revision 36.8  89/08/31  18:24:56  kodiak
+*   cmp, not sub, in KeyHandshakeEnd
+*   
+*   Revision 36.7  89/08/31  17:27:28  kodiak
+*   perform key handshake timeout w/ timer ReadEClock function
+*   
+*   Revision 36.6  89/07/31  17:14:39  kodiak
+*   remove timer cia-a-a use in preparation for timer device use of it
+*   
+*   Revision 36.5  89/03/25  14:08:48  kodiak
+*   use timer a to ensure 75us handshake
+*   make handshake code public for keydev's use
+*   
+*   Revision 36.4  89/03/16  15:57:59  kodiak
+*   use timer a, not b.
+*   
+*   Revision 36.3  89/02/20  16:11:33  kodiak
+*   wait for 75us
+*   
+*   Revision 36.2  88/11/03  12:35:34  kodiak
+*   use AUTOINIT in ResidentTag
+*   
+*   Revision 35.3  88/08/02  12:21:38  kodiak
+*   first cut at timer-based handshake
+*   
+*   Revision 35.2  88/01/25  11:36:43  kodiak
+*   remove unnecessary Disable Enable pair
+*   
+*   Revision 35.1  87/11/12  13:36:24  kodiak
+*   make a500/a2000 numeric ()*/+ keys have NUMERICPAD qualifier
+*   
+*   Revision 35.0  87/10/26  11:32:20  kodiak
+*   initial from V34, but w/ stripped log
+*   
+**********************************************************************
+
+	SECTION		rawinput
+
+*------ Included Files -----------------------------------------------
+
+	INCLUDE		"exec/types.i"
+	INCLUDE		"exec/nodes.i"
+	INCLUDE		"exec/lists.i"
+	INCLUDE		"exec/memory.i"
+	INCLUDE		"exec/ports.i"
+	INCLUDE		"exec/libraries.i"
+	INCLUDE		"exec/devices.i"
+	INCLUDE		"exec/tasks.i"
+	INCLUDE		"exec/io.i"
+	INCLUDE		"exec/strings.i"
+
+	INCLUDE		"hardware/cia.i"
+	INCLUDE		"devices/timer.i"
+	INCLUDE		"devices/inputevent.i"
+
+	INCLUDE		"macros.i"
+	INCLUDE		"kbdata.i"
+
+
+*------ Imported Globals ---------------------------------------------
+
+	XREF		_ciaa
+	XREF		_ciaacra
+	XREF		_ciaasdr
+
+*------ Imported Functions -------------------------------------------
+
+	XREF_EXE	Cause
+
+	XREF		_LVOReadEClock
+
+	XREF		KDReadEvent
+
+
+*------ Exported Functions -------------------------------------------
+
+	XDEF		KDInterrupt
+
+	XDEF		KeyHandshakeBegin
+	XDEF		KeyHandshakeEnd
+
+
+*------ keyboard.device/KDInterrupt ----------------------------------
+*
+*   NAME
+*	KDInterrupt - 8520 serial interrupt routine.
+*
+*   SYNOPSIS
+*	continue = KDInterrupt(KeyboardDev)
+*	CC-zero-bit	       a1
+*
+*   FUNCTION
+*	KDInterrupt gets a key code from the 8520, updates the key
+*	matrix, and either buffers it or satisfies I/O with it.
+*	It is initiated in response to an interrupt by 8520-B control
+*	pair B shift completion.
+*
+*   INPUTS
+*	KeyboardDev - the Keyboard device pointer.
+*
+*   RETURNS
+*	CC-zero if interrupt not handled by this routine.
+*	CC-not-zero if interrupt handled here.
+*
+*---------------------------------------------------------------------
+*
+*   IMPLEMENTATION NOTES
+*
+*	The rules of 8520 (mother board) to 6500/01 (keyboard)
+*	communication are:
+*
+*	After power-on --
+*	    6500/01:test processor, test ram, checksum rom.
+*		    check for key switches pressed (possible stuck
+*			keys).
+*		    scan keyswitches.		   \
+*		    wait for 8520 data handshake.  /
+*		    send any errors and keys pressed (w/ handshaking).
+*	    (Reset starts here: reset key combination is
+*		CTL-ALT-AMIGA)
+*		    send "start" token (w/ handshaking).
+*
+*		    scan keyswitches: wait for transition.
+*		    send key token.
+*		    if handshake not received in 1. seconds,
+*			clock zero data bits @@ 0.25s, waiting for
+*			handshake, then retransmit character.
+*
+*	    8520:   reset operating system ... configure keyboard
+*			driver.
+*		 /> handshake data (i.e. set low then high then serial
+*		 |	input).
+*		 \_ wait for token.
+*
+*
+*
+*---------------------------------------------------------------------
+KeyHandshakeBegin:
+;
+;  the key handshake is spec'd to take at least 75usec.
+;  ciaata counts ticks at 715909 Hz.
+;  So 54 ticks guarantees 75usec.
+;
+	    ;-- drive data line low, start one-shot timer to
+	    ;	initiate the low signal of the handshake and start
+		or.b	#CIACRAF_SPMODE,_ciaacra
+		lea	kd_EClock1(a6),a0
+		move.l	a6,-(a7)
+		move.l	kd_Tick+IO_DEVICE(a6),a6
+		jsr	_LVOReadEClock(a6)
+		move.l	(a7)+,a6
+		moveq	#54,d0
+		add.l	d0,kd_EClock1+EV_LO(a6)
+		bcc.s	khbDone
+		addq.l	#1,kd_EClock1+EV_HI(a6)
+khbDone:
+		rts
+
+
+KDInterrupt:
+		movem.l d2-d4/a6,-(a7)
+		move.l	a1,a6			; get keyboard device
+		moveq	#0,d2			; clear upper byte
+		move.b	_ciaasdr,d2		; get the key.
+
+		;-- start the keyboard handshake
+		bsr.s	KeyHandshakeBegin
+
+	    ;-- this handshake is completed at the end of this routine
+
+		moveq	#0,d4		    ;clear qualifier word
+*	    ;-- save the raw keystroke
+		not.b	d2		    ;signal is active low
+		ror.b	#1,d2		    ;move up/down to sign bit
+
+	    ;-- check for second reset
+		cmpi.b	#RESET_CODE,d2
+		bne.s	notReset
+		bset	#KDB_RESET1,kd_Flags(a6)
+		beq.s	processKey
+		bset	#KDB_RESET2,kd_Flags(a6)
+		bne	intRts
+
+*	    ;-- cause software interrupts for all handlers and exit
+		move.l	kd_HandlerList(a6),a1
+		tst.l	(a1)
+		beq	handshake		; no handlers
+causeLoop:
+		move.l	(a1),d3
+		beq	intRts
+		addq.w	#1,kd_OutstandingResetHandlers(a6)
+		LINKEXE Cause
+		move.l	d3,a1
+		bra.s	causeLoop
+
+notReset:
+		bclr	#KDB_RESET1,kd_Flags(a6)
+processKey:
+		move.w	d2,d1		    ;get keycode index into
+		and.w	#$0007F,d1	    ;  keycode matrix
+		cmp	#HIGH_KEYCODE,d1    ;check that this is in the
+		bhi	enqueueKey	    ;  range of valid keys
+		move	d1,d0		    ;get byte and bit for use in
+		and.w	#$00007,d0	    ;  setting or clearing matrix
+		lsr	#3,d1		    ;  bit
+		lea	kd_Matrix(a6),a0    ;get the matrix base location
+		btst	#7,d2		    ;check key up/down flag
+		bne.s	keyUp
+		bset	d0,0(a0,d1.w)	    ;show key down
+		cmp.w	#$60>>3,d1	    ;check if shift key
+		bne.s	checkNumeric	    ;
+		bset	d0,kd_Shifts(a6)    ;  update shift keys
+		bra.s	checkNumeric
+keyUp:
+		bclr	d0,0(a0,d1.w)	    ;show key up
+		cmp.w	#$60>>3,d1	    ;check if shift key
+		bne.s	checkNumeric	    ;
+		bclr	d0,kd_Shifts(a6)    ;  update shift keys
+		bra.s	checkNumeric	    ;
+
+
+numericMatrix:
+		dc.b	%00000000,%10000000,%00000000,%11100000
+		dc.b	%00000000,%11100000,%00000000,%11110000
+		dc.b	%00001000,%00000100,%00000000,%01111100
+		dc.b	%00000000,%00000000,%00000000,%00000000
+
+checkNumeric:
+*	    ;-- check if numeric
+		move.w	d2,d1
+		and.w	#$0007F,d1
+		move	d1,d0		    ;get byte and bit for use in
+		and.w	#$00007,d0	    ;  testing numeric table
+		lsr	#3,d1		    ;
+		lea	numericMatrix(pc),a0	;get the matrix base location
+		btst	d0,0(a0,d1.w)	    ;check if numeric
+		beq.s	enqueueKey
+		or.w	#IEQUALIFIER_NUMERICPAD,d4
+
+enqueueKey:
+*	    ;-- enqueue the key
+		move.w	kd_BufTail(a6),d1
+		move.w	d1,d0
+		addq.w	#4,d0
+		andi.w	#(KBBUFSIZE-1),d0
+		cmp.w	kd_BufHead(a6),d0
+		bne.s	buffOk
+
+*	    ;------ keyboard overflow!
+		move.w	d1,d0		    ; overwrite the last key
+		move.w	#OVERFLOW_CODE,d2   ;	with overflow code
+		subq.w	#4,d1
+		andi.w	#(KBBUFSIZE-1),d1
+
+buffOk:
+		move.w	d2,kd_BufQueue(a6,d1.w)
+		or.b	kd_Shifts(a6),d4
+		move.w	d4,kd_BufQueue+2(a6,d1.w)
+		move.w	d0,kd_BufTail(a6)
+
+		;------ don't check to satisfy I/O if keyboard stopped
+		btst	#DUB_STOPPED,kd_Unit+du_Flags(a6)
+		bne.s	handshake
+
+	    ;-- if I/O is already pending, see if this will satisfy it
+		move.l	kd_Unit+MP_MSGLIST(a6),a1
+		tst.l	(a1)
+		beq.s	handshake
+
+		bsr	KDReadEvent
+
+handshake:
+		;-- complete the high signal of the handshake
+		bsr.s	KeyHandshakeEnd
+
+intRts:
+		movem.l (a7)+,d2-d4/a6
+		rts
+
+
+
+KeyHandshakeEnd:
+		lea	kd_EClock2(a6),a0
+		move.l	a6,-(a7)
+		move.l	kd_Tick+IO_DEVICE(a6),a6
+		jsr	_LVOReadEClock(a6)
+		move.l	(a7)+,a6
+		move.l	kd_EClock1+EV_HI(a6),d0
+		cmp.l	kd_EClock2+EV_HI(a6),d0
+		bhi.s	KeyHandshakeEnd
+		move.l	kd_EClock1+EV_LO(a6),d0
+		cmp.l	kd_EClock2+EV_LO(a6),d0
+		bhi.s	KeyHandshakeEnd
+
+		; set up to shift in next key
+		and.b	#~(CIACRAF_SPMODE)&$ff,_ciaacra
+		rts
+
+	END
+@
+
+
+36.10
+log
+@use Id instead of Header for 4.x rcs
+@
+text
+@d1 1
+a1 1
+	TTL	'$Id$
+d10 1
+a10 1
+*   Source Control	$Locker: kodiak $
+d13 3
+@
+
+
+36.9
+log
+@for rcs 4.x header change
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: /usr2/kodiak/src/KS/rawinput/RCS/keyint.asm,v 36.8 89/08/31 18:24:56 kodiak Exp Locker: kodiak $'
+d13 3
+@
+
+
+36.8
+log
+@cmp, not sub, in KeyHandshakeEnd
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.7 89/08/31 17:27:28 kodiak Exp $'
+d13 3
+@
+
+
+36.7
+log
+@perform key handshake timeout w/ timer ReadEClock function
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.6 89/07/31 17:14:39 kodiak Exp $'
+d13 3
+d298 2
+a299 2
+		sub.l	d0,kd_EClock2+EV_HI(a6)
+		bcs.s	KeyHandshakeEnd
+d301 2
+a302 2
+		sub.l	d0,kd_EClock2+EV_LO(a6)
+		bcs.s	KeyHandshakeEnd
+@
+
+
+36.6
+log
+@remove timer cia-a-a use in preparation for timer device use of it
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.5 89/03/25 14:08:48 kodiak Exp $'
+d13 3
+d76 2
+d152 11
+a162 1
+		or.b	#CIACRAF_SPMODE,ciacra(a0)
+d169 2
+a170 2
+		moveq	#0,d0			;clear upper byte
+		move.b	_ciaasdr,d0		; get the key.
+d179 2
+a180 2
+		not.b	d0		    ;signal is active low
+		ror.b	#1,d0		    ;move up/down to sign bit
+d183 1
+a183 1
+		cmpi.b	#RESET_CODE,d0
+d195 1
+a195 1
+		move.l	(a1),d2
+d199 1
+a199 1
+		move.l	d2,a1
+a200 1
+		bne	intRts
+d205 1
+a205 1
+		move.w	d0,d1		    ;get keycode index into
+d209 2
+a210 2
+		move	d1,d2		    ;get byte and bit for use in
+		and.w	#$00007,d2	    ;  setting or clearing matrix
+d213 1
+a213 1
+		btst	#7,d0		    ;check key up/down flag
+d215 1
+a215 1
+		bset	d2,0(a0,d1.w)	    ;show key down
+d218 1
+a218 1
+		bset	d2,kd_Shifts(a6)    ;  update shift keys
+d221 1
+a221 1
+		bclr	d2,0(a0,d1.w)	    ;show key up
+d224 1
+a224 1
+		bclr	d2,kd_Shifts(a6)    ;  update shift keys
+d236 1
+a236 1
+		move.w	d0,d1
+d238 2
+a239 2
+		move	d1,d2		    ;get byte and bit for use in
+		and.w	#$00007,d2	    ;  testing numeric table
+d242 1
+a242 1
+		btst	d2,0(a0,d1.w)	    ;check if numeric
+d248 5
+a252 5
+		move.w	kd_BufTail(a6),d2
+		move.w	d2,d3
+		addq.w	#4,d2
+		andi.w	#(KBBUFSIZE-1),d2
+		cmp.w	kd_BufHead(a6),d2
+d256 4
+a259 4
+		move.w	d3,d2		    ; overwrite the last key
+		move.w	#OVERFLOW_CODE,d0   ;	with overflow code
+		subq.w	#4,d3
+		andi.w	#(KBBUFSIZE-1),d3
+d262 1
+a262 1
+		move.w	d0,kd_BufQueue(a6,d3.W)
+d264 2
+a265 2
+		move.w	d4,kd_BufQueue+2(a6,d3.W)
+		move.w	d2,kd_BufTail(a6)
+d289 12
+@
+
+
+36.5
+log
+@use timer a to ensure 75us handshake
+make handshake code public for keydev's use
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.4 89/03/16 15:57:59 kodiak Exp $'
+d13 4
+d33 1
+a33 1
+*   make A500/A2000 numeric ()*/+ keys have NUMERICPAD qualifier
+d91 1
+a91 1
+*	CC-zero-bit	       A1
+a144 3
+		move.l	#_ciaa,a0
+		move.b	#54,ciatalo(a0)
+		move.b	#0,ciatahi(a0)
+d147 1
+a147 1
+		or.b	#CIACRAF_SPMODE!CIACRAF_RUNMODE!CIACRAF_START,ciacra(A0)
+d152 4
+a155 4
+		MOVEM.L D2-D4/A6,-(A7)
+		MOVE.L	A1,A6			; get keyboard device
+		MOVEQ	#0,D0			;clear upper byte
+		MOVE.B	_ciaasdr,D0		; get the key.
+d162 1
+a162 1
+		MOVEQ	#0,D4		    ;clear qualifier word
+d164 2
+a165 2
+		NOT.B	D0		    ;signal is active low
+		ROR.B	#1,D0		    ;move up/down to sign bit
+d168 6
+a173 6
+		CMPI.B	#RESET_CODE,D0
+		BNE.S	notReset
+		BSET	#KDB_RESET1,kd_Flags(A6)
+		BEQ.S	processKey
+		BSET	#KDB_RESET2,kd_Flags(A6)
+		BNE	intRts
+d176 3
+a178 3
+		MOVE.L	kd_HandlerList(A6),A1
+		TST.L	(A1)
+		BEQ	handshake		; no handlers
+d180 3
+a182 3
+		MOVE.L	(A1),D2
+		BEQ	intRts
+		ADDQ.W	#1,kd_OutstandingResetHandlers(A6)
+d184 3
+a186 3
+		MOVE.L	D2,A1
+		BRA.S	causeLoop
+		BNE	intRts
+d189 1
+a189 1
+		BCLR	#KDB_RESET1,kd_Flags(A6)
+d191 15
+a205 15
+		MOVE.W	D0,D1		    ;get keycode index into
+		AND.W	#$0007F,D1	    ;  keycode matrix
+		CMP	#HIGH_KEYCODE,D1    ;check that this is in the
+		BHI	enqueueKey	    ;  range of valid keys
+		MOVE	D1,D2		    ;get byte and bit for use in
+		AND.W	#$00007,D2	    ;  setting or clearing matrix
+		LSR	#3,D1		    ;  bit
+		LEA	kd_Matrix(A6),A0    ;get the matrix base location
+		BTST	#7,D0		    ;check key up/down flag
+		BNE.S	keyUp
+		BSET	D2,0(A0,D1.W)	    ;show key down
+		CMP.W	#$60>>3,D1	    ;check if shift key
+		BNE.S	checkNumeric	    ;
+		BSET	D2,kd_Shifts(A6)    ;  update shift keys
+		BRA.S	checkNumeric
+d207 5
+a211 5
+		BCLR	D2,0(A0,D1.W)	    ;show key up
+		CMP.W	#$60>>3,D1	    ;check if shift key
+		BNE.S	checkNumeric	    ;
+		BCLR	D2,kd_Shifts(A6)    ;  update shift keys
+		BRA.S	checkNumeric	    ;
+d215 4
+a218 4
+		DC.B	%00000000,%10000000,%00000000,%11100000
+		DC.B	%00000000,%11100000,%00000000,%11110000
+		DC.B	%00001000,%00000100,%00000000,%01111100
+		DC.B	%00000000,%00000000,%00000000,%00000000
+d222 9
+a230 9
+		MOVE.W	D0,D1
+		AND.W	#$0007F,D1
+		MOVE	D1,D2		    ;get byte and bit for use in
+		AND.W	#$00007,D2	    ;  testing numeric table
+		LSR	#3,D1		    ;
+		LEA	numericMatrix(PC),A0	;get the matrix base location
+		BTST	D2,0(A0,D1.W)	    ;check if numeric
+		BEQ.S	enqueueKey
+		OR.W	#IEQUALIFIER_NUMERICPAD,D4
+d234 6
+a239 6
+		MOVE.W	kd_BufTail(A6),D2
+		MOVE.W	D2,D3
+		ADDQ.W	#4,D2
+		ANDI.W	#(KBBUFSIZE-1),D2
+		CMP.W	kd_BufHead(A6),D2
+		BNE.S	buffOk
+d242 4
+a245 4
+		MOVE.W	D3,D2		    ; overwrite the last key
+		MOVE.W	#OVERFLOW_CODE,D0   ;	with overflow code
+		SUBQ.W	#4,D3
+		ANDI.W	#(KBBUFSIZE-1),D3
+d248 4
+a251 4
+		MOVE.W	D0,kd_BufQueue(A6,D3.W)
+		OR.B	kd_Shifts(A6),D4
+		MOVE.W	D4,kd_BufQueue+2(A6,D3.W)
+		MOVE.W	D2,kd_BufTail(A6)
+d254 2
+a255 2
+		BTST	#DUB_STOPPED,kd_Unit+du_Flags(A6)
+		BNE.S	handshake
+d258 3
+a260 3
+		MOVE.L	kd_Unit+MP_MSGLIST(A6),A1
+		TST.L	(A1)
+		BEQ.S	handshake
+d262 1
+a262 1
+		BSR	KDReadEvent
+d269 2
+a270 2
+		MOVEM.L (A7)+,D2-D4/A6
+		RTS
+d275 2
+a276 4
+		btst.b	#CIACRAB_START,_ciaacra
+		bne.s	KeyHandshakeEnd
+
+		and.b	#$0BF,_ciaacra		; set up to shift in next key
+@
+
+
+36.4
+log
+@use timer a, not b.
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.3 89/02/20 16:11:33 kodiak Exp $'
+d13 3
+d63 1
+a64 1
+
+d74 1
+a74 1
+	XDEF	    KDInterrupt
+d76 4
+d135 1
+a135 6
+KDInterrupt:
+		MOVEM.L D2-D4/A6,-(A7)
+		MOVE.L	A1,A6			; get keyboard device
+		MOVE.L	#_ciaa,A0
+		MOVEQ	#0,D0		    ;clear upper byte
+		MOVE.B	ciasdr(A0),D0	    ; get the key.
+d138 2
+a139 2
+;  ciaata counts ticks at .715909usec/tick.
+;  So 105 ticks.
+d141 2
+a142 1
+		move.b	#105,ciatalo(a0)
+d146 2
+a147 2
+TEMPTIME	EQU	CIACRAF_SPMODE!CIACRAF_RUNMODE!CIACRAF_START
+		move.b	#TEMPTIME,ciacra(A0) 
+d149 10
+d264 2
+a265 6
+*	    ;-- complete the high signal of the handshake
+		MOVE.L	#_ciaa,A0
+wait75usec:
+		tst.b	ciatalo(a0)
+		bne.s	wait75usec
+		AND.B	#$0BF,_ciaacra	    ; set up to shift in
+d271 10
+a280 1
+		END
+@
+
+
+36.3
+log
+@wait for 75us
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 36.2 88/11/03 12:35:34 kodiak Exp $'
+d13 3
+d139 2
+a140 2
+		move.b	#105,ciatblo(a0)
+		move.b	#0,ciatbhi(a0)
+d254 1
+a254 1
+		tst.b	ciatblo(a0)
+@
+
+
+36.2
+log
+@use AUTOINIT in ResidentTag
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 35.3 88/08/02 12:21:38 kodiak Exp $'
+d13 3
+d249 4
+@
+
+
+35.3
+log
+@first cut at timer-based handshake
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 35.2 88/01/25 11:36:43 kodiak Exp $'
+d13 3
+d217 1
+a217 1
+		ANDI.W	#(BUFSIZE-1),D2
+d225 1
+a225 1
+		ANDI.W	#(BUFSIZE-1),D3
+@
+
+
+35.2
+log
+@remove unnecessary Disable Enable pair
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 35.1 87/11/12 13:36:24 kodiak Exp $'
+d13 3
+d125 11
+a135 2
+*	    ;-- initiate the low signal of the handshake
+		OR.B	#$040,ciacra(A0)    ; drive data line low
+d137 1
+a137 1
+*	    ;-- this handshake is completed at the end of this routine
+@
+
+
+35.1
+log
+@make A500/A2000 numeric ()*/+ keys have NUMERICPAD qualifier
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: keyint.asm,v 35.0 87/10/26 11:32:20 kodiak Exp $'
+d10 1
+a10 1
+*   Source Control	$Locker:  $
+d13 3
+a52 2
+	XREF_EXE	Disable
+	XREF_EXE	Enable
+a198 2
+		LINKEXE	Disable
+
+a216 2
+
+		LINKEXE	Enable
+@
+
+
+35.0
+log
+@initial from V34, but w/ stripped log
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header: keyint.asm,v 1.1 85/11/22 22:37:57 kodiak Exp $'
+a2 11
+*								     *
+*   Copyright 1985, Commodore-Amiga Inc.   All rights reserved.	     *
+*   No part of this program may be reproduced, transmitted,	     *
+*   transcribed, stored in retrieval system, or translated into	     *
+*   any language or computer language, in any form or by any	     *
+*   means, electronic, mechanical, magnetic, optical, chemical,	     *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030				     *
+*								     *
+**********************************************************************
+d4 3
+a6 1
+*	keyboard interrupt code
+d8 1
+a8 3
+*   Source Control
+*   --------------
+*   $Header: keyint.asm,v 1.1 85/11/22 22:37:57 kodiak Exp $
+d10 1
+a10 1
+*   $Locker:  $
+d13 2
+d181 1
+a181 1
+		DC.B	%00001000,%00000100,%00000000,%00000000
+@

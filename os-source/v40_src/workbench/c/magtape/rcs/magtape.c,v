@@ -1,0 +1,365 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.8
+date     91.05.13.18.41.24;  author andy;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.05.13.18.38.18;  author andy;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.05.01.10.43.38;  author andy;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.05.01.08.36.25;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.04.22.18.43.23;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.04.19.20.15.36;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.03.28.18.09.29;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.03.25.16.14.20;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@magnetic tape control command
+@
+
+
+1.8
+log
+@moved the SetIoErr()
+@
+text
+@#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/io.h>
+#include <devices/timer.h>
+#include <libraries/dosextens.h>
+#include "devices/scsidisk.h"
+
+
+#include <string.h>
+
+#include "internal/commands.h"
+
+#include "clib/exec_protos.h"
+#include "clib/dos_protos.h"
+#include "clib/intuition_protos.h"
+
+#include "pragmas/dos_pragmas.h"
+#include <pragmas/exec_pragmas.h>
+
+#include "magtape_rev.h"
+
+#define fsf 1
+
+#define CMD_SCSIDIRECT  28              /* send direct scsi command */
+#ifdef fsf
+#define TEMPLATE    "DEVICE/K,UNIT/N/K,RET=RETENSION/S,REW=REWIND/S,SKIP/N/K" CMDREV
+#else
+#define TEMPLATE    "DEVICE/K,UNIT/N/K,RET=RETENSION/S,REW=REWIND/S" CMDREV
+#endif
+#define OPT_DEVICE	0
+#define OPT_UNIT	1
+#define OPT_RET		2
+#define OPT_REW		3
+#define OPT_FSF		4
+#define OPT_COUNT   	5
+
+void aprintf();
+
+int cmd_mt(void)
+{
+        struct Library *DOSBase;
+        struct Library *SysBase = (*((struct Library **) 4));
+	long opts[OPT_COUNT];
+        struct RDargs *rdargs;
+	long rc=RETURN_FAIL;
+	struct IOStdReq __aligned SCSIReq={0};
+	struct SCSICmd __aligned Cmd={0};
+	UBYTE  __aligned Sense[18];
+	struct MsgPort __aligned Port={0};
+	int i;
+#ifdef fsf
+        long nfile;
+#endif
+	UBYTE  TestUnitReady[] = { 0,0,0,0,0,0 };
+	UBYTE  RetensionUnit[] =  { 0x1b,0,0,0,3,0 };
+	UBYTE  RewindUnit[]    =  { 0x01,0,0,0,0,0 };
+#ifdef fsf
+	UBYTE  ForwardUnit[]   =  { 0x11,0x01,0,0,0,0 };
+#endif
+	UBYTE *device="scsi.device";
+	int devok=0;
+	int unit=4;
+
+   if ((DOSBase = OpenLibrary(DOSLIB, DOSVER))) {
+
+      memset((char *)opts, 0, sizeof(opts));
+      if(!(rdargs = ReadArgs(TEMPLATE, opts, NULL)))goto err;
+
+    if(opts[OPT_DEVICE])device=(UBYTE *)opts[OPT_DEVICE];
+    if(opts[OPT_UNIT])unit=*(long *)opts[OPT_UNIT];
+
+    /* fire up a handler someone is passing us ? */
+    for(i=0; i <strlen(device); i++)if(device[i]==':') {
+	if(!IsFileSystem(device)) {
+	    aprintf("Error: not a device.\n");
+	    goto err;
+	}
+	SetIoErr(0);
+    }
+    if((strlen(device) > 7)&&!stricmp(&device[strlen(device)-7],".device")) {
+        Port.mp_Node.ln_Pri = 0;
+        Port.mp_SigBit      = AllocSignal(-1);
+        Port.mp_SigTask     = (struct Task *)FindTask(0);
+        NewList( &(Port.mp_MsgList) );
+        SCSIReq.io_Message.mn_ReplyPort   = &Port;
+        if(Port.mp_SigBit)devok=(!OpenDevice(device, unit, &SCSIReq, 0));
+    }
+    if (!devok) {
+	aprintf("Error: device didn't open.\n");
+
+	goto err;
+    }
+    SCSIReq.io_Length  = sizeof(struct SCSICmd);
+    SCSIReq.io_Data    = (APTR)&Cmd;
+    SCSIReq.io_Command = CMD_SCSIDIRECT;
+    Cmd.scsi_Data = (APTR)0;
+    Cmd.scsi_Length = 0;
+    Cmd.scsi_CmdLength = 6;
+    Cmd.scsi_Flags = SCSIF_AUTOSENSE;
+    Cmd.scsi_SenseData = (APTR)Sense;
+    Cmd.scsi_SenseLength = 18;
+    Cmd.scsi_SenseActual = 0;
+
+    Cmd.scsi_Command = (APTR)TestUnitReady;
+    DoIO( &SCSIReq );
+    if(Cmd.scsi_Status){
+	aprintf("Unit not ready, scsi status is %ld\n",Cmd.scsi_Status);
+	goto err;
+    }
+
+    if(opts[OPT_RET]) {
+        Cmd.scsi_Command = (APTR)RetensionUnit;
+	DoIO( &SCSIReq );
+	if(Cmd.scsi_Status) {
+	    aprintf("error %ld on retension\n",Cmd.scsi_Status);
+	    goto err;
+	}
+    }
+    if(opts[OPT_REW]) {
+        Cmd.scsi_Command = (APTR)RewindUnit;
+	DoIO( &SCSIReq );
+	if(Cmd.scsi_Status) {
+	    aprintf("error %ld on rewind\n",Cmd.scsi_Status);
+	    goto err;
+	}
+    }
+#ifdef fsf
+    if(opts[OPT_FSF]) {
+        Cmd.scsi_Command = (APTR)ForwardUnit;
+	nfile= *(long *)opts[OPT_FSF];
+	ForwardUnit[2]=(UBYTE)(nfile/4096)&255;
+	ForwardUnit[3]=(UBYTE)(nfile/256)&255;
+	ForwardUnit[4]=(UBYTE)(nfile&255);
+	DoIO( &SCSIReq );
+	if(Cmd.scsi_Status) {
+	    aprintf("error %ld on fast forward\n",Cmd.scsi_Status);
+	    goto err;
+	}
+    }
+#endif
+        rc=RETURN_OK;
+err:;
+	if (rdargs)FreeArgs(rdargs);
+        if(Port.mp_SigBit)FreeSignal(Port.mp_SigBit);
+        if(devok)CloseDevice( &SCSIReq );
+        if(Port.mp_SigBit)FreeSignal(Port.mp_SigBit);
+	if(rc)PrintFault(IoErr(),NULL);
+        CloseLibrary((struct Library *)DOSBase);
+   }
+   else {OPENFAIL;}
+   return(rc);
+}
+
+#if 0
+void ShowSenseData()
+{
+int i;
+
+    for(i=0; i<18; i++)
+        aprintf("%x ",(int)Sense[i]);
+    aprintf("\n");
+}
+#endif
+
+void aprintf( fmt, args )
+char *fmt, *args;
+{
+   struct Library *DOSBase;
+   struct Library *SysBase = (*((struct Library **) 4));
+
+   if(DOSBase=OpenLibrary(DOSLIB,DOSVER)) {
+       VFPrintf(Output(), fmt, (LONG *)&args );
+       CloseLibrary(DOSBase);
+   }
+}
+@
+
+
+1.7
+log
+@additional test for device...I do an isfilesystem
+if they use a : to make sure the handler is all
+fired up.
+@
+text
+@d78 1
+d90 1
+a90 1
+	SetIoErr(0);
+@
+
+
+1.6
+log
+@the rest of the error test
+@
+text
+@d50 1
+d71 8
+d89 1
+d92 1
+a92 1
+    SCSIReq.io_Length  = 0;
+d146 1
+a147 1
+	if(rc)PrintFault(IoErr(),NULL);
+@
+
+
+1.5
+log
+@added test for .device...errors out if not a .device
+@
+text
+@d76 1
+a76 1
+        devok=(!OpenDevice(device, unit, &SCSIReq, 0));
+d133 1
+a133 1
+
+@
+
+
+1.4
+log
+@fixed spelling mistake.
+changed cryptic fsf to clear skip in template/
+@
+text
+@d70 8
+a77 8
+
+    Port.mp_Node.ln_Pri = 0;
+    Port.mp_SigBit      = AllocSignal(-1);
+    Port.mp_SigTask     = (struct Task *)FindTask(0);
+    NewList( &(Port.mp_MsgList) );
+    SCSIReq.io_Message.mn_ReplyPort   = &Port;
+
+    devok=(!OpenDevice(device, unit, &SCSIReq, 0));
+a81 1
+
+@
+
+
+1.3
+log
+@spelling mistake fixed.
+@
+text
+@d26 1
+a26 1
+#define TEMPLATE    "DEVICE/K,UNIT/N/K,RET=RETENSION/S,REW=REWIND/S,FSF/N/K" CMDREV
+d54 1
+a54 1
+	UBYTE  RetentionUnit[] =  { 0x1b,0,0,0,3,0 };
+d102 1
+a102 1
+        Cmd.scsi_Command = (APTR)RetentionUnit;
+d105 1
+a105 1
+	    aprintf("error %ld on retention\n",Cmd.scsi_Status);
+@
+
+
+1.2
+log
+@fixed the fsf case
+@
+text
+@d26 1
+a26 1
+#define TEMPLATE    "DEVICE/K,UNIT/N/K,RET=RETENTION/S,REW=REWIND/S,FSF/N/K" CMDREV
+d28 1
+a28 1
+#define TEMPLATE    "DEVICE/K,UNIT/N/K,RET=RETENTION/S,REW=REWIND/S" CMDREV
+d54 1
+a54 1
+	UBYTE  RetentionUnit[] =  { 0x1b,0,0,0,2,0 };
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d22 2
+d25 3
+a27 1
+
+d29 1
+d50 1
+a50 1
+#if 0
+d56 1
+a56 1
+#if 0
+d117 1
+a117 1
+#if 0
+d121 3
+a123 3
+	ForwardUnit[2]=(UBYTE)(nfile/4096)&256;
+	ForwardUnit[3]=(UBYTE)(nfile/256)&256;
+	ForwardUnit[4]=(UBYTE)(nfile&256);
+@

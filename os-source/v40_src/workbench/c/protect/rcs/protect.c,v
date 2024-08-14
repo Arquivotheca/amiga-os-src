@@ -1,0 +1,952 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.10
+date     93.03.12.16.57.46;  author vertex;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.12.23.17.48.19;  author vertex;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.12.03.12.05.31;  author vertex;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.09.06.19.45.53;  author andy;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.05.25.13.54.39;  author andy;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.05.03.18.50.22;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.04.20.22.24.49;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.04.20.07.03.04;  author andyown;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.18.17.36.01;  author Unknown;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.03.01.19.38.23;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.37.33;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Protect command for cdos
+@
+
+
+1.10
+log
+@Fixed output bug with a filename of FOO:
+@
+text
+@
+#include "internal/commands.h"
+#include "protect_rev.h"
+
+#define MSG_BADFLAG   "Invalid flag - must be one of SPARWED\n"
+#define MSG_SETFAILED "Can't set protection for %s - "
+#define MSG_NOMEM     "No memory\n"
+#define MSG_DONE      "done\n"
+#define MSG_DIR       " (dir)"
+#define MSG_BLANKS    "        "
+#define MSG_ADDSUB    "Can't specify both ADD (+) and SUB (-)\n"
+
+
+#define TEMPLATE    "FILE/A,FLAGS,ADD/S,SUB/S,ALL/S,QUIET/S" CMDREV
+#define OPT_FILE    0
+#define OPT_FLAGS   1
+#define OPT_ADD     2
+#define OPT_SUB     3
+#define OPT_ALL     4
+#define OPT_QUIET   5
+#define OPT_COUNT   6
+
+#define NORMINDENT  3
+#define TABSIZE     5
+
+#define ALL_PROT_BITS (0x00000080|FIBF_SCRIPT|FIBF_PURE|FIBF_ARCHIVE|\
+                       FIBF_READ|FIBF_WRITE|FIBF_EXECUTE|FIBF_DELETE)
+
+#define BITFLIP(x,m) (( (x) & ~((LONG)m)) | ( ~(x) & ((LONG)m) ))
+
+#define ANCHORNAMELEN 255
+#define ANCHORSIZE    (sizeof(struct AnchorPath) + ANCHORNAMELEN)
+
+/* Macro to get longword-aligned stack space for a structure	*/
+/* Uses ANSI token catenation to form a name for the char array */
+/* based on the variable name, then creates an appropriately	*/
+/* typed pointer to point to the first longword boundary in the */
+/* char array allocated.					*/
+#define D_S(name, type) char a_##name[sizeof(type)+3]; \
+			type *name = (type *)((LONG)(a_##name+3) & ~3);
+
+struct uAnchorPath
+{
+   struct AnchorPath ap;
+   char name[255];
+};
+
+int cmd_protect(void)
+{
+struct Library *SysBase = (*((struct Library **) 4));
+struct DosLibrary *DOSBase;
+int rc, rc2, indent, tindent, isdir;
+BOOL apinit;
+LONG mask, umask;
+LONG oldbits;
+char *msg, *curflag;
+LONG opts[OPT_COUNT];
+BPTR lock;
+STRPTR extra;
+struct RDargs *rdargs;
+D_S(ap, struct uAnchorPath);
+
+    rc = RETURN_FAIL;
+    if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)))
+    {
+        memset((char *)opts, 0, sizeof(opts));
+        if (!(rdargs = ReadArgs(TEMPLATE, &opts[0], NULL)))
+        {
+            PrintFault(IoErr(), NULL);
+        }
+        else
+        {
+            rc2    = 0;
+            apinit = FALSE;
+            msg    = NULL;
+            extra  = NULL;
+
+            umask = 0L;
+            if (opts[OPT_FLAGS])
+            {
+                for (curflag = (char *)opts[OPT_FLAGS]; *curflag; curflag++)
+                {
+                    switch(*curflag)
+                    {
+                        case 'h': case 'H': umask |= 0x80;         break;
+                        case 's': case 'S': umask |= FIBF_SCRIPT;  break;
+                        case 'p': case 'P': umask |= FIBF_PURE;    break;
+                        case 'a': case 'A': umask |= FIBF_ARCHIVE; break;
+                        case 'r': case 'R': umask |= FIBF_READ;    break;
+                        case 'w': case 'W': umask |= FIBF_WRITE;   break;
+                        case 'e': case 'E': umask |= FIBF_EXECUTE; break;
+                        case 'd': case 'D': umask |= FIBF_DELETE;  break;
+                        case '+':           opts[OPT_ADD] = 1;    break;
+                        case '-':           opts[OPT_SUB] = 1;    break;
+
+                        default :           msg = MSG_BADFLAG;
+                                            rc  = RETURN_FAIL;
+                                            goto ERRORCASE;
+                    }
+                }
+
+               if (umask == 0L)
+               {
+                   msg = MSG_BADFLAG;
+                   rc  = RETURN_FAIL;
+                   goto ERRORCASE;
+               }
+            }
+
+            if (opts[OPT_ADD] && opts[OPT_SUB])
+            {
+                msg = MSG_ADDSUB;
+                rc  = RETURN_FAIL;
+                goto ERRORCASE;
+            }
+
+            if (opts[OPT_SUB])
+                umask = ( ( (~umask) & ALL_PROT_BITS) | ~ALL_PROT_BITS);
+
+            memset(ap, 0, sizeof(struct uAnchorPath));
+            ap->ap.ap_Flags = APF_DOWILD;
+            ap->ap.ap_Strlen = ANCHORNAMELEN;
+            ap->ap.ap_BreakBits = SIGBREAKF_CTRL_C;
+
+            apinit = TRUE;
+            indent = 0;
+
+            rc  = RETURN_FAIL;
+            rc2 = MatchFirst((STRPTR)opts[OPT_FILE], &ap->ap);
+
+            while (!rc2)
+            {
+                if (CheckSignal(SIGBREAKF_CTRL_C))
+                {
+                    rc2 = ERROR_BREAK;
+                    break;
+                }
+
+                if (ap->ap.ap_Flags & APF_DIDDIR)
+                {
+                    /* Exiting a directory, skip this entry */
+                    ap->ap.ap_Flags &= ~APF_DIDDIR;
+                    indent--;
+                    rc2 = MatchNext(&ap->ap);
+                    continue;
+                }
+
+                isdir = (ap->ap.ap_Info.fib_DirEntryType >= 0);
+
+                if (isdir && opts[OPT_ALL])
+                {
+                    /* Step into the directory */
+                    ap->ap.ap_Flags |= APF_DODIR;
+                    indent++;
+                }
+
+                if ((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL])
+                {
+                    if (!opts[OPT_QUIET])
+                        for (tindent = 0; tindent < indent; tindent++)
+                            WriteChars(MSG_BLANKS, TABSIZE);
+
+                    if (!opts[OPT_QUIET])
+                    {
+                        if (!isdir)
+                            WriteChars(MSG_BLANKS, NORMINDENT);
+
+                        if (ap->ap.ap_Info.fib_FileName[0])
+                            PutStr(ap->ap.ap_Info.fib_FileName);
+                        else
+                            PutStr((STRPTR)opts[OPT_FILE]);
+
+                        if (isdir)
+                            PutStr(MSG_DIR);
+
+                        PutStr("..");
+                    }
+                }
+                else
+                {
+                    tindent = -1;  /* We'll use tindent >= 0 below as a flag */
+                }
+
+                mask = umask;
+                if (opts[OPT_ADD] || opts[OPT_SUB])
+                {
+                    /* Bottom four bits (RWED) are reverse-sense */
+                    oldbits = BITFLIP(ap->ap.ap_Info.fib_Protection, 0x0f);
+
+                    if (opts[OPT_ADD])
+                        mask |= oldbits;
+                    else /* OPT_SUB */
+                        mask &= oldbits;
+                }
+
+                /* Bottom four bits (RWED) are reverse-sense */
+                mask = BITFLIP(mask, 0x0f);
+
+                lock = CurrentDir(ap->ap.ap_Current->an_Lock);
+
+                if ((mask != ap->ap.ap_Info.fib_Protection) && (SetProtection(ap->ap.ap_Info.fib_FileName, mask) == DOSFALSE))
+                {
+                    rc  = RETURN_FAIL;
+                    rc2 = IoErr();
+                    msg = MSG_SETFAILED;
+                    extra = ap->ap.ap_Buf;
+                    PutStr("\n");
+                }
+                else
+                {
+                    if ((tindent >= 0) && !opts[OPT_QUIET])
+                    {
+                        /* If we put out the first part of the msg, put out the rest now */
+                        PutStr(MSG_DONE);
+                    }
+                }
+
+                CurrentDir(lock);
+
+                if (!rc2)
+                    rc2 = MatchNext(&ap->ap);
+            }
+
+            if (rc2 == ERROR_NO_MORE_ENTRIES)
+            {
+                rc2 = 0;
+                rc  = RETURN_OK;
+            }
+            else if (rc2 == ERROR_BREAK)
+            {
+                rc = RETURN_WARN;
+            }
+
+   ERRORCASE:
+
+            if (msg)
+                VPrintf(msg, (ULONG *)&extra);
+
+            if (rc2)
+                PrintFault(rc2, NULL);
+
+            FreeArgs(rdargs);
+
+            if (apinit)
+                MatchEnd(ap);
+
+            SetIoErr(rc2);
+        }
+
+        CloseLibrary((struct Library *)DOSBase);
+    }
+    else {OPENFAIL;}
+
+    return(rc);
+}
+@
+
+
+1.9
+log
+@Fixed infinite loop when using the ALL option
+No longer calls SetProtection() if the prot bits didn't actually change
+@
+text
+@d168 4
+a171 1
+                        PutStr(ap->ap.ap_Info.fib_FileName);
+@
+
+
+1.8
+log
+@Fixed error reporting
+Reformatted code a bit
+Removed some silly code
+@
+text
+@d50 27
+a76 28
+   struct Library *SysBase = (*((struct Library **) 4));
+   struct DosLibrary *DOSBase;
+   int rc, rc2, indent, tindent, isdir;
+   BOOL apinit;
+   LONG mask, umask;
+   LONG oldbits;
+   char *msg, *curflag;
+   LONG opts[OPT_COUNT];
+   BPTR lock;
+   STRPTR extra;
+   struct RDargs *rdargs;
+   D_S(ap, struct uAnchorPath);
+
+
+   rc = RETURN_FAIL;
+   if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)))
+   {
+      memset((char *)opts, 0, sizeof(opts));
+      if(!(rdargs = ReadArgs(TEMPLATE, &opts[0], NULL)))
+      {
+         PrintFault(IoErr(), NULL);
+      }
+      else
+      {
+         rc2    = 0;
+         apinit = FALSE;
+         msg    = NULL;
+         extra  = NULL;
+d78 2
+a79 4
+         umask = 0L;
+         if (opts[OPT_FLAGS])
+         {
+            for (curflag = (char *)opts[OPT_FLAGS]; *curflag; curflag++)
+d81 22
+a102 1
+               switch(*curflag)
+d104 3
+a106 14
+                  case 'h': case 'H': umask |= 0x80;         break;
+                  case 's': case 'S': umask |= FIBF_SCRIPT;  break;
+                  case 'p': case 'P': umask |= FIBF_PURE;    break;
+                  case 'a': case 'A': umask |= FIBF_ARCHIVE; break;
+                  case 'r': case 'R': umask |= FIBF_READ;    break;
+                  case 'w': case 'W': umask |= FIBF_WRITE;   break;
+                  case 'e': case 'E': umask |= FIBF_EXECUTE; break;
+                  case 'd': case 'D': umask |= FIBF_DELETE;  break;
+                  case '+':           opts[OPT_ADD] = 1;    break;
+                  case '-':           opts[OPT_SUB] = 1;    break;
+                  default:
+                     msg = MSG_BADFLAG;
+                     rc  = RETURN_FAIL;
+                     goto ERRORCASE;
+d108 1
+a108 1
+	    }
+d110 1
+a110 1
+            if (umask == 0L)
+d112 3
+a114 3
+               msg = MSG_BADFLAG;
+               rc  = RETURN_FAIL;
+               goto ERRORCASE;
+a115 1
+	 }
+d117 11
+a127 3
+         if (opts[OPT_ADD] && opts[OPT_SUB])
+         {
+            msg = MSG_ADDSUB;
+d129 1
+a129 2
+            goto ERRORCASE;
+         }
+d131 7
+a137 13
+         if(opts[OPT_SUB])
+            umask = ( ( (~umask) & ALL_PROT_BITS) | ~ALL_PROT_BITS);
+
+         memset(ap, 0, sizeof(struct uAnchorPath));
+         ap->ap.ap_Flags = APF_DOWILD;
+         ap->ap.ap_Strlen = ANCHORNAMELEN;
+         ap->ap.ap_BreakBits = SIGBREAKF_CTRL_C;
+
+         apinit = TRUE;
+         indent = 0;
+
+         rc  = RETURN_FAIL;
+         rc2 = MatchFirst((STRPTR)opts[OPT_FILE], &ap->ap);
+d139 8
+a146 7
+         while (!rc2)
+         {
+            if (CheckSignal(SIGBREAKF_CTRL_C))
+            {
+               rc2 = ERROR_BREAK;
+               break;
+            }
+d148 1
+a148 7
+            if (ap->ap.ap_Flags & APF_DIDDIR)
+            {
+               /* Exiting a directory, skip this entry */
+               ap->ap.ap_Flags &= ~APF_DIDDIR;
+               indent--;
+               continue;
+            }
+d150 6
+a155 1
+            isdir = (ap->ap.ap_Info.fib_DirEntryType >= 0);
+d157 5
+a161 6
+            if(isdir && opts[OPT_ALL])
+            {
+               /* Step into the directory */
+               ap->ap.ap_Flags |= APF_DODIR;
+               indent++;
+            }
+d163 9
+a171 5
+            if((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL])
+            {
+               if (!opts[OPT_QUIET])
+                   for (tindent = 0; tindent < indent; tindent++)
+                       WriteChars(MSG_BLANKS, TABSIZE);
+d173 7
+a179 12
+               if(!opts[OPT_QUIET])
+               {
+                   if(!isdir) WriteChars(MSG_BLANKS, NORMINDENT);
+                   PutStr(ap->ap.ap_Info.fib_FileName);
+                   if(isdir) PutStr(MSG_DIR);
+                   PutStr("..");
+	       }
+            }
+            else
+            {
+               tindent = -1;  /* We'll use tindent >= 0 below as a flag */
+            }
+d181 5
+a185 4
+            mask = umask;
+            if(opts[OPT_ADD] || opts[OPT_SUB]) {
+               /* Bottom four bits (RWED) are reverse-sense */
+               oldbits = BITFLIP(ap->ap.ap_Info.fib_Protection, 0x0f);
+d187 5
+a191 5
+               if(opts[OPT_ADD])
+                  mask |= oldbits;
+               else /* OPT_SUB */
+                  mask &= oldbits;
+            }
+d193 2
+a194 2
+            /* Bottom four bits (RWED) are reverse-sense */
+            mask = BITFLIP(mask, 0x0f);
+d196 1
+a196 1
+            lock = CurrentDir(ap->ap.ap_Current->an_Lock);
+d198 9
+a206 11
+            if (SetProtection(ap->ap.ap_Info.fib_FileName, mask) == DOSFALSE)
+            {
+                rc  = RETURN_FAIL;
+                rc2 = IoErr();
+                msg = MSG_SETFAILED;
+                extra = ap->ap.ap_Buf;
+                PutStr("\n");
+            }
+            else
+            {
+                if ((tindent >= 0) && !opts[OPT_QUIET])
+d208 5
+a212 2
+                   /* If we put out the first part of the msg, put out the rest now */
+                   PutStr(MSG_DONE);
+a213 1
+            }
+d215 1
+a215 1
+            CurrentDir(lock);
+d217 33
+a249 29
+             if (!rc2)
+                 rc2 = MatchNext(&ap->ap);
+         }
+
+         if (rc2 == ERROR_NO_MORE_ENTRIES)
+         {
+             rc2 = 0;
+             rc  = RETURN_OK;
+         }
+         else if (rc2 == ERROR_BREAK)
+         {
+             rc = RETURN_WARN;
+         }
+
+ERRORCASE:
+
+         if (msg)
+             VPrintf(msg, (ULONG *)&extra);
+
+         if (rc2)
+             PrintFault(rc2, NULL);
+
+         FreeArgs(rdargs);
+
+         if (apinit)
+             MatchEnd(ap);
+
+         SetIoErr(rc2);
+      }
+d251 1
+a251 4
+      CloseLibrary((struct Library *)DOSBase);
+   }
+   else {OPENFAIL;}
+   return(rc);
+@
+
+
+1.7
+log
+@release 2.0 version
+@
+text
+@a0 34
+; /*
+lc -O -d -j73 -o/obj/Protect.o -i/include -v -csf Protect
+blink /obj/Protect.o to /bin/Protect sc sd nd
+protect /bin/Protect +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker   Mike Witcher */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+ **/
+
+/*---------------------------------------------------------------------------*/
+/* Command: Protect                                                          */
+/* Author:  Doug Walker                                                      */
+/* Change History:                                                           */
+/*  Date    Person  Action                                                   */
+/* -------  ------------- -----------------                                  */
+/* 19MAR89  John Toebes   Initial Creation                                   */
+/* 28MAR89  Doug Walker   Filled in body                                     */
+/* 06NOV89  Doug Walker   Revved for dos.library 36.38                       */
+/*   MAR90  Doug Walker   Added ALL option, wildcards                        */
+/*   MAY90  Doug Walker   Added additionall error checking                   */
+/* Notes:                                                                    */
+/*---------------------------------------------------------------------------*/
+d6 1
+a6 1
+#define MSG_SETFAILED "Can't set protection for %s\n"
+d8 1
+a8 1
+#define MSG_DONE      "...Done\n"
+d23 1
+a23 1
+#define NORMINDENT  3   
+d52 2
+a53 1
+   int rc, rc2, apinit, indent, tindent, isdir;
+d59 1
+d72 1
+a72 1
+      else 
+d74 4
+a77 2
+         rc = rc2 = apinit = 0;
+         msg = NULL;
+d80 1
+a80 1
+         if(opts[OPT_FLAGS]) 
+d82 1
+a82 1
+            for(curflag = (char *)opts[OPT_FLAGS]; *curflag; curflag++) 
+d98 1
+a98 1
+                     rc = RETURN_FAIL;
+d101 3
+a103 2
+	         }
+            if(umask == 0L)
+d106 1
+a106 1
+               rc = RETURN_FAIL;
+d109 1
+a109 1
+	      }
+d111 1
+a111 1
+         if(opts[OPT_ADD] && opts[OPT_SUB])
+d114 1
+a114 1
+            rc = RETURN_FAIL;
+a120 1
+
+d126 2
+a127 5
+         if(rc2=MatchFirst((char *)opts[OPT_FILE], &ap->ap)) {
+            rc = RETURN_FAIL;
+            if(rc2 != ERROR_NO_MORE_ENTRIES)PrintFault(rc2, NULL );
+            goto ERRORCASE;
+         }
+d129 2
+a130 2
+         apinit = 1;
+         indent = 0;
+d132 1
+a132 1
+         do 
+d134 1
+a134 1
+            if(CheckSignal(SIGBREAKF_CTRL_C)) 
+a135 2
+               PrintFault(ERROR_BREAK, NULL);
+               rc = RETURN_FAIL;
+d137 1
+a137 1
+               goto ERRORCASE;
+d140 1
+a140 1
+            if(ap->ap.ap_Flags & APF_DIDDIR)
+d157 8
+a164 5
+            if((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL])  {
+               for(tindent = 0; tindent < indent; tindent++)  {
+                  if(!opts[OPT_QUIET])WriteChars(MSG_BLANKS, TABSIZE);
+               }
+               if(!opts[OPT_QUIET]) {
+d168 1
+d172 1
+d174 1
+d192 7
+a198 4
+            if(SetProtection(ap->ap.ap_Info.fib_FileName, mask) == DOSFALSE) {
+               rc  = RETURN_FAIL;
+               rc2 = IoErr();
+               msg = MSG_SETFAILED;
+d200 7
+a206 4
+
+            if((tindent >= 0) && !opts[OPT_QUIET]) {
+               /* If we put out the first part of the msg, put out the rest now */
+               PutStr(MSG_DONE);
+d210 3
+a213 1
+         while(!rc && !(rc2=MatchNext(&ap->ap)));
+d215 4
+a218 4
+         if(rc2 == ERROR_NO_MORE_ENTRIES)rc2 = 0;
+         else if(!rc) {
+            rc = RETURN_FAIL;
+            PrintFault(rc2, NULL);
+d220 4
+d227 5
+a231 1
+         if (msg) VPrintf(msg, opts);
+d233 1
+a233 1
+         if(rdargs) FreeArgs(rdargs);
+d235 2
+a236 1
+         if(apinit) MatchEnd(ap);
+@
+
+
+1.6
+log
+@new version from the softwarecdistillery
+@
+text
+@d39 1
+a39 1
+#define MSG_BADFLAG   "Invalid flag - must be one of HSPARWED\n"
+d192 2
+a193 4
+            if((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL]) 
+            {
+               for(tindent = 0; tindent < indent; tindent++) 
+               {
+a194 7
+               
+                  if(!opts[OPT_QUIET]) 
+                  {
+                     if(!isdir) WriteChars(MSG_BLANKS, NORMINDENT);
+                     PutStr(ap->ap.ap_Info.fib_FileName);
+                     if(isdir) PutStr(MSG_DIR);
+                  }
+d196 5
+@
+
+
+1.5
+log
+@fixed enforcer hit that happened when protect was used with no flags
+@
+text
+@d20 1
+a20 1
+**/
+d31 2
+a38 1
+#define MSG_BADARGS   "Bad args for " TEMPLATE "\n"
+d45 1
+d104 2
+a105 1
+      else {
+d109 24
+a132 4
+         umask = 0x0L;
+	 if(opts[OPT_FLAGS]) {
+           for(curflag = (char *)opts[OPT_FLAGS]; *curflag; curflag++) {
+            switch(*curflag)
+d134 3
+a136 13
+               case 'h': case 'H': umask |= 0x80;         break;
+               case 's': case 'S': umask |= FIBF_SCRIPT;  break;
+               case 'p': case 'P': umask |= FIBF_PURE;    break;
+               case 'a': case 'A': umask |= FIBF_ARCHIVE; break;
+               case 'r': case 'R': umask |= FIBF_READ;    break;
+               case 'w': case 'W': umask |= FIBF_WRITE;   break;
+               case 'e': case 'E': umask |= FIBF_EXECUTE; break;
+               case 'd': case 'D': umask |= FIBF_DELETE;  break;
+               case '+':           opts[OPT_ADD] = 1;    break;
+               case '-':           opts[OPT_SUB] = 1;    break;
+               default:
+                  msg = MSG_BADFLAG;
+                  goto ERRORCASE;
+d138 9
+a146 2
+	   }
+	 }
+d165 4
+a168 2
+         do {
+            if(CheckSignal(SIGBREAKF_CTRL_C)) {
+d179 1
+d192 13
+a204 9
+            if((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL]) {
+               for(tindent = 0; tindent < indent; tindent++) {
+                    if(!opts[OPT_QUIET])WriteChars(MSG_BLANKS, TABSIZE);
+	       }
+	       if(!opts[OPT_QUIET]) {
+                   if(!isdir)WriteChars(MSG_BLANKS, NORMINDENT);
+                   PutStr(ap->ap.ap_Info.fib_FileName);
+                   if(isdir) PutStr(MSG_DIR);
+	       }
+@
+
+
+1.4
+log
+@quiet option, and doesn't print "no more entries"
+@
+text
+@d102 1
+a102 2
+      else
+      {
+d106 3
+a108 3
+         umask = 0L;
+         for(curflag = (char *)opts[OPT_FLAGS]; *curflag; curflag++)
+         {
+d125 2
+a126 1
+         }
+d145 1
+a145 2
+         do
+         {
+d198 1
+a198 2
+            if(SetProtection(ap->ap.ap_Info.fib_FileName, mask) == DOSFALSE)
+            {
+@
+
+
+1.3
+log
+@removed debugging statement
+@
+text
+@d46 1
+a46 1
+#define TEMPLATE    "FILE/A,FLAGS,ADD/S,SUB/S,ALL/S" CMDREV
+d52 2
+a53 1
+#define OPT_COUNT   5
+d138 1
+a138 1
+            PrintFault(rc2, NULL );
+d170 9
+a178 11
+            if((ap->ap.ap_Flags & APF_ITSWILD) || opts[OPT_ALL])
+            {
+               for(tindent = 0; tindent < indent; tindent++)
+               {
+                  WriteChars(MSG_BLANKS, TABSIZE);
+               }
+               if(!isdir) WriteChars(MSG_BLANKS, NORMINDENT);
+
+               PutStr(ap->ap.ap_Info.fib_FileName);
+
+               if(isdir) PutStr(MSG_DIR);
+d184 1
+a184 2
+            if(opts[OPT_ADD] || opts[OPT_SUB])
+            {
+d206 1
+a206 1
+            if(tindent >= 0) {
+@
+
+
+1.2
+log
+@no longer stops on control-D
+@
+text
+@d137 1
+a137 1
+            PrintFault(rc2, "this is a test:" );
+@
+
+
+1.1
+log
+@version number update
+@
+text
+@d81 1
+d135 1
+a135 2
+         if(rc2=MatchFirst((char *)opts[OPT_FILE], &ap->ap))
+         {
+d137 1
+a137 1
+            PrintFault(rc2, NULL);
+d146 1
+a146 2
+            if(CheckSignal(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D))
+            {
+d208 1
+a208 2
+            if(tindent >= 0)
+            {
+d217 2
+a218 4
+         if(rc2 == ERROR_NO_MORE_ENTRIES) 
+            rc2 = 0;
+         else if(!rc)
+         {
+d236 1
+a236 5
+   else
+   {
+      OPENFAIL;
+   }
+
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d41 3
+d45 1
+d54 3
+d82 1
+a82 1
+   int rc, rc2, apinit;
+d142 1
+d158 1
+d160 4
+a163 1
+            else if(ap->ap.ap_Info.fib_DirEntryType >= 0 && opts[OPT_ALL])
+d167 1
+a167 1
+               continue;
+d170 15
+d207 6
+@

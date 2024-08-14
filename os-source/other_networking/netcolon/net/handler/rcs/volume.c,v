@@ -1,0 +1,552 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  r37-9:1.11 v37r4:1.11 Distillery:1.11;
+locks    ; strict;
+comment  @ * @;
+
+
+1.11
+date     91.01.06.20.51.32;  author Doug;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.12.31.00.58.04;  author Doug;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.12.30.15.48.31;  author Doug;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.12.03.22.14.37;  author Doug;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.27.22.12.30;  author Doug;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.20.01.07.25;  author Doug;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.18.00.04.03;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.10.18.00.19.22;  author Doug;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.10.09.23.57.03;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.02.32.36;  author Doug;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.37.47;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@handler volume manipulation routines
+@
+
+
+1.11
+log
+@Revise debugging messages
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987, 1988 The Software Distillery.  All Rights  */
+/* |. o.| || Reserved.  This program may not be distributed without the    */
+/* | .  | || permission of the authors:                            BBS:    */
+/* | o  | ||   John Toebes     Doug Walker    Dave Baker                   */
+/* |  . |//                                                                */
+/* ======                                                                  */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* Volume Manipulation */
+/* ActCurentVol  ActRenameDisk ActDiskInfo ActInfo ActDiskChange*/
+/*
+**      $Filename: volume.c $ 
+**      $Author: Doug $
+**      $Revision: 1.10 $
+**      $Date: 90/12/31 00:58:04 $
+**      $Log:	volume.c,v $
+ * Revision 1.10  90/12/31  00:58:04  Doug
+ * Fix ActInfo
+ * 
+ * Revision 1.9  90/12/30  15:48:31  Doug
+ * Delete ActNetKludge
+ * 
+**
+**/
+
+#include "handler.h"
+
+static void GetInfo(GLOBAL, struct DosPacket *, struct InfoData *);
+
+ACTFN(ActCurentVol)
+{
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   OBUG(("ActCurentVol\n"));
+   pkt->dp_Res1 = MKBADDR(global->volume);
+   HPQ(global, hpkt);
+}
+
+ACTFN(ActRenameDisk)
+{
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   OBUG(("ActRenameDisk\n"));
+
+   DisMount(global);
+   Mount(global, (char *)pkt->dp_Arg1);
+
+   pkt->dp_Res1 = DOS_TRUE;
+   HPQ(global, hpkt);
+}
+
+static void GetInfo(GLOBAL global, struct DosPacket *pkt, struct InfoData *info)
+{
+   OBUG(("GetInfo\n"));
+
+   if (global->volume == NULL) 
+   {
+      info->id_DiskType = ID_NO_DISK_PRESENT;
+      pkt->dp_Res1 = DOS_FALSE;
+   } 
+   else 
+   {
+      info->id_NumSoftErrors = global->n.ErrorCount;
+      info->id_UnitNumber    = global->unitnum;
+      info->id_DiskState     = ID_VALIDATED;
+      info->id_DiskType      = ID_DOS_DISK;
+      info->id_NumBlocks     = global->numnodes;
+      info->id_NumBlocksUsed = global->upnodes;
+      info->id_VolumeNode    = MKBADDR(global->volume);
+      info->id_InUse         = 0;
+      pkt->dp_Res1 = DOS_TRUE;
+   }
+   OBUG(("GetInfo: Exit\n"));
+}
+
+ACTFN(ActDiskInfo)
+{
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   OBUG(("ActDiskInfo: Entry, hpkt 0x%08lx\n", hpkt));
+   GetInfo(global, pkt, (struct InfoData *)pkt->dp_Arg1);
+   HPQ(global, hpkt);
+}
+
+ACTFN(ActInfo)
+{
+   struct FileLock *flock;
+   NETPTR nlock;
+   struct RPacket *RP;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+
+   OBUG(("ActInfo: Entry, hpkt 0x%08lx\n", hpkt));
+
+   flock = (struct FileLock *)pkt->dp_Arg1;
+
+   if(TESTROOT(flock, nlock) || flock->fl_Volume != MKBADDR(global->volume))
+   {
+      GetInfo(global, pkt, (struct InfoData *)pkt->dp_Arg2);
+      HPQ(global, hpkt);
+   } 
+   else 
+   {
+      /* It is a remote lock - query the remote fs */
+      if(!(RP = AllocRPacket(nlock->NetNode, 0)))
+      {
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+         HPQ(global, hpkt);
+         return;
+      }
+      RP->Type = pkt->dp_Type;
+      RP->Arg1 = (LONG)nlock;
+      RP->DLen = 0;
+      RP->handle = hpkt;
+
+      hpkt->hp_RP = RP;
+      hpkt->hp_Func = ActInfo2;
+      hpkt->hp_NPFlags = NP1;
+      hpkt->hp_NNode = nlock->NetNode;
+      hpkt->hp_Driver = nlock->NetNode->driver;
+
+      RemotePacket(global, hpkt);
+   }
+}
+
+ACTFN(ActInfo2)
+{
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP = hpkt->hp_RP;
+   struct InfoData *info;
+
+   OBUG(("ActInfo2: Entry, hpkt 0x%08lx\n", hpkt))
+
+   if(hpkt->hp_State != HPS_ERR)
+   {
+      if(RP->Arg1 == DOS_TRUE)
+      {
+         info = (struct InfoData *)pkt->dp_Arg2;
+         MQ(RP->DataP, pkt->dp_Arg2, sizeof(struct InfoData));
+         /* Override remote volume with ours */
+         info->id_VolumeNode = MKBADDR(global->volume);
+      }
+      pkt->dp_Res1 = RP->Arg1;
+      pkt->dp_Res2 = RP->Arg2;
+   }
+#if DEBUG
+   else
+   {
+      BUG(("ActInfo2: Error writing\n"))
+   }
+#endif
+}
+
+ACTFN(ActDiskChange)
+{
+   OBUG(("ActDiskChange\n"));
+   hpkt->hp_Pkt->dp_Res1 = ERROR_ACTION_NOT_KNOWN;
+   HPQ(global, hpkt);
+}
+
+
+ACTFN(ActIsFS)
+{
+   OBUG(("ActIsFS\n"))
+   hpkt->hp_Pkt->dp_Res1 = DOS_TRUE;
+   HPQ(global, hpkt);
+}
+
+@
+
+
+1.10
+log
+@Fix ActInfo
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.9 $
+**      $Date: 90/12/30 15:48:31 $
+d17 3
+d33 1
+a33 1
+   BUG(("ActCurentVol\n"));
+d41 1
+a41 1
+   BUG(("ActRenameDisk\n"));
+d52 1
+a52 1
+   BUG(("GetInfo\n"));
+d71 1
+a71 1
+   BUG(("GetInfo: Exit\n"));
+d77 1
+a77 1
+   BUG(("ActDiskInfo: Entry, hpkt 0x%08lx\n", hpkt));
+d89 1
+a89 1
+   BUG(("ActInfo: Entry, hpkt 0x%08lx\n", hpkt));
+d129 1
+a129 1
+   BUG(("ActInfo2: Entry, hpkt 0x%08lx\n", hpkt))
+d153 1
+a153 1
+   BUG(("ActDiskChange\n"));
+d161 1
+a161 1
+   BUG(("ActIsFS\n"))
+@
+
+
+1.9
+log
+@Delete ActNetKludge
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.14 $
+**      $Date: 90/11/29 02:00:20 $
+d17 3
+d59 4
+a62 12
+      info->id_UnitNumber = global->unitnum;
+      if (global->upnodes>1) 
+      {
+         info->id_DiskState = ID_VALIDATED;
+         info->id_DiskType  = ID_DOS_DISK;
+      } 
+      else 
+      {
+         info->id_DiskState = ID_VALIDATING;
+         info->id_DiskType  = ID_NO_DISK_PRESENT;
+      }
+      info->id_NumBlocks = global->numnodes;
+d64 2
+a65 2
+      info->id_VolumeNode = MKBADDR(global->volume);
+      info->id_InUse = 0;
+d124 1
+d131 2
+d134 3
+@
+
+
+1.8
+log
+@Use nlock, not nlock->RPtr
+@
+text
+@d11 8
+a144 51
+}
+
+
+
+/* Arg1: BPTR to null-terminated BCPL string of name of network node */
+/* Arg2: BPTR to null-terminated string of name of device to use     */
+ACTFN(ActNetKludge)
+{
+   struct NetNode *netnode;
+   struct RPacket *RP;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+
+   if (!(netnode = FindNode(global, (char *)pkt->dp_Arg1+1)))
+   {
+      BUG(("ActNetKludge: Adding node %s len %d\n",
+            pkt->dp_Arg1+1, (int)*((unsigned char *)pkt->dp_Arg1)));
+
+      if(netnode=AddNode(global,(char *)pkt->dp_Arg1))
+      {
+         strcpy(netnode->devname, (char *)pkt->dp_Arg2);
+      }
+   } 
+
+   if(!netnode)
+   {
+      BUG(("ActNetKludge: node %s netnode %08lx unavailable\n",
+         pkt->dp_Arg1, netnode));
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_NODE_DOWN;
+      HPQ(global, hpkt);
+      return;
+   }
+
+   if(!(RP = AllocRPacket(netnode, 0)))
+   {
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+      HPQ(global, hpkt);
+      return;
+   }
+   RP->Type = ACTION_NETWORK_KLUDGE;
+   RP->DataP = (char *)pkt->dp_Arg2;
+   RP->DLen = strlen(RP->DataP)+1;
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = 0L;
+   hpkt->hp_NNode = netnode;
+   hpkt->hp_Driver = netnode->driver;
+
+   RemotePacket(global, hpkt);
+@
+
+
+1.7
+log
+@Many bug fixes, incl. proper passing of the res1 and res2 fields
+@
+text
+@d103 1
+a103 1
+      RP->Arg1 = (LONG)nlock->RPtr;
+@
+
+
+1.6
+log
+@New cut that (almost) works
+@
+text
+@d71 1
+a71 1
+   BUG(("ActDiskInfo\n"));
+d83 1
+a83 1
+   BUG(("ActInfo\n"));
+d122 1
+a122 2
+   HPQ(global, hpkt);
+   hpkt->hp_Func = NULL;
+d124 13
+a136 2
+   if(RP->Arg1 == DOS_TRUE)
+      MQ(RP->DataP, pkt->dp_Arg2, sizeof(struct InfoData));
+@
+
+
+1.5
+log
+@Rewrite for asynchronous execution
+@
+text
+@d106 2
+d172 1
+@
+
+
+1.4
+log
+@New version
+@
+text
+@d18 1
+d21 1
+d26 1
+d33 1
+d70 1
+d73 1
+d80 2
+d90 1
+d95 15
+a109 3
+      global->RP.Type = pkt->dp_Type;
+      global->RP.Arg1 = (LONG)nlock->RPtr;
+      global->RP.DLen = 0;
+d111 1
+a111 2
+      if (!RemotePacket(global, nlock, &global->RP))
+         MQ(global->RP.DataP, pkt->dp_Arg2, sizeof(struct InfoData));
+d115 16
+d134 2
+a136 5
+   /* Arg1: BPTR to null-terminated BCPL string of name of network node */
+   /* Arg2: BPTR to null-terminated string of name of device to use     */
+   global->RP.Type = ACTION_NETWORK_KLUDGE;
+   strcpy(global->RP.DataP, (char *)pkt->dp_Arg2);
+   global->RP.DLen = strlen((char *)pkt->dp_Arg2);
+d154 5
+a158 2
+   } 
+   else if (RemotePacket(global, &netnode->RootLock, &global->RP)) 
+d160 4
+a163 1
+      netnode->status = NODE_CRASHED;
+d165 10
+d180 2
+d188 2
+a189 1
+   pkt->dp_Res1 = DOS_TRUE;
+@
+
+
+1.3
+log
+@Eliminate RDevice
+@
+text
+@d79 1
+a79 2
+   if(flock == NULL || flock->fl_Volume != MKBADDR(global->volume) ||
+      (nlock=(NETPTR)flock->fl_Key)->RPtr == NULL)
+@
+
+
+1.2
+log
+@Add ActIsFS, ACTFN macros
+@
+text
+@d14 1
+a14 1
+static void GetInfo U_ARGS((GLOBAL, struct DosPacket *, struct InfoData *));
+d32 1
+a32 1
+ACTFN(GetInfo)
+d110 1
+a110 1
+      if(netnode=AddNode(global,(char *)pkt->dp_Arg1, NULL))
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d16 1
+a16 4
+void
+ActCurentVol(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;              /* a pointer to the dos packet sent    */
+d22 1
+a22 4
+void
+ActRenameDisk(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;              /* a pointer to the dos packet sent       */
+d32 1
+a32 5
+void
+GetInfo(global, pkt, info)
+GLOBAL global;
+struct DosPacket *pkt;
+struct InfoData *info;
+d64 1
+a64 4
+void
+ActDiskInfo(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;
+d70 1
+a70 4
+void
+ActInfo(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;              /* a pointer to the dos packet sent    */
+d96 1
+a96 4
+void
+ActNetKludge(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;
+a114 4
+   else if (netnode->status != NODE_UP) 
+   {
+      ReSync(global, netnode->ioptr);
+   }
+d116 1
+a116 1
+   if (!netnode || netnode->status != NODE_UP || !netnode->RootLock.RDevice) 
+d129 1
+a129 4
+void
+ActDiskChange(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;
+d133 8
+@

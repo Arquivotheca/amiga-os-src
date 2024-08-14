@@ -1,0 +1,1038 @@
+head     37.9;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+37.9
+date     92.07.27.11.50.50;  author bj;  state Exp;
+branches ;
+next     37.8;
+
+37.8
+date     92.04.21.14.43.23;  author bj;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.10.02.13.04.44;  author bj;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.10.02.12.24.01;  author bj;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.09.10.16.08.12;  author bj;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.09.10.15.10.51;  author bj;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.09.09.16.54.50;  author bj;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.09.09.12.20.05;  author bj;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.07.12.17.12;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.9
+log
+@1. error message cosmetics.
+2. ReadArgs now "proper" in it's error handling.
+3. Return values (for scripts) now correct.
+AS225 R2.  
+@
+text
+@/* ---------------------------------------------------------------------------------
+ * CONFIG.C    (CONFIG)
+ *
+ * $Locker:  $
+ *
+ * $Id: config.c,v 37.8 92/04/21 14:43:23 bj Exp $
+ *
+ * $Revision: 37.8 $
+ *
+ * $Log:	config.c,v $
+ * Revision 37.8  92/04/21  14:43:23  bj
+ * New rev numbering system.  New user argument handling.
+ * New error value returns and error messages.
+ * New arg options ('-u=user','-h=hostname','-r=reconfig')
+ * as well as compatibility with the old arguments (-m, -v)
+ * Now gives an error message if socket.library can't be opened
+ * for some reason.
+ * 
+ * Revision 1.7  91/10/02  13:04:44  bj
+ * Fixed extra linefeed problem.
+ * 
+ * Revision 1.5  91/09/10  16:08:12  bj
+ * Additional adjustments to make the new config backwards compatible
+ * with the old way (pre shared socket library) of doing things.
+ * 
+ * Revision 1.3  91/09/09  16:54:50  bj
+ * Added a forgotten FreeArgs() call.
+ * 
+ * Revision 1.2  91/09/09  12:20:05  bj
+ * Completely rewritten to use no startup code and the shared
+ * socket library. Uses ReadArgs as well. Code dropped from
+ * 17K -> 3K -> 628 bytes.
+ * 
+ *
+ * $Header: NW:src/c/config/RCS/config.c,v 37.8 92/04/21 14:43:23 bj Exp $
+ *
+ *-----------------------------------------------------------------------------------
+ */
+
+ 
+#include <exec/types.h>
+#include <ss/socket.h>
+#include <sys/param.h>
+#include <exec/memory.h>
+#include <dos/dos.h>
+#include <libraries/dosextens.h>
+#include <config.h>
+#include <string.h>
+#include <pwd.h>
+#include <stdio.h>
+#include <fcntl.h>
+
+
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <proto/utility.h>
+
+#include "config_rev.h"
+STATIC BYTE *vers = VERSTAG ;
+
+#define TEMPLATE "-R=RECONFIG/S,-U=USER/S,-H=HOSTNAME/S,-M=RECONFIG/S,-V=VALUE/K"
+
+#define OPT_R      0
+#define OPT_U      1
+#define OPT_H      2
+#define OPT_M      3
+#define OPT_V      4
+#define OPT_COUNT  5
+
+#define DOSLIB     "dos.library"
+#define DOSVER      37L
+#define SOCKLIB    "inet:libs/socket.library"
+#define SOCKVER     3L
+#define UTILLIB    "utility.library"
+#define UTILVER     0L
+
+#define BUFFSIZE 256L
+
+#ifdef NULL
+#undef NULL
+#endif
+#define NULL ((VOID *)0L)
+
+/* whichval defs */
+#define NOVAL   0
+#define USERVAL 1
+#define HOSTVAL 2
+
+/* 'failure' values */
+#define  NOFAIL 0
+#define  BADARG 1
+#define  NOARG  2
+#define  UID    3
+#define  HOST   4
+
+void mysprintf(char *, ...) ;  
+
+
+int config(VOID)
+{
+	REGISTER struct Library    *SockBase ;
+/*	REGISTER struct Library    *SysBase = (*((struct Library **) 4)); */
+	REGISTER struct DosLibrary *DOSBase ;
+	REGISTER struct Library    *UtilityBase ;
+	REGISTER struct RDargs     *rdargs ;
+	REGISTER int retval   = RETURN_FAIL ;
+	REGISTER int whichval = NOVAL ;
+	BYTE     hbuf[BUFFSIZE] ;
+	BYTE     *value ;
+	int      errno ;
+	struct   passwd *pw ;
+	struct   passwd *getpwuid();
+	LONG     opts[OPT_COUNT];
+	BYTE     *user = "user" ;
+	BYTE     *host = "hostname" ;
+	BOOL     interactive ;
+	int      failure = NOFAIL ;
+	STRPTR   argstring ;
+
+	char *errors[] = 
+	{   
+		NULL,                                 /* 0 */
+		"config - unknown argument : ",       /* 1    (no line feed!) */
+		"config requires an argument.\n",     /* 2 */
+		"config - error in UID settings\n",   /* 3 */
+		"config - cannot get hostname\n"      /* 4 */
+	} ;
+
+	if(DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)) 
+	{
+		if(UtilityBase = OpenLibrary(UTILLIB,UTILVER ))
+		{                                   
+			if(SockBase = OpenLibrary(SOCKLIB,SOCKVER ))
+			{
+				setup_sockets(1, &errno ) ;
+				memset((char *)opts, 0, sizeof(opts));
+				retval = RETURN_OK ;
+
+				interactive = IsInteractive(Output()) ;
+				argstring   = GetArgStr() ;
+
+				if(rdargs = ReadArgs(TEMPLATE, opts, NULL))
+				{
+					if( opts[OPT_U] || opts[OPT_H] || opts[OPT_V] )
+					{
+						if( opts[OPT_U] )
+						{
+							whichval = USERVAL ;
+						}
+						else if( opts[OPT_H] )
+						{
+							whichval = HOSTVAL ;
+						}
+						else if(value = (BYTE *)opts[OPT_V]) 
+						{
+							if(Stricmp(value, host) == 0) 
+							{
+								whichval = HOSTVAL ;
+							}
+							else if(Stricmp(value, user) == 0)
+							{
+								whichval = USERVAL ;
+							}
+							else 
+							{
+								whichval = NOVAL ;
+							}
+						}
+
+						switch( whichval )
+						{
+							case NOVAL :
+								retval = RETURN_ERROR ;
+								failure = BADARG ;
+								break ;
+
+							case USERVAL :
+								if (pw = getpwuid(getuid()))
+								{
+									PutStr(pw->pw_name) ;
+									if( interactive) PutStr("\n") ;
+								}
+								else
+								{
+									failure = UID ;
+									retval = RETURN_ERROR ;
+								}
+								break ;
+								
+							case HOSTVAL :
+								if (gethostname(hbuf, sizeof(hbuf)) >= 0)
+								{
+									PutStr(hbuf) ;
+									if( interactive) PutStr("\n") ;
+								}
+								else
+								{
+									failure = HOST ;
+									retval = RETURN_ERROR ;
+								}
+								break ;
+
+							default :
+								retval = RETURN_FAIL ;
+								break ;
+						}
+					}
+
+					else if((opts[OPT_M] || opts[OPT_R]) && reconfig() )
+					{
+						PutStr("configuration updated.\n") ;
+					}
+					else
+					{
+						failure = NOARG ;  /* no argument given */
+					}
+					
+					FreeArgs(rdargs) ;
+				}
+				else
+				{
+					failure = BADARG ;
+				}
+
+				if( failure )
+				{
+					PutStr(errors[failure]) ;
+					if( failure == BADARG )
+					{
+						PutStr(argstring) ;
+					}
+					retval = RETURN_FAIL ;
+				}
+				cleanup_sockets() ;
+				CloseLibrary( SockBase ) ;
+			}
+			else
+			{
+				PutStr("config - no socket.library\n") ;
+			}
+			CloseLibrary(UtilityBase) ;
+		}
+		CloseLibrary((struct Library *)DOSBase) ;
+	}
+	return( retval ) ;
+}
+@
+
+
+37.8
+log
+@New rev numbering system.  New user argument handling.
+New error value returns and error messages.
+New arg options ('-u=user','-h=hostname','-r=reconfig')
+as well as compatibility with the old arguments (-m, -v)
+Now gives an error message if socket.library can't be opened
+for some reason.
+@
+text
+@d6 1
+a6 1
+ * $Id: config.c,v 1.7 91/10/02 13:04:44 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.7 $
+d11 8
+d35 1
+a35 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.7 91/10/02 13:04:44 bj Exp $
+d89 9
+d102 1
+a102 1
+	REGISTER struct Library    *SysBase = (*((struct Library **) 4));
+d106 3
+a108 2
+	REGISTER int retval = RETURN_FAIL ;
+	BYTE     hbuf[128] ;
+a109 1
+	int      whichval = NOVAL ;
+a112 1
+	struct   RDArgs ra ;
+d116 3
+d120 9
+d132 1
+a132 1
+		{
+a136 4
+				memset((char *)&ra, 0, sizeof(struct RDArgs));
+				ra.RDA_Buffer = (UBYTE *)hbuf ;
+				ra.RDA_BufSiz = BUFFSIZE ;
+				ra.RDA_Flags  = RDAF_NOALLOC | RDAF_NOPROMPT ;
+d139 4
+a142 1
+				if(rdargs = ReadArgs(TEMPLATE, opts, &ra))
+a147 1
+							value = user ;
+a151 1
+							value = host ;
+d164 4
+a167 1
+							else whichval = NOVAL ;
+d174 1
+a174 3
+								PutStr("config: unknown argument '") ;
+								PutStr(value) ;
+								PutStr("'") ;
+d176 1
+a176 1
+								
+d181 1
+d185 1
+a185 1
+									PutStr("config: error in uid settings.") ;
+d194 1
+d198 1
+a198 1
+									PutStr("config: Can't get hostname") ;
+d202 1
+a202 1
+								
+d208 1
+a208 1
+						
+d213 1
+a213 2
+					
+					if( IsInteractive( Output() ))
+d215 1
+a215 1
+						PutStr("\n") ;
+d217 1
+d220 12
+a231 6
+				
+/*				if( (rdargs == NULL) || (strlen( GetArgStr() ) <= 1)) */
+				if( (rdargs == NULL) || (  *( GetArgStr() ) == '?')  ) 
+				{                             
+					PutStr(TEMPLATE) ;
+					PutStr("\n") ;
+d239 1
+a239 1
+				PutStr("config: no socket.library\n") ;
+@
+
+
+1.7
+log
+@Fixed extra linefeed problem.
+@
+text
+@d6 1
+a6 1
+ * $Id: config.c,v 1.5 91/09/10 16:08:12 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.5 $
+d11 3
+d27 1
+a27 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.5 91/09/10 16:08:12 bj Exp $
+d37 1
+d51 1
+a51 3
+static char *vers = VERSTAG ;
+
+#include <proto/exec.h>
+d53 1
+a53 1
+#define TEMPLATE "-M/S,-V/K"
+d55 6
+a60 3
+#define OPT_M      0
+#define OPT_V      1
+#define OPT_COUNT  2
+d62 2
+a63 2
+#define DOSLIB	   "dos.library"
+#define DOSVER	   36L
+d69 1
+a69 1
+#define BUFFSIZE 128L
+d74 6
+a79 1
+#define NULL ((void *)0L)
+d81 2
+a82 1
+int config(void)
+d84 16
+a99 12
+
+	register struct Library *SockBase ;
+	register struct Library *SysBase = (*((struct Library **) 4));
+	register struct DosLibrary *DOSBase ;
+	register struct Library *UtilityBase ;
+	register struct RDargs *rdargs;
+	register char *value ;
+	int err, errno ;
+	char hbuf[128] ;
+	struct passwd *pw, *getpwuid();
+	struct RDArgs ra ;
+	long opts[OPT_COUNT];
+d101 1
+a101 2
+    err = 20 ;
+	if(UtilityBase = OpenLibrary(UTILLIB,UTILVER ))
+d103 1
+a103 1
+		if(DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)) 
+a107 1
+				err = 0 ;
+d113 2
+a114 1
+				err = 0 ;				
+d117 1
+a117 1
+					if(opts[OPT_M] && reconfig() )
+d119 6
+a124 5
+						PutStr("configuration updated.\n") ;
+					}
+					else if( (value = (char *)opts[OPT_V]) != NULL)
+					{
+						if(Stricmp(value, "hostname") == 0) 
+d126 2
+a127 9
+							if (gethostname(hbuf, sizeof(hbuf)) >= 0)
+							{
+								PutStr(hbuf) ;
+							}
+							else
+							{
+								PutStr("config: Can't get hostname") ;
+								err = 20 ;
+							}
+d129 1
+a129 1
+						else if(Stricmp(value, "user") == 0)
+d131 1
+a131 1
+							if(pw = getpwuid(getuid()))
+d133 1
+a133 1
+								PutStr(pw->pw_name) ;
+d135 1
+a135 1
+							else
+d137 1
+a137 2
+								PutStr("config: error in uid settings.") ;
+								err = 20 ;
+d139 1
+d141 2
+a142 1
+						else 
+d144 34
+a177 3
+							PutStr("config: unknown arg: ") ;
+							PutStr(value) ;
+							err = 20 ;
+d179 10
+a188 4
+						if( IsInteractive( Output() ))
+						{
+							PutStr("\n") ;
+						}
+d192 4
+a195 2
+				else
+				{
+d198 1
+a198 1
+					err = 20 ;
+d203 5
+a207 1
+			CloseLibrary((struct Library *)DOSBase) ;
+d209 1
+a209 1
+		CloseLibrary(UtilityBase) ;
+d211 1
+a211 1
+	return( err ) ;
+@
+
+
+1.6
+log
+@Fixed error message handling. Failure on "-v user" would
+give very cryptic error messages.  Changed to properly
+inform the user just what happened.
+@
+text
+@d105 1
+a105 1
+						PutStr("configuration updated.") ;
+d139 4
+a142 4
+					}
+					if( IsInteractive( Output() ))
+					{
+						PutStr("\n") ;
+@
+
+
+1.5
+log
+@Additional adjustments to make the new config backwards compatible
+with the old way (pre shared socket library) of doing things.
+@
+text
+@d4 1
+a4 1
+ * $Locker: bj $
+d6 1
+a6 1
+ * $Id: config.c,v 1.3 91/09/09 16:54:50 bj Exp Locker: bj $
+d8 1
+a8 1
+ * $Revision: 1.3 $
+d11 4
+d24 1
+a24 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.3 91/09/09 16:54:50 bj Exp Locker: bj $
+d69 1
+a69 1
+#define NULL ((char *)0L)
+d79 2
+a80 2
+	register char *value = NULL ;
+	int err = 20, errno ;
+d86 1
+a86 1
+
+d103 1
+a103 1
+			    	if(opts[OPT_M] && reconfig() )
+d107 3
+a109 4
+                    else if( (value = (char *)opts[OPT_V]) != NULL)
+                    {
+						if((Stricmp(value, "hostname") == 0) && 
+					         (gethostname(hbuf, sizeof(hbuf)) >= 0))
+d111 9
+a119 1
+							PutStr(hbuf) ;
+d121 1
+a121 2
+						else if((Stricmp(value, "user") == 0) && 
+					         ((pw = getpwuid(getuid())) != (char *)0L))
+d123 9
+a131 1
+							PutStr(pw->pw_name) ;
+@
+
+
+1.4
+log
+@restructured things to give proper error values back under all
+the right conditions. The old versions of config would initialize
+an internal config structure that the network applications could
+find via a public port.  Under the shared socket library this
+initialization is done when the socket library is first opened.
+Older inet:s/start-inet files would simply call 'config' to 
+initialize this structure. This is no longer necessary. The new
+structure here reflects that fact.
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: config.c,v 1.3 91/09/09 16:54:50 bj Exp $
+d20 1
+a20 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.3 91/09/09 16:54:50 bj Exp $
+d60 2
+d70 2
+a71 2
+	register struct Library    *SockBase ;
+	register struct Library    *SysBase = (*((struct Library **) 4));
+d73 2
+a74 2
+	register struct Library    *UtilityBase ;
+	register struct RDargs     *rdargs;
+d80 1
+a81 1
+	long opts[OPT_COUNT];
+d90 1
+a90 1
+				
+d92 1
+a92 3
+				memset((char *)&ra,0,sizeof(struct RDArgs)) ;
+				
+				ra.RDA_Flags = RDAF_NOPROMPT | RDAF_NOALLOC ;
+d94 4
+a97 4
+				ra.RDA_BufSiz = 128L ;
+				
+				if((rdargs = ReadArgs(TEMPLATE, opts, &ra)) && 
+			           (opts[OPT_M] || ((value = (char *)opts[OPT_V])!=NULL)))
+d99 1
+a99 5
+#ifdef DEBUG				
+					VPrintf("opts[OPT_M] = %ld\n",(long *)&opts[OPT_M]) ;
+					VPrintf("value = %s\n", (long *)&opts[OPT_V]) ;
+#endif
+					if( opts[OPT_M] && reconfig() )
+a101 1
+						err = 0 ;
+d103 3
+a105 2
+
+					else if((Stricmp(value, "hostname") == 0) && 
+d107 4
+a110 6
+					{
+						PutStr(hbuf) ;
+						err = 0 ;
+					}
+					
+					else if((Stricmp(value, "user") == 0) && 
+d112 9
+a120 9
+					{
+						PutStr(pw->pw_name) ;
+						err = 0 ;
+					}
+					
+					else if (value)
+					{
+						PutStr("config: unknown arg: ") ;
+						PutStr(value) ;
+a121 1
+
+d132 1
+@
+
+
+1.3
+log
+@Added a forgotten FreeArgs() call.
+@
+text
+@d6 1
+a6 1
+ * $Id: config.c,v 1.2 91/09/09 12:20:05 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.2 $
+d11 3
+d20 1
+a20 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.2 91/09/09 12:20:05 bj Exp $
+d68 2
+a69 2
+	register struct Library *SockBase ;
+	register struct Library *SysBase = (*((struct Library **) 4));
+d71 2
+a72 2
+	register struct Library *UtilityBase ;
+	register struct RDargs *rdargs;
+d77 1
+d85 12
+a96 4
+			memset((char *)opts, 0, sizeof(opts));
+			
+			
+			if((rdargs = ReadArgs(TEMPLATE, opts, NULL)) && 
+a97 2
+			{
+				if(SockBase = OpenLibrary(SOCKLIB,SOCKVER ))
+d99 4
+a102 3
+					err = 0 ;
+					setup_sockets(1, &errno ) ;
+
+d106 1
+d113 1
+d120 1
+a126 1
+						err = 20 ;
+a127 4
+					else
+					{
+						err = 20 ;
+					}
+d133 6
+a138 2
+					cleanup_sockets() ;
+					CloseLibrary( SockBase ) ;
+d140 2
+a141 1
+				FreeArgs(rdargs) ;
+@
+
+
+1.2
+log
+@Completely rewritten to use no startup code and the shared
+socket library. Uses ReadArgs as well. Code dropped from
+17K -> 3K -> 628 bytes.
+@
+text
+@d4 1
+a4 1
+ * $Locker: bj $
+d6 1
+a6 1
+ * $Id: config.c,v 1.1 90/11/07 12:17:12 bj Exp Locker: bj $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 6
+a15 1
+ * $Log:$
+d17 1
+a17 1
+ * $Header: NW:src/c/config/RCS/config.c,v 1.1 90/11/07 12:17:12 bj Exp Locker: bj $
+d127 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d12 2
+d17 3
+a19 9
+
+
+
+/*
+ * Set/display configuration options.
+ *
+ * usage: config [-m] [-v value] [file]
+ */
+
+d22 1
+d24 1
+d29 5
+a36 1
+#ifdef LATTICE
+a37 4
+static char *compiler = "LATTICE" ;
+#else
+static char *compiler = "MANX MANX" ;
+#endif
+d39 1
+a39 1
+static struct config *config;
+d41 10
+a50 5
+usage()
+{
+	printf("usage: config [-m] [-v value] [file]\n");
+	exit(1);
+}
+d52 4
+a55 58
+main(argc, argv)
+	char	**argv;
+{
+	char *fname, *value;
+	int mflag, wflag;
+	struct config *cf;
+	value = fname = 0;
+	wflag = mflag = 0;
+
+	for(++argv; --argc > 0; argv++){
+		if(strcasecmp(*argv, "-m") == 0){
+			mflag++;
+		} else if(strcasecmp(*argv, "-w") == 0){
+			wflag++;
+		} else if(strcasecmp(*argv, "-v") == 0 && !value){
+			value = *++argv;
+			--argc;
+		} else if(!fname){
+			fname = *argv;
+		} else {
+			usage();
+		}
+	}
+
+	GETCONFIG(config);
+	if(!config){
+		cf = (struct config *)AllocMem(sizeof(*cf), MEMF_PUBLIC|MEMF_CLEAR);
+		strcpy(cf->configname, CONFIG_NAME);
+		cf->mp.mp_Node.ln_Name = cf->configname;
+		NewList(&cf->mp.mp_MsgList);	/* more style than form */
+		Forbid();
+		AddPort(cf);
+		Permit();
+	}
+
+	GETCONFIG(config);
+	if(!config){
+		printf("config: could not initialize\n");
+		exit(1);
+	}
+
+	if(readconfig(fname) < 0){
+		mflag++;
+	}
+
+	if(mflag){
+		if(configmenu(config) || wflag){
+			writeconfig(fname);
+			printf("config: updated config file\n");
+		}
+	} 
+
+	if(value){
+		printvalue(value);
+	}
+
+	exit(0);
+}
+d57 1
+a57 38
+static char *defaultconfig = "inet:s/inet.config";
+
+writeconfig(fname)
+	char	*fname;
+{
+	register struct config *cf;
+	FILE *fp;
+	int i;
+
+	GETCONFIG(cf);
+	if(!cf){
+		return -1;
+	}
+	
+	if(!fname){
+		fname = defaultconfig;
+	}
+	fp = fopen(fname, "w");
+	if(!fp){
+		return -1;
+	}
+
+	fprintf(fp, "uid=%d\ngid=%d\numask=%d\ntz=%d\ntzname=%s\n", 
+			cf->uid, cf->gid, cf->umask, cf->tz_offset, cf->tzname);
+	fprintf(fp, "user=%s\nhost=%s\ngateway=%s\nconfigfile=%s\n",
+			cf->username, cf->host, cf->gateway, cf->configfile);
+	fprintf(fp, "broadcast=%s\nsubnetmask=%s\n",
+				cf->broadcast, cf->subnetmask);
+	for(i = 0; i < cf->num_gid; i++){
+		fprintf(fp, "gids=%d\n", cf->gids[i]);
+	}
+
+	fclose(fp);
+	return 0;
+}
+
+readconfig(fname)
+	char	*fname;
+a58 33
+	char line[128], *p, *index(), *name, *value;
+	register struct config *cf;
+	FILE *fp;
+	int i;
+
+	GETCONFIG(cf);
+	if(!cf){
+		return -1;
+	}
+	
+	if(!fname){
+		fname = defaultconfig;
+	}
+	fp = fopen(fname, "r");
+	if(!fp){
+		return -1;
+	}
+
+	cf->num_gid = 0;
+	while(fgets(line, sizeof(line), fp)){
+
+		name = line; value = "";
+		p = index(name, '=');
+		if(p){
+			*p++ = 0;
+			value = p;
+			p = index(value, '\n');
+			if(p){
+				*p = 0;
+			}
+		} else {
+			continue;
+		}
+d60 62
+a121 25
+		if(strcasecmp("umask", name) == 0){
+			cf->umask = atoi(value);
+		} else if(strcasecmp("tzname", name) == 0){
+			strcpy(cf->tzname, value);
+		} else if(strcasecmp("tz", name) == 0){
+			cf->tz_offset = atoi(value);
+		} else if(strcasecmp("user", name) == 0){
+			strcpy(cf->username, value);
+		} else if(strcasecmp("uid", name) == 0){
+			cf->uid = atoi(value);
+		} else if(strcasecmp("host", name) == 0){
+			strcpy(cf->host, value);
+		} else if(strcasecmp("gateway", name) == 0){
+			strcpy(cf->gateway, value);
+		} else if(strcasecmp("configfile", name) == 0){
+			strcpy(cf->configfile, value);
+		} else if(strcasecmp("broadcast", name) == 0){
+			strcpy(cf->broadcast, value);
+		} else if(strcasecmp("subnetmask", name) == 0){
+			strcpy(cf->subnetmask, value);
+		} else if(strcasecmp("gid", name) == 0){
+			cf->gid = atoi(value);
+		} else if(strcasecmp("gids", name) == 0){
+			if(cf->num_gid < NGROUP){
+				cf->gids[cf->num_gid++] = atoi(value);
+d123 1
+a123 27
+		} else {
+			printf("config: unknown token in %s file: %s\n", 
+					fname, name);
+		}
+	}
+
+	fclose(fp);
+	return 0;
+}
+
+printvalue(value)
+	char	*value;
+{
+	if(strcasecmp(value, "hostname") == 0){
+		char hbuf[64];
+
+		if(gethostname(hbuf, sizeof(hbuf)) < 0){
+			exit(1);
+		}
+		printf("%s%s", hbuf,
+				 IsInteractive(_devtab[fileno(stdout)].fd)==0 ? "":"\n");
+	} else if(strcasecmp(value, "user") == 0){
+		struct passwd *pw, *getpwuid();
+
+		pw = getpwuid(getuid());
+		if(!pw){
+			exit(1);
+d125 1
+a125 6
+		printf("%s%s", pw->pw_name,
+				 IsInteractive(_devtab[fileno(stdout)].fd)==0 ? "":"\n");
+	} else if(strcasecmp(value, "gateway") == 0){
+	} else {
+		printf("config: %s - no such value\n", value);
+		exit(1);
+d127 1
+@

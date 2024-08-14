@@ -1,0 +1,1248 @@
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-1
+                                                            
+
+                                	.LIST 
+                                 
+                                ; 
+                                ; JDISK.SYS - MSDOS Driver for a virtual PC Drive 
+                                ; 
+                                ; All new Code: Dieter Preiss 			Feb 87 
+                                ; 
+                                ;diag	= 1 
+ = 000D                         cr	= 13 
+ = 000A                         lf	= 10 
+ = 0001                         VERSION = 1 
+                                ; 
+                                ; Macros 
+                                ; 
+                                prints	macro	string 
+                                local	stradr 
+                                 
+                                DSEG    segment para public 'data' 
+                                	ASSUME CS:CODE,DS:CODE 
+                                stradr	db	string,0 
+                                DSEG    ends 
+                                 
+                                  	push	si 
+                                	mov	si,offset CODE:stradr 
+                                	call	PStrng 
+                                	pop	si 
+                                   	endm 
+                                	 
+                                printw	macro	hw 
+                                	push	ax 
+                                	mov	ax,hw 
+                                	call	OutHexW 
+                                	pop	ax 
+                                	endm 
+                                 
+                                printb	macro	hw 
+                                	push	ax 
+                                	mov	al,hw 
+                                	call	OutHexB 
+                                	pop	ax 
+                                	endm 
+                                ; 
+                                ; Error Codes MSDOS understands: 
+                                ; 
+ = 0000                         E_WriteProtect	equ	0 
+ = 0001                         E_WrongUnit	equ	1 
+ = 0002                         E_DriveNotReady	equ	2 
+ = 0003                         E_IllCommand	equ	3 
+ = 0004                         E_CRC		equ	4 
+ = 0005                         E_BadStruct	equ	5 
+ = 0006                         E_Seek		equ	6 
+ = 0007                         E_UnknownMedia	equ	7 
+ = 0008                         E_SecNotFound	equ	8 
+ = 0009                         E_OutOfPaper	equ	9 
+ = 000A                         E_WriteFault	equ	10 
+ = 000B                         E_ReadFault	equ	11 
+ = 000C                         E_General	equ	12 
+                                ; 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-2
+                                                            
+
+                                ; Bits of Status Word (Request.R_Status): 
+                                ; 
+ = 8000                         S_Error		equ	1 shl 15 
+ = 0200                         S_Busy		equ	1 shl 9 
+ = 0100                         S_Done		equ	1 shl 8 
+                                ; 
+                                ; Offsets of a Request Header 
+                                ; 
+                                Request	STRUC 
+ 0000  ??                       R_Length	DB	? 
+ 0001  ??                       R_Unit		DB      ? 
+ 0002  ??                       R_Command	DB      ? 
+ 0003  ????                     R_Status 	DW      ? 
+ 0005  0008[                    R_Resrvd	DB      8 DUP (?) 
+            ??                  
+                         ]      
+                                
+ 000D                           Request	ENDS 
+                                 
+                                InitReq	STRUC 
+ 0000  000D[                    		DB	13 DUP (?) 
+            ??                  
+                         ]      
+                                
+ 000D  ??                       IR_Units	DB	? 
+ 000E  ????????                 IR_EndAddr	DD	? 
+ 0012  ????????                 IR_BPB		DD      ? 
+ 0016  ??                       IR_DriveNum     DB      ? 
+ 0017                           InitReq	ENDS 
+                                 
+                                MedReq	STRUC 
+ 0000  000D[                    		DB	13 DUP (?) 
+            ??                  
+                         ]      
+                                
+ 000D  ??                       MR_MedDescr	DB	? 
+ 000E  ??                       MR_Return	DB	? 
+ 000F  ????????                 MR_VolID	DD	? 
+ 0013                           MedReq	ENDS 
+                                 
+                                BPBReq	STRUC 
+ 0000  000D[                    		DB	13 DUP (?) 
+            ??                  
+                         ]      
+                                
+ 000D  ??                       BR_MedDescr     DB      ? 
+ 000E  ????????                 BR_TFA		DD	? 
+ 0012  ????????                 BR_BPBTbl	DD	? 
+ 0016                           BPBReq	ENDS 
+                                 
+                                IOReq	STRUC 
+ 0000  000D[                    		DB	13 DUP (?) 
+            ??                  
+                         ]      
+                                
+ 000D  ??                       IOR_MedDescr	DB	? 
+ 000E  ????????                 IOR_TFA		DD	? 
+ 0012  ????                     IOR_Count	DW	? 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-3
+                                                            
+
+ 0014  ????                     IOR_StartSect	DW	? 
+ 0016  ????????                 IOR_VolID	DD	? 
+ 001A                           IOReq	ENDS 
+                                 
+ = 000E                         J_JFT	equ	14 
+                                 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-4
+                                                            
+
+                                	PAGE 
+                                ; 
+                                ; Here we go ... 
+                                ; 
+                                 
+                                CODE	GROUP CSEG,DSEG 
+ 0000                           CSEG    segment para public 'code' 
+                                	ASSUME CS:CODE,DS:NOTHING,ES:NOTHING,SS:NOTHING 
+                                 
+                                ; 
+                                ; Device Header Block 
+                                ; 
+ 0000  FFFF FFFF                Header	DW	-1,-1		; Filled later by MSDOS 
+ 0004  6000                     	DW	6000H		; Block Device, Non-IBM Format, 
+                                				; IOCTL supported 
+ 0006  00C5 R                   	DW	Strategy	; Pointer to Strategy Entry 
+ 0008  00D0 R                   	DW	DevInt		; Pointer to Interrupt Entry 
+ 000A  04                       Units	DB	4		; Max of 4 Units 
+                                ; 
+                                ; Command Table 
+                                ; 
+ 000B  0136 R                   ComTbl	DW	Init		;  0, Init Device 
+ 000D  01B7 R                   	DW	MediaCheck	;  1 
+ 000F  01D0 R                   	DW	BuildBPB	;  2 
+ 0011  0299 R                   	DW	IOCTL_I		;  3, IOCTL Input 
+ 0013  018E R                   	DW	Read		;  4 
+ 0015  0112 R                   	DW	Commerr		;  5, Char Devs Only: Non-D Read 
+ 0017  0112 R                   	DW	Commerr		;  6, Char Devs Only: Input Status 
+ 0019  0112 R                   	DW	Commerr		;  7, Char Devs Only: Input Flush 
+ 001B  015D R                   	DW	Write		;  8 
+ 001D  015D R                   	DW	WriteVerify	;  9, Write & Verify 
+ 001F  0112 R                   	DW	Commerr		; 10, Char Devs Only: Output Status 
+ 0021  0112 R                   	DW	Commerr		; 11, Char Devs Only: Output Flush 
+ 0023  0229 R                   	DW	IOCTL_O		; 12, IOCTL Output 
+                                ; 
+                                ; BPB 
+                                ; 
+ 0025  0003[                    BBlk0	BPB	<>		; drop it here for drive 0 
+            00                  
+                         ]      
+ 0028  4A 64 69 73 6B 2E 30     
+       30                       
+ 0030  0200                     
+ 0032  10                       
+ 0033  0001                     
+ 0035  02                       
+ 0036  0100                     
+ 0038  FFE0                     
+ 003A  FB                       
+ 003B  0010                     
+ 003D  0011                     
+ 003F  0004                     
+ 0041  0001                     
+                                
+ 0043  0003[                    BBlk1	BPB	<>		; drop it here for drive 1 
+            00                  
+                         ]      
+ 0046  4A 64 69 73 6B 2E 30     
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-5
+                                                            
+
+       30                       
+ 004E  0200                     
+ 0050  10                       
+ 0051  0001                     
+ 0053  02                       
+ 0054  0100                     
+ 0056  FFE0                     
+ 0058  FB                       
+ 0059  0010                     
+ 005B  0011                     
+ 005D  0004                     
+ 005F  0001                     
+                                
+ 0061  0003[                    BBlk2	BPB	<>		; drop it here for drive 2 
+            00                  
+                         ]      
+ 0064  4A 64 69 73 6B 2E 30     
+       30                       
+ 006C  0200                     
+ 006E  10                       
+ 006F  0001                     
+ 0071  02                       
+ 0072  0100                     
+ 0074  FFE0                     
+ 0076  FB                       
+ 0077  0010                     
+ 0079  0011                     
+ 007B  0004                     
+ 007D  0001                     
+                                
+ 007F  0003[                    BBlk3	BPB	<>		; drop it here for drive 3 
+            00                  
+                         ]      
+ 0082  4A 64 69 73 6B 2E 30     
+       30                       
+ 008A  0200                     
+ 008C  10                       
+ 008D  0001                     
+ 008F  02                       
+ 0090  0100                     
+ 0092  FFE0                     
+ 0094  FB                       
+ 0095  0010                     
+ 0097  0011                     
+ 0099  0004                     
+ 009B  0001                     
+                                
+                                 
+                                ; 
+                                ; BPB Pointers for each logical Unit (Used by Init) 
+                                ; 
+ 009D  0030 R                   BPBPtr	DW	offset BBlk0.SectorLength	; Unit 0 
+ 009F  004E R                   	DW	offset BBlk1.SectorLength	; Unit 1 
+ 00A1  006C R                   	DW	offset BBlk2.SectorLength	; Unit 2 
+ 00A3  008A R                   	DW	offset BBlk3.SectorLength	; Unit 3 
+                                ; 
+                                ; Media Check Status for each drive 
+                                ; 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-6
+                                                            
+
+ 00A5  FF                       MchkTbl DB	-1 
+ 00A6  FF                       	DB	-1 
+ 00A7  FF                       	DB	-1 
+ 00A8  FF                       	DB	-1 
+                                ; 
+                                ; File Handles for each drive 
+                                ; 
+ 00A9  0000                     FTbl	DW	0 
+ 00AB  0000                     	DW	0 
+ 00AD  0000                     	DW	0 
+ 00AF  0000                     	DW	0 
+                                 
+ 00B1  0000 R                   FCBTbl  DW	offset	CODE:IL0 
+ 00B3  008D R                   	DW	offset	CODE:IL1 
+ 00B5  011A R                   	DW	offset	CODE:IL2 
+ 00B7  01A7 R                   	dw	offset	CODE:IL3 
+                                ; 
+                                ; Scratch Variables 
+                                ; 
+ 00B9  ????????                 ptrsav		dd	?	; Request Block Pointer during Strategy 
+ 00BD  ????????                 stack  		dd      ?	; Stack Save during Devint 
+ 00C1  ??                       basedrv		db	?	; our first drive number 
+ 00C2  ??                       ndrives 	db      ?       ; number of drives we know 
+ 00C3  ??                       curdrv  	db      ?       ; current drive number 
+ 00C4  00                       AInit		db	0	; 1 if AMIGA has been initialized 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-7
+                                                            
+
+                                		PAGE 
+                                ; 
+                                ; ------------------- Entries ---------------------------- 
+                                ; 
+                                ; Save Request Block pointer 
+                                ; 
+ 00C5                           Strategy	PROC FAR 
+ 00C5  2E: 89 1E 00B9 R         	mov	word ptr cs:ptrsav,bx 
+ 00CA  2E: 8C 06 00BB R         	mov	word ptr cs:ptrsav+2,es 
+ 00CF  CB                       	ret 
+                                Strategy	ENDP 
+                                ; 
+                                ; This is the general Main Entry: 
+                                ; 
+ 00D0                           main	proc far 
+ 00D0  9C                       Devint:	pushf 
+ 00D1  2E: 89 26 00BD R                 mov     word ptr cs:stack,sp 
+ 00D6  2E: 8C 16 00BF R         	mov     word ptr cs:stack+2,ss 
+ 00DB  FA                       	cli 
+ 00DC  0E                       	push    cs 
+ 00DD  17                       	pop     ss 
+ 00DE  BC 0332 R                	mov	sp,offset CODE:TheEnd-2 
+ 00E1  FB                       	sti 
+ 00E2  50                        	push	ax		; save all regs 
+ 00E3  53                       	push	bx 
+ 00E4  51                       	push	cx 
+ 00E5  52                       	push	dx 
+ 00E6  56                       	push	si 
+ 00E7  57                       	push	di 
+ 00E8  1E                       	push	ds 
+ 00E9  06                       	push	es 
+                                 
+ 00EA  0E                       	push    cs 
+ 00EB  1F                       	pop	ds 
+                                	assume  ds:CODE 
+                                 
+                                 
+                                ; 
+                                ; Dispatcher 
+                                ; 
+ 00EC  C4 3E 00B9 R             	les	di,ptrsav	; get strategy pointer 
+                                 
+ 00F0  26: 8A 45 01             	mov	al,es:[di].R_Unit ; current unit 
+                                 
+ 00F4  A2 00C3 R                	mov	curdrv,al	; save 
+ 00F7  2A E4                    	sub	ah,ah 
+ 00F9  8B F0                    	mov	si,ax 
+ 00FB  D1 E6                    	shl	si,1		; word pointer in si 
+                                 
+ 00FD  26: 8A 5D 02             	mov	bl,es:[di].R_Command ; what shall we do ?? 
+ 0101  80 FB 0C                 	cmp	bl,12		; that much commands we know 
+ 0104  77 0C                    	ja	Commerr		; too high for us if ae 
+ 0106  2A FF                    	sub	bh,bh		; expand 
+ 0108  D1 E3                    	shl	bx,1		; to word offset 
+ 010A  FF A7 000B R             	jmp     ComTbl[bx]	; bye bye 
+                                				; The called entry now finds: 
+                                				; DS ok 
+                                				; ES:DI pointing to RequestBlock 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-8
+                                                            
+
+                                				; current drive in .AL 
+                                				; All regs on stack 
+                                ; 
+                                ;------------ returns ------------------------------------------- 
+                                ; 
+ 010E                           BadDrive: 
+ 010E  B0 01                    	mov	al,E_WrongUnit 
+ 0110  EB 02                    	jmp	short Error 
+                                 
+ 0112                           Commerr:			; we are here since we got an 
+ 0112  B0 03                       	mov	al,E_IllCommand ; illegal command 
+                                ; 
+                                ; Error return, error code in .AL 
+                                ; 
+ 0114                           Error: 
+ 0114  B4 80                    	mov     ah,S_Error shr 8 
+ 0116  26: 89 45 03             	mov     es:[di].R_Status,ax; let DOS know. 
+                                				; fall into exit. 
+                                ; 
+                                ; General Exit (no error bit set) 
+                                ; 
+ 011A  26: 81 4D 03 0100        Exit: 	or      es:[di].R_Status,S_Done 
+                                 
+ 0120  07                       	pop	es 
+ 0121  1F                       	pop	ds 
+ 0122  5F                       	pop	di 
+ 0123  5E                       	pop	si 
+ 0124  5A                       	pop	dx 
+ 0125  59                       	pop	cx 
+ 0126  5B                       	pop	bx 
+ 0127  58                       	pop	ax 
+ 0128  FA                       	cli 
+ 0129  2E: 8B 26 00BD R         	mov	sp,word ptr cs:stack 
+ 012E  2E: 8E 16 00BF R         	mov     ss,word ptr cs:stack+2 
+ 0133  FB                       	sti 
+ 0134  9D                       	popf 
+ 0135  CB                       	ret 
+                                ; 
+                                ; ------------ Now the particular services: 
+                                ; 
+                                ; 
+                                ; Initialize this driver, called once only from DOS 
+                                ; 
+ 0136                           Init: 
+ 0136  26: 8A 45 16             	mov     al,es:[di].IR_DriveNum 
+ 013A  A2 00C1 R                	mov	basedrv,al 
+                                 
+                                endif 
+ 013D  26: C6 45 0D 04          	mov	es:[di].IR_Units,4 
+ 0142  C6 06 00C2 R 04          	mov	ndrives,4 
+ 0147  26: C7 45 0E 0334 R      	mov     word ptr es:[di].IR_EndAddr,offset CODE:TheEnd 
+ 014D  26: 8C 4D 10             	mov     word ptr es:[di].IR_EndAddr+2,cs 
+ 0151  26: 8C 4D 14             	mov     word ptr es:[di].IR_BPB+2,cs 
+ 0155  26: C7 45 12 009D R      	mov	word ptr es:[di].IR_BPB,offset BPBPtr 
+ 015B  EB BD                    	jmp	Exit 
+                                ; 
+                                ; Write Request 
+                                ; 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-9
+                                                            
+
+ 015D                           WriteVerify: 
+ 015D                           Write: 
+                                 
+                                endif 
+ 015D  8B B4 00A9 R             	mov	si,FTbl[si] 
+ 0161  F6 44 02 01              	test	[si].IL_Flag,ILF_RO	; read only ? 
+ 0165  75 23                    	jnz	Wprot			; yes if nz 
+                                 
+ 0167  2B C9                    	sub	cx,cx			; pessimistic 
+ 0169  26: 87 4D 12             	xchg	cx,es:[di].IOR_Count	; Sector Count 
+ 016D  0B F6                    	or	si,si			; valid pointer ? 
+ 016F  74 17                    	jz	wrerr			; no if z 
+ 0171  1E                       	push	ds			; else 
+ 0172  26: C5 55 0E                    	lds	dx,es:[di].IOR_TFA	; Transfer Address 
+ 0176  26: 8B 5D 14             	mov	bx,es:[di].IOR_StartSect; Start Sector 
+ 017A  E8 0343 R                	call    DiskWrite		; Do the read 
+ 017D  1F                       	pop	ds 
+ 017E  26: 89 4D 12             	mov     es:[di].IOR_Count,cx	; update count 
+ 0182  0A C0                    	or	al,al			; OK ? 
+ 0184  75 02                    	jnz	wrerr			; failed if cf 
+                                 
+ 0186  EB 92                    	jmp	Exit 
+                                 
+ 0188                           wrerr:	 
+                                endif	 
+ 0188  EB 8A                    	jmp	Error 
+                                 
+                                 
+ 018A  B0 00                    Wprot:	mov	al,E_WriteProtect 
+ 018C  EB 86                    	jmp	Error 
+                                ; 
+                                ; Read Request 
+                                ; 
+ 018E                           Read: 
+ 018E  8B B4 00A9 R             	mov	si,FTbl[SI]		; to si 
+ 0192  2B C9                    	sub	cx,cx			; pessimistic 
+ 0194  26: 87 4D 12             	xchg	cx,es:[di].IOR_Count	; Sector Count 
+ 0198  0B F6                    	or	si,si			; valid pointer ? 
+ 019A  74 18                    	jz	rderr			; no if z 
+ 019C  1E                       	push	ds			; else 
+ 019D  26: C5 55 0E                    	lds	dx,es:[di].IOR_TFA	; Transfer Address 
+ 01A1  26: 8B 5D 14             	mov	bx,es:[di].IOR_StartSect; Start Sector 
+ 01A5  E8 02E9 R                	call    DiskRead		; Do the read 
+ 01A8  1F                       	pop	ds 
+ 01A9  26: 89 4D 12             	mov     es:[di].IOR_Count,cx	; update count 
+ 01AD  0A C0                    	or	al,al			; OK ? 
+ 01AF  75 03                    	jnz	rderr			; failed if cf 
+                                 
+ 01B1  E9 011A R                	jmp	Exit 
+                                 
+ 01B4                           rderr:	 
+                                endif	 
+ 01B4  E9 0114 R                	jmp	Error 
+                                ; 
+                                ; Media Check Request 
+                                ; 
+ 01B7                           MediaCheck: 
+                                 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-10
+                                                            
+
+ 01B7  8B D8                         	mov     bx,ax 
+ 01B9  8A 87 00A5 R             	mov     al,MchkTbl[BX] 
+ 01BD  26: 88 45 0E             	mov	es:[di].MR_Return,al	; last status 
+ 01C1  83 BC 00A9 R 00          	cmp	FTbl[SI],0		; something linked ? 
+ 01C6  74 05                    	jz      mc1			; no if z 
+ 01C8  C6 87 00A5 R 01          	mov	MchkTbl[bx],1		; no change next time 
+ 01CD  E9 011A R                mc1:	jmp	Exit 
+                                ; 
+                                ; Build BPB Request 
+                                ; 
+ 01D0                           BuildBPB: 
+                                 
+ 01D0  83 BC 00A9 R 00          	cmp	FTbl[si],0 		; point to current File Handle 
+ 01D5  75 0A                    	jne	getbpb			; yes if ne 
+                                 
+ 01D7  B0 02                    Bdnr:	mov	al,E_DriveNotReady 
+ 01D9  E9 0114 R                	jmp	Error			; else error 
+ 01DC  B0 07                    NotDOS:	mov	al,E_UnknownMedia	; not a DOS volume 
+ 01DE  E9 0114 R                	jmp	Error 
+                                 
+ 01E1  BB 0000                  getbpb:	mov	bx,0			; start sector 
+ 01E4  B9 0001                  	mov	cx,1			; count 
+ 01E7  56                       	push	si			; drive table offset 
+ 01E8  26: C5 55 0E             	lds	dx,es:[di].BR_TFA	; TFA ptr 
+ 01EC  2E: 8B B4 00A9 R         	mov	si,cs:FTbl[si]		; FCB ptr 
+ 01F1  E8 02E9 R                	call    DiskRead		; read 1st sector 
+ 01F4  5B                       	pop	bx			; was si 
+ 01F5  0A C0                    	or	al,al			; read ok ? 
+ 01F7  75 DE                    	jnz	Bdnr			; no if nz 
+ 01F9  06                       	push	es			; save requset pointer 
+ 01FA  57                       	push    di 
+ 01FB  26: C5 75 0E             	lds	si,es:[di].BR_TFA	; ds:si -> sector just read 
+ 01FF  0E                       	push	cs			; es = cs 
+ 0200  07                       	pop	es 
+ 0201  2E: 8B BF 009D R         	mov	di,cs:BPBPtr[bx]	; where is the bpb ? 
+ 0206  83 EF 0B                 	sub	di,0bh			; es:di -> cs:bpb 
+                                 
+ 0209  B9 0004                  	mov	cx,4			; the first 8 bytes 
+ 020C  F3/ A7                   	repe	cmpsw			; must fit 
+ 020E  75 05                    	jne	gtbp1			; NotDOS Volume if ne 
+                                 
+ 0210  B9 0016                  	mov	cx, (size BPB)-8	; count, 8 bytes done alreay 
+ 0213  F3/ A4                   	rep     movsb			; copy the rest 
+                                 
+ 0215  5F                       gtbp1:	pop	di			; restore request pointer 
+ 0216  07                       	pop	es 
+                                 
+ 0217  75 C3                    	jne	NotDOS 
+                                 
+ 0219  2E: 8B 87 009D R         	mov	ax,cs:BPBPtr[bx]	; return a valid BPB Pointer 
+ 021E  26: 89 45 12             	mov	word ptr es:[di].BR_BPBTbl,ax 
+ 0222  26: 8C 4D 14             	mov     word ptr es:[di].BR_BPBTbl+2,cs 
+ 0226  E9 011A R                	jmp	Exit			; good exit 
+                                ; 
+                                ; IOCTL Request 
+                                ;	 
+ 0229                           IOCTL_O: 
+ 0229  26: C5 75 0E             	lds	si,es:[di].IOR_TFA 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-11
+                                                            
+
+                                 
+ 022D  8B D8                    	mov	bx,ax 
+ 022F  2E: C6 87 00A5 R FF      	mov	cs:MchkTbl[bx],-1		; medium changed 
+                                 
+ 0235  D1 E3                    	shl	bx,1 
+                                 
+ 0237  80 3C 00                 	cmp	[si].IL_Command,IL_Link 
+ 023A  75 30                    	jne	ioc1 
+                                					; link request 
+ 023C  2E: 83 BF 00A9 R 00      	cmp	CS:Ftbl[bx],0		; file in use ? 
+ 0242  74 04                    	jz	ioct10			; no if z 
+ 0244  B0 02                    	mov	al,ILE_LINKED		; else error 
+ 0246  EB 47                    	jmp	short iodone 
+                                 
+ 0248  2E: 8B 87 00B1 R         ioct10:	mov	ax,CS:FCBTbl[bx]	; set up pointer 
+ 024D  2E: 89 87 00A9 R         	mov	CS:FTbl[bx],ax 
+ 0252  06                       	push	es 
+ 0253  57                       	push	di 
+ 0254  0E                       	push	cs 
+ 0255  07                       	pop	es 
+ 0256  2E: 8B BF 00A9 R         	mov	di,CS:FTbl[bx]		; copy file info structure 
+ 025B  B9 008D                  	mov	cx,size ILink 
+ 025E  F3/ A4                   	rep	movsb 
+ 0260  5F                       	pop	di 
+ 0261  07                       	pop	es 
+ 0262  B0 00                    	mov	al,ILE_OK 
+ 0264  2E: C6 06 00C4 R 01      	mov	CS:AInit,1			; we had a link ... 
+ 026A  EB 23                    	jmp	short iodone 
+                                 
+ 026C                           ioc1: 
+ 026C  80 3C 01                 	cmp	[si].IL_Command,IL_UnLink 
+ 026F  74 04                    	je	ioc2 
+ 0271  B0 01                    	mov	al,ILE_COMERR 
+ 0273  EB 1A                    	jmp	short iodone 
+                                 
+ 0275  0E                       ioc2:	push	cs				; unlink request 
+ 0276  1F                       	pop	ds 
+                                 
+ 0277  B0 04                    	mov	al,ILE_NOT_LINKED 
+ 0279  83 BF 00A9 R 00          	cmp	Ftbl[bx],0			; File linked ? 
+ 027E  74 0F                    	je	iodone				; no if eq 
+                                	 
+ 0280  2B F6                    	sub	si,si 
+ 0282  87 B7 00A9 R             	xchg	Ftbl[bx],si			; mark not linked 
+ 0286  E8 02D1 R                	call	DiskClose			; and close it 
+                                 
+ 0289  B0 00                    	mov	al,ILE_OK			; assume ok 
+ 028B  74 02                    	jz	iodone	 			; is it ok ? 
+                                 
+ 028D  B0 03                    	mov	al,ILE_CLOSE			; no if we are here 
+ 028F                           iodone: 
+ 028F  26: C5 75 0E             	lds	si,es:[di].IOR_TFA 
+ 0293  88 44 01                 	mov	[si].IL_Status,al		; return a status 
+ 0296  E9 011A R                	jmp	Exit 
+                                 
+                                ;  
+                                ; We are asked to send an Info Message 
+                                ; 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-12
+                                                            
+
+ 0299                           IOCTL_I:				; Send Info Message 
+ 0299  B8 000B                  	mov	ax,SIZE Ident 
+                                	 
+ 029C  26: 3B 45 12             	cmp     ax,es:[di].IOR_Count	; That much space provided ? 
+ 02A0  77 2A                    	ja	sizerr			; error if not 
+ 02A2  26: 89 45 12             	mov	es:[di].IOR_Count,ax	; update bytes xferred 
+ 02A6  06                       	push    es			; save request pointer 
+ 02A7  57                       	push	di 
+ 02A8  26: C4 7D 0E             	les	di,es:[di].IOR_TFA	; point to target buffer 
+ 02AC  AA                       	stosb   			; save length 
+ 02AD  B8 444A                  	mov	ax,256*'D'+'J'          ; our name 
+ 02B0  AB                       	stosw 
+ 02B1  B0 01                    	mov	al,VERSION		; Version 
+ 02B3  AA                       	stosb 
+ 02B4  A0 00C1 R                	mov	al,basedrv		; base drive 
+ 02B7  AA                       	stosb 
+ 02B8  A0 00C2 R                	mov	al,ndrives		; Number of Units we know 
+ 02BB  AA                       	stosb 
+ 02BC  B8 00A9 R                	mov	ax, offset FTbl		; and the File Handles, 
+ 02BF  AB                       	stosw 
+ 02C0  8C C8                    	mov	ax,cs			; and segment 
+ 02C2  AB                       	stosw  
+ 02C3  A0 00C4 R                	mov	al,AInit		; init status 
+ 02C6  AA                       	stosb 
+ 02C7  5F                       	pop	di			; and the request pointer 
+ 02C8  07                       	pop	es     
+ 02C9  E9 011A R                	jmp	Exit			; done 
+                                 
+ 02CC  B0 05                    sizerr: mov	al,E_BadStruct 
+ 02CE  E9 0114 R                	jmp	Error 
+                                main	endp 
+                                 
+ 02D1                           aux	proc    near 
+                                ; 
+                                ; --------- AUX Routines 
+                                ; Note that they are local and NEAR 
+                                ; 
+                                ; 
+                                ; 
+                                ; DiskClose 
+                                ; 
+                                ; Close Virtual Disk File 
+                                ; 
+                                ; Expects FCB pointer in SI 
+                                ; 
+ 02D1                           DiskClose: 
+ 02D1  06                       	push	es 
+ 02D2  57                       	push	di 
+                                 
+ 02D3  2E: C4 7C 09             	les	di,CS:[si].IL_JParam 
+                                 
+ 02D7  26: C7 05 0007           	mov	es:[di].adr_Fnctn,ADR_FNCTN_CLOSE 
+ 02DC  8B 44 03                 	mov	ax,[si].IL_Handle		; file handle 
+ 02DF  26: 89 45 02             	mov	es:[di].adr_File,ax 
+                                 
+ 02E3  E8 03D1 R                	call	DoJanus 
+                                 
+ 02E6  5F                       	pop	di 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-13
+                                                            
+
+ 02E7  07                       	pop	es 
+ 02E8  C3                       	ret 
+                                 
+                                ; 
+                                ; Read Sectors from disk 
+                                ; 
+                                ; Expects:	Pointer to File Block in CS:[si] 
+                                ;		Sector Count in	CX 
+                                ;		Buffer Address in DS:DX 
+                                ;		Start Sector in BX 
+                                ; 
+                                ; Returns:	Actual Count in CX 
+                                ;		Error Status in AX 
+                                ; 
+ 02E9                           DiskRead: 
+                                 
+ 02E9  06                       	push    es 
+ 02EA  57                       	push	di 
+ 02EB  55                       	push	bp 
+ 02EC  2B ED                    	sub	bp,bp 
+                                	 
+ 02EE  2E: C4 7C 09             	les	di,CS:[si].IL_JParam 
+                                 
+ 02F2  26: C7 05 0001           	mov	es:[di].adr_Fnctn,ADR_FNCTN_READ 
+                                 
+ 02F7  2E: 8B 44 03             	mov	ax,CS:[si].IL_Handle		; file handle 
+ 02FB  26: 89 45 02             	mov	es:[di].adr_File,ax 
+                                 
+ 02FF  E8 03B4 R                	call	jrw_setOffs 
+                                 
+ 0302                           readloop: 
+                                 
+ 0302  E8 0399 R                	call	jrw_setCount 
+                                ; 
+                                ; Call the famous Janus service 
+                                ; 
+ 0305  E8 03D1 R                	call	DoJanus 
+ 0308  B0 0C                    	mov	al,E_General 
+ 030A  75 31                    	jne	rddone				; Janus Err if ne 
+                                 
+ 030C  26: 83 7D 0E 00          	cmp	es:[di].adr_Err,ADR_ERR_OK	; File err if ne 
+ 0311  B0 0B                    	mov	al,E_ReadFault 
+ 0313  75 28                    	jne	rddone 
+                                 
+ 0315  26: 3B 5D 0A             	cmp	bx,es:[di].adr_Count_l		; Count wrong if ne 
+ 0319  B0 04                    	mov	al,E_CRC 
+ 031B  75 20                    	jne	rddone 
+                                ; 
+                                ; move that block 
+                                ; 
+ 031D  03 E9                    	add	bp,cx				; count down 
+                                 
+ 031F  06                       	push	es				; preserve 
+ 0320  1E                       	push	ds 
+ 0321  56                       	push	si 
+ 0322  51                       	push	cx 
+                                  
+ 0323  1E                       	push	ds				; there we want it 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-14
+                                                            
+
+ 0324  07                       	pop	es 
+                                 
+ 0325  87 FA                    	xchg	di,dx 
+ 0327  2E: C5 74 05             	lds	si,CS:[si].IL_JBuffer	; there it is 
+ 032B  8B CB                    	mov	cx,bx  				; count 
+ 032D  D1 E9                    	shr	cx,1 				; always even 
+ 032F  F3/ A5                   	rep	movsw				; more efficient 
+ 0331  87 FA                    	xchg	di,dx				; pointer updated 
+                                 
+ 0333  59                       	pop	cx				; restore 
+ 0334  5E                       	pop	si 
+ 0335  1F                       	pop	ds 
+ 0336  07                       	pop	es 
+                                 
+ 0337  0B C9                    	or	cx,cx				; sectors left ? 
+ 0339  75 C7                    	jnz	readloop 
+ 033B  2B C0                    	sub	ax,ax 
+                                 
+ 033D  8B CD                    rddone: mov	cx,bp				; actual count left 
+                                 
+ 033F  5D                       	pop	bp				; orig. count 
+ 0340  5F                       	pop	di 
+ 0341  07                       	pop	es 
+ 0342  C3                       	ret 
+                                	 
+                                ; 
+                                ; 
+                                ; Write Sectors to disk 
+                                ; 
+                                ; Expects:	Pointer to [FCB] in CS:[si] 
+                                ;		Sector Count in	CX 
+                                ;		Buffer Address in DS:DX 
+                                ;		Start Sector in BX 
+                                ; 
+                                ; Returns:	Actual Count in CX 
+                                ;		Error Status in AX 
+                                ; 
+ 0343                           DiskWrite: 
+                                 
+ 0343  06                       	push    es 
+ 0344  57                       	push	di 
+ 0345  55                       	push	bp 
+                                 
+ 0346  2B ED                    	sub	bp,bp 
+                                 
+ 0348  2E: C4 7C 09             	les	di,CS:[si].IL_JParam 
+                                 
+ 034C  26: C7 05 0002           	mov	es:[di].adr_Fnctn,ADR_FNCTN_WRITE 
+ 0351  2E: 8B 44 03             	mov	ax,cs:[si].IL_Handle		; file handle 
+ 0355  26: 89 45 02             	mov	es:[di].adr_File,ax 
+                                 
+ 0359  E8 03B4 R                	call	jrw_setOffs 
+                                 
+ 035C                           writeloop: 
+ 035C  E8 0399 R                	call	jrw_setCount 
+                                ; 
+                                ; move that block to write buffer 
+                                ; 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-15
+                                                            
+
+ 035F  51                       	push	cx 
+ 0360  06                       	push	es 
+ 0361  57                       	push	di 
+                                 
+ 0362  8B CB                    	mov	cx,bx 
+ 0364  2E: C4 7C 05             	les	di,CS:[si].IL_JBuffer		; there it is 
+                                 
+ 0368  87 F2                    	xchg	si,dx				; source buffer 
+ 036A  D1 E9                    	shr	cx,1 				; always even 
+ 036C  F3/ A5                   	rep	movsw				; more efficient 
+ 036E  87 F2                    	xchg	si,dx				; pointer updated 
+                                 
+ 0370  5F                       	pop	di 
+ 0371  07                       	pop	es 
+ 0372  59                       	pop	cx				; restore  count 
+                                 
+                                ; 
+                                ; Call the famous Janus service 
+                                ; 
+ 0373  E8 03D1 R                	call	DoJanus 
+ 0376  B0 0C                    	mov	al,E_General 
+ 0378  75 19                    	jne	wrdone				; Janus Err if ne 
+                                 
+ 037A  26: 83 7D 0E 00          	cmp	es:[di].adr_Err,ADR_ERR_OK	; File err if ne 
+ 037F  B0 0A                    	mov	al,E_WriteFault 
+ 0381  75 10                    	jne	wrdone 
+                                 
+ 0383  26: 3B 5D 0A             	cmp	bx,es:[di].adr_Count_l		; Count wrong if ne 
+ 0387  B0 04                    	mov	al,E_CRC 
+ 0389  75 08                    	jne	wrdone 
+                                 
+ 038B  03 E9                    	add	bp,cx				; add sects xferred 
+                                		     	 
+ 038D  0B C9                    	or	cx,cx 
+ 038F  75 CB                    	jnz	writeloop 
+                                 
+ 0391  2B C0                    	sub	ax,ax 
+                                 
+ 0393                           wrdone:  
+ 0393  8B CD                    	mov	cx,bp 
+ 0395  5D                       	pop	bp 
+ 0396  5F                       	pop	di 
+ 0397  07                       	pop	es 
+ 0398  C3                       	ret 
+                                 
+                                ; 
+                                ; Calculate byte count 
+                                ; 
+ 0399                           jrw_setCount: 
+                                 
+ 0399  8B D9                    	mov	bx,cx				; save a copy 
+ 039B  83 FB 10                 	cmp	bx,16				; max count 
+ 039E  72 03                    	jb	jrw10 
+ 03A0  BB 0010                  	mov	bx,16 
+                                 
+ 03A3  2B CB                    jrw10:	sub	cx,bx				; sectors left 
+ 03A5  86 DF                    	xchg	bl,bh				; shl 8 
+ 03A7  D1 E3                    	shl	bx,1				; times 512 total 
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-16
+                                                            
+
+                                 
+ 03A9  26: 89 5D 0A             	mov	es:[di].adr_Count_l,bx		; set up count 
+ 03AD  26: C7 45 08 0000         	mov	es:[di].adr_Count_h,0 
+                                 
+ 03B3  C3                       	ret 
+                                ; 
+                                ; Calculate byte offset of virtual disk file 
+                                ; 
+ 03B4                           jrw_setOffs: 
+ 03B4  26: C7 45 06 0000        	mov	es:[di].adr_Offset_l,0		; set up offet 
+ 03BA  26: C7 45 04 0000        	mov	es:[di].adr_Offset_h,0 
+ 03C0  26: 88 5D 07             	mov	byte ptr es:[di].adr_Offset_l+1,bl 
+ 03C4  26: 88 7D 04             	mov	byte ptr es:[di].adr_Offset_h,bh 
+ 03C8  26: D1 65 06             	shl	es:[di].adr_Offset_l,1 
+ 03CC  26: D1 55 04             	rcl	es:[di].adr_Offset_h,1 
+ 03D0  C3                       	ret 
+                                ; 
+                                ; Send a FILE IO Request to Janus 
+                                ;	 
+ 03D1                           DoJanus: 
+ 03D1  50                       	push	ax 
+ 03D2  53                       	push	bx 
+                                 
+ 03D3  B4 07                    	mov	ah,J_CALL_AMIGA 
+ 03D5  B0 0E                    	mov	al,J_JFT 
+ 03D7  BB FFFF                  	mov	bx,0ffffh 
+ 03DA  CD 0B                    	int	JANUS 
+ 03DC  3C 01                    	cmp	al,J_FINISHED 
+ 03DE  74 0C                    	je	DJret 
+ 03E0  3C 00                    	cmp	al,J_PENDING 
+ 03E2  75 08                    	jne	DJret 
+ 03E4  B4 08                    	mov	ah,J_WAIT_AMIGA 
+ 03E6  B0 0E                    	mov	al,J_JFT 
+ 03E8  CD 0B                    	int	JANUS 
+ 03EA  3C 01                    	cmp	al,J_FINISHED 
+                                 
+ 03EC  5B                       DJret: 	pop	bx 
+ 03ED  58                       	pop	ax 
+ 03EE  C3                       	ret 
+                                 
+                                 
+                                 
+                                endif			; diag 
+                                 
+                                aux	endp 
+                                 
+                                ; 
+                                ; Stack storage & TheEnd: 
+                                ; 
+ 0000                           DSEG    segment para public 'data' 
+                                 
+ 0000  ??                       IL0	ILink	<> 
+ 0001  ??                       
+ 0002  ??                       
+ 0003  ????                     
+ 0005  ????????                 
+ 0009  ????????                 
+ 000D  0080[                    
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Page     1-17
+                                                            
+
+            ??                  
+                         ]      
+                                
+ 008D  ??                       IL1	ILink   <> 
+ 008E  ??                       
+ 008F  ??                       
+ 0090  ????                     
+ 0092  ????????                 
+ 0096  ????????                 
+ 009A  0080[                    
+            ??                  
+                         ]      
+                                
+ 011A  ??                       IL2	ILink	<> 
+ 011B  ??                       
+ 011C  ??                       
+ 011D  ????                     
+ 011F  ????????                 
+ 0123  ????????                 
+ 0127  0080[                    
+            ??                  
+                         ]      
+                                
+ 01A7  ??                       IL3	ILink	<> 
+ 01A8  ??                       
+ 01A9  ??                       
+ 01AA  ????                     
+ 01AC  ????????                 
+ 01B0  ????????                 
+ 01B4  0080[                    
+            ??                  
+                         ]      
+                                
+                                 
+ 0234  0100[                    	db	256 dup (?)	; local stack space 
+            ??                  
+                         ]      
+                                
+                                	EVEN 			; in case we are on a 80268 
+ 0334  ??                       TheEnd  db	?		; End of resident part, stack top 
+ 0335                           DSEG    ends 
+ 03EF                           CSEG	ENDS 
+                                 
+                                	END 
+
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Symbols-1
+                                                             
+
+Macros:
+
+		N a m e			Lines
+
+PRINTB . . . . . . . . . . . . .  	   4
+PRINTS . . . . . . . . . . . . .  	   8
+PRINTW . . . . . . . . . . . . .  	   4
+
+Structures and Records:
+
+                N a m e                 Width   # fields
+                                        Shift   Width   Mask    Initial
+
+AMIGADSKREQ  . . . . . . . . . .  	0010	0008
+  ADR_FNCTN  . . . . . . . . . .  	0000
+  ADR_FILE . . . . . . . . . . .  	0002
+  ADR_OFFSET_H . . . . . . . . .  	0004
+  ADR_OFFSET_L . . . . . . . . .  	0006
+  ADR_COUNT_H  . . . . . . . . .  	0008
+  ADR_COUNT_L  . . . . . . . . .  	000A
+  ADR_BUFFERADDR . . . . . . . .  	000C
+  ADR_ERR  . . . . . . . . . . .  	000E
+BPB  . . . . . . . . . . . . . .  	001E	000D
+  BOOTJMP  . . . . . . . . . . .  	0000
+  OEMNAME  . . . . . . . . . . .  	0003
+  SECTORLENGTH . . . . . . . . .  	000B
+  CLUSTERSECS  . . . . . . . . .  	000D
+  RESRVDSECS . . . . . . . . . .  	000E
+  NUMFATS  . . . . . . . . . . .  	0010
+  ROOTENTRIES  . . . . . . . . .  	0011
+  NUMSECS  . . . . . . . . . . .  	0013
+  MEDIADESCR . . . . . . . . . .  	0015
+  FATSECS  . . . . . . . . . . .  	0016
+  TRACKSECS  . . . . . . . . . .  	0018
+  NUMHEADS . . . . . . . . . . .  	001A
+  HIDDENSECS . . . . . . . . . .  	001C
+BPBREQ . . . . . . . . . . . . .  	0016	0004
+  BR_MEDDESCR  . . . . . . . . .  	000D
+  BR_TFA . . . . . . . . . . . .  	000E
+  BR_BPBTBL  . . . . . . . . . .  	0012
+IDENT  . . . . . . . . . . . . .  	000B	0008
+  I_LENGTH . . . . . . . . . . .  	0000
+  I_MARKER . . . . . . . . . . .  	0001
+  I_VERSION  . . . . . . . . . .  	0003
+  I_BASEDRV  . . . . . . . . . .  	0004
+  I_UNITS  . . . . . . . . . . .  	0005
+  I_FTBL . . . . . . . . . . . .  	0006
+  I_CS . . . . . . . . . . . . .  	0008
+  I_INIT . . . . . . . . . . . .  	000A
+ILINK  . . . . . . . . . . . . .  	008D	0007
+  IL_COMMAND . . . . . . . . . .  	0000
+  IL_STATUS  . . . . . . . . . .  	0001
+  IL_FLAG  . . . . . . . . . . .  	0002
+  IL_HANDLE  . . . . . . . . . .  	0003
+  IL_JBUFFER . . . . . . . . . .  	0005
+  IL_JPARAM  . . . . . . . . . .  	0009
+  IL_NAME  . . . . . . . . . . .  	000D
+INITREQ  . . . . . . . . . . . .  	0017	0005
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Symbols-2
+                                                             
+
+  IR_UNITS . . . . . . . . . . .  	000D
+  IR_ENDADDR . . . . . . . . . .  	000E
+  IR_BPB . . . . . . . . . . . .  	0012
+  IR_DRIVENUM  . . . . . . . . .  	0016
+IOREQ  . . . . . . . . . . . . .  	001A	0006
+  IOR_MEDDESCR . . . . . . . . .  	000D
+  IOR_TFA  . . . . . . . . . . .  	000E
+  IOR_COUNT  . . . . . . . . . .  	0012
+  IOR_STARTSECT  . . . . . . . .  	0014
+  IOR_VOLID  . . . . . . . . . .  	0016
+MEDREQ . . . . . . . . . . . . .  	0013	0004
+  MR_MEDDESCR  . . . . . . . . .  	000D
+  MR_RETURN  . . . . . . . . . .  	000E
+  MR_VOLID . . . . . . . . . . .  	000F
+REQUEST  . . . . . . . . . . . .  	000D	0005
+  R_LENGTH . . . . . . . . . . .  	0000
+  R_UNIT . . . . . . . . . . . .  	0001
+  R_COMMAND  . . . . . . . . . .  	0002
+  R_STATUS . . . . . . . . . . .  	0003
+  R_RESRVD . . . . . . . . . . .  	0005
+
+Segments and Groups:
+
+                N a m e         	Size	Align	Combine Class
+
+CODE . . . . . . . . . . . . . .  	GROUP
+  CSEG . . . . . . . . . . . . .  	03EF	PARA	PUBLIC	'CODE'
+  DSEG . . . . . . . . . . . . .  	0335	PARA	PUBLIC	'DATA'
+
+Symbols:            
+
+                N a m e         	Type	Value	Attr         
+
+ADR_ERR_COUNT  . . . . . . . . .  	Number	0002	
+ADR_ERR_EOF  . . . . . . . . . .  	Number	0005	
+ADR_ERR_FILE . . . . . . . . . .  	Number	0003	
+ADR_ERR_FILE_COUNT . . . . . . .  	Number	0007	
+ADR_ERR_FNCT . . . . . . . . . .  	Number	0004	
+ADR_ERR_LOCKED . . . . . . . . .  	Number	000B	
+ADR_ERR_MULPL  . . . . . . . . .  	Number	0006	
+ADR_ERR_OFFSET . . . . . . . . .  	Number	0001	
+ADR_ERR_OK . . . . . . . . . . .  	Number	0000	
+ADR_ERR_READ . . . . . . . . . .  	Number	0009	
+ADR_ERR_SEEK . . . . . . . . . .  	Number	0008	
+ADR_ERR_WRITE  . . . . . . . . .  	Number	000A	
+ADR_FNCTN_CLOSE  . . . . . . . .  	Number	0007	
+ADR_FNCTN_DELETE . . . . . . . .  	Number	0008	
+ADR_FNCTN_INFO . . . . . . . . .  	Number	0004	
+ADR_FNCTN_INIT . . . . . . . . .  	Number	0000	
+ADR_FNCTN_OPEN_NEW . . . . . . .  	Number	0006	
+ADR_FNCTN_OPEN_OLD . . . . . . .  	Number	0005	
+ADR_FNCTN_READ . . . . . . . . .  	Number	0001	
+ADR_FNCTN_SEEK . . . . . . . . .  	Number	0003	
+ADR_FNCTN_WRITE  . . . . . . . .  	Number	0002	
+AINIT  . . . . . . . . . . . . .  	L BYTE 	00C4	CSEG
+AUX  . . . . . . . . . . . . . .  	N PROC	02D1	CSEG	Length = 011E
+
+BADDRIVE . . . . . . . . . . . .  	L NEAR	010E	CSEG
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Symbols-3
+                                                             
+
+BASEDRV  . . . . . . . . . . . .  	L BYTE 	00C1	CSEG
+BBLK0  . . . . . . . . . . . . .  	L 001E	0025	CSEG
+BBLK1  . . . . . . . . . . . . .  	L 001E	0043	CSEG
+BBLK2  . . . . . . . . . . . . .  	L 001E	0061	CSEG
+BBLK3  . . . . . . . . . . . . .  	L 001E	007F	CSEG
+BDNR . . . . . . . . . . . . . .  	L NEAR	01D7	CSEG
+BPBPTR . . . . . . . . . . . . .  	L WORD 	009D	CSEG
+BUILDBPB . . . . . . . . . . . .  	L NEAR	01D0	CSEG
+
+COMMERR  . . . . . . . . . . . .  	L NEAR	0112	CSEG
+COMTBL . . . . . . . . . . . . .  	L WORD 	000B	CSEG
+CR . . . . . . . . . . . . . . .  	Number	000D	
+CURDRV . . . . . . . . . . . . .  	L BYTE 	00C3	CSEG
+
+DEVINT . . . . . . . . . . . . .  	L NEAR	00D0	CSEG
+DISKCLOSE  . . . . . . . . . . .  	L NEAR	02D1	CSEG
+DISKREAD . . . . . . . . . . . .  	L NEAR	02E9	CSEG
+DISKWRITE  . . . . . . . . . . .  	L NEAR	0343	CSEG
+DJRET  . . . . . . . . . . . . .  	L NEAR	03EC	CSEG
+DOJANUS  . . . . . . . . . . . .  	L NEAR	03D1	CSEG
+
+ERROR  . . . . . . . . . . . . .  	L NEAR	0114	CSEG
+EXIT . . . . . . . . . . . . . .  	L NEAR	011A	CSEG
+E_BADSTRUCT  . . . . . . . . . .  	Number	0005	
+E_CRC  . . . . . . . . . . . . .  	Number	0004	
+E_DRIVENOTREADY  . . . . . . . .  	Number	0002	
+E_GENERAL  . . . . . . . . . . .  	Number	000C	
+E_ILLCOMMAND . . . . . . . . . .  	Number	0003	
+E_OUTOFPAPER . . . . . . . . . .  	Number	0009	
+E_READFAULT  . . . . . . . . . .  	Number	000B	
+E_SECNOTFOUND  . . . . . . . . .  	Number	0008	
+E_SEEK . . . . . . . . . . . . .  	Number	0006	
+E_UNKNOWNMEDIA . . . . . . . . .  	Number	0007	
+E_WRITEFAULT . . . . . . . . . .  	Number	000A	
+E_WRITEPROTECT . . . . . . . . .  	Number	0000	
+E_WRONGUNIT  . . . . . . . . . .  	Number	0001	
+
+FCBTBL . . . . . . . . . . . . .  	L WORD 	00B1	CSEG
+FTBL . . . . . . . . . . . . . .  	L WORD 	00A9	CSEG
+
+GETBPB . . . . . . . . . . . . .  	L NEAR	01E1	CSEG
+GTBP1  . . . . . . . . . . . . .  	L NEAR	0215	CSEG
+
+HEADER . . . . . . . . . . . . .  	L WORD 	0000	CSEG
+
+IL0  . . . . . . . . . . . . . .  	L 008D	0000	DSEG
+IL1  . . . . . . . . . . . . . .  	L 008D	008D	DSEG
+IL2  . . . . . . . . . . . . . .  	L 008D	011A	DSEG
+IL3  . . . . . . . . . . . . . .  	L 008D	01A7	DSEG
+ILE_CLOSE  . . . . . . . . . . .  	Number	0003	
+ILE_COMERR . . . . . . . . . . .  	Number	0001	
+ILE_LINKED . . . . . . . . . . .  	Number	0002	
+ILE_NOT_LINKED . . . . . . . . .  	Number	0004	
+ILE_OK . . . . . . . . . . . . .  	Number	0000	
+ILF_RO . . . . . . . . . . . . .  	Number	0001	
+IL_LINK  . . . . . . . . . . . .  	Number	0000	
+IL_UNLINK  . . . . . . . . . . .  	Number	0001	
+INIT . . . . . . . . . . . . . .  	L NEAR	0136	CSEG
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Symbols-4
+                                                             
+
+IOC1 . . . . . . . . . . . . . .  	L NEAR	026C	CSEG
+IOC2 . . . . . . . . . . . . . .  	L NEAR	0275	CSEG
+IOCT10 . . . . . . . . . . . . .  	L NEAR	0248	CSEG
+IOCTL_I  . . . . . . . . . . . .  	L NEAR	0299	CSEG
+IOCTL_O  . . . . . . . . . . . .  	L NEAR	0229	CSEG
+IODONE . . . . . . . . . . . . .  	L NEAR	028F	CSEG
+
+JANUS  . . . . . . . . . . . . .  	Number	000B	
+JD . . . . . . . . . . . . . . .  	Number	444A	
+JRW10  . . . . . . . . . . . . .  	L NEAR	03A3	CSEG
+JRW_SETCOUNT . . . . . . . . . .  	L NEAR	0399	CSEG
+JRW_SETOFFS  . . . . . . . . . .  	L NEAR	03B4	CSEG
+J_ALLOC_MEM  . . . . . . . . . .  	Number	0002	
+J_CALL_AMIGA . . . . . . . . . .  	Number	0007	
+J_CHECK_AMIGA  . . . . . . . . .  	Number	0009	
+J_FINISHED . . . . . . . . . . .  	Number	0001	
+J_FREE_MEM . . . . . . . . . . .  	Number	0003	
+J_GET_BASE . . . . . . . . . . .  	Number	0001	
+J_GET_SERVICE  . . . . . . . . .  	Number	0000	
+J_ILL_FNCTN  . . . . . . . . . .  	Number	0004	
+J_JFT  . . . . . . . . . . . . .  	Number	000E	
+J_NO_MEMORY  . . . . . . . . . .  	Number	0003	
+J_NO_SERVICE . . . . . . . . . .  	Number	00FF	
+J_OK . . . . . . . . . . . . . .  	Number	0000	
+J_PENDING  . . . . . . . . . . .  	Number	0000	
+J_SET_PARAM  . . . . . . . . . .  	Number	0004	
+J_SET_SERVICE  . . . . . . . . .  	Number	0005	
+J_STOP_SERVICE . . . . . . . . .  	Number	0006	
+J_WAIT_AMIGA . . . . . . . . . .  	Number	0008	
+
+LF . . . . . . . . . . . . . . .  	Number	000A	
+
+MAIN . . . . . . . . . . . . . .  	F PROC	00D0	CSEG	Length = 0201
+MC1  . . . . . . . . . . . . . .  	L NEAR	01CD	CSEG
+MCHKTBL  . . . . . . . . . . . .  	L BYTE 	00A5	CSEG
+MEDIACHECK . . . . . . . . . . .  	L NEAR	01B7	CSEG
+
+NDRIVES  . . . . . . . . . . . .  	L BYTE 	00C2	CSEG
+NOTDOS . . . . . . . . . . . . .  	L NEAR	01DC	CSEG
+
+PTRSAV . . . . . . . . . . . . .  	L DWORD	00B9	CSEG
+
+RDDONE . . . . . . . . . . . . .  	L NEAR	033D	CSEG
+RDERR  . . . . . . . . . . . . .  	L NEAR	01B4	CSEG
+READ . . . . . . . . . . . . . .  	L NEAR	018E	CSEG
+READLOOP . . . . . . . . . . . .  	L NEAR	0302	CSEG
+
+SIZERR . . . . . . . . . . . . .  	L NEAR	02CC	CSEG
+STACK  . . . . . . . . . . . . .  	L DWORD	00BD	CSEG
+STRATEGY . . . . . . . . . . . .  	F PROC	00C5	CSEG	Length = 000B
+S_BUSY . . . . . . . . . . . . .  	Number	0200	
+S_DONE . . . . . . . . . . . . .  	Number	0100	
+S_ERROR  . . . . . . . . . . . .  	Number	8000	
+
+THEEND . . . . . . . . . . . . .  	L BYTE 	0334	DSEG
+
+UNITS  . . . . . . . . . . . . .  	L BYTE 	000A	CSEG
+
+Microsoft (R) Macro Assembler  Version 4.00                 1/1/80 05:18:38
+ 
+JDISK.SYS MSDOS Device Driver                               Symbols-5
+                                                             
+
+VERSION  . . . . . . . . . . . .  	Number	0001	
+
+WPROT  . . . . . . . . . . . . .  	L NEAR	018A	CSEG
+WRDONE . . . . . . . . . . . . .  	L NEAR	0393	CSEG
+WRERR  . . . . . . . . . . . . .  	L NEAR	0188	CSEG
+WRITE  . . . . . . . . . . . . .  	L NEAR	015D	CSEG
+WRITELOOP  . . . . . . . . . . .  	L NEAR	035C	CSEG
+WRITEVERIFY  . . . . . . . . . .  	L NEAR	015D	CSEG
+
+
+   1183 Source  Lines
+   1187 Total   Lines
+    223 Symbols
+
+  38902 Bytes symbol space free
+
+      0 Warning Errors
+      0 Severe  Errors

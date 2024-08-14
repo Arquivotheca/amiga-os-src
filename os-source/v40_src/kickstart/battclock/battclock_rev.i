@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'20.4.92'
+	ENDM
+VERS	MACRO
+		dc.b	'battclock 39.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'battclock 39.3 (20.4.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: battclock 39.3 (20.4.92)',0
+	ENDM

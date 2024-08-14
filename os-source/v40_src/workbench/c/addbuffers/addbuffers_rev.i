@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'21.1.91'
+	ENDM
+VERS	MACRO
+		dc.b	'addbuffers 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'addbuffers 37.2 (21.1.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: addbuffers 37.2 (21.1.91)',0
+	ENDM

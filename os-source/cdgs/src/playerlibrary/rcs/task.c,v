@@ -1,0 +1,1273 @@
+head     1.16;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.16
+date     93.05.20.12.09.02;  author peter;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     93.04.16.16.39.59;  author peter;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     93.03.29.12.35.50;  author peter;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     93.03.19.19.40.37;  author peter;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     93.03.09.09.05.40;  author jerryh;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     93.03.08.15.11.14;  author jerryh;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     93.02.23.13.20.30;  author jerryh;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     93.02.22.15.41.21;  author jerryh;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     93.02.22.11.48.54;  author jerryh;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     93.02.19.11.42.26;  author jerryh;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     93.02.05.13.28.07;  author jerryh;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     93.01.07.10.13.02;  author jerryh;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.10.13.09.21.11;  author jerryh;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.10.12.16.42.44;  author jerryh;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.09.21.13.17.30;  author jerryh;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.09.11.13.00.54;  author jerryh;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Player task.  Main control module for simulated internal player.
+@
+
+
+1.16
+log
+@If the CDPlay request terminates early with an error, we invoke
+Stop() to synch our reported state with the actual state of affairs.
+@
+text
+@
+
+#include <exec/types.h>
+#include <exec/execbase.h>
+#include <exec/memory.h>
+#include <exec/io.h>
+#include <exec/interrupts.h>
+
+#include <devices/timer.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <clib/exec_protos.h>
+#include <pragmas/graphics_pragmas.h>
+#include <clib/graphics_protos.h>
+#include <pragmas/dos_pragmas.h>
+#include <clib/dos_protos.h>
+#include <clib/alib_protos.h>
+
+#include <gs:cd/cd.h>
+
+#include "playerlibrary.h"
+#include "defs.h"
+
+#include "task_funcs.h"
+#include "cd_funcs.h"
+#include "playlist_funcs.h"
+#include "vfd_funcs.h"
+
+
+
+/***************************************************************************/
+
+LONG __asm DiskChangeIntr(register __a1 struct ChangeData *cd);
+
+/***************************************************************************/
+/*                                                                         */
+/*  SendTimeRequest - Generate a timer request                             */
+/*                                                                         */
+/***************************************************************************/
+
+void SendTimeRequest(ULONG micros, struct V *V) {
+
+#if DEBUGGING
+    if ( V->TimeReqOutstanding )
+    {
+	kprintf("Detected reuse of Time request!\n");
+    }
+#endif
+    V->TimeReq->tr_node.io_Command = TR_ADDREQUEST;                         /* Create timer request */
+    V->TimeReq->tr_time.tv_secs    = 0;
+    V->TimeReq->tr_time.tv_micro   = micros;
+
+    SendIO(V->TimeReq);                                                     /* Send timer request */
+
+    V->TimeReqOutstanding = 1;                                              /* Timer request is outstanding */
+    }
+
+
+
+/***************************************************************************/
+/*                                                                         */
+/*  AbortTimeRequest - Abort a timer request                               */
+/*                                                                         */
+/***************************************************************************/
+
+void AbortTimeRequest(struct V *V) {
+
+    if (V->TimeReqOutstanding) {                                            /* Is there an active request to abort? */
+
+        AbortIO(V->TimeReq);                                                /* Abort IO Request */
+
+        Wait(1L << V->TimeReplyPort->mp_SigBit);                            /* Wait for message to come back */
+        while (GetMsg(V->TimeReplyPort));
+
+        V->TimeReqOutstanding = 0;                                          /* No outstanding timer request */
+        }
+    }
+
+
+
+/***************************************************************************/
+/*                                                                         */
+/*  SendSQTimeRequest - Generate a Q-Code timer request                    */
+/*                                                                         */
+/***************************************************************************/
+
+void SendSQTimeRequest(struct V *V) {
+
+#if DEBUGGING
+    if ( V->SQTimeReqOutstanding )
+    {
+	kprintf("Protected against reuse of SQTime request!\n");
+    }
+#endif
+    /* Peter 25-Mar-93:  I've seen re-used SQTime IO Requests.
+     * In particular, this happens whenever the track advances
+     * because of Intro mode (this bug is fixed in its place).
+     * Since AbortSQTimeRequest() checks first to see if there is a
+     * request out there, it's safe to call that here to ensure
+     * there is no outstanding request.  Calling it buys us a little
+     * piece of mind.
+     */
+    AbortSQTimeRequest(V);
+    V->SQTimeReq->tr_node.io_Command = TR_ADDREQUEST;                       /* Create timer request */
+    V->SQTimeReq->tr_time.tv_secs    = 0;
+    V->SQTimeReq->tr_time.tv_micro   = V->SQUpdateFreq;
+
+    SendIO(V->SQTimeReq);                                                   /* Send timer request */
+
+    V->SQTimeReqOutstanding = 1;                                            /* Timer request is outstanding */
+    }
+
+
+
+/***************************************************************************/
+/*                                                                         */
+/*  AbortSQTimeRequest - Abort a Q-Code timer request                      */
+/*                                                                         */
+/***************************************************************************/
+
+void AbortSQTimeRequest(struct V *V) {
+
+    if (V->SQTimeReqOutstanding) {                                          /* Is there an active request to abort? */
+
+        AbortIO(V->SQTimeReq);                                              /* Abort IO Request */
+
+        Wait(1L << V->SQTimeReplyPort->mp_SigBit);                          /* Wait for message to come back */
+        while (GetMsg(V->SQTimeReplyPort));
+
+        V->SQTimeReqOutstanding = 0;                                        /* No outstanding timer request */
+        }
+    }
+
+
+
+/* The CDTV keystrokes are now generated directly by the controller
+ * when the lowlevel.library SCON_AddCreateKeys feature is used.
+ * We need to be able to distinguish our echoes from real keys,
+ * so we or in 0xFF00 into the keycode.
+ */
+void EchoKey(UBYTE Keystroke, struct V *V) {
+
+struct InputEvent InputEvent;
+
+    InputEvent.ie_NextEvent        = 0;
+    InputEvent.ie_Class            = IECLASS_RAWKEY;
+    InputEvent.ie_SubClass         = 0;
+    InputEvent.ie_Code             = 0xFF00|Keystroke;
+    InputEvent.ie_Qualifier        = 0;
+    InputEvent.ie_position.ie_addr = 0;
+
+    V->InputReq->io_Command = IND_WRITEEVENT;
+    V->InputReq->io_Data    = &InputEvent;
+    V->InputReq->io_Length  = sizeof(struct InputEvent);
+    DoIO(V->InputReq);
+    }
+
+
+static UBYTE doKeyStroke( UWORD keystroke, struct V *V );
+
+struct Message *DoPlayer(struct Message *StartupMsg, struct V *V)
+{
+int   Exit = FALSE;
+
+ULONG Event;
+ULONG DiskChangeSignal;
+ULONG TimeSignal;
+ULONG SQTimeSignal;
+ULONG CDPlaySignal;
+ULONG TaskMsgSignal;
+UBYTE LastDownStroke = 0;
+
+struct Message *TaskMsg;
+
+struct ChangeData InterruptData;
+struct Interrupt  InterruptNode =
+{
+    { NULL, NULL, NT_INTERRUPT, 0, "Player Library Eject Interrupt" },
+    NULL,
+    (VOID (*)())DiskChangeIntr
+};
+
+struct PlayerState *PlayerState = &V->PlayerBase->PlayerState;
+
+    InterruptNode.is_Data      = (APTR)&InterruptData;
+    InterruptData.LibraryTask  = FindTask(NULL);
+    InterruptData.Signal       = 1L << DISKCHANGESIGBIT;
+
+    V->DiskChangeReq->io_Command = CD_ADDCHANGEINT;
+    V->DiskChangeReq->io_Length  = sizeof(struct Interrupt);
+    V->DiskChangeReq->io_Data    = (APTR)&InterruptNode;
+    SendIO(V->DiskChangeReq);
+
+    DiskChangeSignal = 1L << DISKCHANGESIGBIT;
+    TimeSignal       = 1L << V->TimeReplyPort->mp_SigBit;
+    SQTimeSignal     = 1L << V->SQTimeReplyPort->mp_SigBit;
+    CDPlaySignal     = 1L << V->CDPlayReplyPort->mp_SigBit;
+    TaskMsgSignal    = 1L << V->PlayerBase->TaskMsgPort->mp_SigBit;
+
+    GetDiskInfo(V);
+
+    ReplyMsg(StartupMsg);
+
+    while (!Exit)
+    {
+        Event = Wait(DiskChangeSignal | TimeSignal | SQTimeSignal | CDPlaySignal | TaskMsgSignal);
+
+        if (Event & DiskChangeSignal) GetDiskInfo(V);
+
+        if (Event & SQTimeSignal)
+	{
+            while (GetMsg(V->SQTimeReplyPort));
+
+            V->SQTimeReqOutstanding = 0;
+
+            if (PlayerState->PlayState == PLS_PLAYING) if (GetValidQCode(V)) UpdateVFDPosition(V);
+
+	    /* UpdateVFDPosition can discover that we need to switch
+	     * tracks, at which point it calls PlayNextPrevTrack(),
+	     * which sends an SQTimeRequest.  Thus, we have to
+	     * check before sending one out:
+	     */
+	    if ( !V->SQTimeReqOutstanding )
+	    {
+	        SendSQTimeRequest(V);
+	    }
+        }
+
+        if (Event & TimeSignal)
+	{
+            while (GetMsg(V->TimeReplyPort));
+
+            V->TimeReqOutstanding = 0;
+
+            if (PlayerState->PlayMode == PLM_SKIPFWD || PlayerState->PlayMode == PLM_SKIPREV)
+	    {
+                if (!LastDownStroke)
+		{
+                    if (PlayerState->PlayState >= PLS_PLAYING)
+		    {
+                        Play(V);
+                        PlayerState->PlayMode = PLM_NORMAL;
+                    }
+                }
+
+                else
+		{
+                    SkipTrack(LastDownStroke, V);
+                    SendTimeRequest(SKIPTRACKCOUNT, V);
+                }
+            }
+
+            else
+	    {
+                if      (LastDownStroke == PKS_FORWARD) FastForward(V);
+                else if (LastDownStroke == PKS_REVERSE) FastReverse(V);                 
+            }
+        }
+
+        if (Event & CDPlaySignal)
+	{
+            while (GetMsg(V->CDPlayReplyPort));
+
+            AbortSQTimeRequest(V);
+
+            V->CDPlayReqOutstanding = 0;
+
+            if ( ( V->CDPlayReq->io_Error ) &&
+		( V->CDPlayReq->io_Error != CDERR_ABORTED ) )
+            {
+        	/* The only expected return conditions here are "no error"
+        	 * and "command aborted".  In case of an unexpected
+        	 * error, we had better stop.  (Had we more time,
+        	 * we might figure out some way of retrying.)
+        	 *
+        	 * Currently, this condition is known to happen
+        	 * if the CD player is playing near the beginning of
+        	 * the first track and the system is jarred, sending
+        	 * the head before the first track.  We get CDERR_BadDataType
+        	 * in that case.
+        	 */
+        	Stop(V);
+            }
+
+            if (PlayerState->PlayState != PLS_STOPPED) PlayNextPrevTrack(V);
+            else                                       Stop(V);
+        }
+
+        if (Event & TaskMsgSignal)
+	{
+            while (TaskMsg = GetMsg(V->PlayerBase->TaskMsgPort))
+	    {
+                if (TaskMsg->mn_Length == MSG_SHUTDOWN)
+		{
+                    Exit = TRUE;
+                    break;
+                }
+                else if (TaskMsg->mn_Length == MSG_TIMEMODE)
+		{
+                    if (PlayerState->PlayState == PLS_SELECTED || PlayerState->PlayState == PLS_PAUSED)
+		    {
+			UpdateVFDPosition(V);
+		    }
+                    FreeMem(TaskMsg, sizeof(struct Message));
+                }
+                else
+		{
+		    UWORD keystroke = TaskMsg->mn_Length;
+
+		    if ( LastDownStroke )
+		    {
+			/* We already have a key down */
+			if ( ( keystroke & PKSF_STROKEDIR ) == PKSF_PRESS )
+			{
+			    /* We have a new down stroke, so force the old
+			     * key up...
+			     */
+			    LastDownStroke = doKeyStroke( LastDownStroke | PKSF_RELEASE, V );
+			}
+			else /* now we know it's an upstroke */
+			{
+			    if ( ( keystroke & PKSF_KEY ) != LastDownStroke )
+			    {
+				/* Ignore upstrokes of a key other than
+				 * the one we have down
+				 */
+				keystroke = 0;
+			    }
+			}
+		    }
+		    else /* we don't have a key down */
+		    {
+			if ( ( keystroke & PKSF_STROKEDIR ) == PKSF_RELEASE )
+			{
+			    /* Discard spurious upstrokes */
+			    keystroke = 0;
+			}
+		    }
+
+		    if ( keystroke )
+		    {
+			LastDownStroke = doKeyStroke( keystroke, V );
+		    }
+
+		    FreeMem(TaskMsg, sizeof(struct Message));
+		}
+            }
+        }
+    }
+
+    Stop(V);
+
+    V->DiskChangeReq->io_Command = CD_REMCHANGEINT;
+    V->DiskChangeReq->io_Length  = sizeof(struct Interrupt);
+    V->DiskChangeReq->io_Data    = (APTR)&InterruptNode;
+    DoIO(V->DiskChangeReq);
+
+    return(TaskMsg);
+}
+
+
+static UBYTE doKeyStroke( UWORD keystroke, struct V *V )
+{
+    UWORD forceplay = 0;
+    UBYTE KeyPressed;
+    struct PlayerState *PlayerState = &V->PlayerBase->PlayerState;
+    UBYTE Track;
+
+    /* We take PKS_EJECT to be equivalent to PKS_PLAYPAUSE,
+     * except that it never sends us into pause mode.  Think
+     * of it as a forced play key, which the Audio Player
+     * can use regardless of what state it's in.
+     */
+    if ((keystroke & PKSF_STROKEDIR) == PKSF_PRESS)
+    {
+	KeyPressed = keystroke & PKSF_KEY;
+    }
+    else
+    {
+	KeyPressed = 0;
+    }
+
+    if ( ( keystroke & PKSF_KEY ) == PKS_EJECT )
+    {
+	keystroke = ( keystroke & PKSF_STROKEDIR ) | PKS_PLAYPAUSE;
+	forceplay = 1;
+    }
+
+
+    EchoKey(keystroke & (PKSF_KEY | PKSF_STROKEDIR), V);
+
+    switch(keystroke)
+    {
+        case (PKS_PLAYPAUSE | PKSF_PRESS):
+
+            switch (PlayerState->PlayState)
+	    {
+                case PLS_PLAYING:
+		    if ( !forceplay ) Pause(V);
+		    break;
+                case PLS_PAUSED:   Resume(V);   break;
+                case PLS_STOPPED:
+                case PLS_NUMENTRY: 
+
+                    ObtainSemaphore(&V->PlayerBase->PlayListSemaphore);
+                    V->PlayListAllocated = 1;
+
+                    if (Track = GetFirstItem(V))
+		    {
+                        ObtainSemaphore(&V->PlayerBase->PlayStateSemaphore);
+
+                        VFD0000(V);
+                        V->PlayerBase->PlayerState.Track     = Track;
+                        V->PlayerBase->PlayerState.PlayState = PLS_SELECTED;
+
+                        ReleaseSemaphore(&V->PlayerBase->PlayStateSemaphore);
+
+                        NormalPlay(V);
+                        Play(V);
+                    }
+
+                    else
+		    {
+                        ReleaseSemaphore(&V->PlayerBase->PlayListSemaphore);
+                        V->PlayListAllocated = 0;
+                    }
+
+                    break;
+
+                case PLS_SELECTED:
+
+                    ObtainSemaphore(&V->PlayerBase->PlayListSemaphore);
+                    V->PlayListAllocated = 1;
+
+                    NormalPlay(V);
+                    Play(V);
+                    break;
+            } 
+
+            break;
+
+        case (PKS_STOP | PKSF_PRESS):
+
+            Stop(V);
+            break;
+
+        case (PKS_REVERSE | PKSF_PRESS):
+        case (PKS_FORWARD | PKSF_PRESS):
+
+            AbortTimeRequest(V);
+
+            if (PlayerState->PlayState < PLS_PLAYING
+                || PlayerState->PlayState == PLS_PAUSED
+                || PlayerState->PlayMode  == PLM_SKIPFWD
+                || PlayerState->PlayMode  == PLM_SKIPREV) SkipTrack(keystroke, V);
+
+            SendTimeRequest(FASTMODECOUNT, V);
+
+            break;
+
+        case (PKS_REVERSE | PKSF_RELEASE):
+        case (PKS_FORWARD | PKSF_RELEASE):
+
+            AbortTimeRequest(V);
+
+            if (PlayerState->PlayState >= PLS_PLAYING)
+	    {
+                if (PlayerState->PlayMode == PLM_FFWD || PlayerState->PlayMode == PLM_FREV) NormalPlay(V);
+
+                else
+		{
+                    AbortPlay(V);
+
+                    if (PlayerState->PlayMode != PLM_SKIPFWD && PlayerState->PlayMode != PLM_SKIPREV)
+		    {
+                        if ((keystroke & PKSF_KEY) == PKS_FORWARD)
+			{
+                            SkipTrack(keystroke & PKSF_KEY, V);
+			}
+                        else
+			{
+                            VFD0000(V);
+                            PlayerState->PlayMode = PLM_SKIPREV;
+                        }
+                    }
+
+                    SendTimeRequest(FASTMODECOUNT, V);
+                }
+            }
+
+            break;
+    }
+    return( KeyPressed );
+}
+
+
+LONG __asm DiskChangeIntr(register __a1 struct ChangeData *cd) {
+
+    Signal(cd->LibraryTask, cd->Signal);
+    return(0);
+    }
+
+
+
+
+void __saveds PlayerTask(void) {
+
+struct V             *V;
+struct Message       *StartupMsg;
+struct Message       *ShutdownMsg = NULL;
+struct PlayerLibrary *PlayerBase;
+
+    PlayerBase = *((struct PlayerLibrary **)(FindTask(NULL)->tc_SPLower));
+
+    Wait(1L << PlayerBase->TaskMsgPort->mp_SigBit);
+
+    while (1) {
+
+        StartupMsg = GetMsg(PlayerBase->TaskMsgPort);
+
+        if (StartupMsg) if (StartupMsg->mn_Length == MSG_STARTUP) break;
+        }
+
+    if (V = AllocMem(sizeof(struct V), MEMF_PUBLIC | MEMF_CLEAR)) {
+
+        V->PlayerBase = PlayerBase;
+
+        if (V->CDReplyPort = CreateMsgPort()) {
+
+            AddPort(V->CDReplyPort);
+
+            if (V->CDReq = CreateStdIO(V->CDReplyPort)) {
+
+                if (V->CDPlayReplyPort = CreateMsgPort()) {
+
+                    AddPort(V->CDPlayReplyPort);
+
+                    if (V->CDPlayReq = CreateStdIO(V->CDPlayReplyPort)) {
+
+                        if (V->DiskChangeReplyPort = CreateMsgPort()) {
+
+                            AddPort(V->DiskChangeReplyPort);
+
+                            if (V->DiskChangeReq = CreateStdIO(V->DiskChangeReplyPort)) {
+
+                                if (!OpenDevice("cd.device", 0, V->CDReq, 0)) {
+
+                                    V->CDPlayReq->io_Device = V->DiskChangeReq->io_Device = V->CDReq->io_Device;
+                                    V->CDPlayReq->io_Unit   = V->DiskChangeReq->io_Unit   = V->CDReq->io_Unit;
+
+                                    if (V->TimeReplyPort = CreateMsgPort()) {
+
+                                        AddPort(V->TimeReplyPort);
+
+                                        if (V->TimeReq = (struct timerequest *)
+                                            CreateExtIO(V->TimeReplyPort, sizeof(struct timerequest))) {
+
+                                            if (V->SQTimeReplyPort = CreateMsgPort()) {
+
+                                                AddPort(V->SQTimeReplyPort);
+
+                                                if (V->SQTimeReq = (struct timerequest *)
+                                                    CreateExtIO(V->SQTimeReplyPort, sizeof(struct timerequest))) {
+
+                                                    if (V->InputReplyPort = CreateMsgPort()) {
+
+                                                        if (V->InputReq = CreateStdIO(V->InputReplyPort)) {
+
+                                                            if (!OpenDevice("input.device", 0, (struct IORequest *)V->InputReq, 0)) {
+
+                                                                if (!OpenDevice("timer.device", UNIT_VBLANK, V->TimeReq, 0)) {
+
+                                                                    V->SQTimeReq->tr_node.io_Device = V->TimeReq->tr_node.io_Device;
+                                                                    V->SQTimeReq->tr_node.io_Unit   = V->TimeReq->tr_node.io_Unit;
+
+                                                                    ShutdownMsg = DoPlayer(StartupMsg, V);
+
+                                                                    CloseDevice(V->TimeReq);
+                                                                    }
+
+                                                                CloseDevice(V->InputReq);
+                                                                }
+
+                                                            DeleteStdIO(V->InputReq);
+                                                            }
+
+                                                        DeleteMsgPort(V->InputReplyPort);
+                                                        }
+
+                                                    DeleteExtIO(V->SQTimeReq);
+                                                    }
+
+                                                RemPort(V->SQTimeReplyPort);
+                                                DeleteMsgPort(V->SQTimeReplyPort);
+                                                }
+
+                                            DeleteExtIO(V->TimeReq);
+                                            }
+
+                                        RemPort(V->TimeReplyPort);
+                                        DeleteMsgPort(V->TimeReplyPort);
+                                        }
+
+                                    CloseDevice(V->CDReq);
+                                    }
+
+                                DeleteStdIO(V->DiskChangeReq);
+                                }
+
+                            RemPort(V->DiskChangeReplyPort);
+                            DeleteMsgPort(V->DiskChangeReplyPort);
+                            }
+
+                        DeleteStdIO(V->CDPlayReq);
+                        }
+
+                    RemPort(V->CDPlayReplyPort);
+                    DeleteMsgPort(V->CDPlayReplyPort);
+                    }
+
+                DeleteStdIO(V->CDReq);
+                }
+
+            RemPort(V->CDReplyPort);
+            DeleteMsgPort(V->CDReplyPort);
+            }
+
+        FreeMem(V, sizeof(struct V));
+        }
+
+    if (!ShutdownMsg) {
+
+        StartupMsg->mn_Length = 0;
+        ReplyMsg(StartupMsg);
+        }
+
+    else ReplyMsg(ShutdownMsg);
+
+    Wait(0);
+    }
+
+@
+
+
+1.15
+log
+@Now correctly handle key-rollover.  Before, it used to ignore a new key if one
+was already down.  Now, it forces the upstroke for the previous key first.
+Also, it discards upstrokes of keys other than the current down one.
+@
+text
+@d269 17
+@
+
+
+1.14
+log
+@Automatically aborts SQTime request if trying to resend when one is in
+use (safety precaution).  Now avoids resending SQTime request if
+UpdateVFDPosition() switches us to the next track.
+@
+text
+@d161 1
+d163 2
+a164 2
+struct Message *DoPlayer(struct Message *StartupMsg, struct V *V) {
+
+d173 1
+a173 2
+UBYTE KeyPressed = 0;
+UBYTE Track;
+d178 2
+a179 2
+struct Interrupt  InterruptNode = {
+
+d183 1
+a183 1
+    };
+d206 2
+a207 2
+    while (!Exit) {
+
+d212 2
+a213 2
+        if (Event & SQTimeSignal) {
+
+d225 2
+a226 1
+	    if ( !V->SQTimeReqOutstanding ) {
+d228 2
+a229 4
+	        }
+            }
+
+        if (Event & TimeSignal) {
+d231 2
+d237 6
+a242 6
+            if (PlayerState->PlayMode == PLM_SKIPFWD || PlayerState->PlayMode == PLM_SKIPREV) {
+
+                if (!KeyPressed) {
+
+                    if (PlayerState->PlayState >= PLS_PLAYING) {
+
+a244 1
+                        }
+d246 1
+d248 3
+a250 3
+                else {
+
+                    SkipTrack(KeyPressed, V);
+a251 1
+                    }
+d253 1
+a253 2
+
+            else {
+d255 4
+a258 3
+                if      (KeyPressed == PKS_FORWARD) FastForward(V);
+                else if (KeyPressed == PKS_REVERSE) FastReverse(V);                 
+                }
+d260 1
+d262 2
+a263 2
+        if (Event & CDPlaySignal) {
+
+d272 60
+d333 9
+d343 2
+a344 1
+        if (Event & TaskMsgSignal) {
+a345 1
+            while (TaskMsg = GetMsg(V->PlayerBase->TaskMsgPort)) {
+d347 20
+a366 1
+                if (TaskMsg->mn_Length == MSG_SHUTDOWN) {
+d368 5
+a372 3
+                    Exit = TRUE;
+                    break;
+                    }
+a373 1
+                else if (TaskMsg->mn_Length == MSG_TIMEMODE) {
+d375 1
+a375 1
+                    if (PlayerState->PlayState == PLS_SELECTED || PlayerState->PlayState == PLS_PAUSED) UpdateVFDPosition(V);
+d377 23
+a399 2
+                    FreeMem(TaskMsg, sizeof(struct Message));
+                    }
+d401 1
+a401 2
+                else if (!KeyPressed || (KeyPressed && (TaskMsg->mn_Length & PKSF_KEY)       == KeyPressed
+                                                    && (TaskMsg->mn_Length & PKSF_STROKEDIR) == PKSF_RELEASE)) {
+d403 3
+a405 2
+		    UWORD keystroke = TaskMsg->mn_Length;
+		    UWORD forceplay = 0;
+d407 5
+a411 7
+		    /* We take PKS_EJECT to be equivalent to PKS_PLAYPAUSE,
+		     * except that it never sends us into pause mode.  Think
+		     * of it as a forced play key, which the Audio Player
+		     * can use regardless of what state it's in.
+		     */
+                    if ((keystroke & PKSF_STROKEDIR) == PKSF_PRESS) KeyPressed = keystroke & PKSF_KEY;
+                    else                                                     KeyPressed = 0;
+d413 1
+a413 4
+		    if ( ( keystroke & PKSF_KEY ) == PKS_EJECT ) {
+			keystroke = ( keystroke & PKSF_STROKEDIR ) | PKS_PLAYPAUSE;
+			forceplay = 1;
+			}
+d415 1
+d417 2
+a418 1
+                    EchoKey(keystroke & (PKSF_KEY | PKSF_STROKEDIR), V);
+d420 4
+a423 1
+                    switch(keystroke) {
+d425 1
+a425 96
+                        case (PKS_PLAYPAUSE | PKSF_PRESS):
+
+                            switch (PlayerState->PlayState) {
+
+                                case PLS_PLAYING:
+				    if ( !forceplay ) Pause(V);
+				    break;
+                                case PLS_PAUSED:   Resume(V);   break;
+                                case PLS_STOPPED:
+                                case PLS_NUMENTRY: 
+
+                                    ObtainSemaphore(&V->PlayerBase->PlayListSemaphore);
+                                    V->PlayListAllocated = 1;
+
+                                    if (Track = GetFirstItem(V)) {
+
+                                        ObtainSemaphore(&V->PlayerBase->PlayStateSemaphore);
+
+                                        VFD0000(V);
+                                        V->PlayerBase->PlayerState.Track     = Track;
+                                        V->PlayerBase->PlayerState.PlayState = PLS_SELECTED;
+
+                                        ReleaseSemaphore(&V->PlayerBase->PlayStateSemaphore);
+
+                                        NormalPlay(V);
+                                        Play(V);
+                                        }
+
+                                    else {
+
+                                        ReleaseSemaphore(&V->PlayerBase->PlayListSemaphore);
+                                        V->PlayListAllocated = 0;
+                                        }
+
+                                    break;
+
+                                case PLS_SELECTED:
+
+                                    ObtainSemaphore(&V->PlayerBase->PlayListSemaphore);
+                                    V->PlayListAllocated = 1;
+
+                                    NormalPlay(V);
+                                    Play(V);
+                                    break;
+                                } 
+
+                            break;
+
+                        case (PKS_STOP | PKSF_PRESS):
+
+                            Stop(V);
+                            break;
+
+                        case (PKS_REVERSE | PKSF_PRESS):
+                        case (PKS_FORWARD | PKSF_PRESS):
+
+                            AbortTimeRequest(V);
+
+                            if (PlayerState->PlayState < PLS_PLAYING
+                                || PlayerState->PlayState == PLS_PAUSED
+                                || PlayerState->PlayMode  == PLM_SKIPFWD
+                                || PlayerState->PlayMode  == PLM_SKIPREV) SkipTrack(keystroke, V);
+
+                            SendTimeRequest(FASTMODECOUNT, V);
+
+                            break;
+
+                        case (PKS_REVERSE | PKSF_RELEASE):
+                        case (PKS_FORWARD | PKSF_RELEASE):
+
+                            AbortTimeRequest(V);
+
+                            if (PlayerState->PlayState >= PLS_PLAYING) {
+
+                                if (PlayerState->PlayMode == PLM_FFWD || PlayerState->PlayMode == PLM_FREV) NormalPlay(V);
+
+                                else {
+
+                                    AbortPlay(V);
+
+                                    if (PlayerState->PlayMode != PLM_SKIPFWD && PlayerState->PlayMode != PLM_SKIPREV) {
+
+                                        if ((keystroke & PKSF_KEY) == PKS_FORWARD)
+
+                                            SkipTrack(keystroke & PKSF_KEY, V);
+
+                                        else {
+
+                                            VFD0000(V);
+                                            PlayerState->PlayMode = PLM_SKIPREV;
+                                            }
+                                        }
+
+                                    SendTimeRequest(FASTMODECOUNT, V);
+                                    }
+                                }
+d427 42
+a468 1
+                            break;
+d470 1
+d472 1
+a472 2
+                    FreeMem(TaskMsg, sizeof(struct Message));
+                    }
+a474 1
+        }
+d476 1
+a476 8
+    Stop(V);
+
+    V->DiskChangeReq->io_Command = CD_REMCHANGEINT;
+    V->DiskChangeReq->io_Length  = sizeof(struct Interrupt);
+    V->DiskChangeReq->io_Data    = (APTR)&InterruptNode;
+    DoIO(V->DiskChangeReq);
+
+    return(TaskMsg);
+d478 2
+a479 1
+
+@
+
+
+1.13
+log
+@Now understands PKS_EJECT's value to mean absolute play, i.e. like PKS_PLAYPAUSE
+but never causes pause.  Echoed keys now contain 0xFF in the high byte of
+the keycode, so they're distinguishable from rawkey codes generated by
+lowlevel's SCON_AddCreateKeys.
+@
+text
+@d45 6
+d91 15
+d220 8
+a227 1
+            SendSQTimeRequest(V);
+@
+
+
+1.12
+log
+@Didn't fix what I thought I fixed.  Sometimes I can be
+such an idiot.
+@
+text
+@d117 5
+d129 1
+a129 1
+    InputEvent.ie_Code             = Keystroke;
+d265 9
+a273 1
+                    if ((TaskMsg->mn_Length & PKSF_STROKEDIR) == PKSF_PRESS) KeyPressed = TaskMsg->mn_Length & PKSF_KEY;
+d276 7
+a282 1
+                    EchoKey(TaskMsg->mn_Length & (PKSF_KEY | PKSF_STROKEDIR), V);
+d284 1
+a284 1
+                    switch(TaskMsg->mn_Length) {
+d290 3
+a292 1
+                                case PLS_PLAYING:  Pause(V);    break;
+d347 1
+a347 1
+                                || PlayerState->PlayMode  == PLM_SKIPREV) SkipTrack(TaskMsg->mn_Length, V);
+d368 1
+a368 1
+                                        if ((TaskMsg->mn_Length & PKSF_KEY) == PKS_FORWARD)
+d370 1
+a370 1
+                                            SkipTrack(TaskMsg->mn_Length & PKSF_KEY, V);
+@
+
+
+1.11
+log
+@Fixed a bug where an event could go unnoticed.
+@
+text
+@d247 1
+a254 1
+                    break;
+@
+
+
+1.10
+log
+@removed kprintf.
+@
+text
+@a246 1
+                    break;
+d249 1
+a249 1
+                if (TaskMsg->mn_Length == MSG_TIMEMODE) {
+d257 2
+a258 2
+                if (!KeyPressed || (KeyPressed && (TaskMsg->mn_Length & PKSF_KEY) == KeyPressed
+                                               && (TaskMsg->mn_Length & PKSF_STROKEDIR) == PKSF_RELEASE)) {
+@
+
+
+1.9
+log
+@took out kprintf.
+@
+text
+@a462 2
+                                                                    kprintf("DoPlayer\n");
+
+@
+
+
+1.8
+log
+@ << >> keys now work properly when audio is paused.
+@
+text
+@a399 2
+    kprintf("PlayerTaskRunning\n");
+
+@
+
+
+1.7
+log
+@Fixed a bug when play button is hit and play list is empty.
+@
+text
+@d324 4
+a327 3
+                            if (PlayerState->PlayState < PLS_PLAYING 
+                                || PlayerState->PlayMode == PLM_SKIPFWD
+                                || PlayerState->PlayMode == PLM_SKIPREV) SkipTrack(TaskMsg->mn_Length, V);
+@
+
+
+1.6
+log
+@SubmitKeystroke() now echos key back through input chain.
+@
+text
+@d293 5
+@
+
+
+1.5
+log
+@uses cd.device instead of cdtv.device.  Minor changes for new device.
+@
+text
+@d10 1
+d117 1
+d119 1
+d121 15
+d264 2
+d447 1
+a447 1
+                                                    if (!OpenDevice("timer.device", UNIT_VBLANK, V->TimeReq, 0)) {
+d449 1
+a449 2
+                                                        V->SQTimeReq->tr_node.io_Device = V->TimeReq->tr_node.io_Device;
+                                                        V->SQTimeReq->tr_node.io_Unit   = V->TimeReq->tr_node.io_Unit;
+d451 16
+a466 1
+                                                        kprintf("DoPlayer\n");
+d468 2
+a469 1
+                                                        ShutdownMsg = DoPlayer(StartupMsg, V);
+d471 1
+a471 1
+                                                        CloseDevice(V->TimeReq);
+@
+
+
+1.4
+log
+@Stops CD from playing before exiting.
+@
+text
+@d20 1
+a20 1
+#include <cdtv/cdtv.h>
+d189 1
+a189 1
+                    if (PlayerState->PlayState == PLS_PLAYING) {
+a193 6
+
+                    else if (PlayerState->PlayState == PLS_PAUSED) {
+
+                        SeekPaused(V);
+                        PlayerState->PlayMode = PLM_NORMAL;
+                        }
+d373 2
+d408 1
+a408 1
+                                if (!OpenDevice("cdtv.device", 0, V->CDReq, 0)) {
+d431 2
+@
+
+
+1.3
+log
+@Made library work from disk.
+@
+text
+@d350 2
+@
+
+
+1.2
+log
+@Resource is now a library.
+@
+text
+@d118 1
+a118 1
+struct Message *DoPlayer(struct V *V) {
+a122 1
+BYTE  DiskChangeSigBit;
+d141 1
+a141 1
+struct PlayerState   *PlayerState   = &V->PlayerBase->PlayerState;
+d144 2
+a145 2
+    InterruptData.LibraryTask  = V->PlayerBase->PlayerTask;
+    InterruptData.Signal       = (1L << (DiskChangeSigBit = AllocSignal(-1)));
+d152 1
+a152 1
+    DiskChangeSignal = 1L << DiskChangeSigBit;
+d160 1
+a160 1
+    Wait(TaskMsgSignal);
+a161 9
+    while (TaskMsg = GetMsg(V->PlayerBase->TaskMsgPort)) {
+
+        if (TaskMsg->mn_Length == MSG_STARTUP) {
+
+            ReplyMsg(TaskMsg);
+            break;
+            }
+        }
+
+d351 4
+a354 6
+    V->CDReq->io_Command = CD_REMCHANGEINT;
+    V->CDReq->io_Length  = sizeof(struct Interrupt);
+    V->CDReq->io_Data    = (APTR)&InterruptNode;
+    DoIO(V->CDReq);
+
+    WaitIO(V->DiskChangeReq);
+d372 4
+a375 2
+struct V       *V;
+struct Message *ShutdownMsg;
+d377 11
+d390 1
+a390 1
+        V->PlayerBase = *((struct PlayerLibrary **)(FindTask(NULL)->tc_SPLower));
+d434 1
+a434 1
+                                                        ShutdownMsg = DoPlayer(V);
+d480 9
+a488 1
+    ReplyMsg(ShutdownMsg);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d22 1
+a22 1
+#include "playerresource.h"
+d137 1
+a137 1
+    { NULL, NULL, NT_INTERRUPT, 0, "Player Resource Eject Interrupt" },
+d145 1
+a145 1
+    InterruptData.ResourceTask = V->PlayerBase->PlayerTask;
+d375 1
+a375 1
+    Signal(cd->ResourceTask, cd->Signal);
+d389 1
+a389 1
+        V->PlayerBase = *((struct PlayerResource **)(FindTask(NULL)->tc_SPLower));
+@

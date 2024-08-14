@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'5.4.91'
+	ENDM
+VERS	MACRO
+		dc.b	'wait 37.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'wait 37.3 (5.4.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: wait 37.3 (5.4.91)',0
+	ENDM

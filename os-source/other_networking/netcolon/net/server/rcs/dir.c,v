@@ -1,0 +1,1025 @@
+head     1.13;
+branch   ;
+access   ;
+symbols  r37-12:1.13 v37r8:1.13 Distillery:1.13;
+locks    ; strict;
+comment  @ * @;
+
+
+1.13
+date     91.01.15.01.06.21;  author J_Toebes;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     91.01.11.10.46.57;  author J_Toebes;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     91.01.11.00.00.39;  author J_Toebes;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.12.31.15.27.48;  author J_Toebes;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.11.29.01.59.59;  author J_Toebes;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.11.28.01.54.04;  author J_Toebes;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.23.15.07.32;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.05.06.56.09;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.10.25.23.27.44;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.10.18.00.26.28;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.10.16.00.54.42;  author John_Toebes;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.03.01.03;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.00.07;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@directory manipulation routines
+@
+
+
+1.13
+log
+@Implement pseudo locks on handlers.
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987, 1988 The Software Distillery.  All Rights  */
+/* |. o.| || Reserved.  This program may not be distributed without the    */
+/* | .  | || permission of the authors:                            BBS:    */
+/* | o  | ||   John Toebes     Doug Walker    Dave Baker                   */
+/* |  . |//                                                                */
+/* ======                                                                  */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* Directory Manipulation */
+/*  RmtCreateDir RmtExamine RmtExNext RmtParent */
+/*
+**      $Filename: dir.c $ 
+**      $Author: J_Toebes $
+**      $Revision: 1.12 $
+**      $Date: 91/01/11 10:46:57 $
+**      $Log:	dir.c,v $
+ * Revision 1.12  91/01/11  10:46:57  J_Toebes
+ * Cleanup support for uplevel reference limits.  At the same time corrected
+ * problems where cd net:john/assigned  would not return the asigned name
+ * of the object
+ * 
+ * Revision 1.11  91/01/11  00:00:39  J_Toebes
+ * Added code to compress the FIB portion of the return on an ACT_EXAMINE/EXNEXT
+ * 
+ * Revision 1.10  90/12/31  15:27:48  J_Toebes
+ * Implement security restrictions for read/write access and prevention of
+ * moving up too many levels.
+ * Elmininated bogus Permit() call.
+ * Changed LCHAIN structure to an ELOCK.
+ * 
+ * Revision 1.9  90/11/29  01:59:59  J_Toebes
+ * Added chaining of locks for tracking.
+ * 
+ * Revision 1.8  90/11/28  01:54:04  J_Toebes
+ * Added support for icons.
+ * 
+ * Revision 1.7  90/11/23  15:07:32  J_Toebes
+ * Added in session support of access control lists.
+ * 
+ * Revision 1.6  90/11/05  06:56:09  J_Toebes
+ * Major rewrite to make server multi-threaded with support for multiple
+ * devices.  At this point in time it is not debugged and the concept of
+ * sessions is missing.
+ * 
+**/
+#include "server.h"
+
+ACTFN(RmtCreateDir)
+{
+   /* Arg1 - Lock */
+   /* Arg2 - name */
+   /* Arg3 (optional) Attributes */
+   struct MsgPort *port;
+   BUG(("RmtCreateDir\n"));
+   BUGBSTR("Creating directory '%s'\n", spkt->sp_RP->DataP);
+
+   if ((port = GetRDevice(global, spkt, (ELOCK)spkt->sp_Pkt.dp_Arg1,
+                                  spkt->sp_RP->DataP, ATTEMPT_WRITE)) == NULL)
+   {
+      return;
+   }
+   spkt->sp_Pkt.dp_Arg2 = (LONG)MKBADDR(spkt->sp_RP->DataP);
+   spkt->sp_Pkt.dp_Arg3 = spkt->sp_RP->Arg3;
+
+   Dispatch(global, spkt, ACTION_RETLOCKNAME, port);
+}
+
+ACTFN(RmtNameLockRet)
+{
+   BPTR lock;
+   lock = spkt->sp_Pkt.dp_Res1;
+   spkt->sp_RP->Arg2 = spkt->sp_Pkt.dp_Res2;
+
+   /* Now get the full pathname of this lock so we can reestablish it */
+   if(lock && spkt->sp_RP->Arg4)
+   {
+      spkt->sp_RP->DLen = 1;
+      chainlock(global, spkt, lock);
+      NameNode(global, spkt, lock);
+   }
+   else
+   {
+      chainlock(global, spkt, lock);
+      spkt->sp_RP->DLen = 0;
+   }
+}
+
+ACTFN(RmtExamine)
+{
+   /* Arg1: Lock of object to examine */
+   /* Arg2: FileInfoBlock to fill in */
+
+   struct FileInfoBlock *fib;
+   struct DEVLIST *dev;
+   long key;
+   int flag;
+   ELOCK elock;
+
+   BUG(("RmtExamine/RmtExNext - lock %lx type %ld\n", spkt->sp_RP->Arg1, spkt->sp_RP->Type));
+
+   fib = (struct FileInfoBlock *)spkt->sp_RP->DataP;
+   spkt->sp_Pkt.dp_Arg2 = (LONG)MKBADDR(fib);
+   spkt->sp_Pkt.dp_Arg7 = 0;
+
+   if (spkt->sp_RP->Type == ACTION_EXAMINE_OBJECT ||
+       (spkt->sp_RP->DLen < sizeof(*fib)))
+      memset(fib->fib_Reserved, 0, sizeof(fib->fib_Reserved));
+
+   elock = (ELOCK)spkt->sp_Pkt.dp_Arg1;
+   switch(testlock(global, spkt, elock))
+   {
+      case LOCK_ROOT:
+         if (spkt->sp_RP->Type == ACTION_EXAMINE_OBJECT)
+         {
+            BUG(("Examine on root\n"));
+            fib->fib_DiskKey = NULL;
+            fib->fib_DirEntryType = fib->fib_EntryType = 2;
+            strcpy(fib->fib_FileName, spkt->sp_Ses->name);
+            fib->fib_Protection = FIBF_WRITE|FIBF_DELETE|FIBF_EXECUTE;
+            fib->fib_Size = 0;
+            fib->fib_NumBlocks = 0;
+            fib->fib_Comment[0] = 0;
+            spkt->sp_RP->Arg1 = DOSTRUE;
+            break;
+         }
+         dev = spkt->sp_Ses->devices;
+         BUG(("Exnext on root\n"));
+         flag = 0;
+         if (fib->fib_DiskKey)
+         {
+            flag = fib->fib_DiskKey & 1;
+            key = fib->fib_DiskKey & ~1;
+            while(dev != NULL && ((long)dev != key))
+               dev = dev->next;
+            if (dev && !flag) dev = dev->next;
+         }
+         if (dev == NULL)
+         {
+            spkt->sp_RP->Arg1 = DOSFALSE;
+            spkt->sp_RP->Arg2 = ERROR_NO_MORE_ENTRIES;
+            break;
+         }
+         /* If flag is set, it is time for us to look for the .info file */
+         /* We will first attempt to find a file of the form:            */
+         /* devs:networks/icons/<name>.info                              */
+         /* If that fails we will then look for one of the form          */
+         /* devs:networks/icons/__default__.info                         */
+         /* Failing that we will ignore the .info file and go on to the  */
+         /* next entry in the chain.  This will be slightly tricky to    */
+         /* make this work.                                              */
+         if (flag)
+         {
+            spkt->sp_Pkt.dp_Type = ACTION_LOCATE_OBJECT;
+            spkt->sp_Pkt.dp_Arg1 = global->configlock;
+            spkt->sp_Pkt.dp_Arg2 = MKBADDR(spkt->sp_RP->DataP);
+            spkt->sp_Pkt.dp_Arg3 = SHARED_LOCK;
+            spkt->sp_Pkt.dp_Arg4 = (long)dev;
+            strcpy(spkt->sp_RP->DataP, "\x0Bicons/"); /* Account for icons/.info */
+            strcpy(spkt->sp_RP->DataP+7, dev->name);
+            spkt->sp_RP->DataP[0] += dev->len;
+            strcpy(spkt->sp_RP->DataP+7+dev->len, ".info");
+            spkt->sp_RP->DLen = sizeof(struct FileInfoBlock);
+
+            Dispatch(global, spkt, ACTION_FINDINFO,
+                     ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+         }
+         else
+         {
+            fib->fib_DiskKey = (long)dev;
+            if (global->configlock) fib->fib_DiskKey |= 1;
+            fib->fib_DirEntryType = fib->fib_EntryType = dev->type;
+            strcpy(fib->fib_FileName, &dev->len);
+            fib->fib_Protection = dev->protect;
+            fib->fib_Size = 0;
+            fib->fib_NumBlocks = 0;
+            fib->fib_Comment[0] = 0;
+         }
+         spkt->sp_RP->Arg1 = DOSTRUE;
+         break;
+
+      case LOCK_PSEUDO:
+         if (spkt->sp_RP->Type == ACTION_EXAMINE_NEXT)
+         {
+            spkt->sp_RP->Arg1 = DOSFALSE;
+            spkt->sp_RP->Arg2 = ERROR_NO_MORE_ENTRIES;
+            break;
+         }
+         /* Figure out which device it was we wanted to deal with */
+         for(flag = elock->info.a.devpos, dev = spkt->sp_Ses->devices;
+             flag > 0 && dev != NULL; dev = dev->next, flag--);
+         if (dev == NULL)
+         {
+            spkt->sp_RP->Arg1 = DOS_FALSE;
+            spkt->sp_RP->Arg2 = ERROR_OBJECT_NOT_FOUND;
+            break;
+         }
+      
+         fib->fib_DiskKey = (long)dev;
+         fib->fib_DirEntryType = fib->fib_EntryType = dev->type;
+         strcpy(fib->fib_FileName, &dev->len);
+         fib->fib_Protection = dev->protect;
+         fib->fib_Size = 0;
+         fib->fib_NumBlocks = 0;
+         fib->fib_Comment[0] = 0;
+         break;
+
+      case LOCK_NORMAL:
+         if (spkt->sp_RP->Type == ACTION_EXAMINE_OBJECT &&
+             elock->info.a.depth == 0)
+         {
+            spkt->sp_Pkt.dp_Arg7 = elock->info.all+1;
+         }
+      
+         spkt->sp_Pkt.dp_Arg1 = elock->lock;
+         spkt->sp_RP->DLen = sizeof(struct FileInfoBlock);
+      
+         Dispatch(global, spkt, ACTION_RETFIB,
+                               ((struct FileLock *)BADDR(elock->lock))->fl_Task);
+         break;
+   }
+}
+
+ACTFN(RmtFindInfo)
+{
+   struct FileInfoBlock *fib;
+   fib = (struct FileInfoBlock *)spkt->sp_RP->DataP;
+   if (spkt->sp_Pkt.dp_Res1)
+   {
+      spkt->sp_Pkt.dp_Type = ACTION_EXAMINE_OBJECT;
+      spkt->sp_Pkt.dp_Arg1 = spkt->sp_Pkt.dp_Res1;
+      spkt->sp_Pkt.dp_Arg2 = (LONG)MKBADDR(fib);
+      /* Lock succeeded */
+      Dispatch(global, spkt, ACTION_RETINFO, 
+                     ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+   }
+   else if (strcmp(spkt->sp_RP->DataP, DEFICON))
+   {
+      strcpy(spkt->sp_RP->DataP, DEFICON);
+      Dispatch(global, spkt, ACTION_FINDINFO,
+                     ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+   }
+   else
+   {
+      /* End of the road on this trial, default to no .info and go on to */
+      /* the next entry                                                  */
+      spkt->sp_RP->Arg1 = ROOTLOCK;
+      spkt->sp_RP->Type = ACTION_EXAMINE_NEXT;
+      fib->fib_DiskKey = spkt->sp_Pkt.dp_Arg4;
+      RmtExamine(global, spkt);
+   }
+}
+
+ACTFN(RmtDoneInfo)
+{
+   struct FileInfoBlock *fib;
+   struct DEVLIST *dev;
+
+   spkt->sp_RP->Arg1 = spkt->sp_Pkt.dp_Res1;
+   spkt->sp_RP->Arg2 = spkt->sp_Pkt.dp_Res2;
+   spkt->sp_RP->DLen = sizeof(struct FileInfoBlock);
+   fib = (struct FileInfoBlock *)spkt->sp_RP->DataP;
+   fib->fib_DiskKey = spkt->sp_Pkt.dp_Arg4;
+   dev = (struct DEVLIST *)fib->fib_DiskKey;
+   /* We also have to correct the name! */
+   strcpy(fib->fib_FileName, &dev->len);
+   strcpy(fib->fib_FileName+1+dev->len, ".info");
+   fib->fib_FileName[0] += 5;
+   spkt->sp_Pkt.dp_Type = ACTION_FREE_LOCK;
+   Dispatch(global, spkt, ACTION_RETFIB,
+                  ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+}
+
+ACTFN(RmtRetFIB)
+{
+   struct FileInfoBlock *fib;
+   ACINFO info;
+   struct DEVLIST *dev;
+
+   fib = (struct FileInfoBlock *)spkt->sp_RP->DataP;
+
+   if ((info.all = spkt->sp_Pkt.dp_Arg7) != 0)
+   {
+      for(dev = spkt->sp_Ses->devices; info.a.devpos > 0 && dev != NULL;
+                       dev = dev->next, info.a.devpos--);
+      if (dev == NULL)
+      {
+         spkt->sp_RP->Arg1 = DOSFALSE;
+         spkt->sp_RP->Arg2 = ERROR_INVALID_LOCK;
+      }
+      fib->fib_DirEntryType = fib->fib_EntryType = dev->type;
+      strcpy(fib->fib_FileName, &dev->len);
+      fib->fib_Protection = dev->protect;
+      fib->fib_Size = 0;
+      fib->fib_NumBlocks = 0;
+      fib->fib_Comment[0] = 0;
+   }
+
+   if (fib->fib_Comment[0] == 0)
+#if 0
+   /* We really don't need this check because it can't really occur. The
+      reserved field is reserved because the original BCPL DOS commands did
+      not allocate more than 80 bytes for the comment field that used to extend
+      into what is now the reserved field.  However we leave the code here 
+      if someone wants to be paranoid about it.                                 */
+ &&
+       !memcmp(fib->fib_Reserved,"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+                                 "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 36))
+#endif
+   {
+      spkt->sp_RP->DLen -= (sizeof(fib->fib_Comment)+sizeof(fib->fib_Reserved))-1;
+   }
+
+   if (spkt->sp_Pkt.dp_Type != ACTION_FREE_LOCK)
+   {
+      spkt->sp_RP->Arg1 = spkt->sp_Pkt.dp_Res1;
+      spkt->sp_RP->Arg2 = spkt->sp_Pkt.dp_Res2;
+   }
+}
+
+ACTFN(RmtParent)
+{
+   /* Arg1 - Lock */
+   ELOCK elock;
+
+   BUG(("RmtParent\n"));
+
+   elock = (ELOCK)spkt->sp_Pkt.dp_Arg1;
+
+   switch(testlock(global, spkt, elock))
+   {
+      case LOCK_ROOT:
+         spkt->sp_RP->Arg1 = 0;
+         spkt->sp_RP->Arg2 = 0;
+         break;
+
+      case LOCK_PSEUDO:
+      case LOCK_NORMAL:
+         if (elock->info.a.depth <= 0)
+         {
+            spkt->sp_Pkt.dp_Res1 = 0;
+            RmtParentRet(global, spkt);
+            break;
+         }
+         spkt->sp_Pkt.dp_Arg1 = elock->lock;
+         spkt->sp_Pkt.dp_Arg7 = elock->info.all-1;  /* Reduce the depth */
+      
+         Dispatch(global, spkt, ACTION_RETPARENT,
+                 ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+         break;
+   }
+}
+
+ACTFN(RmtParentRet)
+{      
+   spkt->sp_RP->Arg2 = spkt->sp_Pkt.dp_Res2;
+
+   if (spkt->sp_Pkt.dp_Res1 == 0)
+   {
+      spkt->sp_RP->Arg1 = ROOTLOCK;
+      if (spkt->sp_RP->Arg4)
+      {
+         spkt->sp_RP->DLen = 2;
+         spkt->sp_RP->DataP[0] = 1;
+         spkt->sp_RP->DataP[1] = ':';
+      }
+      return;
+   }
+   chainlock(global, spkt, spkt->sp_RP->Arg1);
+   RmtNameLockRet(global, spkt);
+}
+@
+
+
+1.12
+log
+@Cleanup support for uplevel reference limits.  At the same time corrected
+problems where cd net:john/assigned  would not return the asigned name
+of the object
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.11 $
+**      $Date: 91/01/11 00:00:39 $
+d17 5
+d109 2
+a110 1
+   if (spkt->sp_RP->Arg1 == ROOTLOCK)
+d112 14
+a125 14
+      if (spkt->sp_RP->Type == ACTION_EXAMINE_OBJECT)
+      {
+         BUG(("Examine on root\n"));
+         fib->fib_DiskKey = NULL;
+         fib->fib_DirEntryType = fib->fib_EntryType = 2;
+         strcpy(fib->fib_FileName, spkt->sp_Ses->name);
+         fib->fib_Protection = FIBF_WRITE|FIBF_DELETE|FIBF_EXECUTE;
+         fib->fib_Size = 0;
+         fib->fib_NumBlocks = 0;
+         fib->fib_Comment[0] = 0;
+         spkt->sp_RP->Arg1 = DOSTRUE;
+      }
+      else
+      {
+d141 1
+a141 1
+            return;
+d179 27
+a205 5
+      }
+      return;
+   }
+   
+   elock = (ELOCK)spkt->sp_Pkt.dp_Arg1;
+d207 13
+a219 4
+   if (spkt->sp_RP->Type == ACTION_EXAMINE_OBJECT &&
+       elock->info.a.depth == 0)
+   {
+      spkt->sp_Pkt.dp_Arg7 = elock->info.all+1;
+a220 6
+
+   spkt->sp_Pkt.dp_Arg1 = elock->lock;
+   spkt->sp_RP->DLen = sizeof(struct FileInfoBlock);
+
+   Dispatch(global, spkt, ACTION_RETFIB,
+                         ((struct FileLock *)BADDR(elock->lock))->fl_Task);
+a326 6
+   if (spkt->sp_RP->Arg1 == ROOTLOCK)
+   {
+      spkt->sp_RP->Arg1 = 0;
+      spkt->sp_RP->Arg2 = 0;
+      return;
+   }
+d328 2
+a329 1
+   if (elock->info.a.depth <= 0)
+d331 19
+a349 3
+      spkt->sp_Pkt.dp_Res1 = 0;
+      RmtParentRet(global, spkt);
+      return;
+a350 5
+   spkt->sp_Pkt.dp_Arg1 = elock->lock;
+   spkt->sp_Pkt.dp_Arg7 = elock->info.all-1;  /* Reduce the depth */
+
+   Dispatch(global, spkt, ACTION_RETPARENT,
+           ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+@
+
+
+1.11
+log
+@Added code to compress the FIB portion of the return on an ACT_EXAMINE/EXNEXT
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.10 $
+**      $Date: 90/12/31 15:27:48 $
+d17 3
+d98 1
+d179 6
+d245 21
+a266 1
+   fib = spkt->sp_RP->DataP;
+d303 1
+a303 1
+   if (elock->depth <= 0)
+d310 1
+a310 1
+   spkt->sp_Pkt.dp_Arg7 = (elock->class << 8) | (elock->depth-1);
+@
+
+
+1.10
+log
+@Implement security restrictions for read/write access and prevention of
+moving up too many levels.
+Elmininated bogus Permit() call.
+Changed LCHAIN structure to an ELOCK.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.9 $
+**      $Date: 90/11/29 01:59:59 $
+d17 6
+d96 4
+d178 1
+a178 1
+   Dispatch(global, spkt, ACTION_RETURN,
+d228 1
+a228 1
+   Dispatch(global, spkt, ACTION_RWMORE3,
+d230 27
+@
+
+
+1.9
+log
+@Added chaining of locks for tracking.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.8 $
+**      $Date: 90/11/28 01:54:04 $
+d17 3
+d43 2
+a44 2
+   if ((port = GetRDevice(global, spkt, spkt->sp_Pkt.dp_Arg1,
+                                  spkt->sp_RP->DataP)) == NULL)
+d56 2
+a57 1
+   spkt->sp_RP->Arg1 = spkt->sp_Pkt.dp_Res1;
+d61 1
+a61 1
+   if(spkt->sp_RP->Arg1 && spkt->sp_RP->Arg4)
+a62 2
+      BPTR lock;
+      lock = spkt->sp_RP->Arg1;
+d69 1
+a69 1
+      chainlock(global, spkt, spkt->sp_RP->Arg1);
+d83 1
+a158 1
+         Permit();
+d162 4
+a165 1
+    
+d169 1
+a169 1
+            ((struct FileLock *)BADDR(spkt->sp_Pkt.dp_Arg1))->fl_Task);
+d225 1
+d235 9
+a243 1
+   spkt->sp_Pkt.dp_Arg1 = spkt->sp_RP->Arg1;
+a250 1
+   spkt->sp_RP->Arg1 = spkt->sp_Pkt.dp_Res1;
+d253 1
+a253 1
+   if (spkt->sp_RP->Arg1 == 0)
+a266 1
+
+@
+
+
+1.8
+log
+@Added support for icons.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.7 $
+**      $Date: 90/11/23 15:07:32 $
+d17 3
+d62 1
+d67 1
+d251 1
+a251 1
+
+@
+
+
+1.7
+log
+@Added in session support of access control lists.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.6 $
+**      $Date: 90/11/05 06:56:09 $
+d17 3
+d74 2
+d100 1
+d103 3
+a105 1
+            while(dev != NULL && ((long)dev != fib->fib_DiskKey))
+d107 1
+a107 1
+            if (dev) dev = dev->next;
+d115 35
+a149 8
+         
+         fib->fib_DiskKey = (long)dev;
+         fib->fib_DirEntryType = fib->fib_EntryType = dev->type;
+         strcpy(fib->fib_FileName, &dev->len);
+         fib->fib_Protection = dev->protect;
+         fib->fib_Size = 0;
+         fib->fib_NumBlocks = 0;
+         fib->fib_Comment[0] = 0;
+d162 50
+d232 3
+@
+
+
+1.6
+log
+@Major rewrite to make server multi-threaded with support for multiple
+devices.  At this point in time it is not debugged and the concept of
+sessions is missing.
+@
+text
+@d14 2
+a15 2
+**      $Revision: 1.4 $
+**      $Date: 90/11/04 17:36:27 $
+d17 5
+d70 1
+a70 1
+   struct DosList *dev, *bdev;
+d82 1
+a82 1
+         fib->fib_DiskKey = 0;
+d84 1
+a84 5
+#if 0
+         strcpy(fib->fib_FileName, global->ses->name);
+#else
+         strcpy(fib->fib_FileName, "\0x07RmtRoot");
+#endif
+d93 1
+a93 4
+         /* We are doing an examine next loop through the entries in the */
+         /* Directory.  We need to walk the Device list here for the     */
+         /* operation.  For now we are bad boys and walk it under forbid */
+         /* With 2.0 we should use the new doslist access routines       */
+a94 5
+         Forbid();
+         dev = (struct DosList *)
+                BADDR(((struct DosInfo *)
+                           BADDR(((struct RootNode *)DOSBase->dl_Root)->rn_Info)
+                           )->di_DevInfo);
+d97 3
+a99 13
+            bdev = dev;
+            while(dev != NULL && dev != (struct DosList *)fib->fib_DiskKey)
+            {
+               dev = (struct DosList *)(BADDR(dev->dol_Next));
+            }
+            /* If we didn't find the node on the list, it means that it has  */
+            /* been deleted in the mean time.  This is fine, we just pretend */
+            /* that it was the first one and start from the beginning of the */
+            /* list again.  This does mean that they might see the same one  */
+            /* more than once.                                               */
+            if (dev == NULL) dev = bdev;
+DOITAGAIN:
+            dev = (struct DosList *)(BADDR(dev->dol_Next));
+a104 1
+            Permit();
+a107 3
+         /* If there is no volume node for the device we can assume that it     */
+         /* is a file.                                                          */
+         BUG(("Key=%08lx Type = %ld Startup=%08lx\n", dev, dev->dol_Type, dev->dol_misc.dol_handler.dol_Startup));
+d109 3
+a111 24
+         if (dev->dol_Type == DLT_DEVICE &&
+             dev->dol_misc.dol_handler.dol_Startup < 100)
+         {
+            /* It is a "file" */
+            //fib->fib_DirEntryType = fib->fib_EntryType = -3;
+            BUGBSTR("RmtExNext: Skipping 'file' entry name ", BADDR(dev->dol_Name));
+            goto DOITAGAIN;
+         }
+         else
+         {
+            /* Check to see if it is us - if so, don't include it */
+            if(!stricmp(BADDR(dev->dol_Name), "\3NET") ||
+               !stricmp(BADDR(dev->dol_Name), "\7NETWORK"))
+            {
+               BUGBSTR("RmtExNext: Skipping NET: device entry name ", 
+                  BADDR(dev->dol_Name));
+               goto DOITAGAIN;
+            }
+
+            fib->fib_DirEntryType = fib->fib_EntryType = 2;
+         }
+         
+         strcpy(fib->fib_FileName, BADDR(dev->dol_Name));
+         fib->fib_Protection = FIBF_WRITE|FIBF_DELETE|FIBF_EXECUTE;
+@
+
+
+1.5
+log
+@Make it work with workbench;
+---Suppress ExNext of 'file' entries like CON:, PRT:
+---Suppress ExNext of NET: and NETWORK: entries
+also fixed a hanging forbid
+
+@
+text
+@d11 7
+a17 1
+
+d20 1
+a20 6
+void
+RmtCreateDir(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1 - Lock */
+                        /* Arg2 - name */
+                        /* Arg3 (optional) Attributes */
+d22 3
+d27 1
+a27 1
+   BUGBSTR("Creating directory '%s'\n", global->RP.DataP);
+d29 2
+a30 3
+   pkt->dp_Arg1 = global->RP.Arg1;
+   MBSTR(global->RP.DataP, global->fib);
+   if ((port = GetRDevice(global, pkt->dp_Arg1, global->fib)) == NULL)
+d34 5
+a38 2
+   pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+   pkt->dp_Arg3 = global->RP.Arg3;
+d40 4
+a43 1
+   Dispatch(global, port);
+d46 1
+a46 1
+   if(global->RP.Arg1 && global->RP.Arg4)
+d49 3
+a51 6
+      lock = global->RP.Arg1;
+      global->RP.DLen = 1;
+      NameNode(global, lock);
+      global->RP.DataP[0] = global->RP.DLen-1;
+      global->RP.Arg1 = lock;
+      BUGBSTR("RmtCreateDir: full path is ", global->RP.DataP);
+d54 3
+a56 1
+      global->RP.DLen = 0;
+d59 1
+a59 5
+void
+RmtExamine(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Lock of object to examine */
+                        /* Arg2: FileInfoBlock to fill in */
+d61 3
+d67 1
+a67 1
+   BUG(("RmtExamine/RmtExNext - lock %lx type %ld\n", global->RP.Arg1, global->RP.Type));
+d69 2
+a70 3
+   fib = (struct FIleInfoBlock *)global->RP.DataP;
+   pkt->dp_Arg1 = global->RP.Arg1;
+   pkt->dp_Arg2 = (LONG)MKBADDR(fib);
+d72 1
+a72 1
+   if (global->RP.Arg1 == ROOTLOCK)
+d74 1
+a74 1
+      if (global->RP.Type == ACTION_EXAMINE_OBJECT)
+d79 1
+d81 3
+d88 1
+a88 1
+         global->RP.Arg1 = DOSTRUE;
+d120 2
+a121 2
+            global->RP.Arg1 = DOSFALSE;
+            global->RP.Arg2 = ERROR_NO_MORE_ENTRIES;
+d125 3
+d157 1
+a157 1
+         global->RP.Arg1 = DOSTRUE;
+d163 1
+a163 18
+#if 0
+{
+    fib = (struct FileInfoBlock *)BADDR(pkt->dp_Arg2);
+    BUG(("RmtEx-in: FIB name='%s' Key=%ld size=%ld numblocks=%ld\n",
+        fib->fib_FileName+1, fib->fib_DiskKey, fib->fib_Size, fib->fib_NumBlocks));
+}
+#endif
+ 
+    Dispatch(global, ((struct FileLock *)BADDR(pkt->dp_Arg1))->fl_Task);
+
+#if 0
+{
+   struct FileInfoBlock *fib;
+    fib = (struct FileInfoBlock *)global->RP.DataP;
+    BUG(("RmtEx-out: FIB name='%s' Key=%ld size=%ld numblocks=%ld\n",
+        fib->fib_FileName+1, fib->fib_DiskKey, fib->fib_Size, fib->fib_NumBlocks));
+}
+#endif
+d165 2
+a166 1
+    global->RP.DLen = sizeof(struct FileInfoBlock);
+d169 1
+a169 5
+void
+RmtParent(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;
+/* Arg1 - Lock */
+d171 1
+a171 1
+    BUG(("RmtParent\n"));
+d173 1
+a173 7
+    if (global->RP.Arg1 == ROOTLOCK)
+    {
+       global->RP.Arg1 = 0;
+       global->RP.Arg2 = 0;
+       return;
+    }
+    pkt->dp_Arg1 = global->RP.Arg1;
+d175 7
+a181 13
+    Dispatch(global, ((struct FileLock *)BADDR(pkt->dp_Arg1))->fl_Task);
+    
+    if (global->RP.Arg1 == 0)
+    {
+       global->RP.Arg1 = ROOTLOCK;
+       if (global->RP.Arg4)
+       {
+          global->RP.DLen = 2;
+          global->RP.DataP[0] = 1;
+          global->RP.DataP[1] = ':';
+       }
+       return;
+    }
+d183 3
+d187 3
+a189 2
+   /* Now get the full pathname of this lock so we can reestablish it */
+   if(global->RP.Arg1 && global->RP.Arg4)
+d191 8
+a198 7
+      BPTR lock;
+      lock = global->RP.Arg1;
+      global->RP.DLen = 1;
+      NameNode(global, lock);
+      global->RP.DataP[0] = global->RP.DLen-1;
+      global->RP.Arg1 = lock;
+      BUGBSTR("RmtParent: full path is ", global->RP.DataP);
+d200 2
+a201 2
+   else
+      global->RP.DLen = 0;
+@
+
+
+1.4
+log
+@Correct return code for parent of root
+@
+text
+@d105 1
+d112 1
+d120 4
+a123 2
+            /* It is a directory */
+            fib->fib_DirEntryType = fib->fib_EntryType = -1;
+d127 9
+@
+
+
+1.3
+log
+@Working version with logical assign support
+@
+text
+@d170 1
+a170 1
+       global->RP.Arg2 = ERROR_OBJECT_NOT_FOUND;
+@
+
+
+1.2
+log
+@Change interface for dispatch
+@
+text
+@d57 2
+a58 1
+    BUG(("RmtExamine/RmtExNext - lock %lx\n", global->RP.Arg1));
+d60 1
+a60 2
+    pkt->dp_Arg1 = global->RP.Arg1;
+    pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+d62 81
+a142 8
+#if 1
+    MQ(global->RP.DataP, global->fib, sizeof(struct FileInfoBlock));
+#else
+    /* The handler doesn't send the whole FIB, only the key and name */
+    memset(global->fib, 0, sizeof(struct FileInfoBlock));
+    fib = (struct FileInfoBlock *)global->fib;
+    fib->fib_DiskKey = *((LONG *)global->RP.DataP);
+    strcpy(fib->fib_FileName, global->RP.DataP+4);
+d144 1
+a144 1
+
+d147 1
+a147 1
+#if DEBUG
+d150 3
+a152 3
+    fib = (struct FileInfoBlock *)global->fib;
+    BUG(("RmtEx: FIB name='%s' size=%ld numblocks=%ld\n",
+        fib->fib_FileName+1, fib->fib_Size, fib->fib_NumBlocks));
+a155 2
+    MQ(global->fib, global->RP.DataP, sizeof(struct FileInfoBlock));
+
+d167 6
+d176 13
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d21 3
+a23 2
+    BUG(("RmtCreateDir\n"));
+    BUGBSTR("Creating directory '%s'\n", global->RP.DataP);
+d25 8
+a32 4
+    pkt->dp_Arg1 = global->RP.Arg1;
+    MBSTR(global->RP.DataP, global->fib);
+    pkt->dp_Arg2 = (LONG)MKBADDR(global->fib);
+    pkt->dp_Arg3 = global->RP.Arg3;
+d34 1
+a34 1
+    Dispatch(global);
+d72 1
+a72 1
+    Dispatch(global);
+d98 1
+a98 1
+    Dispatch(global);
+@

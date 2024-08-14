@@ -1,0 +1,9 @@
+CFILES	=	a.c b.c c.c
+OFILES	=	a.o b.o c.o
+HFILES	=	a.h b.h c.h
+
+target:	$(OFILES)
+	@echo "All done!"
+	touch target
+
+$(OFILES):	$(HFILES) Makefile

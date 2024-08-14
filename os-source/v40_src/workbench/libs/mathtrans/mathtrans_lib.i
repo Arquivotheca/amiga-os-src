@@ -1,0 +1,19 @@
+*** This file generated on Mon Sep  8 20:18:14 1986
+*** $Id: mathtrans_lib.i,v 37.1 91/01/22 14:09:33 mks Exp $
+	FUNCDEF	SPAtan
+	FUNCDEF	SPSin
+	FUNCDEF	SPCos
+	FUNCDEF	SPTan
+	FUNCDEF	SPSincos
+	FUNCDEF	SPSinh
+	FUNCDEF	SPCosh
+	FUNCDEF	SPTanh
+	FUNCDEF	SPExp
+	FUNCDEF	SPLog
+	FUNCDEF	SPPow
+	FUNCDEF	SPSqrt
+	FUNCDEF	SPTieee
+	FUNCDEF	SPFieee
+	FUNCDEF	SPAsin
+	FUNCDEF	SPAcos
+	FUNCDEF	SPLog10

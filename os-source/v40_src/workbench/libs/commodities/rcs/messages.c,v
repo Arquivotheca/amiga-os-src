@@ -1,0 +1,587 @@
+head     38.6;
+branch   ;
+access   ;
+symbols  ;
+locks    vertex:38.6; strict;
+comment  @ * @;
+
+
+38.6
+date     92.11.24.15.15.01;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.11.23.10.56.39;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.10.16.17.59.23;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.10.24.10.19.02;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.10.21.11.01.15;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.10.07.15.23.27;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Commodity message handling
+@
+
+
+38.6
+log
+@No longer discards messages with bogus sub classes from within CopyIE(), done in
+  sender objects instead
+@
+text
+@
+#include <exec/types.h>
+
+#include <clib/exec_protos.h>
+#include <clib/utility_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+#include "commoditiesbase.h"
+#include "messages.h"
+
+
+/*****************************************************************************/
+
+
+struct CxMsg *CreateCxMsg(ULONG type, struct InputEvent *ie)
+{
+struct CxMsg *cxm;
+ULONG         msgSize;
+
+    msgSize = sizeof(struct CxMsg);
+    if (type == CXM_IEVENT)
+        msgSize += IESize(ie);
+
+    if (cxm = AllocPoolMem(msgSize))
+    {
+        cxm->cxm_Msg.mn_Length    = msgSize;
+        cxm->cxm_Msg.mn_ReplyPort = &CxBase->cx_EventReply;
+        CXMSGTYPE(cxm)            = type;
+
+        // done by GetCxMsg() above
+        // CXMSGID(cxm)        = 0;
+        // cxm->cxm_Echo       = 0;
+        // cxm->cxm_StackIndex = 0;
+
+        if (type == CXM_IEVENT)
+        {
+            CXMSGDATA(cxm) = (char *) &cxm[1];
+            CopyIE(ie,(struct InputEvent *)CXMSGDATA(cxm));
+        }
+    }
+
+    return (cxm);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM DisposeCxMsgLVO(REG(a0) struct CxMsg *cxm)
+{
+    LockCX();
+    Remove(cxm);
+    UnlockCX();
+
+    FreeCxMsg(cxm);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM DivertCxMsgLVO(REG(a0) struct CxMsg *cxm,
+                        REG(a1) struct CxObj *co,
+                        REG(a2) struct CxObj *returnObj)
+{
+    ROUTECXMSG(cxm,(struct CxObj *)CO_LIST(co)->mlh_Head);
+
+    if (cxm->cxm_StackIndex < STACKSLOTS)
+        cxm->cxm_RoutingStack[cxm->cxm_StackIndex++] = returnObj;
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM RouteCxMsgLVO(REG(a0) struct CxMsg *cxm,
+                       REG(a1) struct CxObj *co)
+{
+    ROUTECXMSG(cxm,co);
+}
+
+
+/*****************************************************************************/
+
+
+ULONG ASM CxMsgTypeLVO(REG(a0) struct CxMsg *cxm)
+{
+    return ((ULONG)CXMSGTYPE(cxm));
+}
+
+
+/*****************************************************************************/
+
+
+APTR ASM CxMsgDataLVO(REG(a0) struct CxMsg *cxm)
+{
+    if (cxm)
+        return(CXMSGDATA(cxm));
+
+    return(NULL);
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM CxMsgIDLVO(REG(a0) struct CxMsg *cxm)
+{
+    return (CXMSGID(cxm));
+}
+
+
+/*****************************************************************************/
+
+
+ULONG IESize(struct InputEvent *ie)
+{
+struct IENewTablet *nt;
+struct TagItem	   *tstate;
+ULONG               size;
+
+    size = sizeof(struct InputEvent);
+
+    if (ie->ie_Class == IECLASS_NEWPOINTERPOS)
+    {
+        switch (ie->ie_SubClass)
+        {
+            case IESUBCLASS_PIXEL    : size += sizeof(struct IEPointerPixel);
+                                       break;
+
+            case IESUBCLASS_TABLET   : size += sizeof(struct IEPointerTablet);
+                                       break;
+
+            case IESUBCLASS_NEWTABLET: size += sizeof(struct IENewTablet);
+
+                                       /* include size of tag list */
+                                       nt = ie->ie_EventAddress;
+                                       tstate = nt->ient_TagList;
+                                       while (NextTagItem(&tstate))
+                                           size += sizeof(struct TagItem);
+
+                                       /* don't forget to leave room for TAG_DONE */
+                                       size += sizeof(struct TagItem);
+                                       break;
+        }
+    }
+
+    return(size);
+}
+
+
+/*****************************************************************************/
+
+
+/* "copy" must point to a memory block of IESize(copy) bytes. */
+VOID CopyIE(struct InputEvent *original, struct InputEvent *copy)
+{
+struct IENewTablet *nt0;
+struct IENewTablet *nt1;
+struct TagItem	   *tstate;
+struct TagItem	   *ti;
+struct TagItem     *t0;
+struct TagItem     *t1;
+
+    CopyMem(original,copy,sizeof(struct InputEvent));
+
+    copy->ie_NextEvent = NULL;    /* be safe */
+
+    if (copy->ie_Class == IECLASS_NEWPOINTERPOS)
+    {
+        copy->ie_EventAddress = &copy[1];
+        switch (copy->ie_SubClass)
+        {
+            case IESUBCLASS_PIXEL    : CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IEPointerPixel));
+                                       break;
+
+            case IESUBCLASS_TABLET   : CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IEPointerTablet));
+                                       break;
+
+            case IESUBCLASS_NEWTABLET: CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IENewTablet));
+                                       nt0 = original->ie_EventAddress;
+                                       nt1 = copy->ie_EventAddress;
+                                       nt1->ient_TagList = (struct TagItem *)&nt1[1];
+                                       t0 = nt0->ient_TagList;
+                                       t1 = nt1->ient_TagList;
+
+                                       tstate = t0;
+                                       while (ti = NextTagItem(&tstate))
+                                       {
+                                           *t1 = *ti;
+                                           t1++;
+                                       }
+                                       t1->ti_Tag = TAG_DONE;
+
+                                        break;
+
+            case IESUBCLASS_COMPATIBLE: break;  /* ignore */
+
+            default                   : copy->ie_Class = IECLASS_NULL;
+                                        break;
+        }
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM AddIEventsLVO(REG(a0) struct InputEvent *ie)
+{
+struct CxMsg *cxm;
+struct CxLib *cx = CxBase;
+
+    LockCX();
+
+    while (ie)
+    {
+        if (cxm = CreateCxMsg(CXM_IEVENT,ie))
+        {
+            ROUTECXMSG(cxm,(struct CxObj *)CXOBJLIST->mlh_Head);
+            AddTail((struct List *)&cx->cx_Messages,cxm);
+        }
+        else
+        {
+            break;
+        }
+        ie = ie->ie_NextEvent;
+    }
+
+    UnlockCX();
+}
+@
+
+
+38.5
+log
+@DisposeCxMsg() now protects itself when accessing the message list
+
+CopyIE() always NULLs out ie_NextEvent of messages it copies
+
+CreateCxMsg() now always sets the mn_ReplyPort field of messages it creates
+@
+text
+@d126 1
+a126 1
+    if (ie->ie_SubClass != 0)
+d128 1
+a128 1
+        if (ie->ie_Class == IECLASS_NEWPOINTERPOS)
+d130 2
+a131 4
+            switch (ie->ie_SubClass)
+            {
+                case IESUBCLASS_PIXEL    : size += sizeof(struct IEPointerPixel);
+                                           break;
+d133 4
+a136 10
+                case IESUBCLASS_TABLET   : size += sizeof(struct IEPointerTablet);
+                                           break;
+
+                case IESUBCLASS_NEWTABLET: size += sizeof(struct IENewTablet);
+
+                                           /* include size of tag list */
+                                           nt = ie->ie_EventAddress;
+                                           tstate = nt->ient_TagList;
+                                           while (NextTagItem(&tstate))
+                                               size += sizeof(struct TagItem);
+d138 4
+a141 1
+                                           /* don't forget to leave room for TAG_DONE */
+d143 4
+a146 2
+                                           break;
+            }
+d171 1
+a171 1
+    if (copy->ie_SubClass != 0)
+d173 2
+a174 1
+        if (copy->ie_Class != IECLASS_NEWPOINTERPOS)
+d176 24
+a199 29
+            copy->ie_Class = IECLASS_NULL;
+        }
+        else
+        {
+            copy->ie_EventAddress = &copy[1];
+            switch (copy->ie_SubClass)
+            {
+                case IESUBCLASS_PIXEL    : CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IEPointerPixel));
+                                           break;
+
+                case IESUBCLASS_TABLET   : CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IEPointerTablet));
+                                           break;
+
+                case IESUBCLASS_NEWTABLET: CopyMem(original->ie_EventAddress,copy->ie_EventAddress,sizeof(struct IENewTablet));
+                                           nt0 = original->ie_EventAddress;
+                                           nt1 = copy->ie_EventAddress;
+                                           nt1->ient_TagList = (struct TagItem *)&nt1[1];
+                                           t0 = nt0->ient_TagList;
+                                           t1 = nt1->ient_TagList;
+
+                                           tstate = t0;
+                                           while (ti = NextTagItem(&tstate))
+                                           {
+                                               *t1 = *ti;
+                                               t1++;
+                                           }
+                                           t1->ti_Tag = TAG_DONE;
+
+                                           break;
+d201 2
+a202 3
+                default                  : copy->ie_Class = IECLASS_NULL;
+                                           break;
+            }
+@
+
+
+38.4
+log
+@Added input event copying stuff to handle extended input event
+@
+text
+@d28 3
+a30 2
+        cxm->cxm_Msg.mn_Length = msgSize;
+        CXMSGTYPE(cxm)         = type;
+d37 1
+a37 1
+        if (type == CXM_COMMAND)
+a38 4
+            cxm->cxm_Msg.mn_ReplyPort = &CxBase->cx_EventReply;
+        }
+        else
+        {
+d53 1
+d55 2
+d160 2
+a161 1
+VOID CopyIE(struct InputEvent *original, APTR copy)
+a162 1
+struct InputEvent  *ie;
+d172 3
+a174 1
+    if (original->ie_SubClass != 0)
+d176 1
+a176 2
+        ie = (struct InputEvent *)copy;
+        if (original->ie_Class != IECLASS_NEWPOINTERPOS)
+d178 1
+a178 1
+            ie->ie_Class = IECLASS_NULL;
+d182 2
+a183 2
+            ie->ie_EventAddress = &ie[1];
+            switch (ie->ie_SubClass)
+d185 1
+a185 1
+                case IESUBCLASS_PIXEL    : CopyMem(original->ie_EventAddress,ie->ie_EventAddress,sizeof(struct IEPointerPixel));
+d188 1
+a188 1
+                case IESUBCLASS_TABLET   : CopyMem(original->ie_EventAddress,ie->ie_EventAddress,sizeof(struct IEPointerTablet));
+d191 1
+a191 1
+                case IESUBCLASS_NEWTABLET: CopyMem(original->ie_EventAddress,ie->ie_EventAddress,sizeof(struct IENewTablet));
+d193 1
+a193 1
+                                           nt1 = ie->ie_EventAddress;
+d208 1
+a208 1
+                default                  : ie->ie_Class = IECLASS_NULL;
+@
+
+
+38.3
+log
+@Clean up and speed up
+@
+text
+@d5 2
+d8 1
+a11 1
+#include "cxpools.h"
+d17 1
+a17 1
+struct CxMsg *CreateCxMsg(VOID)
+d20 5
+d26 1
+a26 1
+    if (cxm = GetCxMsg(CXMSG_IEVENT_SIZE))
+d28 2
+a29 2
+        CXMSGTYPE(cxm)      = CXM_IEVENT;
+        CXMSGDATA(cxm)      = (char *) &cxm[1];
+d31 14
+a44 5
+/* done by GetCxMsg() above
+        CXMSGID(cxm)        = 0;
+        cxm->cxm_Echo       = 0;
+        cxm->cxm_StackIndex = 0;
+*/
+d118 100
+d227 1
+a227 1
+        if (cxm = CreateCxMsg())
+a228 1
+            *((struct InputEvent *)CXMSGDATA(cxm)) = *ie;
+@
+
+
+38.2
+log
+@Uses macros whenever possible
+DisposeCxMsg() now locks the semaphore before Remove()
+@
+text
+@a8 1
+#include "msgstack.h"
+d15 1
+a15 1
+struct CxMsg *CreateCxMsg(ULONG type)
+d19 1
+a19 1
+    if (cxm = GetCxMsg(CxMsgLength((LONG)type)))
+d21 2
+a22 5
+        CXMSGTYPE(cxm)  = type;
+        CXMSGID(cxm)    = 0;
+        cxm->cxm_Length = CxMsgLength((LONG) type);
+        cxm->cxm_Name   = NULL;
+        cxm->cxm_Echo   = 0;
+d24 5
+a28 4
+        InitCxmStack(cxm);
+
+        /* point to buffer space after message */
+        CXMSGDATA(cxm)  =  (char *) &cxm[1];
+a39 1
+    LockCX();
+a40 3
+    UnlockCX();
+
+    FreeCxmStack(cxm);
+a47 12
+LONG CxMsgLength(LONG type)
+{
+    if (type == CXM_IEVENT)
+        return(sizeof(struct CxMsg) + sizeof(struct InputEvent));
+
+    return (sizeof(struct CxMsg) + sizeof(WORD));
+}
+
+
+/*****************************************************************************/
+
+
+d53 3
+a55 1
+    CxmPush(cxm,returnObj);
+d111 1
+a111 1
+        if (cxm = CreateCxMsg(CXM_IEVENT))
+d114 2
+a115 4
+
+            ROUTECXMSG(cxm,(struct CxObj *)CXOBJLIST->lh_Head);
+
+            AddTail(&cx->cx_Control.cxc_Messages,cxm);
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@a1 1
+
+d22 2
+a23 1
+        cxm->cxm_Type   = type;
+a26 1
+        cxm->cxm_ID     = 0;
+d30 2
+a31 2
+        /* point to buffer space after message   */
+        cxm->cxm_Data   =  (char *) &cxm[1];
+a40 10
+void InsertCxMsg(struct List *list, struct CxMsg *cxm, struct CxMsg *pred)
+{
+    cxm->cxm_List = list;
+    Insert(list,cxm,pred);
+}
+
+
+/*****************************************************************************/
+
+
+d43 1
+d45 2
+d69 1
+a69 1
+                        REG(a2) struct CxObj *comyself)
+d71 2
+a72 2
+    RouteCxMsgLVO(cxm,(struct CxObj *)CO_LIST(co)->lh_Head);
+    CxmPush(cxm, comyself);
+d82 1
+a82 1
+    cxm->cxm_Destination = co;
+d91 1
+a91 1
+    return ((ULONG) CXMSGTYPE(cxm));
+d98 1
+a98 1
+STRPTR ASM CxMsgDataLVO(REG(a0) struct CxMsg *cxm)
+d100 4
+a103 1
+    return ((STRPTR) CXMSGDATA(cxm));
+d112 1
+a112 1
+    return ((LONG)CXMSGID(cxm));
+d122 1
+d128 1
+a128 1
+        if (cxm = CreateCxMsg((LONG) CXM_IEVENT))
+d132 1
+a132 1
+            RouteCxMsgLVO(cxm,CXOBJLIST->lh_Head);
+d134 5
+a138 2
+            cxm->cxm_List = CXMSGLIST;
+            AddTail(cxm->cxm_List,cxm);
+@

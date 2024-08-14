@@ -1,0 +1,256 @@
+=========================================================================
+                       Commodore-Amiga Midi Driver
+=========================================================================
+
+Introduction
+~~~~~~~~~~~~
+    CAMD is an Amiga shared library which provides a general device driver
+for MIDI data, so that applications can share MIDI data with each other in
+real-time, and interface to MIDI hardware in a device-independent way.
+
+Goals
+~~~~~
+    The goals of CAMD are:
+
+    1. To encourage development of music software and synchronized
+multimedia applications by providing a working driver to the public.
+
+    2. To enable music and multimedia applications to operate concurrently
+and exchange MIDI data in real-time.
+
+    3. To improve on existing "freeware" drivers by enhancing performance,
+by providing hooks for getting raw input, and by simplifying the interface
+as much as possible.
+
+Operating System Requirements
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    The CAMD library functions identically under 2.0 or 1.3. However, many
+of the various utilities that come with CAMD require GadTools or other 2.0
+features. One of the most important of these is the "MIDI Ports"
+preferences editor, which is used to tell CAMD which hardware ports to
+use. Note that if the preferences file is missing, CAMD will always fall
+back on opening the Amiga's internal serial port. What this means is that
+applications that run under 1.3 can use CAMD, but until a preferences
+editor that works under 1.3 has been created the functionality will be
+reduced.
+
+The MIDI System
+~~~~~~~~~~~~~~~
+    The MIDI distribution system is based on the idea of "linkages"
+(called MidiLinks) between applications. Each application or hardware
+driver can establish linkages to other applications or hardware drivers.
+Multiple links can be established to a single source, so that more than
+one application can see the MIDI stream coming out of a hardware port or
+application output. Similarly, more than one application can send a MIDI
+stream to a single hardware port or application input. The ability to have
+one application send data to another allows "pipelining" of the MIDI
+stream, for example connecting an interactive composing program to a
+sequencer and running both concurrently.
+    Note that there is no requirement that the data sent actually be valid
+musical data -- it is possible for a pair of applications to set up a private
+linkage, and communicate anything they want, as long as it follows the
+syntactic rules of MIDI. However, it is suggested that such linkages be
+hidden from the user (using a special bit which makes a linkage private),
+since the eventually there will be a "patch editor" which will allow the
+user to manipulate linkages without the application being aware of it.
+
+    Each MIDI application must create a MidiNode. This structure is used
+as a central dispatch point for incoming and outgoing messages, and holds
+all of the application-specific information, including:
+    -- location and size of input buffers.
+    -- the name of the application
+    -- the icon to be used for the application in the patch editor.
+    -- the address of the task to signal when messages are received, and
+            the signal bit to use.
+
+MIDI Messages
+~~~~~~~~~~~~~
+    Each MIDI message sent or received is contained in a MidiMsg
+structure. This 8-byte structure contains a timestamp, the actual MIDI
+bytes (up to 3) and a link number (so that applications which have several
+input links can determine which one received the message). Note that since
+the message is so small, the entire message is copied when MIDI data is
+transferred, rather than passing pointers around.
+
+How MIDI Data is received
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    MIDI applications can be either task-based or callback based. A
+task-based application uses a signal to wait for incoming MIDI data. Once
+the signal is received, the application can call GetMidi() to actually
+look at what was received. All incoming messages are queued, and there is
+a seperate queue for system exclusive messages (which can be quite long).
+Each incoming MIDI event is both timestamped and marked with the linkage
+number (settable by the application) from the link that it came in on.
+    Some people have questioned whether a task can respond fast enough to
+incoming MIDI data to meet professional standards of timing accuracy. Our
+experimentation has determined that a high-priority task (say, 30 or so),
+can meet these reqiuirements, even when the disk drive is running.
+    However, if the application's handling of MIDI is very fast, it may be
+better to use a callback. The callback occurs in the context of the
+sender, so it is best to be quick so as not to slow down the sending task.
+(Note that the sender will always be a task, and not an interrupt, since
+the actual hardware drivers are serviced via a task) The callback is
+invoked through a standard Hook structure. Using a callback avoids the
+overhead of task switching, and can allow improved overall performance.
+
+How MIDI Data is Sent
+~~~~~~~~~~~~~~~~~~~~~
+    Sending MIDI data is very simple, mainly a matter of filling out a
+MidiMsg structure and calling PutMidi(). Note that if the receive buffer
+is full, then the function will fail, rather than waiting for the receive
+buffer to empty.
+
+System Exclusive
+~~~~~~~~~~~~~~~~
+    For those of you not familier with MIDI, system exclusive messages
+(called SysEx for short) are a kind of escape hatch in the MIDI spec which
+allows developers to define their own messages. Unlike other MIDI events
+which are limited to 3 bytes or less, SysEx messages can be any length. In
+CAMD, SysEx messages are handled by placing the header of the message (the
+first three bytes) in the regular receive queue as a MidiMsg, and placing
+the full message in a seperate buffer. The receiver can look at the first
+three bytes, and decide whether they want to read the rest by calling
+GetSysEx() or throw it away by calling SkipSysEx();
+    Sending SysEx is done by calling the function PutSysEx().
+
+Filters
+~~~~~~~
+    To reduce the load on the system, MIDI data can be filtered so that
+only useful data shows up in the application's input buffer. Each MidiLink
+has a set of filter bits, can allow incoming messages to be ignored (not
+placed in the receive queue). The first set of filter bits correspond to
+the 16 MIDI channels. (For those of you unfamilier with MIDI, the low
+nybble of the first MIDI byte contains the channel number). If the
+incoming MIDI messages is on a channel which does not correspond to one of
+the bits set in the filter word. the message is skipped. A second filter
+is based on the type of the event, of which CAMD breaks up into 14
+categories:
+
+    -- note on/off
+    -- program change
+    -- pitch bend
+    -- controller change MSB
+    -- controller change LSB
+    -- controller change boolean switch
+    -- controller change single byte
+    -- controller parameter change
+    -- undefined controllers
+    -- mode change messages
+    -- channel after touch
+    -- polyphonic after touch
+    -- system real-time messages (MIDI clock, MTC Quarter Frame)
+    -- system common messages (Start, Stop, etc)
+    -- system exclusive messages
+
+    In addition, there is a special filtering system for SysEx messages
+which allows them to be filtered based on the first byte or the first
+three bytes after the SysEx header byte. If the first byte only is used,
+then three different filters can be specified. If the first three bytes
+are used, then only one filter can be specified.
+
+Establishing Links
+~~~~~~~~~~~~~~~~~~
+    One of the nice thing about MidiLinks is that they can be established
+even if the other application or hardware driver hasn't been loaded yet.
+This is because a MidiLink does not connect directly to the other
+application, but rather it connects to a "meeting place" or "rendevous
+point" for MidiLinks called a Cluster. Each cluster is referred to by
+name. For example, if I establish an output link to the cluster "foo", and
+someone else establishes an input link to that same cluster, then any data
+that my application sends to that link will be received by that other
+application. If a third application creates an input link to "foo", then
+it will also receive the data, whereas if another application creates an
+output link to "foo" then it's MIDI data will be merged with mine, and
+distributed to all the input links.
+    So the rules of clusters are as follows:
+
+    -- The first attempt to link to a cluster creates the cluster, and
+        the last link to leave deletes it.
+
+    -- Each sender link to a cluster is merged with all the other senders.
+
+    -- Each receiver link to a cluster gets a copy of what all the other
+        receivers get.
+
+    In addition, there are some other properties of clusters:
+
+    Participants: The library function MidiLinkConnected() can be used to
+check a cluster to see if there are any linkages of the opposite type. For
+example, a sender could check to see if anybody is listening or if they
+are just talking to vacuum. Similarly, a receiver could check to see if
+there are any senders. In addition, you can request to be notified (via
+signal) whenever the participants in a cluster change. This feature is
+primarily used by the hardware interface in the library itself -- it
+allows a driver to be shut down (and freeing the hardware resources) when
+there are no applications using it.
+    Cluster Comments: For purposes of building user interface to select
+clusters, each link to a cluster can specify a "comment", up to 34
+characters long, which describes what this cluster actually is. However,
+since there can only be one comment for a cluster, the comment from the
+first link is the one used.
+
+    One of the advantages of the cluster model is that applications can be
+started up in any order and still work. The following are suggestions as
+to how applications should handle linkages:
+
+    1. An application should allow the user to see a list of existing
+clusters (which CAMD can provide), or allow the user to type in a new
+cluster name. [Issue: Should the word "cluster" be used in UI?]
+    2. The application should save the current linkages either in the
+applications "settings", or embedded in the document or performance file
+(perhaps using an IFF chunk). When the application is restarted (or that
+performance loaded or whatever) the application should then automatically
+establish the links specified.
+
+    If every application does this, then it will be easy for the user to set
+up the same configuration of linkages as they did last time, even if they
+launch their applications in a different order. Even if the applications
+are invoked via a script, the network of applications can come into
+existence automatically.
+    (Eventually we will want to have a "performance manager" which can
+"snapshot" a whole network of apps, allowing the user to go back to that
+"state" later. This might be done using ARexx).
+
+MIDI Timestamps
+~~~~~~~~~~~~~~~
+    Each incoming MIDI message may be timestamped, however, you must
+supply a source of timing information (the recommended method is to use
+RealTime.library, however many other timestamp sources are possible).
+	You can tell CAMD to use a particular timig source. The MidiNode
+contains a pointer (of type LONG *), which may be pointed to the source of
+timestamps. Whenever a MidiMsg is received, the longword that is pointed
+to by this pointer is used as the current time, and copied into the
+MidiMsg. Normally, what you would want to do is point this pointer at a
+longword that was contually being updated. Note that in this fashion, your
+application can have timestamps in any format it wants, since CAMD never
+looks at the timestamp field once it is set.
+    One important point is that the timestamp is set at the time the
+message is placed into the receiver's buffer. It would have been nice to
+timestamp the messages at the interrupt time of the first MIDI status
+byte, however this would have made the cluster model of distribution
+impossible. Application which desire ultimate accuracy should probably
+adjust the timestamp to compensate for the length of the MidiMsg.
+
+Interfacing to Hardware
+~~~~~~~~~~~~~~~~~~~~~~~
+    CAMD maintains a list of hardware drivers which are used to access
+serial ports, DSP boards, or any other hardware interface. A preferences
+file (ENV:sys/midi.prefs) is used to indicate which hardware drivers
+should be loaded and which ports should be activated. Note that using file
+notification, CAMD is capable of changing this setup at any time, even
+while applications are running.
+    Hardware drivers live in the directory DEVS:midi. They can be created
+by third-party developers, and are fairly simple.
+    CAMD maintains a task for each input MIDI stream. This task is
+responsible for reading bytes from the hardware, parsing them into
+MidiMsgs, and sending them to a cluster. The cluster name is specified in
+the preferences file, on a per-port basis.
+
+Credits
+~~~~~~~
+	CAMD has a long and convoluted history. It was originally created at
+Carnegie-Mellon university by Roger B. Dannenberg and Jean-Christophe
+Dhellemmes. After that is was worked on by Bill Barton, and later by
+Darius Taghavy, followed by Carolyn Scheppner. The final form of the
+design was conceived by David Joiner (a.k.a. Talin) and implemented by Joe
+Pearce.

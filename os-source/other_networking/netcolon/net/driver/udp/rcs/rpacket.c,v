@@ -1,0 +1,478 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.5; strict;
+comment  @ * @;
+
+
+1.5
+date     91.08.02.09.12.13;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.07.25.19.21.31;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.07.08.10.06.04;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.06.21.11.52.47;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.06.05.12.52.30;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@**  Bolt NET-UDP.library:
+**  rpacket.c -- Functions to allocate, free and duplicate RPacket structures.
+@
+
+
+1.5
+log
+@First Alpha?
+@
+text
+@/*
+**  Bolt NET-UDP.library:
+**  rpacket.c -- Functions to allocate, free and duplicate RPacket structures.
+**
+**      $Log:	rpacket.c,v $
+ * Revision 1.4  91/07/25  19:21:31  dlarson
+ * working!
+ * 
+ * Revision 1.3  91/07/08  10:06:04  dlarson
+ * continuing development...
+ *
+ * Revision 1.2  91/06/21  11:52:47  dlarson
+ * work in progress...
+ *
+*/
+
+
+#include "bolt-udp.h"
+
+/****** NET-UDP.library/SDNAllocRPacket *******************************
+*
+*   NAME
+*	SDNAllocRPacket -- Allocate an RPacket for general use.
+*
+*   SYNOPSIS
+*	RP = SDNAllocRPacket(drglobal, con, len)
+*	D0		     A0	       A1   D0
+*
+*	struct RPacket *SDNAllocRPacket(APTR, APTR, int);
+*
+*   FUNCTION
+*	Allocate an RPacket for general use.  The RPacket is initialized
+*	such that if it is later given to SDNSend() it will be sent to
+*	'con'.
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer.
+*	con		- Connection to allocate packet for.
+*	len		- Minimum number of bytes that must be in the DataP
+*			  field.
+*
+*   RESULT
+*	 RP		- created RPacket (or NULL for error).
+*
+*   NOTES
+*	This routine is called only by the handler.
+*
+*	For ease of implementation, it is convenient to call this routine
+*	internally with a NULL con pointer when generating packets.
+*
+*   BUGS
+*	Curently ignores 'len.'
+*
+*   SEE ALSO
+*	SDNFreeRPacket(), SDNDupRPacket(), SDNInitNode()
+*
+****************************************/
+struct RPacket *
+LIBENT UDPSDNAllocRPacket (register __a0 UDPGLOBAL tg,
+			     register __a1 APTR con,
+			     register __d0 int len,
+			     register __a6 struct DrLibrary *DriverBase)
+{
+struct UDPRPacket *rp;
+
+	Forbid();
+	BUGP(("SNDAllocRPacket(con=%lx)\n", con));
+	for(rp = tg->ppack; rp != NULL && rp->class != PACKET_FREE;
+	    rp = rp->next)
+		;
+	if (rp != NULL)  /* if there is a perm rpacket not being used */
+	{
+		SETRPDATA(rp);
+		rp->con = con;
+		rp->class = PACKET_PERM;
+		Permit();
+		return(rp);
+	}
+
+
+/*
+** No free perm rpacket, must create a temporary one:
+*/
+	BUG(("Allocating a *temporary* rpacket.\n"));
+	if( (rp = (struct UDPRPacket *)AllocMem(UDPRPALLOCN, 0L)) == NULL)
+	{
+		Permit();
+		return(NULL);
+	}
+	SETRPDATA(rp);
+	rp->con = con;
+	rp->next = tg->tpack;
+	rp->class = PACKET_TEMP; /* mark it to be freed later */
+	tg->tpack = rp;
+	Permit();
+	return(rp);
+}
+
+/****************************************
+*
+*   NAME
+*	SDNDupRPacket --  Allocate a second RPacket on the same connection.
+*
+*   SYNOPSIS
+*	NewRP = SDNDupRPacket(drglobal, RP)
+*	D0		      A0	A1
+*
+*	struct RPacket *SDNDupRPacket(APTR, struct RPacket *);
+*
+*   FUNCTION
+*	This function makes a copy of an RPacket so that it may be replied to
+*	more than one time.  It is primarily intended for usage in situations
+*	where asynchronous events need to be generated (i.e. file
+*	notification).
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer
+*	RP		- RPacket to duplicate
+*
+*   RESULT
+*	NewRP		- Duplicated RPacket (NULL if error)
+*
+*   NOTES
+*
+*   BUGS
+*	If copied RPacket is freed before the copy, the copy will contain
+*	dangling pointers.
+*
+*	Copies cannot be sent across the wire because only the RPacket is
+*	copied, not data.
+*
+*	Need to ask Toebes about DataP, AllocP in the context of DupRPacket.
+*
+*   SEE ALSO
+*	SDNFreeRPacket()
+*
+****************************************/
+struct RPacket *
+LIBENT UDPSDNDupRPacket (register __a0 UDPGLOBAL tg,
+			   register __a1 struct RPacket *rp,
+			   register __a6 struct DrLibrary *DriverBase)
+{
+struct RPacket *newrp;
+
+	BUG(("SNDDupRPacket()\n"));
+	newrp = SDNAllocRPacket((APTR)tg, NULL, NETBUFSIZE);
+	if (newrp != NULL)
+	{
+		/* Actually, this is wrong, we need to copy less, but we aren't
+		** worried about it for now...	*/
+		memcpy(newrp, rp, sizeof(struct UDPRPacket));
+	}
+	return(newrp);
+}
+
+/****************************************
+*
+*   NAME
+*	SDNFreeRPacket -- Free an RPacket.
+*
+*   SYNOPSIS
+*	SDNFreeRPacket(drglobal, rp)
+*
+*	void SDNFreeRPacket(APTR, struct RPacket *);
+*
+*   FUNCTION
+*	This function must be called before the driver is allowed to reuse an
+*	RPacket structure which it previously issued via SDNAllocRPacket(),
+*	SDNDupRPacket(), SDNReceive() or SDNAccept().
+*
+*	Both handler and server can call this function.
+*
+*   INPUTS
+*	 drglobal	- Driver-specific global data pointer.
+*	 rp		- RPacket to free (NULL ok).
+*
+*   RESULT
+*	None.
+*
+*   NOTES
+*	FreeRPacket should be called ASAP on any packets returned from
+*	SDNReceive() or SDNAccept() since the returned packets are really
+*	driver-allocated input buffers;  holding on to them may result in
+*	lots of memory being allocated to the driver for buffering.  The
+*	server, in particular, must call FreeRPacket BEFORE calling Dispatch()
+*	to process the packet.
+*
+*	It is safe to call this function with a NULL rpacket or with an
+*	rpacket with NULL AllocP.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	SDNDupRPacket(), SDNAllocRPacket(), SDNReceive(), SDNAccept()
+*
+****************************************/
+void
+LIBENT UDPSDNFreeRPacket (register __a0 UDPGLOBAL tg,
+			  register __a1 struct RPacket *rp,
+			  register __a6 struct DrLibrary *DriverBase)
+{
+struct UDPRPacket *ip;  /* index on rpackets  */
+
+/*  The INet driver decrements a usage count on this connection here.  */
+
+	BUG(("FreeRPacket().. "));
+        if (rp == NULL)
+        	return;
+        Forbid();
+        switch(UDPRP->class)
+        {
+		case PACKET_TEMP:
+			BUG(("temp... "));
+			if(UDPRP == tg->tpack)
+			{
+				tg->tpack = UDPRP->next;
+			}
+			else
+			{
+				for(ip=tg->tpack; ip!=NULL && ip->next!=UDPRP;
+				    ip=ip->next);
+				if (ip == NULL)
+				{
+					BUG(("Missing temporary packet\n"));
+					Permit();
+					return;
+				}
+				ip->next = UDPRP->next;
+			}
+			BUG(("about to FreeMem()... "));
+			FreeMem((void *)rp, UDPRPALLOCN);
+/**** when seperate:
+*			if(UDPRP->rp.AllocP != NULL)
+*				FreeMem((void *)UDPRP->rp.AllocP, NETBUFSIZE);
+*			FreeMem((void *)UDPRP, sizeof(struct UDPRPacket));
+*/
+			break;
+                case PACKET_PERM:
+/**** when sepearte:
+*			if(UDPRP->rp.AllocP != NULL)
+*				FreeMem((void *)UDPRP->rp.AllocP, NETBUFSIZE);
+*****/
+			BUG(("perm... "));
+			UDPRP->class = PACKET_FREE;
+                        break;
+                default:
+                	BUG(("Bad packet type (perm v. temp)\n"));
+                        break;
+        }
+        BUG(("Permit() and return.\n"));
+        Permit();
+}
+@
+
+
+1.4
+log
+@working!
+@
+text
+@d6 3
+@
+
+
+1.3
+log
+@continuing development...
+@
+text
+@d6 3
+d63 4
+a66 2
+	BUG(("SNDAllocRPacket(con=%lx)\n", con));
+	for (rp = tg->ppack; rp != NULL && rp->class != PACKET_FREE; rp = rp->next)
+d68 1
+a68 1
+	if (rp != NULL)
+d70 1
+d73 1
+d76 6
+d83 2
+d86 2
+d92 1
+a92 23
+	SETRPDATA(rp);
+	return(rp);
+
+#if 0
+	/* this is the old code which had seperate data (it is broken anyway) */
+
+	rp = (struct UDPRPacket *)AllocMem(sizeof(*rp), 0L);
+	if (rp == NULL)
+		return(NULL);
+	rp->next = tg->tpack;
+	rp->class = PACKET_TEMP; /* mark it to be freed later	  */
+	tg->tpack = rp;
+	rp->rp.AllocP = NULL;
+	rp->rp.DataP = rp->rp.AllocP;
+	if (rp->rp.DataP == NULL)
+	{
+		rp->rp.AllocP = rp->rp.DataP = AllocMem(NETBUFSIZE, 0);
+		if (rp->rp.AllocP == NULL)
+		{
+			SDNFreeRPacket((APTR)tg, rp);
+			rp = NULL;
+		}
+	}
+a93 1
+#endif
+d129 2
+d146 2
+a147 2
+		/* Actually, this is wrong, we need to copy less, but we aren't using it  */
+		/* for now...																				 */
+a149 1
+
+d185 3
+a198 1
+struct UDPRPacket *ipkt = (struct INETRPacket *)rp;
+d203 5
+a207 3
+	BUG(("FreeRPacket()\n"));
+        if (rp == NULL) return;
+        switch(ipkt->class)
+d209 25
+a233 23
+                case PACKET_TEMP:
+                	BUG(("temp"));
+                        if(ipkt == tg->tpack)
+                        {
+                                tg->tpack = ipkt->next;
+                        }
+                        else
+                        {
+                                for(ip = tg->tpack; ip != NULL && ip->next != ipkt; ip = ip->next);
+                                if (ip == NULL)
+                                {
+                                	BUG(("Missing temporary packet"));
+                                        return;
+                                }
+                                ip->next = ipkt->next;
+                        }
+			FreeMem((void *)ipkt, UDPRPALLOCN);
+			break;
+#if 0
+	/* Old code for seperate RPacket and RPacket data: */
+			if(ipkt->rp.AllocP != NULL)
+				FreeMem((void *)ipkt->rp.AllocP, NETBUFSIZE);
+			FreeMem((void *)ipkt, sizeof(struct UDPRPacket));
+a234 2
+#endif
+
+d236 6
+a241 1
+                        ipkt->class = PACKET_FREE;
+a242 1
+
+d244 1
+a244 1
+                	BUG(("Bad packet type"));
+d247 2
+@
+
+
+1.2
+log
+@work in progress...
+@
+text
+@d6 3
+d12 1
+a12 1
+#include "net-udp.h"
+d26 3
+a28 1
+*	Allocate an RPacket for general use.
+d60 1
+d65 1
+d69 12
+a80 1
+	/* Have to allocate a temporary one from system storage */
+d99 1
+d129 5
+d146 1
+d204 1
+a204 1
+/*  The INet driver decrements a usage count on this connection here  */
+d206 1
+d226 9
+a234 4
+                        if(ipkt->rp.AllocP != NULL)
+                                FreeMem((void *)ipkt->rp.AllocP, NETBUFSIZE);
+                        FreeMem((void *)ipkt, sizeof(struct UDPRPacket));
+                        break;
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d41 1
+d60 1
+d62 8
+a69 11
+	else
+	{
+		/* Have to allocate a temporary one from system storage */
+		rp = (struct UDPRPacket *)AllocMem(sizeof(*rp), 0L);
+		if (rp == NULL)
+			return(NULL);
+		rp->next = tg->tpack;
+		rp->class = PACKET_TEMP; /* mark it to be freed later	  */
+		tg->tpack = rp;
+		rp->rp.AllocP = NULL;
+	}
+d185 2
+a186 1
+                        if (ipkt == tg->tpack)
+d195 1
+a195 1
+                                	BUGR("Missing temporary packet");
+d200 1
+a200 1
+                        if (ipkt->rp.AllocP != NULL)
+d202 1
+a202 1
+                        FreeMem((void *)ipkt, sizeof(*ipkt));
+d210 1
+a210 1
+                	BUGR("Bad packet type");
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'10.1.92'
+	ENDM
+VERS	MACRO
+		dc.b	'cmd 37.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cmd 37.4 (10.1.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cmd 37.4 (10.1.92)',0
+	ENDM

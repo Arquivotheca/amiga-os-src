@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'21.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'rlogin 38.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'rlogin 38.2 (21.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: rlogin 38.2 (21.5.93)',0
+	ENDM

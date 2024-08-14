@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'28.9.92'
+	ENDM
+VERS	MACRO
+		dc.b	'inetd 1.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'inetd 1.5 (28.9.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: inetd 1.5 (28.9.92)',0
+	ENDM

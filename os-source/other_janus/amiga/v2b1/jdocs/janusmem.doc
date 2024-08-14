@@ -1,0 +1,581 @@
+
+Description and Usage of Bridge/Janus Dual-Ported Memory
+Robert J. Mical
+29 April 1988
+Copyright (C) 1986, 1987, 1988, Commodore-Amiga Inc.
+All Rights Reserved
+
+
+
+This section describes the memory layout of the Amiga 2000 Bridge card 
+and discusses how to gain access to and use the features of this special 
+memory.  This section is divided into the following subsections:
+
+        - Introduction
+        - Memory Access Address Spaces (Defines Type)
+        - Memory Areas (Defines Type and Offset)
+        - Rules for Reading and Writing Janus Memory
+        - Locking and Unlocking Janus RAM
+        - The Inner Sanctum of Locks
+        - The Read-Only Write-Only Protocol
+        - Example:  Amiga/PC Traversing a Janus Memory Linked List
+        - The Memory Functions
+
+
+
+=== Introduction ==============================================================
+
+The Janus RAM is a special sort of RAM which can't be accessed in the 
+normal Amiga or PC way.  You need to make particular system calls to 
+access the memory, and you need to exercise certain techniques which, 
+though not too difficult, are nevertheless non-standard.  Also, you may 
+want to consider protocols which define ways for a program on the Amiga 
+and one on the PC to read and write to a shared data block without 
+destroying one another's efforts.  Such a protocol is called a "locking 
+protocol" and is defined below under "Locking and Unlocking Janus RAM."  
+
+The Janus hardware interface contains 128K of dual-ported RAM.  This RAM 
+can be accessed by either the Amiga's or the PC's processor.  The 128K 
+size of the RAM reflects today's reality; tomorrow there may be more, 
+perhaps much more.  
+
+Even though both CPU's can access the RAM, the bus structure of the RAM 
+is set up such that only one processor at a time can perform a memory 
+read or write.  Either processor, once beginning a read/write operation, 
+can be assured that the operation will complete before the other processor 
+gains access to the memory.  The implication of this is that it's not 
+possible for both processors to bang simultaneously on the same memory 
+location with a mixed result, or one processor reading a partial value 
+from a memory location that the other processor is in the process of 
+writing.  A benefit of this is that a safe alebit crude "lock" mechanism 
+can be implemented, which locking mechanism is described in the "Locking 
+and Unlocking Janus RAM" subsection below.  Also, it allows for a safe 
+and simple read-only write-only protocol, which allows programs to pass 
+data without locking.  This protocol is described under "Read-Only 
+Write-Only Protocol" below.  
+
+The total "address space" of the Janus memory, which is to say the 
+total number of memory locations that you can read to or write from 
+in Janus memory, looks much larger than the actual amount of Janus RAM.   
+This is because each physical byte of the Janus RAM can be read from 
+or written to using several different ranges of memory addresses.  
+The data contained in the RAM looks different depending on which address 
+you use to access it.  Normally, RAM looks like RAM, but with the Janus 
+memory you can also look at the RAM through an address space where the 
+bytes of each word are swapped, where the bits are all swizzled together, 
+where the RAM is scrambled.  You may wonder why you would want to read 
+scrambled RAM?  In the "Memory Access Address Spaces" section below the 
+RAM differences are described and an explanation and examples are given.  
+Each of these address spaces of the RAM has its own complete set of memory 
+locations, even though, as noted above, all the sets of memory locations 
+address the same physical RAM chips.  
+
+Also, the Janus memory is divided into area that are a maximum size of 64K.  
+Currently, there are only two areas of RAM that can be addressed:  
+parameter and buffer RAM.  Memory areas and memory "offsets" are discussed 
+in the "Memory Areas" subsection below. 
+
+You will find a value name "type" used in the discussions below and as 
+an argument to many of the janus.library functions.  The type value 
+describes both the memory address space that you are using and the memory 
+area of your RAM.  Sometimes you specify the type value, other times you 
+make system calls to learn the type of a block of Janus memory.  Also, 
+you will find the phrase well-formed type" used below.  This refers to 
+a type argument that correctly defines both the memory address space and the 
+memory area of the RAM.  Al well-formed type has descriptors for both.  
+
+
+
+=== Memory Access Address Spaces (Defines Type) ===============================
+
+The "address spaces" of Janus memory refers to the ranges of memory 
+addresses that are available on the Amiga side when addressing Janus memory.  
+The data contained in the RAM looks different depending on which address 
+space you use to access it.  
+
+Note that the discussion of address space is for Amiga programmers only.  
+On the PC side, RAM always looks like RAM is expected to look.  The burden 
+is on Amiga programmers to adjust and translate memory pointers depending 
+on which type of memory operation will be performed.  The Amiga takes all 
+the weight of this; the PC, limping along as it does, needs all the help 
+it can get.  
+
+The simplest memory access address space is the byte-access address space.  
+Individual bytes of RAM are read and written through byte-access, which 
+is just like normal byte read and write operations in any Amiga or PC RAM.  
+
+But while byte reads/writes are the same on the two machines, word 
+reads/writes differ significantly.  On the one hand, when a word of memory 
+is written by the Amiga with its 68000 processor family, the high byte is 
+written first and the low byte is written at the next address.  On the PC 
+with its 8088 processor family, when a word of memory is written the low 
+byte is written first and the high byte is written at the next address, 
+which is exactly the opposite of the Amiga.  If the Amiga wrote a word 
+value to regular memory and the PC read that word, the value read would 
+have its bytes swapped (e.g. if the Amiga wrote $00FF to a memory location 
+and the PC read that location, the PC would find the value $FF00 in its 
+internal register).  
+
+To solve this inherent problem, Bridge provides a memory address space 
+called "word-access memory", where a word read into an internal register 
+by the Amiga looks the same as that word when read in by the PC.  If the 
+Amiga writes $00FF to word-access RAM, it looks like $00FF if the Amiga 
+then reads that same memory location.  But the bytes of the Amiga's word 
+are swapped on their way to real RAM, so that the RAM actually contains 
+the values $FF-$00 which, when read as a word by the PC, becomes the 
+value $00FF as desired.  
+
+This is a great advantage to programmers, who are freed of the obligation of 
+swapping bytes when reading words written by the other processor.  
+
+To specify byte-access address space in the type argument, you use the 
+constant MEM_BYTEACCESS.  To specify word-access address space, you use 
+MEM_WORDACCESS.  
+
+There is another memory access address space provided by the Bridge, the 
+graphics-access address space.  Graphics-access is not generally useful 
+to programmers.  This is an address space where the bits of a word are 
+scrambled in a way that makes reading graphics data from the PC convenient 
+on the Amiga.  On the PC, graphics data is laid out in a fashion where 
+the 2 bits of a pixel are packed together side by side in the same byte, 
+4 pixels per byte, whereas the bits of an Amiga's pixel are spread out 
+one per bitplane.  Reading PC graphics data and converting to Amiga graphics 
+is quite a complicated and slow affair.  The graphics-access memory space 
+provides a way of helping hasten this process.  In the graphics-access 
+address space, the bits of a word are shuffled up in such a way that the 
+first bits of each pixel will be packed together into the first byte of 
+a word and the second bits of each pixel will be packed together into the 
+second byte of the word.  
+
+For instance, here's what a word of graphics-access data 
+would look like on the PC and on the Amiga (in binary and hex):
+   PC:  01010101 01101001  $5569      00010010 00110100  $1234
+        - - - -  - - - -              - - - -  - - - -
+Amiga:  00000110 11111001  $06F9      00010100 01000110  $1446
+        --------                      --------
+
+Perhaps you agree that this isn't generally useful to Janus interface 
+programmers, unless of course you're bringing PC graphics into an Amiga 
+application, or vice versa (which is a strange but useful thing to think 
+about).  
+
+Another data access method that will come available in the future will be 
+the longword-access address space, which will allow the Amiga and a 386 
+device to read and write normal longwords (32-bit) to Janus memory.  
+As of this writing there is no 32-bit address space, so the management of 
+32-bit (or larger) quantities must be by a convention agreed upon by the 
+joint applications.  
+
+
+
+=== Memory Areas (Defines Type and Offset) ====================================
+
+The Janus RAM is divided up into memory areas, each of which has a maximum 
+size of 64K.  
+
+Currently, there are two memory areas available:  buffer and parameter.  
+Buffer memory is 64K big, and parameter memory is 16K.  These sizes 
+are subject to change without notice.  When you allocate memory, you must 
+specify the memory area you want used for your allocation (it is an error 
+to not specify the memory area).  Most often programmers will allocate 
+memory out of the buffer area.  You may use any of the memory address 
+spaces when accessing any of the memory areas.  
+
+In the future, more memory areas will be made available.  Each memory 
+area will always be a maximum of 64K.  
+
+When using Janus memory, often you will be required to deal with the memory's 
+"offset." The Janus memory offset is the number of bytes that a particular 
+byte is displaced from the first byte of its memory area.  For example, 
+if a particular memory area of Janus memory turned out to be $200000 and 
+you were interested in the byte at $200010, then the offset to your byte 
+is $10.  Because a Janus memory area will never exceed 64K, the offset to 
+the memory will never exceed 16 bits.  In several of the Janus data 
+structures you will find notation "RPTR Offset" where RPTR stands for 
+"Relative PTR," which is defined as a 16-bit quantity used to define 
+an address that's relative to some memory base.  
+
+A note about a peculiar Janus memory idiosyncracy:  an offset of 0 
+into Janus memory is a valid offset, of course, which messes up a 
+standard that we've come to expect, which is that zero means "error."  
+In Janus memory, 0 is good.  The "not a valid offset" value is -1.  This 
+is the value you'll find when you expect either a valid offset or 
+"no offset defined."  
+
+
+
+=== Rules for Reading and Writing Janus Memory ================================
+
+The freedom that comes with the memory-swizzling address spaces and areas 
+of Janus RAM does not come free:  the Amiga programmer is obliged to always 
+make sure to use the correct address space when accessing data, and both 
+Amiga and PC programmers must pay attention to the memory area that's 
+being used.  
+
+The rule for address space is simple, but you must remember to use it:  
+when reading individual bytes, read from the byte-access address space.  
+When reading words or longwords, use the word-access address space.  
+
+There are a group of routines on the Amiga which assist you in making sure 
+that you're addressing the correct address space for the job.  For 
+instance, JanusMemToOffset() creates a Janus memory offset from a regular 
+memory pointer, JanusMemType() creates a Janus memory type from 
+a regular memory pointer, and JanusOffsetToMem() creates a regular 
+memory pointer from an offset and a type.  
+
+By the way, don't let the memory complications put you off too much.  
+Once you have used the memory type and the offset to create a pointer to 
+the correct type of Janus memory, then you can use that pointer just like 
+any Amiga or PC pointer.  
+
+
+
+=== Locking and Unlocking Janus RAM ===========================================
+
+If there's a possibility that both an Amiga program and a PC program might 
+be manipulating the same memory, you probably want to require the programs 
+to "lock" access to the memory before beginning.  
+
+A Janus lock is a software/hardware mechanism which can make a lock out of 
+any byte of Janus RAM.  Only one processor can "own" the lock at a time.  
+If one owns the lock and the other tries to get it, the other will have to 
+wait until the first releases the lock.  
+
+Why would you want a lock?  As an example, if you have a data structure 
+in Janus memory which can be written to by either the Amiga or the PC, 
+then each side should lock the other out from using this memory to 
+avoid problems where, for instance, both processors are trying to write to 
+the same word at the same time.  As another example, if you have a linked 
+list in Janus memory which can be manipulated by either the PC or the Amiga, 
+then you should lock access to this list before changing it.  Imagine if 
+the two processors could simultaneously link and unlink fields in the 
+list without regard to what the other is doing.  Sooner or later the guru 
+comes to play chess with you.  
+
+A lock:  
+        - controls access to a specific area of memory which may be used 
+          by more than one program but should be used by only one program 
+          at a time
+        - only one program can own a lock at a time
+        - the lock protocol, described below, provides a way for programs 
+          to attempt to own a lock and to wait until they do own the lock
+        - only the program that owns the lock can use the memory associated 
+          with the lock
+        - the program that owns the lock knows that it can use the memory 
+          without concern about possible interference from other programs 
+
+To create a Janus lock is rather easy.  All you need is a byte of Janus memory,
+which you initialize with the value $7F.
+
+The Janus library provides C-callable functions to get ownership of a Janus 
+lock (named JanusLock() and JanusLockAttempt()) and assembly-language 
+macros (named LOCK and LOCKTRY) which do all the work for you.  Your only 
+job is to remember to call JanusUnlock() (or UNLOCK as appropriate) as 
+soon as you possibly can.  Note that the lock is a byte of memory, so the 
+address you pass to the JanusLock(), JanusLockAttempt() and JanusUnlock() 
+functions must point to the Bridge board's byte-access memory space.  
+
+The JanusLock() function is designed for high-performance applications 
+where fast through-put is essential and where both Amiga and PC programs 
+promise to never own the lock for long.  To achieve this high-performance 
+lock, the Janus library, for lack of a better alternative, will commit 
+one of the great Amiga sins for you:  JanusLock() sits in a busy-wait loop 
+waiting for the lock byte to come available.  The PC-side lock does the 
+same thing, but on the PC, when you're rude, no one cares.  
+
+JanusLockAttempt() is the mellow version of the normal JanusLock() function.  
+JanusLockAttempt() tries once to get the lock and returns a BOOL TRUE or 
+FALSE if it succeeds or fails respectively.  This allows you, if your 
+program opens GfxBase, to create the MellowLock() function:  
+        MellowLock(lockbyte)
+        UBYTE *lockbyte;
+        /* Go about getting a Janus lock in a mellow way, trying only 60 
+         * times per second (or 50 times per second in some locations) 
+         * to get the lock, calling WaitTOF() between calls to 
+         * JanusLockAttempt().  Note that the following code presumes that 
+         * you've opened graphics.library.  
+         * 
+         * When this routine returns, you own the lock.  Don't forget to 
+         * call JanusUnlock().
+         * 
+         * Remember that lockbyte is a Janus memory pointer and should be 
+         * byte-access oriented.  
+         */
+        {
+            if (NOT JanusLockAttempt(lockbyte)) WaitTOF();
+        }
+
+
+For you Service users, the ServiceData structure that you get the address 
+of has a lock-byte field, named, imaginatively enough, ServiceDataLock.  
+The lock is initialized by the system for you, after which your program 
+is free to use this lock in any way.  Most Amiga/PC service programs that 
+share memory will want to lock one another out before accessing the memory.  
+There is an AddService() Flag named ADDS_LOCKDATA which you can set to 
+specify that the ServiceDataLock should be set for you before your service 
+is added to the system.  This lock allows you to take initialization steps 
+such as preparing your parameter memory before users of your service will 
+have access to the contents of the ServiceData structure.  This presumes 
+that you have declared a protocol where users must lock the ServiceDataLock 
+before accessing the ServiceData.  
+
+Note that if you have more than one Amiga program going after the same Janus 
+lock they too must lock each other out.  Fortunately, the same locking 
+mechanism will work.  Unfortunately, the locking mechanism is a naughty 
+one because the only way to check whether or not you have gotten the lock 
+is by testing repeatedly, which is called a "busy-wait loop," which is 
+considered bad programming style in a multi-tasking environment.  
+Really really bad programming style.  Also, it's fairly dangerous, because 
+if there are two Amiga tasks conected to the same service, where one task 
+has a higher priority than the other and the lower-priority task has a 
+lock on memory when the higher-priority task decides it wants it, the 
+higher-priority task will busy-wait loop forever trying to acquire the 
+lock, never giving the lower task the time-slice it needs to be able to 
+relinquish the lock.  This is one example of a dreaded problem called 
+dead-lock, the only way out of which is with that familiar three-key 
+sequence.  
+
+An Amiga-approved way out of the dilemma is to use an Exec semaphore, but 
+there is some overhead involved with semaphores which can degrade 
+performance unnecessarily when you have a situation where good performance 
+is important and you know that any owner of the lock will never own it 
+for long.  Besides, if one application has what's needed by the PC but it's 
+prevented by satisfying the PC because a different task has owns the 
+semaphore, we're back to dead-lock.  
+
+A less complicated way to solve the problem is to require all Amiga 
+programs to use Forbid() to hold each other off while using the Janus 
+memory.  But this solution is extreme; one should avoid Forbid()/Permit() 
+whenever possible.  And besides, we can dead-lock here too.  
+
+A slightly more forgiving way to busy-wait loop, which helps solve the 
+problem of multiple Amiga programs needed to let each other have a 
+chance at satisfying the PC, is to test the lock and if you fail to 
+lock then call WaitTOF() before testing again.  At least this allows 
+the system to breathe in between your checks, although it causes you to 
+test the lock only 60 times per second, which is unacceptably slow in 
+high-throughput applications.  Also, this is a programming style that 
+some Amiga developers eschew but which others take advantage of regularly 
+because it provides a quick and easy way to wait for an event in a 
+multitaskingly-polite way.  
+
+Refer to the Janus library documentation for details regarding JanusLock(), 
+JanusLockAttempt(), JanusUnlock(), LOCK and UNLOCK.  
+
+
+
+=== The Inner Sanctum of Locks ================================================
+
+This section purports to explain how locks work at the innermost level.  
+You do not need to understand the contents of this section in order to 
+use locks.  The intention of this section is as a tutorial, so you can 
+skip it if you want.  In fact, you probably want to skip this section.  
+Do not underestimate the power of the dark side, young programmer.  
+
+By definition, an "unlocked" lock byte contains the value $7F while 
+a "locked" lock byte contains the value $FF.  Although the lock byte 
+will always have these values, you will probably never have to know 
+about it because you never have to look at the whole value of the lock 
+byte, you look only at bit 7 (the most significant bit) of the lock byte.  
+If this bit is set, then someone else already owns the lock.  If this 
+bit is clear, you can own the lock if you set the bit.  
+
+The problem with implementing a safe lock mechanism is that you must be 
+able somehow to test for the availability of the lock and actually get the 
+lock all in a single step.  If testing for and getting the lock requires a 
+multi-step process, you can get into serious trouble because someone can 
+steal the bus from you halfway through your steps and the result can be 
+garbage.  
+
+Consider the multi-step case where to get ownership of a lock first you 
+read the lock byte, examine bit 7 to see that the bit is clear, and if it 
+was clear then set the bit in the lock byte to designate that now you own 
+the lock.  This multi-step process won't always work correctly if you 
+take more than one bus cycle to both examine the lock and mark it for your 
+own, because both your program and a program on the other side may be 
+racing simultaneously to get the lock and you may fool each other that 
+the lock is available to both, as the following example illustrates:
+
+  Real-time Amiga Events                 Simultaneous real-time PC events
+  ------------------------------------   ---------------------------------------
+  Amiga wants to get a lock              PC wants to get a lock 
+
+  Amiga asks for the Janus memory bus,   PC asks for the Janus memory bus, must 
+      gets it, reads the lock byte           wait because Amiga has the bus
+
+  Amiga examines the lock byte value,    PC now gets the bus, 
+      sees that bit 7 is clear               reads the lock byte
+
+  Amiga asks for the bus, gets it,       PC examines the lock byte value,
+      sets bit 7 of the lock byte            sees that bit 7 is clear
+      to designate that Amiga 
+      owns the lock
+
+                                         PC asks for the bus, gets it,
+                                             sets bit 7 of the lock byte 
+                                             to designate that PC 
+                                             owns the lock
+
+At the end of this example, both CPU's believe that they own the lock.  
+Soon comes the guru.  
+
+So the trick is to test for ownership of the lock and claim ownership of 
+the lock all in one bus cycle.  How can we do this?  Well, it requires 
+a bit of fancy dancing by both processors to create the effect.  
+
+On the 68000 side there's an instruction called TAS, which stands for 
+Test And Set.  This instruction, in one indivisible memory cycle, tests a 
+specified memory location for zero and negative and sets bit 7 of the 
+memory location.  The effect of this is that you can set bit 7 of a lock 
+and find out whether or not bit 7 was already set (by testing the N flag) 
+all in one stroke.  If bit 7 hadn't been set before (N flag clear after 
+the operation) then you have successfully obtained the lock because TAS 
+sets bit 7.  If bit 7 had been set before (N flag set after the operation) 
+then you have not obtained the lock; meanwhile, the fact that TAS sets 
+bit 7 doesn't hurt anything because it's merely setting a bit that's 
+already set.  
+
+[Note:  the 68000 TAS instruction as described above doesn't work in the 
+Amiga chip memory because the bus is granted to the Amiga chip DMA devices 
+halfway through normal 68000 cycles and it's possible for the DMA devices to 
+jazz with a memory location that your TAS is working with without you 
+knowing.  Fortunately for our application, Janus memory is not chip memory 
+so we can use this technique.  But this is a warning that you 
+assembly-language programmers should note.  It's funny how this stuff works.  
+TAS is "indivisible" except of course when you divide it.  Kind of like 
+life, eh?]
+
+On the PC side, the PC is going to test whether or not bit 7 is set by 
+rotating the lock's value left, which will rotate the carry bit into 
+bit 0 of the lock, rotate the lock left by one bit, and rotate bit 7 of 
+the lock into the carry bit.  In preparation for attempting to get the 
+lock, the PC sets the carry bit so that a set bit will be rotated into 
+bit 0 of the lock.  The PC has an instruction prefix named LOCK which 
+forces the next read/modify/write CPU operation to have indivisible 
+access to the bus, which allows it to perform the above operation is 
+one swoop.  At the end, the lock byte will have the value $FF.  If the 
+byte had had the value of $FF before the operation, then it still has 
+the value $FF except that now the carry bit is set to designate to the 
+PC that the lock was not gotten.  If the carry bit is clear, then the 
+lock byte had had $7F, which means it was unlocked, and now it has $FF 
+to designate that it's locked.  
+
+
+
+=== Read-Only Write-Only Protocol =============================================
+
+If you need to transfer data between the two processors, there is a safe way 
+to do so without requiring the CPU's to lock before reading and writing 
+shared memory locations.  This is the read-only write-only protocol.  
+
+This protocol takes advantage of the fact that both CPU's are able perform 
+an indivisible read/write in Bridge RAM.  
+
+
+
+=== Example:  Amiga/PC Traversing a Janus Memory Linked List ==================
+The example C code below could be used by either the Amiga or PC to 
+traverse a linked list.  This is based on the fact that the RPTR offset 
+value of -1 means "no memory" in the Janus memory.  
+
+struct ExampleStruct
+    {
+    RPTR   OffsetToNext;
+    USHORT Field;
+    UBYTE  ByteField0, ByteField1;
+    };
+
+RPTR   offset;
+struct ExampleStruct *exptr, *exptr_BA, *exptr2;
+
+/* Get the Janus memory offset to the first ExampleStruct pointed to by 
+ * the argument named arg.
+ */
+offset = arg->FirstExampleStruct;
+exptr = NULL;
+
+/* We do the loop while offset doesn't equal -1.  An offset of -1 in 
+ * Janus memory means "end of memory"
+ */
+while (offset != -1)
+    {
+    /* We know, by our own definition, that all of our ExampleStruct 
+     * structures will be located in buffer memory.  We want to have a 
+     * word-access pointer to our structure, so our type is 
+     * MEMF_BUFFER | MEM_WORDACCESS.  Turn this plus the offset into 
+     * a pointer to our structure.
+     */
+    exptr = (struct ExampleStruct *)JanusOffsetToMem(offset, 
+            MEMF_BUFFER | MEM_WORDACCESS);
+
+    printf("next field = %ld\n", exptr->Field);
+
+    /* Now turn the word pointer into a byte pointer before reading the 
+     * structure's byte-sized fields.
+     */
+    exptr_BA = MakeBytePtr(exptr);
+    printf("next byte1 = %ld\n", exptr_BA->ByteField1);
+
+    /* Get the next offset.  Note that we're reading a word, which is 
+     * why we asked for MEM_WORDACCESS above.  
+     */
+    offset = exptr->OffsetToNext;
+    }
+
+if (exptr)
+    {
+    exptr2 = (struct ExampleStruct *)AllocJanusMem(
+            sizeof(struct ExampleStruct), MEMF_BUFFER | MEM_WORDACCESS);
+    if (exptr2)
+        {
+        exptr->OffsetToNext = JanusMemToOffset(exptr2);
+        exptr2->OffsetToNext = -1;
+        }
+    }
+
+
+
+=== The Memory Functions ======================================================
+
+AllocJanusMem(Size, Type)
+    Allocates Janus memory 
+
+AllocJRemember(...)
+
+AllocServiceMem(ServiceData, Size, Type)
+    Allocates memory, attaches it to the ServiceData list so that it can be 
+    freed automatically when the service is deleted and removed from the 
+    system
+
+FreeJanusMem(Ptr, Size)
+    Frees memory 
+
+FreeJRemember(...)
+
+FreeServiceMem(ServiceData, Ptr)
+    Frees memory that had been allocated using an AllocServiceMem() call
+
+JanusMemBase(Type)
+    Returns address of first byte of memory type
+
+JanusMemType(Ptr)
+    Returns type of memory that Ptr points to
+
+TranslateJanusPtr(Ptr, Type)
+    Translates the Janus memory pointer from its current type to the new 
+    type, returns the pointer to the new type memory
+
+JanusMemToOffset(Ptr)
+    Derives an offset of the pointer from the beginning of the type of memory 
+    to which it's a pointer.  This is a two-step process:  first it gets the 
+    absolute offset depending on the memory-access type, and then it 
+    figures out if this pointed to parameter or buffer memory (these are 
+    two different areas of memory which aren't necessarily continguous) 
+    and creates the offset from the beginning of the type of memory.  
+
+
+JanusOffsetToMem(...)
+
+MakeBytePtr(...)
+
+MakeWordPtr(...)

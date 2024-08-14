@@ -1,0 +1,410 @@
+head     36.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.11
+date     92.07.31.20.02.48;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.08.31.14.50.07;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.08.28.02.13.43;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.06.14.02.32.48;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.05.30.18.06.10;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.05.29.05.26.14;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     90.04.05.05.22.27;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     90.02.20.20.29.57;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.12.14.21.07.56;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.12.14.04.23.00;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.10.24.19.03.13;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Link support routines
+@
+
+
+36.11
+log
+@ifdefed out softlink support
+@
+text
+@/* makelink.c */
+
+#include "ram_includes.h"
+#include "ram.h"
+
+/********************************************************/
+/* success := makelink(lock,string,type,arg)            */
+/*                                                      */
+/* make a hard or soft link				*/
+/********************************************************/
+
+LONG
+makelink (lock,string,arg,soft)
+	struct lock *lock;
+	UBYTE *string;
+	LONG arg;	/* may be string or lock */
+	LONG soft;
+{
+	struct node *newnode,*node;
+	struct lock *new;
+	LONG type;
+
+/****FIX */
+/*
+kprintf("Makelink of %s, ",string);
+if (soft)
+kprintf("to %s (soft)\n",arg);
+else
+kprintf("to lock 0x%lx (%s)\n",arg,
+((struct node *)(((struct lock *)BADDR(arg))->lock.fl_Key))->name);
+*/
+	if (!soft)
+	{
+		node = checklock((struct lock *) BADDR(arg));
+		if (!node)
+			return FALSE;	/* bad lock */
+	}
+#ifndef SOFTLINKS_SUPPORTED
+	  else {
+		fileerr = ERROR_NOT_IMPLEMENTED;
+		return FALSE;
+	}
+#endif
+	/* Don't overwrite! (what about following links?) */
+	/* We want to find if something exists so we don't overwrite it */
+	/* (unless it's a softlink) */
+
+	newnode = locatenode(lock,string,FALSE);	/* don't follow links */
+	if (newnode)
+	{
+		/* node exists - should we overwrite if both soft? FIX */
+		fileerr = ERROR_OBJECT_EXISTS;
+		return FALSE;
+	}
+	/* Either it doesn't exist, in which case create it, or it */
+	/* exists, overwrite it (causes old string to be deleted)  */
+	new = create(lock,string,EXCLUSIVE_LOCK,FALSE);
+	if (!new)
+		return FALSE;
+
+	newnode = (struct node *) new->lock.fl_Key;
+
+#ifdef SOFTLINKS_SUPPORTED
+	if (soft)
+	{
+		/* soft link */
+		newnode->type = ST_SOFTLINK;
+
+		/* make it a 'file' of data containing the link string */
+		write(new,(CPTR) arg,strlen((char *) arg));
+	} else
+#endif
+	{
+		/* hard link */
+		node = (struct node *) ((struct lock *)BADDR(arg))->lock.fl_Key;
+		type = node->type;
+
+		if (type < 0)
+			newnode->type = ST_LINKFILE;
+		else
+			newnode->type = ST_LINKDIR;
+
+		/* keep a single-linked list of links to object */
+		newnode->firstlink = node->firstlink;
+		node->firstlink    = newnode;
+
+		/* set pointer to real node */
+		newnode->list = node;
+	}
+
+	freelock(new);
+
+	return DOS_TRUE;
+}
+
+/* read the value of a soft link into a buffer  */
+/* return -1 for most errors, -2 for not enough space (res2 will have file */
+/* size).  String returned is null-terminated.  Returns size of string. */
+
+LONG
+readlink (lock,string,buffer,size)
+	struct lock *lock;
+	UBYTE *string;
+	UBYTE *buffer;
+	ULONG size;
+{
+#ifndef SOFTLINKS_SUPPORTED
+	fileerr = ERROR_NOT_IMPLEMENTED;
+	return FALSE;
+#else
+	struct node *node;
+	LONG is_dir = FALSE;
+	LONG res,len;
+
+	/* finddir maintains current_node for us. */
+	/* failure is expected, unless it's a file link, in which case */
+	/* the findentry call will be needed.  Check for the right error.   */
+
+	/* we make assumptions about how locatenode works here! */
+	node = locatenode(lock,string,FALSE);
+
+	if (!node)
+	{
+		if (fileerr == ERROR_IS_SOFT_LINK)
+		{
+			is_dir = TRUE;		/* remember... */
+			node = current_node;
+		} else
+			return -1;		/* failure */
+	}
+
+	if (node->type != ST_SOFTLINK)
+	{
+		fileerr = ERROR_OBJECT_WRONG_TYPE;
+		return -1;
+	}
+
+	/* finddir leaves offset past last dir in path_pos */
+	if (is_dir)
+	{
+		/* must deal with '/' and ':' correctly in the soft link */
+		/* code below counts on these assigns! */
+
+		string = &string[path_pos];
+		len = strlen(string) + 1;	/* + 1 for slash */
+	} else
+		len = 0;		/* softlink is last part of string */
+
+	if (node->size + 1 + len >= size)
+	{
+		/* not enough space */
+		/* this may be 1 larger than needed!! (':' stuff) */
+
+		fileerr = node->size + 1 + len;
+		return -2;		/* indicates not enough space */
+	}
+
+	/* need a lock on it to do a read */
+	lock = getlock(node,SHARED_LOCK);
+	if (!lock)
+		return -1;
+
+	res = read(lock,(CPTR) buffer,size);
+
+	if (res >= 0)
+	{
+		/* add on the rest of the name to make new full path */
+		if (is_dir)
+		{
+			/* string already points to rest of path */
+			/* len = strlen(string)+1 from above */
+			if (buffer[res-1] != ':')
+				buffer[res++] = '/';
+
+			/* null-terminates for us */
+			strcpy(&(buffer[res]),string);
+			res += len-1;
+		} else {
+			/* else no more slashes, so MUST be end of path */
+			buffer[res] = '\0';
+		}
+	}
+
+	freelock(lock);
+	return res;
+#endif
+}
+@
+
+
+36.10
+log
+@changed calls to 
+@
+text
+@d38 6
+a43 1
+
+d62 2
+d71 3
+a73 1
+	} else {
+d107 4
+d186 1
+@
+
+
+36.9
+log
+@Commetn changes
+@
+text
+@d52 1
+a52 1
+	new = create(lock,string,EXCLUSIVE_LOCK);
+@
+
+
+36.8
+log
+@chnage to create() params
+@
+text
+@d87 1
+a87 1
+/* read the value of a soft link into a buffer (as a null-terminated BSTR!) */
+a89 1
+/* Note that the null is not counted in the BSTR (or the return value). */
+a154 1
+		/* note that string starts at buffer+1!!! */
+@
+
+
+36.7
+log
+@Don't overwrite files/links on Makelink!!!!
+@
+text
+@d52 1
+a52 1
+	new = create(lock,string);
+@
+
+
+36.6
+log
+@Make polymorphable links
+@
+text
+@d1 1
+a1 1
+/* comment.c */
+d39 13
+a51 1
+	/* FIX! don't overwrite! (what about following links?) */
+a99 1
+	char name[MAX_FILENAME+1];
+a102 4
+	node = checklock(lock);
+	if (node == NULL)
+		return -1;
+
+d107 2
+a108 1
+	node = finddir(node,string,name);
+d110 1
+a110 2
+	if ((!node && fileerr == ERROR_IS_SOFT_LINK) ||
+	    (node  && findentry(node,name,FALSE)))	/* don't follow links!*/
+d112 2
+a113 1
+		if (!node)
+d115 4
+a118 3
+		node = current_node;
+	} else
+		return -1;
+@
+
+
+36.5
+log
+@for rcs 4.x header change
+@
+text
+@d62 3
+a64 1
+		node->links++;
+@
+
+
+36.4
+log
+@Fixes, also speedups using new write() and read()
+@
+text
+@@
+
+
+36.3
+log
+@Forgot to check for a valid lock for Makelink
+@
+text
+@d51 1
+a51 1
+		transfer(new,(CPTR) arg,strlen((char *) arg), FALSE);
+d115 1
+a115 2
+	/* finddir leaves offset past last dir in path_pos   */
+	/* offset is 1-based!! */
+d121 1
+a121 1
+		string = &string[path_pos-1];
+d140 1
+a140 1
+	res = transfer(lock,(CPTR) buffer,size,TRUE);
+@
+
+
+36.2
+log
+@*** empty log message ***
+@
+text
+@d32 7
+@
+
+
+36.1
+log
+@Created this file
+@
+text
+@d23 9
+@

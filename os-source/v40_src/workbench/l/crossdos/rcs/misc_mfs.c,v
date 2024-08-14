@@ -1,0 +1,481 @@
+head	40.18;
+access;
+symbols;
+locks; strict;
+comment	@ * @;
+
+
+40.18
+date	93.05.20.22.52.18;	author LPOMA;	state Exp;
+branches;
+next	38.15;
+
+38.15
+date	92.12.16.01.15.14;	author LPOMA;	state Exp;
+branches;
+next	38.14;
+
+38.14
+date	92.11.25.13.30.53;	author LPOMA;	state Exp;
+branches;
+next	38.11;
+
+38.11
+date	92.08.08.08.53.59;	author LPOMA;	state Exp;
+branches;
+next	38.10;
+
+38.10
+date	92.08.07.01.08.09;	author LPOMA;	state Exp;
+branches;
+next	38.2;
+
+38.2
+date	92.01.05.14.14.44;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.18.22;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.18
+log
+@Fixed problem with ".INF" not being translated to ".info" extensions. We
+have icon files again.
+@
+text
+@/* misc_MFS.c **************************************************************
+** Copyright 1991 CONSULTRON
+*
+*      misc functions.
+*
+*************************************************************************/
+#include "FS:FS.h"
+
+extern struct ExecBase  *SysBase;
+extern struct DOSBase *DOSBase;
+extern struct Library *UtilityBase;
+extern struct FS         *fsys;
+extern int DOSerror;
+extern struct FS_dir_ent *AllocDirEnt();
+extern struct trans_table *trans_tbl;
+
+
+/**********************************************************************
+*   ConvertVolumeName() -- Convert MSDOS Volume name to BSTR.
+**********************************************************************/
+int ConvertVolumeName(mfile, bstr)
+UCHAR *mfile;
+UCHAR *bstr;
+{
+    UCHAR *i = &bstr[1], *j, c;
+    BYTE k;
+  
+    for(k=0, j=i; k < FNAME_EXT_SIZE; k++)
+    {       /* copy MSDOS volume name */
+        c=mfile[k];
+        if((k==0) && (c == 0x05)) c = FN_ERASE;     /* change 0xE5 to 0x05 for first char only */
+        *(i++) = Trans_M_A(c,trans_tbl);
+        if(( c != ' ') && ( c != '\0')) j=i;
+    }
+    i = min(j,i);
+    *(i) = '\0';     /* For future compatability (I guess) */
+
+    return((int)(bstr[0] = i-(&bstr[1])));
+}
+
+#define STRLEN_BACKGROUND 11
+
+
+UCHAR *info = ".info";
+#define STRLEN_INFO 5
+/* For a possible future feature
+static const *background = ".background";
+#define STRLEN_BACKGROUND 11
+*/
+
+/**********************************************************************
+*   ConvertFileName() -- Convert MSDOS file name and extension to BSTR.
+**********************************************************************/
+int ConvertFileName(mfile, bstr)
+UCHAR *mfile;
+UCHAR *bstr;
+{
+F();
+    register UCHAR *i= &bstr[1], *j, c;
+    BYTE k;
+  
+    for(k=0, j=i; k < FNAME_SIZE; k++)    /* copy MSDOS file name */
+    {
+/* This one is kind of strange.  In order to use the 0xE5 char for international chars
+   the 0x05 char is used because the 0xE5 char is used to describe FileName Erased (FN_ERASE) 
+   in only the first char location */
+        c=mfile[k];
+        if((k==0) && (c == 0x05)) c = FN_ERASE;     /* change 0xE5 to 0x05 for first char only */
+        *(i++) = Trans_M_A(c,trans_tbl);
+        if( c != ' ') j=i;
+    }
+    i = min(j,i);
+        
+    if((*((ULONG *)&(mfile[FNAME_SIZE])) & 0xFFFFFF00) != 0x20202000 )  /* extension not blank */
+    {
+        *(i++) = '.';                       /* add period */
+
+/* Using the utility.library equivalent to stricmp() because with localization
+it should handle case for international characters properly */
+/* Support the ".info" file ext */
+        if( !strnicmp(&mfile[FNAME_SIZE], "INF",FEXT_SIZE))
+        {
+D();
+            strcpy(i,&info[1]);             /* change .INF to .info */
+            i += STRLEN_INFO-1;             /* MUST be lowercase !! */
+        }
+/* For a possible future feature
+/* Support the ".background" file ext */
+        else if( !strnicmp(&mfile[FNAME_SIZE], "BAC",FEXT_SIZE))
+        {
+            strcpy(i,&background[1]);           /* change .BAC to .background */
+            i += STRLEN_BACKGROUND-1;           /* MUST be lowercase !! */
+        }
+*/
+         else
+        {
+            for(; k < FNAME_EXT_SIZE; k++)
+            {
+                *(i++) = Trans_M_A(c=mfile[k],trans_tbl);
+                if( c != ' ') j=i;
+            }
+            i = min(j,i);
+        }
+    }
+    *(i) = '\0';     /* For future compatability (I guess) */
+
+    return((int)(bstr[0] = i-(&bstr[1])));
+}
+
+
+#define FEB         2   /* # Month */
+#define MINS_HR     60
+
+#define SECS_PER_DAY    86400
+#define DAYS_78to70     2922
+
+#include "utility/date.h"
+#include "clib/utility_protos.h"
+#include "pragmas/utility_pragmas.h"
+/**********************************************************************
+*   ConvertFileDate() -- Convert MSDOS file date to DateStamp struct.
+**********************************************************************/
+void ConvertFileDate(mtimestamp, datestamp)
+UBYTE *mtimestamp;
+struct DateStamp *datestamp;
+{
+    UWORD volatile mtime;
+    UWORD volatile mdate;
+
+    struct ClockData date = {0,0,0};
+
+    SWAPWORD(mtime,mtimestamp[0]);
+    SWAPWORD(mdate,mtimestamp[2]);
+
+        /* convert hours into  # minutes */
+    datestamp->ds_Minute = ((mtime&TIMEM_HOURS)>>TIMEB_HOURS) * MINS_HR;
+
+        /* get # minutes */
+    datestamp->ds_Minute += ((mtime&TIMEM_MINS)>>TIMEB_MINS);
+
+        /* convert each 2 secs into # ticks */
+    datestamp->ds_Tick = (mtime&TIMEM_2SECS)* (2 * TICKS_PER_SECOND);
+
+    date.month = (mdate&DATEM_MONTH)>>DATEB_MONTH;
+    date.mday  = mdate&DATEM_DAY;
+    date.year  = ((mdate&DATEM_YEAR)>>DATEB_YEAR)+1980;
+
+    datestamp->ds_Days = Date2Amiga(&date)/SECS_PER_DAY;
+
+}
+
+/**********************************************************************
+*   ConvertFromDateStamp() -- Convert DateStamp struct to MSDOS file date and time
+**********************************************************************/
+ULONG ConvertFromDateStamp(datestamp)
+struct DateStamp *datestamp;
+{
+    ULONG volatile mtimestamp;
+    UWORD volatile mtime;
+    UWORD volatile mdate;
+    struct ClockData time;
+
+    mtime =   (((datestamp->ds_Minute)/60)<<TIMEB_HOURS) /* convert hours */
+            + (((datestamp->ds_Minute)%60)<<TIMEB_MINS)  /* convert minutes */
+            + (((datestamp->ds_Tick)/TICKS_PER_SECOND)>>TIMEB_2SECS);
+                                                        /* convert seconds */
+
+    Amiga2Date((datestamp->ds_Days)*SECS_PER_DAY,&time);
+
+    mdate =   ((time.year-1980)<<DATEB_YEAR)        /* convert years */
+            + (time.month<<DATEB_MONTH)             /* convert months */
+            + (time.mday);                          /* convert days */
+ 
+      SWAPWORD(((UBYTE *)&mtimestamp)[0],mtime);
+      SWAPWORD(((UBYTE *)&mtimestamp)[2],mdate);
+    return(mtimestamp);
+}
+
+
+/**********************************************************************
+*   SetCurrentTime() -- Set current date and time to MSDOS directory entry
+**********************************************************************/
+ULONG SetCurrentTime()
+{
+    struct DateStamp ds;
+
+    DateStamp(&ds);
+    return(ConvertFromDateStamp(&ds));
+}
+
+
+/**********************************************************************
+*   RenameDisk()  --- Rename Disk.  Optional setdate flag
+*
+*   If newname = 0, then use the current name.
+*   This routine is also use to support ACTION_FORMAT and ACTION_SERIALIZE_DISK
+**********************************************************************/
+int RenameDisk(newname,setdate)
+UCHAR *newname;    /* BADDR(BSTR) */
+LONG setdate;       /* setdate flag. NO=DOSFALSE; YES=DOSTRUE */
+{
+    register struct MFileInfoBlock *mfib = (struct MFileInfoBlock *)fsys->f_scratch;
+    register struct FS_dir_ent    *dirent;
+    UBYTE   strsize=0;
+    UCHAR *VolNodeName;
+    int i;
+
+    if(!CompareVolNode_Write(0)) return(DOSFALSE);
+
+/* find if new object name already exists */
+    if( !(dirent = (struct FS_dir_ent *)FindVolEntry()) )
+    {
+        if(newname == 0)    /* No name supplied */
+        {
+            newname = fsys->f_sys_id;
+        }
+/* Volume Label NOT found in root directory. Create volume label */
+        mfib->mfib_DiskCluster = ROOTDIR_CLUST;
+        mfib->mfib_DirEntStatus = MLDE_DIR;
+        mfib->mfib_DiskDirEntry = -1L;  /* start at the beginning of the directory */
+
+        if( !( dirent = AllocDirEnt(mfib)) )
+        {       /* no more directory entries available in root dir */
+            return(DOSFALSE);
+        }
+            /* dir entry found */
+        dirent->fde_protection = ATTF_VOL_LBL|ATTF_ARCHIVE; /* make entry Volume label attrib */
+    }
+/* Put new volume name in directory entry but first clear name with spaces */
+    if(newname)
+    {
+        strsize = min(FNAME_TOTALSZ,newname[0]);
+        memset( dirent->fde_filename, ' ', FNAME_TOTALSZ); /* set to all spaces */
+
+        for(i=0; i<strsize; i++)
+        {
+                /* Set newname to uppercase.  MSDOS does not like lowercase */
+            (dirent->fde_filename)[i] = Trans_A_M(toupper(newname[i+1]),trans_tbl);
+        }
+    }
+
+/* set NULL at end of volname and new volume date (if option set) */
+/**** Set Current Date and Time on Directory ****/
+    if(setdate)
+    {
+        DateStamp(&(fsys->f_vol_date));    /* set volume date in FS struct */
+        *(ULONG *)(dirent->fde_time) = ConvertFromDateStamp(&(fsys->f_vol_date));
+    }
+
+    if( !StoreDirEnt(dirent))
+    {
+       return(DOSFALSE);
+    }
+
+/* correct DosList VolumeNode if available */
+    if(fsys->f_VolumeNode  && (fsys->f_VolumeNode->dol_Type == DLT_VOLUME))
+    {
+        VolNodeName = (UCHAR *)BADDR(fsys->f_VolumeNode->dol_Name);
+    /* Put new volume name in Volume Node */
+        CopyMem( dirent->fde_filename, (UCHAR *)&(VolNodeName[1]),
+            VolNodeName[0] = strsize);
+
+        VolNodeName[strsize+1] = '\0';  /* make sure NULL is at the end of the volume name */
+
+        if(setdate != DOSFALSE)
+        {
+        /* Put new volume date in Volume Node */
+            ConvertFileDate( dirent->fde_time,
+                &(fsys->f_VolumeNode->dol_misc.dol_volume.dol_VolumeDate));
+        }
+    }
+    return(DOSTRUE);
+}
+@
+
+
+38.15
+log
+@Move of string constant to this module.
+@
+text
+@d58 1
+d81 1
+a81 1
+        if( !stricmp(&mfile[FNAME_SIZE], "INF"))
+d83 1
+d89 1
+a89 1
+        else if( !stricmp(&mfile[FNAME_SIZE], "BAC"))
+@
+
+
+38.14
+log
+@Made change to save current datestamp in FS struct.
+@
+text
+@d9 1
+d41 1
+d43 8
+d77 1
+a77 1
+/* Using the utility.library equivalent to stricmp() becasue with localization
+d79 1
+d82 9
+a90 2
+            strcpy(i,"info");           /* change .inf to .info */
+            i += strlen("info");        /* MUST be lowercase !! */
+d92 1
+a92 1
+
+@
+
+
+38.11
+log
+@Fixed problem with file extensions that had a space right after the '.'.
+It used to ignore the extension if this were the case.
+Fixed bug when using Date2Amiga().  I had forgot to set sec, min and hour
+values in the ClockData struct.  This caused random values to ADD to the
+actual date.
+@
+text
+@d226 2
+a227 1
+        *(ULONG *)(dirent->fde_time) = SetCurrentTime();
+d236 1
+a236 1
+    if(fsys->f_VolumeNode)
+@
+
+
+38.10
+log
+@Fixed problem with a few rare MSDOS format programs putting NULLs after the
+volume name to pad instead of the more common ' ' character.
+@
+text
+@d63 1
+a63 1
+    if(mfile[FNAME_SIZE] != ' ')            /* extension not blank */
+d110 1
+a110 1
+    struct ClockData date;
+@
+
+
+38.2
+log
+@Fixed RenameDisk() for use with ACTION_SERIALIZE_DISK when inhibited.
+@
+text
+@a7 2
+#include "time.h"
+#include "dos/datetime.h"
+d32 1
+a32 1
+        if( c != ' ') j=i;
+d97 3
+d110 1
+a110 2
+    struct DateTime dt;
+    UBYTE datestr[LEN_DATSTRING];
+d124 5
+a128 9
+        /* convert date */
+    sprintf(datestr,"%02ld-%02ld-%02ld",
+        (mdate&DATEM_MONTH)>>DATEB_MONTH,
+        mdate&DATEM_DAY,
+        ((mdate&DATEM_YEAR)>>DATEB_YEAR)+80);
+
+    dt.dat_StrTime = 0;
+    dt.dat_StrDate = datestr;
+    dt.dat_Format = FORMAT_USA;
+a129 2
+    StrToDate(&dt);
+    datestamp->ds_Days = dt.dat_Stamp.ds_Days;
+a131 3
+#include "utility/date.h"
+#include "clib/utility_protos.h"
+#include "pragmas/utility_lib.h"
+a153 18
+/*
+    ULONG secs;
+    BYTE  time[6];
+
+    mtime =   (((datestamp->ds_Minute)/60)<<TIMEB_HOURS) /* convert hours */
+            + (((datestamp->ds_Minute)%60)<<TIMEB_MINS)  /* convert minutes */
+            + (((datestamp->ds_Tick)/TICKS_PER_SECOND)>>TIMEB_2SECS);
+                                                        /* convert seconds */
+
+    secs = (datestamp->ds_Days+DAYS_78to70)*SECS_PER_DAY;
+
+    utunpk(secs,time);
+
+    mdate =   ((time[0]-10)<<DATEB_YEAR)                /* convert years */
+            + (time[1]<<DATEB_MONTH)                    /* convert months */
+            + (time[2]);                                /* convert days */
+ 
+*/
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d201 3
+d211 1
+a211 1
+    UBYTE   strsize;
+a216 2
+    strsize = min(FNAME_TOTALSZ,newname[0]);
+
+d220 4
+d237 4
+a240 1
+    memset( dirent->fde_filename, ' ', FNAME_TOTALSZ); /* set to all spaces */
+d242 5
+a246 5
+
+    for(i=0; i<strsize; i++)
+    {
+            /* Set newname to uppercase.  MSDOS does not like lowercase */
+        (dirent->fde_filename)[i] = Trans_A_M(toupper(newname[i+1]),trans_tbl);
+@

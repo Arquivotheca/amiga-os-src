@@ -1,0 +1,25 @@
+€ˆEXEC_TASKS_H€EXEC_TASKS_HˆµŒ"exec/nodes.h"‡ˆ·Œ"exec/lists.h"‡
+ƒTask{
+ƒ¬tc_Node;
+Štc_Flags;
+Štc_State;
+štc_IDNestCnt;
+štc_TDNestCnt;
+—tc_SigAlloc;
+—tc_SigWait;
+—tc_SigRecvd;
+—tc_SigExcept;
+‰tc_TrapAlloc;
+‰tc_TrapAble;
+”tc_ExceptData;
+”tc_ExceptCode;
+”tc_TrapData;
+”tc_TrapCode;
+”tc_SPReg;
+”tc_SPLower;
+”tc_SPUpper;
+VOID(*tc_Switch)();
+VOID(*tc_Launch)();
+ƒ®tc_MemEntry;
+”tc_UserData;
+};€TB_PROCTIME 0€TB_STACKCHK 4€TB_EXCEPT 5€TB_SWITCH 6€TB_LAUNCH 7€TF_PROCTIME (1<<0)€TF_STACKCHK (1<<4)€TF_EXCEPT (1<<5)€TF_SWITCH (1<<6)€TF_LAUNCH (1<<7)€TS_INVALID 0€TS_ADDED 1€TS_RUN 2€TS_READY 3€TS_WAIT 4€TS_EXCEPT 5€TS_REMOVED 6€SIGB_ABORT 0€SIGB_CHILD 1€SIGB_BLIT 4€SIGB_SINGLE 4€SIGB_DOS 8€SIGF_ABORT (1<<0)€SIGF_CHILD (1<<1)€SIGF_BLIT (1<<4)€SIGF_SINGLE (1<<4)€SIGF_DOS (1<<8)‡

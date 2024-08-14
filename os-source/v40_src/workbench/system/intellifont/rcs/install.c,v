@@ -1,0 +1,783 @@
+head     37.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+37.7
+date     92.02.07.11.55.49;  author davidj;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     91.03.11.14.22.38;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.7
+log
+@bug fixes
+@
+text
+@/*
+**	$Id: install.c,v 37.6 91/03/11 14:22:38 kodiak Exp Locker: davidj $
+**
+**	Fountain/install.c -- handle install button
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+*/
+
+#include  "fountain.h"
+
+#define	DB(x)	;
+
+extern struct Library *SysBase;
+extern struct Library *DOSBase;
+extern struct Library *GadToolsBase;
+extern struct Library *GfxBase;
+extern struct Library *IntuitionBase;
+
+extern union StaticPool S;
+extern UWORD YSizes[];
+extern UWORD YSizesCnt;
+extern ULONG DeviceDPI;
+extern ULONG DotSize;
+extern UWORD SymbolSet;
+
+extern struct Window *Window;
+extern struct MinList SFaceList;
+extern struct Gadget *GPSFace;
+extern struct Gadget *GPDDir;
+extern int CurrDDirIndex;
+extern struct FontsEntry *CurrDDir;
+extern struct MinList FontsList;
+extern char SDirName[];
+
+#if sizeof(struct InfoData) >= sizeof(struct FileInfoBlock)
+#if sizeof(struct InfoData) >= PATHNAMELEN
+#define  MYDOSBUFFERSIZE	sizeof(struct InfoData)/2+1
+#else
+#define  MYDOSBUFFERSIZE	PATHNAMELEN
+#endif
+#else
+#if sizeof(struct FileInfoBlock) >= PATHNAMELEN
+#define  MYDOSBUFFERSIZE	sizeof(struct FileInfoBlock)/2+1
+#else
+#define  MYDOSBUFFERSIZE	PATHNAMELEN
+#endif
+#endif
+
+
+CreateInstall (ae, feP, oeP, te)
+    struct FontsEntry *ae;
+    struct FontEntry **feP;
+    struct OTagEntry **oeP;
+    struct TypeEntry *te;
+{
+    struct FontEntry *fe;
+    struct OTagEntry *oe;
+    struct SizeEntry *se;
+    short i;
+
+    fe = *feP;
+    oe = *oeP;
+
+    te->fFlags = FFLAG_COMPLETE;
+
+    if (!oe)
+    {
+	DB (kprintf ("create oe\n"));
+	if (!(oe = (struct OTagEntry *) malloc (sizeof (struct OTagEntry))))
+	    EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+		     sizeof (struct OTagEntry));
+
+	*oeP = oe;
+	/* create .otag structure */
+	NewList (&oe->sizes);
+	for (i = 0; i < YSizesCnt; i++)
+	{
+	    if (!(se = (struct SizeEntry *)
+		  malloc (sizeof (struct SizeEntry))))
+		EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+			 sizeof (struct SizeEntry));
+	    DB (kprintf ("  oe: y %ld\n", YSizes[i]));
+	    se->ref.oe = oe;
+	    se->ySize = YSizes[i];
+	    se->dpi = DeviceDPI;
+	    se->dotSize = DotSize;
+	    se->symbolSet = SymbolSet;
+	    se->fFlags = FFLAG_CREATE;
+	    AddTail ((struct List *) & oe->sizes, (struct Node *) se);
+	}
+	oe->bDef = oe->iDef = oe->biDef = 0;
+	oe->bRef = oe->iRef = oe->biRef = 0;
+	oe->symbolSet = SymbolSet;
+	oe->fFlags = FFLAG_COMPLETE | FFLAG_CREATE;
+	strcpy (oe->amigaName, te->amigaName);
+	oe->bRefName[0] = oe->iRefName[0] = oe->biRefName[0] = '\0';
+	strcpy (oe->otagPath, ae->assignPath);
+	AddTail ((struct List *) & ae->otList, (struct Node *) oe);
+    }
+
+    oe->te = te;
+    oe->fFlags |= FFLAG_TYPE;
+
+    DB (kprintf ("oe name \"%s\" path \"%s\" fFlags $%02lx\n", oe->amigaName, oe->otagPath, oe->fFlags));
+    DB (kprintf ("  otag SymbolSet %.2s\n", &oe->symbolSet));
+
+    if (!fe)
+    {
+	DB (kprintf ("create fe\n"));
+	if (!(fe = (struct FontEntry *) malloc (sizeof (struct FontEntry))))
+	    EndGame (RETURN_ERROR, ENDGAME_NoMemory,
+		     sizeof (struct FontEntry));
+
+	*feP = fe;
+	/* create .font structure */
+	NewList (&fe->sizes);
+	fe->fFlags = FFLAG_COMPLETE | FFLAG_CREATE;
+	strcpy (fe->amigaName, te->amigaName);
+	strcpy (fe->fontPath, ae->assignPath);
+	AddTail ((struct List *) & ae->fcList, (struct Node *) fe);
+    }
+    fe->oe = oe;
+    fe->te = te;
+    fe->fFlags |= FFLAG_TYPE;
+
+    DB (kprintf ("fe name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName, fe->fontPath, fe->fFlags));
+}
+
+
+SelectInstall ()
+{
+    struct FaceDisplay *fd;
+    struct TypeEntry *te, *teI;
+    struct FontEntry *fe, *feI;
+    struct OTagEntry *oeI;
+    struct FontsEntry *ae;
+    struct SizeEntry *se;
+    BPTR lock1, lock2, lock3;
+    FILE *libSrc, *libDest;
+    UWORD myDosBuffer[MYDOSBUFFERSIZE];
+    struct FileInfoBlock *fib;
+    struct InfoData *info;
+    int diskBlocks, installations, installed, actual, length;
+    char prevFailed;
+
+    if (!CurrDDir)
+    {
+	ErrRequester (ERROR_INoDest, ((struct StringInfo *)
+				      GPDDir->SpecialInfo)->Buffer);
+	return;
+    }
+
+    WaitPointer (1);
+    SetWindowTitles(Window, LzS[TITLE_Install], (char *) ~0);
+
+    /* check destination directory and available disk space */
+    diskBlocks = 0;
+    prevFailed = FALSE;
+    if (lock1 = Lock (CurrDDir->assignPath, SHARED_LOCK))
+    {
+	fib = (struct FileInfoBlock *)
+	  ((((ULONG) myDosBuffer) + 2) & 0xfffffffc);
+	if (Examine (lock1, fib) && (fib->fib_DirEntryType >= 0))
+	{
+	    info = (struct InfoData *)
+	      ((((ULONG) myDosBuffer) + 2) & 0xfffffffc);
+	    if (Info (lock1, info))
+	    {
+		diskBlocks = info->id_NumBlocks - info->id_NumBlocksUsed;
+		DB (kprintf ("diskBlocks %ld\n", diskBlocks));
+		/* ensure the outline subdirectory exists */
+		buildpath (S.t.TempBuffer, CurrDDir->assignPath, DIR_OUTLINES);
+		lock2 = Lock (S.t.TempBuffer, SHARED_LOCK);
+		if (lock2)
+		{
+		    /* ensure different than source directory */
+		    lock3 = Lock (SDirName, SHARED_LOCK);
+		    if (lock3)
+		    {
+			if (SameLock (lock2, lock3) == LOCK_SAME)
+			{
+			    ErrRequester (ERROR_ISrcEquDest, SDirName);
+			    prevFailed = TRUE;
+			}
+			UnLock (lock3);
+		    }
+		}
+		else
+		{
+		    /* create new outline subdirectory */
+		    lock2 = CreateDir (S.t.TempBuffer);
+		}
+		if (lock2)
+		{
+		    UnLock (lock2);
+		}
+		else
+		{
+		    ErrRequester (ERROR_ICreateDirFail, S.t.TempBuffer);
+		    prevFailed = TRUE;
+		}
+	    }
+	    else
+	    {
+		ErrRequester (ERROR_IInternal, "Info");
+		prevFailed = TRUE;
+	    }
+	}
+	else
+	{
+	    ErrRequester (ERROR_INotDir, CurrDDir->assignPath);
+	    prevFailed = TRUE;
+	}
+	UnLock (lock1);
+    }
+    else
+    {
+	ErrRequester (ERROR_INoDest, CurrDDir->assignPath);
+	prevFailed = TRUE;
+    }
+
+    if (prevFailed)
+    {
+	WaitPointer (-1);
+	return;
+    }
+
+    installations = installed = 0;
+    for (fd = (struct FaceDisplay *) SFaceList.mlh_Head;
+	 fd->node.ln_Succ;
+	 fd = (struct FaceDisplay *) fd->node.ln_Succ)
+    {
+	if (fd->name[0] == '+')
+	{
+	    installations++;
+	    diskBlocks -= ((fd->ref.te->spaceReq + 511) >> 9) + 1;
+	    DB (kprintf ("  diskblocks -= %ld (%ld) to %ld\n", ((fd->ref.te->spaceReq + 511) >> 9) + 1, fd->ref.te->spaceReq, diskBlocks));
+	}
+    }
+
+    if ((diskBlocks < 0) && (!WarnRequester (WARNING_INoDestSpace,
+					     CurrDDir->assignPath, -diskBlocks * 2)))
+    {
+	WaitPointer (-1);
+	return;
+    }
+
+    GT_SetGadgetAttrs (GPSFace, Window, 0, GTLV_Labels, ~0L, TAG_DONE);
+    prevFailed = FALSE;
+    for (fd = (struct FaceDisplay *) SFaceList.mlh_Head;
+	 fd->node.ln_Succ;
+	 fd = (struct FaceDisplay *) fd->node.ln_Succ)
+    {
+	teI = 0;
+	oeI = 0;
+	feI = 0;
+	/* check if this is to be installed */
+	if (fd->name[0] != '+')
+	    continue;
+	DB (kprintf ("Install %s\n", fd->name));
+	WaitPointer ((((installed * 7) + 1) / (installations + 1)) + 2);
+	te = fd->ref.te;
+	if ((prevFailed) && (!WarnRequester (WARNING_IContinueInstall,
+					     te->amigaName)))
+	    break;
+	prevFailed = FALSE;
+	/* check for existing font in destination */
+	for (fe = (struct FontEntry *) CurrDDir->fcList.mlh_Head;
+	     fe->node.mln_Succ;
+	     fe = (struct FontEntry *) fe->node.mln_Succ)
+	{
+	    DB (kprintf ("check match \"%s\" vs \"%s\"\n", te->amigaName, fe->amigaName));
+	    if (StrEquNC (te->amigaName, fe->amigaName))
+	    {
+		DB (kprintf ("found font %s already exists\n", te->amigaName));
+		if (fe->fFlags & FFLAG_OFONT)
+		{
+		    if (!WarnRequester (WARNING_IOverwrite, te->amigaName))
+			goto nextInstall;
+		}
+		else
+		{
+		    if (!WarnRequester (WARNING_IOverwriteStd, te->amigaName))
+			goto nextInstall;
+		}
+		feI = fe;
+		feI->fFlags |= FFLAG_CREATE;
+		for (se = (struct SizeEntry *) feI->sizes.mlh_Head;
+		     se->node.mln_Succ;
+		     se = (struct SizeEntry *) se->node.mln_Succ)
+		{
+		    DB (kprintf ("reinstall .font size %ld\n", se->ySize));
+		    se->fFlags |= FFLAG_CREATE;
+		}
+		oeI = feI->oe;
+		if (oeI)
+		{
+		    DB (kprintf ("reinstall .otag %s\n", oeI->amigaName));
+		    oeI->fFlags |= FFLAG_CREATE;
+		    teI = oeI->te;
+		}
+		break;
+	    }
+	}
+	if (CurrDDirIndex < MAXDDIRS)
+	{
+	    DB (kprintf ("check for blocking\n"));
+	    /* check if other entry is before this one in Fonts: path */
+	    for (ae = (struct FontsEntry *) FontsList.mlh_Head;
+		 ae->node.mln_Succ && (ae != CurrDDir);
+		 ae = (struct FontsEntry *) ae->node.mln_Succ)
+	    {
+		for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+		     fe->node.mln_Succ;
+		     fe = (struct FontEntry *) fe->node.mln_Succ)
+		{
+		    if (StrEquNC (te->amigaName, fe->amigaName))
+		    {
+			if (!WarnRequester (WARNING_Hidden,
+					    te->amigaName, fe->fontPath))
+			    goto nextInstall;
+			goto checkAfter;
+		    }
+		}
+	    }
+	    /* check if other entry is before this one in Fonts: path */
+	  checkAfter:
+	    for (ae = (struct FontsEntry *) CurrDDir->node.mln_Succ;
+		 ae->node.mln_Succ;
+		 ae = (struct FontsEntry *) ae->node.mln_Succ)
+	    {
+		for (fe = (struct FontEntry *) ae->fcList.mlh_Head;
+		     fe->node.mln_Succ;
+		     fe = (struct FontEntry *) fe->node.mln_Succ)
+		{
+		    if (StrEquNC (te->amigaName, fe->amigaName))
+		    {
+			if (!WarnRequester (WARNING_Hides,
+					    te->amigaName, fe->fontPath))
+			    goto nextInstall;
+			goto createType;
+		    }
+		}
+	    }
+	}
+      createType:
+	/* free any previous type description structure */
+	if (teI)
+	{
+	    DB (kprintf ("free old .type $%lx\n", teI));
+	    Remove ((struct Node *) teI);
+	    free (teI);		/* free old structure */
+	    feI->fFlags &= ~FFLAG_TYPE;
+	    oeI->fFlags &= ~FFLAG_TYPE;
+	    oeI->te = 0;
+	}
+
+	/* create type description structures */
+	if (!(teI = (struct TypeEntry *) malloc (sizeof (struct TypeEntry))))
+	    EndGame (RETURN_ERROR, ENDGAME_NoMemory, sizeof (struct TypeEntry));
+	*teI = *te;
+
+	buildpath (teI->typePath, CurrDDir->assignPath, DIR_OUTLINES);
+	sprintf ((char *) myDosBuffer, "%s/%s" SUFFIX_TYPE, teI->typePath,
+		 teI->amigaName);
+	DB (kprintf ("typePath \"%s\" assignPath \"%s\" :: \"%s\"\n", teI->typePath, CurrDDir->assignPath, (char *) myDosBuffer));
+
+	/* install based on whether it's a FAIS or an intellifont file */
+	if (teI->complementID)
+	{
+	    /* FAIS file */
+	    DB (kprintf ("install FAIS\n"));
+	    if (!FAISLoad (teI, (char *) myDosBuffer, 0))
+	    {
+		prevFailed = TRUE;
+	    }
+	}
+	else
+	{
+	    /* intellifont file */
+	    DB (kprintf ("install Intellifont\n"));
+	    if (libSrc = fopen (teI->sourceFile, "r"))
+	    {
+		if (libDest = fopen ((char *) myDosBuffer, "w"))
+		{
+		    while ((length = fread (S.t.TempBuffer, 1, 10000, libSrc))
+			   > 0)
+		    {
+			if ((actual =
+			     fwrite (S.t.TempBuffer, 1, length, libDest))
+			    != length)
+			{
+			    ErrRequester (ERROR_IFileWrite,
+					  teI->amigaName, (char *) myDosBuffer,
+					  length, actual, ferror (libDest));
+			    prevFailed = TRUE;
+			}
+		    }
+		    if (length < 0)
+		    {
+			ErrRequester (ERROR_IFileRead,
+				      teI->amigaName, (char *) myDosBuffer,
+				      10000, length, ferror (libSrc));
+			prevFailed = TRUE;
+		    }
+		    fclose (libDest);
+		}
+		fclose (libSrc);
+	    }
+	}
+	if (prevFailed)
+	{
+	    free (teI);
+	    goto nextInstall;
+	}
+
+	AddTail ((struct List *) & CurrDDir->tfList, (struct Node *) teI);
+
+	CreateInstall (CurrDDir, &feI, &oeI, teI);
+
+	FindOMatches (CurrDDir);
+	Update (CurrDDir, 0);
+
+	/* indicate installation success */
+	fd->node.ln_Name[0] = ' ';
+
+      nextInstall:
+	installed++;
+    }
+
+    GT_SetGadgetAttrs (GPSFace, Window, 0, GTLV_Labels, &SFaceList, TAG_DONE);
+    RedisplayDFace ();
+    WaitPointer (-1);
+    SetWindowTitles(Window, LzS[TITLE_Main], (char *) ~0);
+}
+@
+
+
+37.6
+log
+@*** empty log message ***
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d12 2
+d51 5
+a55 5
+CreateInstall(ae, feP, oeP, te)
+struct FontsEntry *ae;
+struct FontEntry **feP;
+struct OTagEntry **oeP;
+struct TypeEntry *te;
+d65 1
+a65 1
+	te->fFlags = FFLAG_COMPLETE;
+d67 59
+a125 57
+	if (!oe) {
+	    DBG("create oe\n");
+	    if (!(oe = (struct OTagEntry *) malloc(sizeof(struct OTagEntry))))
+		EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+			sizeof(struct OTagEntry));
+
+	    *oeP = oe;
+	    /* create .otag structure */
+	    NewList(&oe->sizes);
+	    for (i = 0; i < YSizesCnt; i++) {
+		if (!(se = (struct SizeEntry *)
+			malloc(sizeof(struct SizeEntry))))
+		    EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+			    sizeof(struct SizeEntry));
+		DBG1("  oe: y %ld\n", YSizes[i]);
+		se->ref.oe = oe;
+		se->ySize = YSizes[i];
+		se->dpi = DeviceDPI;
+		se->dotSize = DotSize;
+		se->symbolSet = SymbolSet;
+		se->fFlags = FFLAG_CREATE;
+		AddTail((struct List *) &oe->sizes, (struct Node *) se);
+	    }
+	    oe->bDef = oe->iDef = oe->biDef = 0;
+	    oe->bRef = oe->iRef = oe->biRef = 0;
+	    oe->symbolSet = SymbolSet;
+	    oe->fFlags = FFLAG_COMPLETE | FFLAG_CREATE;
+	    strcpy(oe->amigaName, te->amigaName);
+	    oe->bRefName[0] = oe->iRefName[0] = oe->biRefName[0] = '\0';
+	    strcpy(oe->otagPath, ae->assignPath);
+	    AddTail((struct List *) &ae->otList, (struct Node *) oe);
+	}
+
+	oe->te = te;
+	oe->fFlags |= FFLAG_TYPE;
+
+	DBG3("oe name \"%s\" path \"%s\" fFlags $%02lx\n", oe->amigaName,
+		oe->otagPath, oe->fFlags);
+	DBG1("  otag SymbolSet %.2s\n", &oe->symbolSet);
+
+	if (!fe) {
+	    DBG("create fe\n");
+	    if (!(fe = (struct FontEntry *) malloc(sizeof(struct FontEntry))))
+		EndGame(RETURN_ERROR, ENDGAME_NoMemory,
+			sizeof(struct FontEntry));
+
+	    *feP = fe;
+	    /* create .font structure */
+	    NewList(&fe->sizes);
+	    fe->fFlags = FFLAG_COMPLETE | FFLAG_CREATE;
+	    strcpy(fe->amigaName, te->amigaName);
+	    strcpy(fe->fontPath, ae->assignPath);
+	    AddTail((struct List *) &ae->fcList, (struct Node *) fe);
+	}
+	fe->oe = oe;
+	fe->te = te;
+	fe->fFlags |= FFLAG_TYPE;
+d127 1
+a127 2
+	DBG3("fe name \"%s\" path \"%s\" fFlags $%02lx\n", fe->amigaName,
+		fe->fontPath, fe->fFlags);
+d131 1
+a131 1
+SelectInstall()
+d147 4
+a150 3
+    if (!CurrDDir) {
+	ErrRequester(ERROR_INoDest, ((struct StringInfo *)
+		GPDDir->SpecialInfo)->Buffer);
+d154 3
+a156 1
+    WaitPointer(1);
+d160 2
+a161 1
+    if (lock1 = Lock(CurrDDir->assignPath, SHARED_LOCK)) {
+d163 3
+a165 2
+		((((ULONG) myDosBuffer) + 2) & 0xfffffffc);
+	if (Examine(lock1, fib) && (fib->fib_DirEntryType >= 0)) {
+d167 3
+a169 2
+		    ((((ULONG) myDosBuffer) + 2) & 0xfffffffc);
+	    if (Info(lock1, info)) {
+d171 1
+a171 1
+		DBG1("diskBlocks %ld\n", diskBlocks);
+d173 4
+a176 3
+		buildpath(S.t.TempBuffer, CurrDDir->assignPath, DIR_OUTLINES);
+		lock2 = Lock(S.t.TempBuffer, SHARED_LOCK);
+		if (lock2) {
+d178 6
+a183 4
+		    lock3 = Lock(SDirName, SHARED_LOCK);
+		    if (lock3) {
+			if (SameLock(lock2, lock3) == LOCK_SAME) {
+			    ErrRequester(ERROR_ISrcEquDest, SDirName);
+d186 1
+a186 1
+			UnLock(lock3);
+d189 2
+a190 1
+		else {
+d192 1
+a192 1
+		    lock2 = CreateDir(S.t.TempBuffer);
+d194 3
+a196 2
+		if (lock2) {
+		    UnLock(lock2);
+d198 3
+a200 2
+		else {
+		    ErrRequester(ERROR_ICreateDirFail, S.t.TempBuffer);
+d204 3
+a206 2
+	    else {
+		ErrRequester(ERROR_IInternal, "Info");
+d210 3
+a212 2
+	else {
+	    ErrRequester(ERROR_INotDir, CurrDDir->assignPath);
+d215 1
+a215 1
+	UnLock(lock1);
+d217 3
+a219 2
+    else {
+	ErrRequester(ERROR_INoDest, CurrDDir->assignPath);
+d223 3
+a225 2
+    if (prevFailed) {
+	WaitPointer(-1);
+d231 5
+a235 3
+	    fd->node.ln_Succ;
+	    fd = (struct FaceDisplay *) fd->node.ln_Succ) {
+	if (fd->name[0] == '+') {
+d237 2
+a238 4
+	    diskBlocks -= ((fd->ref.te->spaceReq + 511)>>9) + 1;
+	    DBG3("  diskblocks -= %ld (%ld) to %ld\n",
+		    ((fd->ref.te->spaceReq + 511)>>9) + 1,
+		    fd->ref.te->spaceReq, diskBlocks);
+d242 4
+a245 3
+    if ((diskBlocks < 0) && (!WarnRequester(WARNING_INoDestSpace,
+	    CurrDDir->assignPath, -diskBlocks*2))) {
+	WaitPointer(-1);
+d249 1
+a249 1
+    GT_SetGadgetAttrs(GPSFace, Window, 0, GTLV_Labels, ~0L, TAG_DONE);
+d252 3
+a254 2
+	    fd->node.ln_Succ;
+	    fd = (struct FaceDisplay *) fd->node.ln_Succ) {
+d261 2
+a262 2
+	DBG1("Install %s\n", fd->name);
+	WaitPointer((((installed*7)+1)/(installations+1))+2);
+d264 2
+a265 2
+	if ((prevFailed) && (!WarnRequester(WARNING_IContinueInstall,
+		te->amigaName)))
+d270 10
+a279 8
+		fe->node.mln_Succ;
+		fe = (struct FontEntry *) fe->node.mln_Succ) {
+	    DBG2("check match \"%s\" vs \"%s\"\n",
+		    te->amigaName, fe->amigaName);
+	    if (StrEquNC(te->amigaName, fe->amigaName)) {
+		DBG1("found font %s already exists\n", te->amigaName);
+		if (fe->fFlags & FFLAG_OFONT) {
+		    if (!WarnRequester(WARNING_IOverwrite, te->amigaName))
+d282 3
+a284 2
+		else {
+		    if (!WarnRequester(WARNING_IOverwriteStd, te->amigaName))
+d290 4
+a293 3
+			se->node.mln_Succ;
+			se = (struct SizeEntry *) se->node.mln_Succ) {
+		    DBG1("reinstall .font size %ld\n", se->ySize);
+d297 3
+a299 2
+		if (oeI) {
+		    DBG1("reinstall .otag %s\n", oeI->amigaName);
+d306 3
+a308 2
+	if (CurrDDirIndex < MAXDDIRS) {
+	    DBG("check for blocking\n");
+d311 3
+a313 2
+		ae->node.mln_Succ && (ae != CurrDDir);
+		ae = (struct FontsEntry *) ae->node.mln_Succ) {
+d315 7
+a321 5
+			fe->node.mln_Succ;
+			fe = (struct FontEntry *) fe->node.mln_Succ) {
+		    if (StrEquNC(te->amigaName, fe->amigaName)) {
+			if (!WarnRequester(WARNING_Hidden,
+				te->amigaName, fe->fontPath))
+d328 1
+a328 1
+checkAfter:
+d330 3
+a332 2
+		ae->node.mln_Succ;
+		ae = (struct FontsEntry *) ae->node.mln_Succ) {
+d334 7
+a340 5
+			fe->node.mln_Succ;
+			fe = (struct FontEntry *) fe->node.mln_Succ) {
+		    if (StrEquNC(te->amigaName, fe->amigaName)) {
+			if (!WarnRequester(WARNING_Hides,
+				te->amigaName, fe->fontPath))
+d347 1
+a347 1
+createType:
+d349 5
+a353 4
+	if (teI) {
+	    DBG1("free old .type $%lx\n", teI);
+	    Remove((struct Node *) teI);
+	    free(teI);			/* free old structure */
+d360 2
+a361 2
+	if (!(teI = (struct TypeEntry *) malloc(sizeof(struct TypeEntry))))
+	    EndGame(RETURN_ERROR, ENDGAME_NoMemory, sizeof(struct TypeEntry));
+d364 4
+a367 5
+	buildpath(teI->typePath, CurrDDir->assignPath, DIR_OUTLINES);
+	sprintf((char *) myDosBuffer, "%s/%s" SUFFIX_TYPE, teI->typePath,
+		teI->amigaName);
+	DBG3("typePath \"%s\" assignPath \"%s\" :: \"%s\"\n",
+		teI->typePath, CurrDDir->assignPath, (char *) myDosBuffer);
+d370 2
+a371 1
+	if (teI->complementID) {
+d373 3
+a375 2
+	    DBG("install FAIS\n");
+	    if (!FAISLoad(teI, (char *) myDosBuffer, 0)) {
+d379 2
+a380 1
+	else {
+d382 8
+a389 5
+	    DBG("install Intellifont\n");
+	    if (libSrc = fopen(teI->sourceFile, "r")) {
+		if (libDest = fopen((char *) myDosBuffer, "w")) {
+		    while ((length = fread(S.t.TempBuffer, 1, 10000, libSrc))
+			    > 0) {
+d391 6
+a396 5
+				fwrite(S.t.TempBuffer, 1, length, libDest))
+				!= length) {
+			    ErrRequester(ERROR_IFileWrite,
+				    teI->amigaName, (char *) myDosBuffer,
+				    length, actual, ferror(libDest));
+d400 5
+a404 4
+		    if (length < 0) {
+			ErrRequester(ERROR_IFileRead,
+				teI->amigaName, (char *) myDosBuffer,
+				10000, length, ferror(libSrc));
+d407 1
+a407 1
+		    fclose(libDest);
+d409 1
+a409 1
+		fclose(libSrc);
+d412 3
+a414 2
+	if (prevFailed) {
+	    free(teI);
+d418 1
+a418 1
+	AddTail((struct List *) &CurrDDir->tfList, (struct Node *) teI);
+d420 1
+a420 1
+	CreateInstall(CurrDDir, &feI, &oeI, teI);
+d422 2
+a423 2
+	FindOMatches(CurrDDir);
+	Update(CurrDDir, 0);
+d428 1
+a428 1
+nextInstall:
+d432 4
+a435 3
+    GT_SetGadgetAttrs(GPSFace, Window, 0, GTLV_Labels, &SFaceList, TAG_DONE);
+    RedisplayDFace();
+    WaitPointer(-1);
+@

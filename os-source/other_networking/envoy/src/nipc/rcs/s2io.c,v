@@ -1,0 +1,1799 @@
+head     1.43;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.43
+date     93.07.30.18.39.34;  author kcd;  state Exp;
+branches ;
+next     1.42;
+
+1.42
+date     93.04.05.11.16.32;  author gregm;  state Exp;
+branches ;
+next     1.41;
+
+1.41
+date     93.03.02.16.24.34;  author gregm;  state Exp;
+branches ;
+next     1.40;
+
+1.40
+date     93.02.15.10.38.50;  author kcd;  state Exp;
+branches ;
+next     1.39;
+
+1.39
+date     92.12.16.14.39.45;  author kcd;  state Exp;
+branches ;
+next     1.38;
+
+1.38
+date     92.12.02.11.25.23;  author gregm;  state Exp;
+branches ;
+next     1.37;
+
+1.37
+date     92.11.02.14.06.47;  author kcd;  state Exp;
+branches ;
+next     1.36;
+
+1.36
+date     92.09.24.16.56.27;  author kcd;  state Exp;
+branches ;
+next     1.35;
+
+1.35
+date     92.08.18.12.16.33;  author gregm;  state Exp;
+branches ;
+next     1.34;
+
+1.34
+date     92.08.13.17.42.23;  author gregm;  state Exp;
+branches ;
+next     1.33;
+
+1.33
+date     92.07.31.16.15.49;  author kcd;  state Exp;
+branches ;
+next     1.32;
+
+1.32
+date     92.07.09.12.02.23;  author kcd;  state Exp;
+branches ;
+next     1.31;
+
+1.31
+date     92.06.26.11.30.26;  author kcd;  state Exp;
+branches ;
+next     1.30;
+
+1.30
+date     92.06.24.11.13.53;  author kcd;  state Exp;
+branches ;
+next     1.29;
+
+1.29
+date     92.06.24.11.01.42;  author gregm;  state Exp;
+branches ;
+next     1.28;
+
+1.28
+date     92.06.22.15.12.12;  author gregm;  state Exp;
+branches ;
+next     1.27;
+
+1.27
+date     92.06.08.09.49.29;  author kcd;  state Exp;
+branches ;
+next     1.26;
+
+1.26
+date     92.06.04.19.49.46;  author kcd;  state Exp;
+branches ;
+next     1.25;
+
+1.25
+date     92.05.22.15.34.54;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@The IP->Sana II interface.
+@
+
+
+1.43
+log
+@Some bug fixes that Greg must have found.
+@
+text
+@/**************************************************************************
+**
+** s2io.c       - SANA2 IO Routines
+**
+** Copyright 1992, Commodore-Amiga, Inc.
+**
+** $Id: s2io.c,v 1.42 93/04/05 11:16:32 gregm Exp Locker: gregm $
+**
+***************************************************************************
+
+/*------------------------------------------------------------------------*/
+
+/* The following line forces NIPC to switch packets to AS225 based on
+ * IP address;  not defining this allows it to switch them on packet type
+ * instead.
+ */
+//#define SWITCHONADDRESS         1
+
+#include "nipcinternal.h"
+
+#include <dos/dos.h>
+#include <dos/rdargs.h>
+#include <utility/tagitem.h>
+#include <devices/sana2.h>
+#include <string.h>
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/intuition_protos.h>
+
+extern ULONG far FastRand(ULONG seed);
+
+#include "nipcinternal_protos.h"
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include "externs.h"
+
+extern APTR far ACTB;
+extern APTR far ACFB;
+
+static BOOL SwitchPacket(struct IOSana2ReqSS *ioreq);
+static void ProcessReq(struct IOSana2ReqSS *ioreq);
+
+/*------------------------------------------------------------------------*/
+
+/* worthwhile constants */
+#define TOTALQUEUE 25           /* Number of IP read requests that I keep
+                                 * running at any given time */
+
+#define MIN(x, y) ((x) < (y) ? (x):(y))
+#define MAX(x, y) ((x) > (y) ? (x):(y))
+
+/*------------------------------------------------------------------------*/
+
+BOOL __stdargs(*ExCTB) (UBYTE * from, ULONG length, APTR to);
+
+
+/* superstructure */
+struct IOSana2ReqSS
+{
+    struct IOSana2Req ss;
+    struct sanadev *ios2_DevPtr;
+};
+
+/*------------------------------------------------------------------------*/
+
+/* Get things rolling */
+
+BOOL InitSana2()
+{
+    register struct NBase *nb = gb;
+
+    struct sanadev *s2dev;
+    struct CollectionItem *ci;
+    struct NIPCDevicePrefs *ndp;
+
+    BOOL override;
+    ULONG DevIP, IPMask;
+
+    struct IOSana2Req ioreq;
+    struct Sana2DeviceQuery s2dq;
+
+    /* Init some globals */
+    gb->notags[0]=TAG_DONE;
+    gb->copytags[0]=S2_CopyToBuff;
+    gb->copytags[1]=(LONG) &ACTB;
+    gb->copytags[2]=S2_CopyFromBuff;
+    gb->copytags[3]=(LONG) &ACFB;
+    gb->copytags[4]=TAG_DONE;
+
+    gb->Switching = FALSE;
+
+    /* make sure our device list is usable */
+    NewList(&gb->DeviceList);
+    NewList((struct List *) & gb->ExchangeList);
+
+    /* Create the reply port for all Sana II device requests */
+    if(nb->replyport = (struct MsgPort *) CreateMsgPort())
+    {
+        if(nb->localport = (struct MsgPort *) CreateMsgPort())
+        {
+            if(nb->CMDPort = (struct MsgPort *) CreateMsgPort())
+            {
+                if(nb->DataPort = (struct MsgPort *) CreateMsgPort())
+                {
+                    gb->s2sigmask = (1 << gb->replyport->mp_SigBit) | (1 << gb->localport->mp_SigBit) |
+                                    (1 << (gb->CMDPort->mp_SigBit)) | (1 << (gb->DataPort->mp_SigBit));
+
+                    if(s2dev = (struct sanadev *) AllocMem(sizeof(struct sanadev), MEMF_PUBLIC | MEMF_CLEAR))
+                    {
+                        s2dev->sanadev_IPAddress = 0x7f000001;
+                        s2dev->sanadev_IPNetwork = 0x7f000000;
+                        s2dev->sanadev_IPMask = 0xff000000;
+                        s2dev->sanadev_MTU = 0xffffffff;
+                        s2dev->sanadev_BPS = 0xffffffff;
+                        NewList((struct List *) & (s2dev->sanadev_Fragments));
+                        AddTail((struct List *) & nb->DeviceList, (struct Node *) s2dev);
+                    }
+                    ci = FindCollection(nb->iff,ID_PREF,ID_NDEV);
+
+                    while (ci)
+                    {
+                        ndp = (struct NIPCDevicePrefs *)ci->ci_Data;
+
+                        if(ndp->ndp_Flags & NDPFLAGF_ONLINE)
+                        {
+                            override = (ndp->ndp_Flags & NDPFLAGF_HARDADDR);
+
+                            ioreq.ios2_BufferManagement = &gb->copytags;
+                            ioreq.ios2_Req.io_Message.mn_ReplyPort = gb->replyport;
+                            if (!OpenDevice(ndp->ndp_DevPathName, ndp->ndp_Unit, (struct IORequest *) & ioreq, 0L))
+                            {
+                                s2dev = (struct sanadev *) AllocMem(sizeof(struct sanadev), MEMF_PUBLIC + MEMF_CLEAR);
+                                if (!s2dev)
+                                    continue;
+                                ioreq.ios2_Req.io_Command = S2_DEVICEQUERY;
+                                ioreq.ios2_StatData = (void *) &s2dq;
+                                s2dq.SizeAvailable = sizeof(struct Sana2DeviceQuery);
+                                DoIO((struct IORequest *) & ioreq);
+                                s2dev->sanadev_IPType = ndp->ndp_IPType;
+                                s2dev->sanadev_ARPType = ndp->ndp_ARPType;
+                                s2dev->sanadev_MTU = s2dq.MTU;
+                                s2dev->sanadev_BPS = s2dq.BPS;
+                                s2dev->sanadev_HardwareType = s2dq.HardwareType;
+                                if (s2dq.HardwareType == 1)  /* If ethernet */
+                                    s2dev->sanadev_Flags |= S2DF_USEARP;
+                                s2dev->sanadev_AddressSize = s2dq.AddrFieldSize;
+                                s2dev->sanadev_Device = ioreq.ios2_Req.io_Device;
+                                s2dev->sanadev_Unit = ioreq.ios2_Req.io_Unit;
+                                s2dev->sanadev_BuffMan = ioreq.ios2_BufferManagement;
+                                s2dev->sanadev_IPAddress = DevIP = ndp->ndp_IPAddress;
+                                s2dev->sanadev_IPNetwork = NetNum(s2dev->sanadev_IPAddress);
+                                s2dev->sanadev_MaxIPReq = TOTALQUEUE;
+                                s2dev->sanadev_MaxARPReq = 5;
+                                s2dev->sanadev_NumIPReq = 0;
+                                s2dev->sanadev_NumARPReq = 0;
+
+                                if (IP_CLASSA(DevIP))
+                                    IPMask = 0xff000000;
+                                if (IP_CLASSB(DevIP))
+                                    IPMask = 0xffff0000;
+                                if (IP_CLASSC(DevIP))
+                                    IPMask = 0xffffff00;
+                                if (IP_CLASSD(DevIP))
+                                    IPMask = 0xffffffff;
+                                if (IP_CLASSE(DevIP))
+                                    IPMask = 0xffffffff;
+
+                                s2dev->sanadev_IPMask = IPMask;
+
+                                if (ndp->ndp_Flags & NDPFLAGF_SUBNET)
+                                {
+                                    s2dev->sanadev_SubnetMask = ndp->ndp_IPSubnet;
+                                    s2dev->sanadev_IPSubnet = s2dev->sanadev_SubnetMask & s2dev->sanadev_IPAddress;
+                                    s2dev->sanadev_SValid = TRUE;
+                                }
+                                else
+                                    s2dev->sanadev_SValid = FALSE;
+
+                                if (!override)
+                                {
+                                    ioreq.ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+                                    DoIO((struct IORequest *) & ioreq);
+                                    memcpy(&(ioreq.ios2_SrcAddr), &(ioreq.ios2_DstAddr), 16);
+                                }
+                                else
+                                {
+                                    memcpy(&(ioreq.ios2_SrcAddr), &ndp->ndp_HardAddress, (s2dev->sanadev_AddressSize) >> 3);
+                                }
+
+                                ioreq.ios2_Req.io_Command = S2_CONFIGINTERFACE;
+                                DoIO((struct IORequest *) & ioreq);
+
+                                if (ioreq.ios2_Req.io_Error)
+                                {
+                                    ioreq.ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+                                    DoIO((struct IORequest *) & ioreq);
+                                }
+
+                                NewList((struct List *) & (s2dev->sanadev_Fragments));
+
+                                memcpy(&(s2dev->sanadev_HardAddress), &(ioreq.ios2_SrcAddr), (s2dev->sanadev_AddressSize) >> 3);
+
+                                AddTail((struct List *) & nb->DeviceList, (struct Node *) s2dev);
+
+                                QueueRead(s2dev, PACKET_IP);
+
+                                if (s2dev->sanadev_Flags & S2DF_USEARP)
+                                    QueueRead(s2dev, PACKET_ARP);
+
+                            }
+                            else
+                            {
+                                struct Library *IntuitionBase;
+                                struct EasyStruct es;
+                                APTR ERArgs;
+                                if(IntuitionBase = OpenLibrary("intuition.library",37L))
+                                {
+                                    ERArgs=(APTR)ndp->ndp_DevPathName;
+                                    es.es_StructSize = sizeof(struct EasyStruct);
+                                    es.es_Flags = NULL;
+                                    es.es_Title = "NIPC";
+                                    es.es_TextFormat = "Could not open %s.";
+                                    es.es_GadgetFormat = "Ok";
+                                    EasyRequestArgs(NULL,&es,NULL,&ERArgs);
+                                    CloseLibrary(IntuitionBase);
+                                }
+                            }
+                        }
+                        ci = ci->ci_Next;
+                    }
+                    nb->CMDPort->mp_Node.ln_Name = "NIPC Exchange";
+                    AddPort(nb->CMDPort);
+                    CheckForInet();
+                    return(TRUE);
+                }
+                DeleteMsgPort(nb->CMDPort);
+            }
+            DeleteMsgPort(nb->localport);
+        }
+        DeleteMsgPort(nb->replyport);
+    }
+    return(FALSE);
+}
+
+/*------------------------------------------------------------------------*/
+
+void DeinitSana2()
+{
+    register struct NBase *nb = gb;
+    struct sanadev *deldev;
+    struct IOSana2Req *ioretreq;
+    struct IOSana2Req ioreq;
+    while (deldev = (struct sanadev *) RemHead(&nb->DeviceList))
+    {
+        if(deldev->sanadev_Device)
+        {
+            deldev->sanadev_Flags |= S2DF_OFFLINE;  /* prevent any further
+                                                     * CMD_WRITE's */
+            ioreq.ios2_Req.io_Unit = deldev->sanadev_Unit;
+            ioreq.ios2_Req.io_Device = deldev->sanadev_Device;
+            ioreq.ios2_BufferManagement = deldev->sanadev_BuffMan;
+            ioreq.ios2_Req.io_Message.mn_ReplyPort = gb->replyport;
+            ioreq.ios2_Req.io_Command = CMD_FLUSH;
+            DoIO((struct IORequest *) & ioreq);
+            while (ioretreq = (struct IOSana2Req *) GetMsg(nb->replyport))
+            {
+                if (ioretreq->ios2_Req.io_Command == CMD_READ)
+                    FreeBuffer(ioretreq->ios2_Data);
+                EDeleteIORequest( (struct IORequest *) ioretreq);
+            }
+            CloseDevice((struct IORequest *) & ioreq);
+        }
+        FreeMem(deldev, sizeof(struct sanadev));
+    }
+
+    DeleteMsgPort(nb->replyport);
+    DeleteMsgPort(nb->localport);
+    /* Must notify callers that this port is no longer "usable" */
+    NotifyInet();
+    /* FIXME */ /* What?  FIXME what??  I -hate- it when I do this! */
+    DeleteMsgPort(nb->DataPort);
+    RemPort(nb->CMDPort);
+    DeleteMsgPort(nb->CMDPort);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+void CheckCmdPort()
+{
+    struct xstart *rd;
+    register struct NBase *nb = gb;
+
+    while (rd = (struct xstart *) GetMsg(nb->CMDPort))
+    {
+        if (rd->xs_Command == XCMD_START)
+        {
+            struct sanadev *td;
+
+            /* Make sure that we're using that device & Unit */
+            td = (struct sanadev *) gb->DeviceList.lh_Head;
+            while (td->sanadev_Node.mln_Succ)
+            {
+                if ((td->sanadev_Device == rd->xs_Device) && (td->sanadev_Unit == rd->xs_Unit))
+                {
+                    gb->Switching = TRUE;
+                    ExCTB = rd->xs_CTB;
+                    break;
+                }
+                td = (struct sanadev *) td->sanadev_Node.mln_Succ;
+            }
+            if (td->sanadev_Node.mln_Succ)  /* If a match was found */
+            {
+                rd->xs_Link = gb->DataPort;
+            }
+            else
+            {
+                rd->xs_Link = 0L;
+            }
+        }
+        if (rd->xs_Command == XCMD_END)
+        {
+            struct IORequest *xm;
+            gb->Switching = FALSE;
+            while (xm = (struct IORequest *) RemHead((struct List *) & nb->ExchangeList))
+            {
+                xm->io_Error = S2ERR_OUTOFSERVICE;
+                ReplyMsg(&xm->io_Message);
+            }
+        }
+        ReplyMsg(&rd->xs_Msg);
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void CheckDataPort()
+{
+    struct IORequest *ior;
+    register struct NBase *nb = gb;
+
+    while (ior = (struct IORequest *) GetMsg(nb->DataPort))
+    {
+        Forbid();
+        AddTail((struct List *) & nb->ExchangeList, (struct Node *) ior);
+        Permit();
+    }
+
+}
+
+/*------------------------------------------------------------------------*/
+
+static BOOL SwitchPacket(ioreq)
+struct IOSana2ReqSS *ioreq;
+{
+    struct Buffer *sb;
+    struct iphdr *iph;
+    struct BuffEntry *be;
+#ifdef SWITCHONADDRESS
+    struct sanadev *dv;
+#endif
+    int x;
+    struct IOSana2ReqSS *xtreq;
+
+    if (!gb->Switching)
+    {
+        return (FALSE);         /* If we're not switching, don't BOTHER .. */
+    }
+
+    /*
+     * Okay, the crap begins here.  We need to actually find our way into the
+     * buffer for this thing, find the IP header, and find the destination
+     * address.  Sheesh!
+     */
+
+    sb = (struct Buffer *) ioreq->ss.ios2_Data;
+    iph = (struct iphdr *) BuffPointer(sb, 0, &be);
+
+
+#ifdef SWITCHONADDRESS
+    /* Okay, check the IP address vs. those that we have in our devices ... */
+    if (ioreq->ss.ios2_PacketType == ioreq->ios2_DevPtr->sanadev_IPType)
+    {
+        if (IsListEmpty((struct List *) & gb->DeviceList))
+            return (FALSE);
+
+        dv = (struct sanadev *) gb->DeviceList.lh_Head;
+        while (dv->sanadev_Node.mln_Succ)
+        {
+            if (dv->sanadev_IPAddress == iph->iph_DestAddr)     /* This packet is for us */
+                return (FALSE);                                 /* return (FALSE)        */
+                                                                /* ..                    */
+            dv = (struct sanadev *) dv->sanadev_Node.mln_Succ;
+        }
+    }
+#else
+    if (iph->iph_Protocol == 26) /* RDP is NIPC's */
+        return(FALSE);
+    if (iph->iph_Protocol == 17) /* UDP could be NIPC's .. Let's check the port */
+    {
+        struct udphdr *uh;
+        uh = (struct udphdr *) ( ((ULONG) iph) + (iph->iph_IHL<<2) );
+
+        if ( (uh->udp_DestPort == NIP_UDP_PORT) && (!iph->iph_FragmentOffset) )
+        {
+            return(FALSE);
+        }
+    }
+#endif
+
+    /* Not for us ... */
+    /* Find an ioreq for this device and unit */
+    Forbid();
+    if (!IsListEmpty((struct List *) & gb->ExchangeList))
+    {
+        xtreq = (struct IOSana2ReqSS *) gb->ExchangeList.mlh_Head;
+        while (xtreq->ss.ios2_Req.io_Message.mn_Node.ln_Succ)
+        {
+            if ((xtreq->ss.ios2_Req.io_Device == ioreq->ss.ios2_Req.io_Device) &&
+                (xtreq->ss.ios2_Req.io_Unit == ioreq->ss.ios2_Req.io_Unit) &&
+                (xtreq->ss.ios2_PacketType == ioreq->ss.ios2_PacketType))
+                break;
+            xtreq = (struct IOSana2ReqSS *) xtreq->ss.ios2_Req.io_Message.mn_Node.ln_Succ;
+        }
+        Permit();
+        if (xtreq->ss.ios2_Req.io_Message.mn_Node.ln_Succ)
+        {
+            Remove((struct Node *) xtreq);
+            xtreq->ss.ios2_DataLength = ioreq->ss.ios2_DataLength;
+            xtreq->ss.ios2_Req.io_Error = ioreq->ss.ios2_Req.io_Error;
+            xtreq->ss.ios2_WireError = ioreq->ss.ios2_WireError;
+            xtreq->ss.ios2_PacketType = ioreq->ss.ios2_PacketType;
+            (*ExCTB) ((UBYTE *) iph, (ULONG) ioreq->ss.ios2_DataLength, (void *) xtreq->ss.ios2_Data);   /* copy the data over */
+
+            /* Copy the addresses over .. */
+            for (x = 0; x < 16; x++)
+            {
+                xtreq->ss.ios2_SrcAddr[x] = ioreq->ss.ios2_SrcAddr[x];
+                xtreq->ss.ios2_DstAddr[x] = ioreq->ss.ios2_DstAddr[x];
+            }
+
+            ReplyMsg(&xtreq->ss.ios2_Req.io_Message);
+        }
+    }
+    else
+        Permit();
+
+    /* Clean up after ourselves */
+    if (ioreq->ss.ios2_PacketType == ioreq->ios2_DevPtr->sanadev_IPType)
+    {
+        if(!IsBroadcast(iph->iph_DestAddr))     /* We need IP broadcast packets too! */
+        {
+            FreeBuffer(sb);
+            return (TRUE);
+        }
+        else
+        {
+            return (FALSE);
+        }
+    }
+    else
+        return (FALSE);         /* We need a copy of the arp packets too! */
+}
+
+/*------------------------------------------------------------------------*/
+
+void PacketWrite(dev, gateway, buffer, destination, packettype, brc, ether)
+struct sanadev *dev;
+ULONG gateway;
+struct Buffer *buffer;
+ULONG destination;
+UWORD packettype;
+BOOL brc;
+BOOL ether;
+{
+    register struct NBase *nb = gb;
+    ULONG dest;
+    struct IOSana2ReqSS *wioreq;
+    struct LocalIOReq *localreq;
+    UBYTE eaddr[16];
+//    register ULONG seed;
+
+/* Randomly toss packets */
+//    seed = nb->RandomSeed;
+//    seed = FastRand(seed);
+//    nb->RandomSeed = seed;
+//    if ((seed & 0xFF) < 32)
+//    {
+//        kprintf("Dumping buffer\n");
+//        buffer->buff_refcnt++;
+//        FreeBuffer(buffer);
+//    }
+
+
+//    kprintf("WRITTEN PACKET\n");
+
+    gb->outbuffs++;
+
+    if(dev == (struct sanadev *)gb->DeviceList.lh_Head)
+    {
+        if(localreq = (struct LocalIOReq *) AllocMem(sizeof(struct LocalIOReq),MEMF_PUBLIC))
+        {
+            localreq->lreq_Buffer = buffer;
+            localreq->lreq_Device = dev;
+            buffer->buff_refcnt++;
+            PutMsg(nb->localport,(struct Message *)localreq);
+        }
+        else
+            FreeBuffer(buffer);
+
+        return;
+    }
+    if (ether)
+    {
+        char *ex = (char *) destination;
+        CopyMem(ex,&eaddr[0],6);
+    }
+
+    if ((!brc) && (!ether))
+    {
+        if (gateway == dev->sanadev_IPAddress)
+            dest = destination;
+        else
+            dest = gateway;
+
+        if(dev->sanadev_Flags & S2DF_USEARP)
+        {
+            if (!FindArpEntry(dev, dest, (UBYTE *) & eaddr))
+            {
+                AddBuffList(buffer, destination, dev, gateway, packettype);
+                return;
+            }
+        }
+        else
+        {
+            ULONG lmask,portion;
+            int n;
+            n = dev->sanadev_AddressSize;
+            lmask = (1 << n) - 1;
+            portion = dest & lmask;
+            portion = (portion << (32-n));
+            memcpy(&eaddr,&portion,4);
+        }
+    }
+
+    if(wioreq = (struct IOSana2ReqSS *) ECreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS)))
+    {
+        wioreq->ss.ios2_Req.io_Device = dev->sanadev_Device;
+        wioreq->ss.ios2_Req.io_Unit = dev->sanadev_Unit;
+        wioreq->ss.ios2_BufferManagement = dev->sanadev_BuffMan;
+        wioreq->ss.ios2_Data = (void *) buffer;
+        wioreq->ss.ios2_DataLength = DataLength(buffer);
+        wioreq->ios2_DevPtr = dev;
+        if(!brc)
+            wioreq->ss.ios2_Req.io_Command = CMD_WRITE;
+        else
+            wioreq->ss.ios2_Req.io_Command = S2_BROADCAST;
+
+        switch (packettype)
+        {
+            case PACKET_IP:
+                wioreq->ss.ios2_PacketType = dev->sanadev_IPType;
+                break;
+            case PACKET_ARP:
+                wioreq->ss.ios2_PacketType = dev->sanadev_ARPType;
+                break;
+            default:
+                break;
+        }
+
+        /* Our version of ARP is hardcoded for ETHERNET -- thus the "6" */
+        if(!brc)
+            memcpy(&(wioreq->ss.ios2_DstAddr), &eaddr, 6);
+
+        buffer->buff_refcnt++;
+
+        SendIO((struct IORequest *) wioreq);
+    }
+    else
+        FreeBuffer(buffer);
+}
+
+/*------------------------------------------------------------------------*/
+
+#ifdef PACKET_BRC
+
+void PacketBroadcast(dev, buffer, packettype)
+struct sanadev *dev;
+struct Buffer *buffer;
+UWORD packettype;
+{
+    register struct NBase *nb = gb;
+    struct IOSana2ReqSS *wioreq;
+
+//    kprintf("BROADCAST PACKET\n");
+
+    if(wioreq = (struct IOSana2ReqSS *) ECreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS)))
+    {
+        wioreq->ss.ios2_Req.io_Device = dev->sanadev_Device;
+        wioreq->ss.ios2_Req.io_Unit = dev->sanadev_Unit;
+        wioreq->ss.ios2_BufferManagement = dev->sanadev_BuffMan;
+
+        wioreq->ss.ios2_Data = (void *) buffer;
+        wioreq->ss.ios2_DataLength = DataLength(buffer);
+        wioreq->ios2_DevPtr = dev;
+        wioreq->ss.ios2_Req.io_Command = S2_BROADCAST;
+        switch (packettype)
+        {
+            case PACKET_IP:
+                wioreq->ss.ios2_PacketType = dev->sanadev_IPType;
+                break;
+            case PACKET_ARP:
+                wioreq->ss.ios2_PacketType = dev->sanadev_ARPType;
+                break;
+            default:
+                break;
+        }
+
+        buffer->buff_refcnt++;
+
+        SendIO((struct IORequest *) wioreq);
+    }
+
+}
+
+#endif
+/*------------------------------------------------------------------------*/
+
+void PollPort()
+{
+    struct IOSana2ReqSS *ioreq;
+    register struct NBase *nb = gb;
+    struct LocalIOReq *localreq;
+    CheckCmdPort();
+    CheckDataPort();
+    while (ioreq = (struct IOSana2ReqSS *) GetMsg(nb->replyport))
+    {
+        ProcessReq(ioreq);
+    }
+    while (localreq = (struct LocalIOReq *) GetMsg(nb->localport))
+    {
+    localreq->lreq_Buffer->buff_refcnt--;
+    ip_in(localreq->lreq_Buffer, localreq->lreq_Device);
+
+    FreeMem(localreq,sizeof(struct LocalIOReq));
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void QueueRead(dev, pt)
+struct sanadev *dev;
+UWORD pt;
+{
+    register struct NBase *nb = gb;
+    struct IOSana2ReqSS *ioreq;
+    struct Buffer *tmpbuff;
+    UWORD queue;
+    ONTIMER(12);
+    if(pt == PACKET_IP)
+    {
+        queue = dev->sanadev_MaxIPReq - dev->sanadev_NumIPReq;
+    }
+    else
+    {
+        queue = dev->sanadev_MaxARPReq - dev->sanadev_NumARPReq;
+    }
+
+    while(queue--)
+    {
+        tmpbuff = AllocBuffer(dev->sanadev_MTU);
+        if(!tmpbuff)
+            return;
+
+        ioreq = (struct IOSana2ReqSS *) ECreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS));
+        if (!ioreq)
+        {
+            OFFTIMER(12);
+            return;
+        }
+
+        ioreq->ss.ios2_Req.io_Device = dev->sanadev_Device;
+        ioreq->ss.ios2_Req.io_Unit = dev->sanadev_Unit;
+        ioreq->ss.ios2_BufferManagement = dev->sanadev_BuffMan;
+        ioreq->ss.ios2_Req.io_Command = CMD_READ;
+        ioreq->ss.ios2_Data = (void *) tmpbuff;
+
+//        kprintf("READ PACKET\n");
+
+        switch (pt)
+        {
+            case PACKET_IP:
+                dev->sanadev_NumIPReq++;
+                ioreq->ss.ios2_PacketType = dev->sanadev_IPType;
+                break;
+            case PACKET_ARP:
+                dev->sanadev_NumARPReq++;
+                ioreq->ss.ios2_PacketType = dev->sanadev_ARPType;
+                break;
+            default:
+                break;
+        }
+
+        ioreq->ios2_DevPtr = dev;
+        SendIO((struct IORequest *) ioreq);
+    }
+    OFFTIMER(12);
+}
+
+/*------------------------------------------------------------------------*/
+
+static void ProcessReq(ioreq)
+struct IOSana2ReqSS *ioreq;
+{
+
+    UWORD packt;
+    struct sanadev *queuedev=NULL;
+    struct Buffer *buff;
+    struct BuffEntry *be;
+    struct iphdr *hdr;
+    ONTIMER(8);
+    if (ioreq->ss.ios2_Req.io_Command == CMD_READ)
+    {
+        if (!ioreq->ss.ios2_Req.io_Error)       /* If a read w/ no error,
+                                                 * feed the packet to the
+                                                 * next level up */
+        {
+/*            if (ioreq->ios2_DevPtr->sanadev_Flags & S2DF_USEARP)
+            {
+                buff = (struct Buffer *) ioreq->ss.ios2_Data;
+                be = (struct BuffEntry *) buff->buff_list.mlh_Head;
+                hdr = (struct iphdr *) be->be_data;
+                if (ioreq->ss.ios2_PacketType == ioreq->ios2_DevPtr->sanadev_ARPType)
+                {
+                    struct arppkt *a=(struct arppkt *) hdr;
+                    kprintf("Arp op=%ld",a->arp_Operation);
+                    if (a->arp_Operation == ARP_REPLY)
+                        AddARPEntry(hdr->iph_SrcAddr, (UBYTE *) & (ioreq->ss.ios2_SrcAddr));
+                }
+            }
+*/
+            packt = PACKET_IP;
+            if (ioreq->ss.ios2_PacketType != ioreq->ios2_DevPtr->sanadev_IPType)
+            {
+                ioreq->ios2_DevPtr->sanadev_NumARPReq--;
+                packt = PACKET_ARP;
+            }
+            else
+            {
+                ioreq->ios2_DevPtr->sanadev_NumIPReq--;
+            }
+            if (!SwitchPacket(ioreq))
+            {
+                ProtocolInput(ioreq->ss.ios2_Data, ioreq->ss.ios2_DataLength,
+                              packt, ioreq->ios2_DevPtr);
+            }
+        }
+        else
+        {
+            if (ioreq->ss.ios2_PacketType != ioreq->ios2_DevPtr->sanadev_IPType)
+            {
+                ioreq->ios2_DevPtr->sanadev_NumARPReq--;
+                packt=PACKET_ARP;
+            }
+            else
+            {
+                ioreq->ios2_DevPtr->sanadev_NumIPReq--;
+                packt=PACKET_IP;
+            }
+            FreeBuffer((struct Buffer *) ioreq->ss.ios2_Data);
+            if (ioreq->ss.ios2_Req.io_Error == S2ERR_OUTOFSERVICE)      /* If we're told "out of
+                                                                         * service", queue a */
+            {                   /* S2_ONEVENT, an wait for it to go into
+                                 * service. */
+                if (!(ioreq->ios2_DevPtr->sanadev_Flags & S2DF_WAITING))
+                {
+                    ioreq->ios2_DevPtr->sanadev_Flags |= (S2DF_WAITING | S2DF_OFFLINE);
+                    ioreq->ss.ios2_Req.io_Command = S2_ONEVENT;
+                    ioreq->ss.ios2_WireError = S2EVENT_ONLINE;
+                    SendIO((struct IORequest *) ioreq);
+                }
+            }
+        }
+        if (ioreq->ss.ios2_Req.io_Command == CMD_READ)  /* Don't do this for the
+                                                         * one that changed to
+                                                         * an ONEVENT */
+        {
+            packt = PACKET_IP;
+            if (ioreq->ss.ios2_PacketType != ioreq->ios2_DevPtr->sanadev_IPType)
+                packt = PACKET_ARP;
+            if (!(ioreq->ios2_DevPtr->sanadev_Flags & S2DF_OFFLINE))
+            {
+                queuedev=ioreq->ios2_DevPtr;
+//                QueueRead(ioreq->ios2_DevPtr, packt);
+            }
+            EDeleteIORequest((struct IORequest *) ioreq);
+        }
+    }
+
+    else if (ioreq->ss.ios2_Req.io_Command == S2_ONEVENT)
+    {
+        ioreq->ios2_DevPtr->sanadev_Flags &= ~(S2DF_WAITING | S2DF_OFFLINE);
+        QueueRead(ioreq->ios2_DevPtr, PACKET_IP);
+        if (ioreq->ios2_DevPtr->sanadev_Flags & S2DF_USEARP)
+            queuedev=ioreq->ios2_DevPtr;
+//            QueueRead(ioreq->ios2_DevPtr, PACKET_ARP);
+        EDeleteIORequest((struct IORequest *) ioreq);
+    }
+
+
+    else if ((ioreq->ss.ios2_Req.io_Command == CMD_WRITE) || (ioreq->ss.ios2_Req.io_Command == S2_BROADCAST))
+    {
+        gb->outbuffs--;
+        ((struct Buffer *)ioreq->ss.ios2_Data)->buff_refcnt--;   /* The device no longer needs this buffer. */
+        FreeBuffer(ioreq->ss.ios2_Data);                         /* Free it if nobody wants it anymore. */
+        EDeleteIORequest((struct IORequest *) ioreq);
+    }
+    if(queuedev)
+        QueueRead(queuedev, packt);
+
+    OFFTIMER(8);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+/* The two pieces of callback material */
+BOOL __stdargs CTB(from, n, to)
+struct Buffer *to;
+UBYTE *from;
+ULONG n;
+{
+    return (CopyToBuffer(to, from, n));
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL __stdargs CFB(to, n, from)
+struct Buffer *from;
+ULONG n;
+UBYTE *to;
+{
+    CopyFromBuffer(to, from, n);
+    return TRUE;
+}
+
+/*------------------------------------------------------------------------*/
+
+void CheckForInet()
+{
+    struct MsgPort *inetport;
+    struct MsgPort *tmpreply;
+    struct xstart xs;
+
+    /* Try to send an xstart for each device we have */
+
+    if(tmpreply = CreateMsgPort())
+    {
+        if (!IsListEmpty((struct List *) & gb->DeviceList))
+        {
+            struct sanadev *sd;
+            sd = (struct sanadev *) gb->DeviceList.lh_Head;
+            while (sd->sanadev_Node.mln_Succ)
+            {
+                xs.xs_Command = XCMD_START;
+                xs.xs_Device = sd->sanadev_Device;
+                xs.xs_Unit = sd->sanadev_Unit;
+                xs.xs_Link = gb->DataPort;
+                xs.xs_Msg.mn_ReplyPort = tmpreply;
+                Forbid();
+                inetport = FindPort("INET Exchange");
+                if (inetport)
+                {
+                    PutMsg(inetport, (struct Message *) & xs);
+                }
+                Permit();
+                if (inetport)
+                {
+                    WaitPort(tmpreply);
+                    GetMsg(tmpreply);
+                    if (xs.xs_Link == 0L)
+                    {
+                        ExCTB = xs.xs_CTB;
+                        gb->Switching = TRUE;
+                    }
+                }
+                sd = (struct sanadev *) sd->sanadev_Node.mln_Succ;
+            }
+        }
+        DeleteMsgPort(tmpreply);
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void NotifyInet()
+{
+    register struct NBase *nb = gb;
+    struct MsgPort *tmpreply;
+    struct MsgPort *inetport;
+    struct xstart xs;
+    struct IORequest *ior;
+
+    /* First, flush their read requests */
+    Forbid();
+    while (ior = (struct IORequest *) RemHead((struct List *) & nb->ExchangeList))
+    {
+        ior->io_Error = -128;
+        ReplyMsg(&ior->io_Message);
+    }
+    Permit();
+
+
+    if(tmpreply = CreateMsgPort())
+    {
+        xs.xs_Command = XCMD_END;
+        xs.xs_Msg.mn_ReplyPort = tmpreply;
+        Forbid();
+        inetport = FindPort("INET Exchange");
+        if (inetport)
+            PutMsg(inetport, &xs.xs_Msg);
+        Permit();
+        if (inetport)
+        {
+            WaitPort(tmpreply);
+            GetMsg(tmpreply);
+        }
+
+        DeleteMsgPort(tmpreply);
+    }
+
+}
+
+/*------------------------------------------------------------------------*/
+
+void DevReqTimeout()
+{
+    struct sanadev *dev;
+
+    dev = (struct sanadev *) gb->DeviceList.lh_Head;
+    while(dev->sanadev_Node.mln_Succ)
+    {
+        QueueRead(dev,PACKET_IP);
+        dev = (struct sanadev *) dev->sanadev_Node.mln_Succ;
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+struct IORequest *ECreateIORequest(struct MsgPort *rp,ULONG size)
+{
+    register struct NBase *nb=gb;
+    struct IORequest *i;
+    i = (struct IORequest *) EAllocPooled(nb->MemoryPool,size);
+    if (i)
+    {
+        i->io_Message.mn_Node.ln_Type = NT_REPLYMSG;
+        i->io_Message.mn_ReplyPort = rp;
+        i->io_Message.mn_Length = size;
+        return(i);
+    }
+    return(0L);
+}
+
+VOID EDeleteIORequest(struct IORequest *i)
+{
+    register struct NBase *nb=gb;
+
+    EFreePooled(nb->MemoryPool,i,i->io_Message.mn_Length);
+
+}
+
+@
+
+
+1.42
+log
+@Added new Create/Delete IORequest code that uses our memory pools.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.41 93/03/02 16:24:34 gregm Exp Locker: gregm $
+d230 1
+a230 1
+                                    es.es_GadgetFormat = "Okay";
+d276 1
+a276 1
+                EDeleteIORequest(ioretreq);
+d373 1
+d375 1
+d410 3
+a412 1
+        if (uh->udp_DestPort == NIP_UDP_PORT)
+d414 1
+d474 1
+a474 1
+void PacketWrite(dev, gateway, buffer, destination, packettype, brc)
+d481 1
+d502 2
+d520 7
+a526 1
+    if(!brc)
+d602 2
+d695 2
+d735 1
+a735 1
+            if (ioreq->ios2_DevPtr->sanadev_Flags & S2DF_USEARP)
+d741 6
+a746 1
+                    AddARPEntry(hdr->iph_SrcAddr, (UBYTE *) & (ioreq->ss.ios2_SrcAddr));
+d748 1
+@
+
+
+1.41
+log
+@Set up the Sanadev BitsPerSecond (BPS) field to a non-zero value 
+for the local interface.  In fact, I used the highest possible 
+32-bit integer.  
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.40 93/02/15 10:38:50 kcd Exp Locker: gregm $
+d276 1
+a276 1
+                DeleteIORequest(ioretreq);
+d539 1
+a539 1
+    if(wioreq = (struct IOSana2ReqSS *) CreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS)))
+d588 1
+a588 1
+    if(wioreq = (struct IOSana2ReqSS *) CreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS)))
+d666 1
+a666 1
+        ioreq = (struct IOSana2ReqSS *) CreateIORequest(nb->replyport, sizeof(struct IOSana2ReqSS));
+d779 1
+a779 1
+            DeleteIORequest((struct IORequest *) ioreq);
+d790 1
+a790 1
+        DeleteIORequest((struct IORequest *) ioreq);
+d799 1
+a799 1
+        DeleteIORequest((struct IORequest *) ioreq);
+d930 26
+@
+
+
+1.40
+log
+@Bumped the number of ARPReq's queued to 5.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.39 92/12/16 14:39:45 kcd Exp Locker: kcd $
+d121 1
+@
+
+
+1.39
+log
+@Added static prototypes for two functions, and eliminated a few
+compiler warnings.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.38 92/12/02 11:25:23 gregm Exp Locker: kcd $
+d159 1
+a159 1
+                                s2dev->sanadev_MaxARPReq = 1;
+@
+
+
+1.38
+log
+@(a) Added a else Permit(); in SwitchPacket().  There was a place where we could Forbid(), but
+never Permit().
+(b) Added some conditional compilation stuff to cause AS225 interoperability to work
+on the basis of protocol types rather than IP addresses.  (Different IP addresses are still
+okay, though.)
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.37 92/11/02 14:06:47 kcd Exp Locker: gregm $
+d24 1
+a24 1
+#include <sana2.h>
+d47 3
+d359 1
+a359 1
+BOOL SwitchPacket(ioreq)
+d365 1
+d367 1
+a674 7
+//        tmpbuff = AllocBuffer(dev->sanadev_MTU);
+//        if (!tmpbuff)
+//        {
+//            DeleteIORequest((struct IORequest *) ioreq);
+//            OFFTIMER(12);
+//            return;
+//        }
+d700 1
+a700 1
+void ProcessReq(ioreq)
+d890 1
+a890 1
+        ior->io_Error = 255;
+@
+
+
+1.37
+log
+@Removed 32-bit math operations.  Fixed a buffer reference count problem
+that was causing a nasty memory leak.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.36 92/09/24 16:56:27 kcd Exp Locker: kcd $
+d13 6
+d112 6
+a117 6
+		    if(s2dev = (struct sanadev *) AllocMem(sizeof(struct sanadev), MEMF_PUBLIC | MEMF_CLEAR))
+		    {
+		    	s2dev->sanadev_IPAddress = 0x7f000001;
+		    	s2dev->sanadev_IPNetwork = 0x7f000000;
+		    	s2dev->sanadev_IPMask = 0xff000000;
+		    	s2dev->sanadev_MTU = 0xffffffff;
+d119 2
+a120 2
+	                AddTail((struct List *) & nb->DeviceList, (struct Node *) s2dev);
+		    }
+d258 2
+a259 2
+    	if(deldev->sanadev_Device)
+    	{
+d378 2
+d395 12
+d441 2
+d494 9
+a502 9
+    	if(localreq = (struct LocalIOReq *) AllocMem(sizeof(struct LocalIOReq),MEMF_PUBLIC))
+    	{
+    	    localreq->lreq_Buffer = buffer;
+    	    localreq->lreq_Device = dev;
+    	    buffer->buff_refcnt++;
+    	    PutMsg(nb->localport,(struct Message *)localreq);
+    	}
+    	else
+    	    FreeBuffer(buffer);
+d504 1
+a504 1
+    	return;
+d656 3
+a658 3
+    	tmpbuff = AllocBuffer(dev->sanadev_MTU);
+    	if(!tmpbuff)
+    	    return;
+d777 1
+a777 1
+            	queuedev=ioreq->ios2_DevPtr;
+d803 1
+a803 1
+    	QueueRead(queuedev, packt);
+@
+
+
+1.36
+log
+@Added the default pseudo-device code and fixed a problem with online/offline
+state flags for sana2 devices.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.35 92/08/18 12:16:33 gregm Exp $
+d184 1
+a184 1
+                                    memcpy(&(ioreq.ios2_SrcAddr), &ndp->ndp_HardAddress, (s2dev->sanadev_AddressSize) / 8);
+d198 1
+a198 1
+                                memcpy(&(s2dev->sanadev_HardAddress), &(ioreq.ios2_SrcAddr), (s2dev->sanadev_AddressSize) / 8);
+d605 1
+d607 1
+d634 4
+d648 7
+a654 7
+        tmpbuff = AllocBuffer(dev->sanadev_MTU);
+        if (!tmpbuff)
+        {
+            DeleteIORequest((struct IORequest *) ioreq);
+            OFFTIMER(12);
+            return;
+        }
+d685 1
+d725 1
+d730 1
+d755 2
+a756 1
+                QueueRead(ioreq->ios2_DevPtr, packt);
+d767 2
+a768 1
+            QueueRead(ioreq->ios2_DevPtr, PACKET_ARP);
+d780 3
+@
+
+
+1.35
+log
+@Fixed a problem involving us assuming that the default ethernet address was the current ehternet address.
+Kept decnet from running w/ us.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.34 92/08/13 17:42:23 gregm Exp Locker: gregm $
+d106 9
+d252 17
+a268 13
+        deldev->sanadev_Flags |= S2DF_OFFLINE;  /* prevent any further
+                                                 * CMD_WRITE's */
+        ioreq.ios2_Req.io_Unit = deldev->sanadev_Unit;
+        ioreq.ios2_Req.io_Device = deldev->sanadev_Device;
+        ioreq.ios2_BufferManagement = deldev->sanadev_BuffMan;
+        ioreq.ios2_Req.io_Message.mn_ReplyPort = gb->replyport;
+        ioreq.ios2_Req.io_Command = CMD_FLUSH;
+        DoIO((struct IORequest *) & ioreq);
+        while (ioretreq = (struct IOSana2Req *) GetMsg(nb->replyport))
+        {
+            if (ioretreq->ios2_Req.io_Command == CMD_READ)
+                FreeBuffer(ioretreq->ios2_Data);
+            DeleteIORequest(ioretreq);
+a269 1
+        CloseDevice((struct IORequest *) & ioreq);
+d452 1
+d470 14
+d754 1
+a754 1
+        ioreq->ios2_DevPtr->sanadev_Flags &= !(S2DF_WAITING | S2DF_OFFLINE);
+@
+
+
+1.34
+log
+@Added some code to randomly drop packets.  (Currently commented out.)
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.33 92/07/31 16:15:49 kcd Exp Locker: gregm $
+d180 6
+@
+
+
+1.33
+log
+@I now finally pay attention to the ONLINE/OFFLINE settings in nipc prefs.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.32 92/07/09 12:02:23 kcd Exp $
+d26 3
+d112 2
+a113 2
+			if(ndp->ndp_Flags & NDPFLAGF_ONLINE)
+			{
+d435 13
+d512 1
+a512 1
+    	FreeBuffer(buffer);
+@
+
+
+1.32
+log
+@Fixed a memory leak with failed CreateIORequest().
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.31 92/06/26 11:30:26 kcd Exp Locker: kcd $
+d109 3
+a111 1
+                        override = (ndp->ndp_Flags & NDPFLAGF_HARDADDR);
+d113 61
+a173 39
+                        ioreq.ios2_BufferManagement = &gb->copytags;
+                        ioreq.ios2_Req.io_Message.mn_ReplyPort = gb->replyport;
+                        if (!OpenDevice(ndp->ndp_DevPathName, ndp->ndp_Unit, (struct IORequest *) & ioreq, 0L))
+                        {
+                            s2dev = (struct sanadev *) AllocMem(sizeof(struct sanadev), MEMF_PUBLIC + MEMF_CLEAR);
+                            if (!s2dev)
+                                continue;
+                            ioreq.ios2_Req.io_Command = S2_DEVICEQUERY;
+                            ioreq.ios2_StatData = (void *) &s2dq;
+                            s2dq.SizeAvailable = sizeof(struct Sana2DeviceQuery);
+                            DoIO((struct IORequest *) & ioreq);
+                            s2dev->sanadev_IPType = ndp->ndp_IPType;
+                            s2dev->sanadev_ARPType = ndp->ndp_ARPType;
+                            s2dev->sanadev_MTU = s2dq.MTU;
+                            s2dev->sanadev_BPS = s2dq.BPS;
+                            s2dev->sanadev_HardwareType = s2dq.HardwareType;
+                            if (s2dq.HardwareType == 1)  /* If ethernet */
+                                s2dev->sanadev_Flags |= S2DF_USEARP;
+                            s2dev->sanadev_AddressSize = s2dq.AddrFieldSize;
+                            s2dev->sanadev_Device = ioreq.ios2_Req.io_Device;
+                            s2dev->sanadev_Unit = ioreq.ios2_Req.io_Unit;
+                            s2dev->sanadev_BuffMan = ioreq.ios2_BufferManagement;
+                            s2dev->sanadev_IPAddress = DevIP = ndp->ndp_IPAddress;
+                            s2dev->sanadev_IPNetwork = NetNum(s2dev->sanadev_IPAddress);
+                            s2dev->sanadev_MaxIPReq = TOTALQUEUE;
+                            s2dev->sanadev_MaxARPReq = 1;
+                            s2dev->sanadev_NumIPReq = 0;
+                            s2dev->sanadev_NumARPReq = 0;
+
+                            if (IP_CLASSA(DevIP))
+                                IPMask = 0xff000000;
+                            if (IP_CLASSB(DevIP))
+                                IPMask = 0xffff0000;
+                            if (IP_CLASSC(DevIP))
+                                IPMask = 0xffffff00;
+                            if (IP_CLASSD(DevIP))
+                                IPMask = 0xffffffff;
+                            if (IP_CLASSE(DevIP))
+                                IPMask = 0xffffffff;
+d175 2
+a176 1
+                            s2dev->sanadev_IPMask = IPMask;
+d178 1
+a178 8
+                            if (ndp->ndp_Flags & NDPFLAGF_SUBNET)
+                            {
+                                s2dev->sanadev_SubnetMask = ndp->ndp_IPSubnet;
+                                s2dev->sanadev_IPSubnet = s2dev->sanadev_SubnetMask & s2dev->sanadev_IPAddress;
+                                s2dev->sanadev_SValid = TRUE;
+                            }
+                            else
+                                s2dev->sanadev_SValid = FALSE;
+d180 1
+a180 10
+                            if (!override)
+                            {
+                                ioreq.ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+                                DoIO((struct IORequest *) & ioreq);
+                                memcpy(&(ioreq.ios2_SrcAddr), &(ioreq.ios2_DstAddr), 16);
+                            }
+                            else
+                            {
+                                memcpy(&(ioreq.ios2_SrcAddr), &ndp->ndp_HardAddress, (s2dev->sanadev_AddressSize) / 8);
+                            }
+d182 3
+a184 2
+                            ioreq.ios2_Req.io_Command = S2_CONFIGINTERFACE;
+                            DoIO((struct IORequest *) & ioreq);
+d186 2
+a187 1
+                            NewList((struct List *) & (s2dev->sanadev_Fragments));
+d189 2
+a190 16
+                            memcpy(&(s2dev->sanadev_HardAddress), &(ioreq.ios2_SrcAddr), (s2dev->sanadev_AddressSize) / 8);
+
+                            AddTail((struct List *) & nb->DeviceList, (struct Node *) s2dev);
+
+                            QueueRead(s2dev, PACKET_IP);
+
+                            if (s2dev->sanadev_Flags & S2DF_USEARP)
+                                QueueRead(s2dev, PACKET_ARP);
+
+                        }
+                        else
+                        {
+                            struct Library *IntuitionBase;
+                            struct EasyStruct es;
+                            APTR ERArgs;
+                            if(IntuitionBase = OpenLibrary("intuition.library",37L))
+d192 14
+a205 8
+                                ERArgs=(APTR)ndp->ndp_DevPathName;
+                                es.es_StructSize = sizeof(struct EasyStruct);
+                                es.es_Flags = NULL;
+                                es.es_Title = "NIPC";
+                                es.es_TextFormat = "Could not open %s.";
+                                es.es_GadgetFormat = "Okay";
+                                EasyRequestArgs(NULL,&es,NULL,&ERArgs);
+                                CloseLibrary(IntuitionBase);
+@
+
+
+1.31
+log
+@Added error requesters for bad OpenDevice() calls.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.30 92/06/24 11:13:53 kcd Exp Locker: kcd $
+d492 2
+a493 1
+
+d798 1
+d802 1
+a802 1
+    if (!IsListEmpty((struct List *) & gb->ExchangeList))
+d804 2
+a805 6
+        struct IORequest *ior;
+        while (ior = (struct IORequest *) RemHead((struct List *) & nb->ExchangeList))
+        {
+            ior->io_Error = 255;
+            ReplyMsg(&ior->io_Message);
+        }
+@
+
+
+1.30
+log
+@Fixed problem with the init code failing if there were not SANA2 devices
+in the configuration file.  nipc.library is supposed to work without
+any.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.29 92/06/24 11:01:42 gregm Exp Locker: kcd $
+d25 1
+d32 1
+d187 17
+@
+
+
+1.29
+log
+@Fixed an ugly exchange bug.  Could cause crashes.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.28 92/06/22 15:12:12 gregm Exp Locker: gregm $
+d101 3
+a103 1
+                    if(ci = FindCollection(nb->iff,ID_PREF,ID_NDEV))
+d105 3
+d109 3
+a111 1
+                        while (ci)
+d113 35
+a147 1
+                            ndp = (struct NIPCDevicePrefs *)ci->ci_Data;
+d149 1
+a149 1
+                            override = (ndp->ndp_Flags & NDPFLAGF_HARDADDR);
+d151 1
+a151 3
+                            ioreq.ios2_BufferManagement = &gb->copytags;
+                            ioreq.ios2_Req.io_Message.mn_ReplyPort = gb->replyport;
+                            if (!OpenDevice(ndp->ndp_DevPathName, ndp->ndp_Unit, (struct IORequest *) & ioreq, 0L))
+d153 6
+a158 57
+                                s2dev = (struct sanadev *) AllocMem(sizeof(struct sanadev), MEMF_PUBLIC + MEMF_CLEAR);
+                                if (!s2dev)
+                                    continue;
+                                ioreq.ios2_Req.io_Command = S2_DEVICEQUERY;
+                                ioreq.ios2_StatData = (void *) &s2dq;
+                                s2dq.SizeAvailable = sizeof(struct Sana2DeviceQuery);
+                                DoIO((struct IORequest *) & ioreq);
+                                s2dev->sanadev_IPType = ndp->ndp_IPType;
+                                s2dev->sanadev_ARPType = ndp->ndp_ARPType;
+                                s2dev->sanadev_MTU = s2dq.MTU;
+                                s2dev->sanadev_BPS = s2dq.BPS;
+                                s2dev->sanadev_HardwareType = s2dq.HardwareType;
+                                if (s2dq.HardwareType == 1)  /* If ethernet */
+                                    s2dev->sanadev_Flags |= S2DF_USEARP;
+                                s2dev->sanadev_AddressSize = s2dq.AddrFieldSize;
+                                s2dev->sanadev_Device = ioreq.ios2_Req.io_Device;
+                                s2dev->sanadev_Unit = ioreq.ios2_Req.io_Unit;
+                                s2dev->sanadev_BuffMan = ioreq.ios2_BufferManagement;
+                                s2dev->sanadev_IPAddress = DevIP = ndp->ndp_IPAddress;
+                                s2dev->sanadev_IPNetwork = NetNum(s2dev->sanadev_IPAddress);
+                                s2dev->sanadev_MaxIPReq = TOTALQUEUE;
+                                s2dev->sanadev_MaxARPReq = 1;
+                                s2dev->sanadev_NumIPReq = 0;
+                                s2dev->sanadev_NumARPReq = 0;
+
+                                if (IP_CLASSA(DevIP))
+                                    IPMask = 0xff000000;
+                                if (IP_CLASSB(DevIP))
+                                    IPMask = 0xffff0000;
+                                if (IP_CLASSC(DevIP))
+                                    IPMask = 0xffffff00;
+                                if (IP_CLASSD(DevIP))
+                                    IPMask = 0xffffffff;
+                                if (IP_CLASSE(DevIP))
+                                    IPMask = 0xffffffff;
+
+                                s2dev->sanadev_IPMask = IPMask;
+
+                                if (ndp->ndp_Flags & NDPFLAGF_SUBNET)
+                                {
+                                    s2dev->sanadev_SubnetMask = ndp->ndp_IPSubnet;
+                                    s2dev->sanadev_IPSubnet = s2dev->sanadev_SubnetMask & s2dev->sanadev_IPAddress;
+                                    s2dev->sanadev_SValid = TRUE;
+                                }
+                                else
+                                    s2dev->sanadev_SValid = FALSE;
+
+                                if (!override)
+                                {
+                                    ioreq.ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+                                    DoIO((struct IORequest *) & ioreq);
+                                    memcpy(&(ioreq.ios2_SrcAddr), &(ioreq.ios2_DstAddr), 16);
+                                }
+                                else
+                                {
+                                    memcpy(&(ioreq.ios2_SrcAddr), &ndp->ndp_HardAddress, (s2dev->sanadev_AddressSize) / 8);
+                                }
+d160 3
+a162 1
+                                ioreq.ios2_Req.io_Command = S2_CONFIGINTERFACE;
+d164 6
+d171 2
+a172 1
+                                NewList((struct List *) & (s2dev->sanadev_Fragments));
+d174 1
+a174 1
+                                memcpy(&(s2dev->sanadev_HardAddress), &(ioreq.ios2_SrcAddr), (s2dev->sanadev_AddressSize) / 8);
+d176 5
+a180 3
+                                AddTail((struct List *) & nb->DeviceList, (struct Node *) s2dev);
+
+                                QueueRead(s2dev, PACKET_IP);
+d182 2
+a183 2
+                                if (s2dev->sanadev_Flags & S2DF_USEARP)
+                                    QueueRead(s2dev, PACKET_ARP);
+a184 2
+                            }
+                            ci = ci->ci_Next;
+d186 1
+a186 4
+                        nb->CMDPort->mp_Node.ln_Name = "NIPC Exchange";
+                        AddPort(nb->CMDPort);
+                        CheckForInet();
+                        return(TRUE);
+d188 4
+a191 1
+                    DeleteMsgPort(nb->DataPort);
+@
+
+
+1.28
+log
+@Fixed a bug w/ the AS225 exchange mechanism:
+If NIPC was asked (by AS225) to exchange on a device that AS225 knew about,
+but NIPC didn't, NIPC would answer "okey dokey" if it was already doing any
+exchanging with AS225.
+
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.27 92/06/08 09:49:29 kcd Exp Locker: gregm $
+d362 1
+a362 2
+        if (!(xtreq->ss.ios2_Req.io_Message.mn_Node.ln_Succ))    /* none for this
+                                                                 * device/unit */
+d364 15
+a378 1
+            return (FALSE);
+a380 16
+
+    Remove((struct Node *) xtreq);
+    xtreq->ss.ios2_DataLength = ioreq->ss.ios2_DataLength;
+    xtreq->ss.ios2_Req.io_Error = ioreq->ss.ios2_Req.io_Error;
+    xtreq->ss.ios2_WireError = ioreq->ss.ios2_WireError;
+    xtreq->ss.ios2_PacketType = ioreq->ss.ios2_PacketType;
+    (*ExCTB) ((UBYTE *) iph, (ULONG) ioreq->ss.ios2_DataLength, (void *) xtreq->ss.ios2_Data);   /* copy the data over */
+
+    /* Copy the addresses over .. */
+    for (x = 0; x < 16; x++)
+    {
+        xtreq->ss.ios2_SrcAddr[x] = ioreq->ss.ios2_SrcAddr[x];
+        xtreq->ss.ios2_DstAddr[x] = ioreq->ss.ios2_DstAddr[x];
+    }
+
+    ReplyMsg(&xtreq->ss.ios2_Req.io_Message);
+@
+
+
+1.27
+log
+@Code cleanup. Eliminated PacketBroadcast() function.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.26 92/06/04 19:49:46 kcd Exp Locker: kcd $
+d265 1
+d269 1
+a269 1
+            if (gb->Switching)
+@
+
+
+1.26
+log
+@Fixed bug with how ARP entries were being added.
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.25 92/05/22 15:34:54 gregm Exp Locker: kcd $
+d403 1
+a403 1
+void PacketWrite(dev, gateway, buffer, destination, packettype)
+d409 1
+d418 6
+a423 4
+    if (gateway == dev->sanadev_IPAddress)
+        dest = destination;
+    else
+        dest = gateway;
+d425 9
+a433 3
+    if(dev->sanadev_Flags & S2DF_USEARP)
+    {
+    if (!FindArpEntry(dev, dest, (UBYTE *) & eaddr))
+d435 8
+a442 3
+        AddBuffList(buffer, destination, dev, gateway, packettype);
+        return;
+    }
+a443 10
+    else
+    {
+        ULONG lmask,portion;
+        int n;
+        n = dev->sanadev_AddressSize;
+        lmask = (1 << n) - 1;
+        portion = dest & lmask;
+        portion = (portion << (32-n));
+        memcpy(&eaddr,&portion,4);
+    }
+d453 5
+a457 1
+        wioreq->ss.ios2_Req.io_Command = CMD_WRITE;
+d471 2
+a472 1
+        memcpy(&(wioreq->ss.ios2_DstAddr), &eaddr, 6);
+d474 2
+d483 2
+d514 3
+d522 1
+a650 1
+                packt = PACKET_ARP;
+d698 2
+a699 1
+        FreeBuffer(ioreq->ss.ios2_Data);
+@
+
+
+1.25
+log
+@Changed the # of iorequests queued, and then hanged back.  :')
+@
+text
+@d7 1
+a7 1
+** $Id: s2io.c,v 1.24 92/05/14 20:20:21 kcd Exp Locker: gregm $
+d610 1
+a610 1
+                if (ioreq->ss.ios2_PacketType == ioreq->ios2_DevPtr->sanadev_IPType)
+@

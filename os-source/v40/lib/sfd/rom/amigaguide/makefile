@@ -1,0 +1,58 @@
+########################################
+MAKEMETA=	../../../../tools/makemeta
+
+
+OBJS0=\
+	AGARexxHost.obj\
+	LockAmigaGuideBase.obj\
+	UnlockAmigaGuideBase.obj\
+	ExpungeDataBases.obj\
+	OpenAmigaGuideA.obj\
+	OpenAmigaGuide.obj\
+	OpenAmigaGuideAsyncA.obj\
+	OpenAmigaGuideAsync.obj\
+	CloseAmigaGuide.obj\
+	AmigaGuideSignal.obj\
+	GetAmigaGuideMsg.obj\
+	ReplyAmigaGuideMsg.obj\
+	SetAmigaGuideContextA.obj\
+	SetAmigaGuideContext.obj\
+	SendAmigaGuideContextA.obj\
+	SendAmigaGuideContext.obj\
+	SendAmigaGuideCmdA.obj\
+	SendAmigaGuideCmd.obj\
+	SetAmigaGuideAttrsA.obj\
+	SetAmigaGuideAttrs.obj\
+	GetAmigaGuideAttr.obj\
+	SetAmigaGuideHook.obj\
+	LoadXRef.obj\
+	ExpungeXRef.obj\
+	AddAmigaGuideHostA.obj\
+	AddAmigaGuideHost.obj\
+	RemoveAmigaGuideHostA.obj\
+	RemoveAmigaGuideHost.obj\
+	OpenE.obj\
+	LockE.obj\
+	CopyPathList.obj\
+	AddPathEntries.obj\
+	FreePathList.obj\
+	ParsePathString.obj\
+	OpenDataBase.obj\
+	LoadNode.obj\
+	UnloadNode.obj\
+	CloseDataBase.obj\
+	GetAmigaGuideString.obj
+
+lib.timestamp:	asm.timestamp
+	make objs0 ${MFLAGS} ${MARGS}
+	cat *.obj >../amigaguide.lib
+	rm -f *.obj
+	touch lib.timestamp
+
+asm.timestamp:
+
+objs0:		${OBJS0}
+	rm -f *.asm
+	touch asm.timestamp
+
+.INCLUDE=${MAKEMETA}

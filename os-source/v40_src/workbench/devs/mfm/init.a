@@ -1,0 +1,177 @@
+**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       init.a  -- device initialization code
+*
+**************************************************************************
+        section ,CODE
+
+        include "mfm.i"
+        include "mfm_ext.i"
+        include "mfm.device_rev.i"
+
+        XREF    _EndCode
+        XREF    _Open
+        XREF    _Close
+        XREF    _Expunge
+        XREF    _Null
+        XREF    _BeginIO
+        XREF    _AbortIO
+        XDEF    devName
+
+        ; This code is here in case someone tried to run you as a program 
+        ; instead of calling you as a library or device.  If random data
+        ; were present when ran as a program, illegal code might be 
+        ; encountered and cause undesirable results with the operating system.
+FirstAddress:
+        CLEAR   d0
+        rts
+
+        ; force word alignment
+        cnop    0,2
+
+;--------------------------------------------------------------------------
+; Initialization Section
+;
+; This section of code is used only when the Device is opened for the first
+; time.  Subsequent OpenDevice() calls do not go through code.
+;
+; This code establishes the Device structure which includes the device 
+; node and device function vector table.  The device is started up as a 
+; library and treated as such by the Exec.  The only difference is that the
+; Exec has routines such as DoIO(), SendIO, WaitIO() and CheckIO() that apply
+; only to devices and not libraries.
+;
+; In summary, the initialization code takes care of starting up the device
+; resources for the all units in the device.  All device resources must be
+; deallocated ; only in the Expunge() routine when all Open() calls to the
+; device are Closed().
+;--------------------------------------------------------------------------
+
+        ;--------------------------------------------------------------------
+        ; This is a  romtag structure.  Exec and 'ramlib' use this structure
+        ; to find out about you (such as where to start running from...) and
+        ; stores this structure to make the device resident when subsequent 
+        ; Open()s are made.
+        ;--------------------------------------------------------------------
+
+initDDescrip:
+                                ;STRUCTURE RT,0
+        dc.w    RTC_MATCHWORD   ;UWORD  RT_MATCHWORD
+        dc.l    initDDescrip    ;APTR   RT_MATCHTAG
+        dc.l    _EndCode        ;APTR   RT_ENDSKIP
+        dc.b    RTF_AUTOINIT    ;UBYTE  RT_FLAGS
+        dc.b    VERSION         ;UBYTE  RT_VERSION
+        dc.b    NT_DEVICE       ;UBYTE  RT_TYPE
+        dc.b    DEVPRI          ;BYTE   RT_PRI
+        dc.l    devName         ;APTR   RT_NAME
+        dc.l    idString        ;APTR   RT_IDSTRING
+        dc.l    Init            ;APTR   RT_INIT
+                                ;LABEL  RT_SIZE
+
+        ;--------------------------------------------------------------------------
+        ; RT_INIT points to the Init table because of RTF_AUTOINIT in RT_FLAGS.
+        ; If the RTF_AUTOINIT bit was not set then RT_INIT would point to a 
+        ; routine to run.
+
+devName:        MFMNAME
+
+		dc.b	'$VER: '
+        ; An identifier tag.
+idString:       VSTRING
+
+        ; force word alignment
+        cnop    0,2
+
+Init:
+        dc.l    MFMDev_sz               ; data space size -- device structure
+                                        ; The size of the memory allocated 
+                                        ; for this table becomes the constant
+                                        ; LIB_POSSIZE of the library 
+                                        ; structure of the device.
+        dc.l    FuncVecs                ; pointer to function vectors
+        dc.l    DataInit                ; pointer to data initializers
+        dc.l    InitCode                ; initialization code
+
+        ;--------------------------------------------------------------------
+        ; The RTF_AUTOINIT will create a jump table with the following vectors
+        ; starting just below the start of the device structure in memory.  
+        ; The size of the memory allocated for this table becomes the 
+        ; constant LIB_NEGSIZE of the library structure of the device.
+FuncVecs:
+        ;------- standard system routines
+        dc.l    _Open
+        dc.l    _Close
+        dc.l    _Expunge
+        dc.l    _Null
+        ;------- my device definitions
+        dc.l    _BeginIO
+        dc.l    _AbortIO
+        ;------- function vector table end marker
+        dc.l    -1      ; indicates to the romtag init routines the end of 
+                        ;function vectors.
+
+        ;--------------------------------------------------------------------
+        ; The RTF_AUTOINIT will load any STATIC values you want into the 
+        ; device data structure using the InitStruct() routine called by 
+        ; the Exec.  The dataTable is the data to be loaded.
+        ; Refer to the "exec/InitStruct()" function for the format of the data.
+        ; The assembler macros for INITBYTE/INITWORD/INITLONG are in the file
+        ; "exec/initializers.i".  The macro arguments are:
+        ;       argument #1 = offset from the device structure base
+        ;       argument #2 = value to put offset.
+        ; The table must be null terminated.
+DataInit:
+        INITBYTE        LN_TYPE,NT_DEVICE
+        INITLONG        LN_NAME,devName
+        INITBYTE        LIB_FLAGS,LIBF_SUMUSED!LIBF_CHANGED
+        INITWORD        LIB_VERSION,VERSION
+        INITWORD        LIB_REVISION,REVISION
+        INITLONG        LIB_IDSTRING,idString
+        dc.l            0
+
+;--------------------------------------------------------------------
+; After all the autoinitialization is done, the device is linked to
+; the system device list.  The remaining GLOBAL device initialization
+; can occur by calling this routine.
+;
+; Inputs:
+; =======
+; a6 = _AbsExecBase ptr
+; a0 = seglist of the device driver
+; d0 = device ptr
+;
+; Returns:
+; ========
+; d0 = device ptr = successful initialization 
+;    = 0 = error
+;--------------------------------------------------------------------
+MM_InitCode     reg     a5
+
+InitCode:
+        ;------- put device pointer into an address register
+        movem.l MM_InitCode,-(sp)
+        move.l  d0,Device
+
+******** Store some important ptrs into the device structure.
+        move.l  _AbsExecBase,AbsExecBase    ; store AbsExecBase in reg
+        move.l  AbsExecBase,md_AbsExecBase(Device)  ; copy to Device 
+
+*        save our code seglist pointer
+        move.l  a0,md_SegList(Device)       ; store seglist ptr
+
+    ifnd CBM
+        XREF TDPatchKludge
+        jsr     TDPatchKludge
+
+        tst.l   RetD0
+        beq.s   Init_End
+        sub.l   Device,Device
+    endc
+
+Init_End:
+        move.l  Device,RetD0
+        movem.l (sp)+,MM_InitCode
+        rts
+
+        end

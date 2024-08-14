@@ -1,0 +1,280 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    J_Toebes:1.1; strict;
+comment  @ * @;
+
+
+1.1
+date     90.10.07.23.42.09;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@IO routines for handling ethernet (INET) interface.
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
+* |_o_o|\\ Copyright (c) 1990 The Software Distillery.                    *
+* |. o.| ||          All Rights Reserved                                  *
+* | .  | ||          Written by Doug Walker                               *
+* | o  | ||          The Software Distillery                              *
+* |  . |//           235 Trillingham Lane                                 *
+* ======             Cary, NC 27513                                       *
+*                    BBS:(919)-471-6436                                   *
+\* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+#include <exec/types.h>
+#include <exec/errors.h>
+#include <exec/memory.h>
+#include <intuition/intuition.h>
+#include <intuition/intuitionbase.h>
+#include <graphics/gfxbase.h>
+#include <graphics/regions.h>
+#include <graphics/gels.h>
+#include <devices/serial.h>
+#include <libraries/dos.h>
+#include <libraries/dosextens.h>
+
+#include "netcomm.h"
+#include "proto.h"
+#include "netinet.h"
+
+static int GetIO(NGLOBAL global, struct IOStdIpc *IPCReq, int size);
+
+int PutRPacket(global, ioptr, RP)
+NGLOBAL global;
+APTR ioptr;
+struct RPacket *RP;
+{
+   INETGLOBAL tg = global->n.d.tg;
+
+   BUG(("PutRPacket: Con: %ld type %d, Args %lx %lx %lx %lx\n", 
+       tg->curcon, RP->Type, 
+       RP->Arg1, RP->Arg2, 
+       RP->Arg3, RP->Arg4));
+
+   BUG(("PutRPacket: writing %d to confd %ld. . .", RPSIZEN, tg->curcon));
+   if (write(tg->curcon, RP, RPSIZEN) != RPSIZEN)
+   {
+      /* Something is really bad here - I bet they closed the connection        */
+      /* We need to return a failure.                                           */
+      BUGR("NET write error")
+      return(1);
+   }
+
+   BUG(("%ld written\n", RPSIZEN));
+
+   if(RP->DLen)
+   {
+      BUG(("PutRPacket: writing %d to confd %ld. . .", RP->DLen, tg->curcon));
+      if (write(tg->curcon, RP->DataP, RP->DLen) != RP->DLen)
+      {
+        BUGR("NET write error");
+        return(1) ;
+      }
+      BUG(("%d written\n", RP->DLen));
+   }
+
+   if(global->n.infoport)
+   {
+      struct Message *m;
+      while(m=GetMsg(global->n.ntirec.m.mn_ReplyPort))
+      {
+         if(m == &global->n.ntirec.m)
+            global->n.inuse_rec = 0;
+         else
+            global->n.inuse_trans = 0;
+      }
+      global->n.inf_trans += RPSIZEN + RP->DLen;
+         
+      if(!global->n.inuse_trans)
+      {
+         BUG(("PutRPacket: Writing status info to port %lx: TRANSMIT %ld\n", 
+            global->n.infoport, global->n.inf_trans))
+
+         global->n.ntitrans.nti_bytes = global->n.inf_trans;
+         global->n.ntitrans.nti_direction = NTI_TRANSMIT;
+         PutMsg(global->n.infoport, &global->n.ntitrans.m);
+
+         global->n.inuse_trans = 1;
+         global->n.inf_trans = 0;
+      }
+#if DEBUG
+      else
+         BUG(("PutRPacket: Skipping status write, packet outstanding\n"))
+#endif
+   }
+   return(0);
+}
+
+int GetRPacket(global, ioptr, RP)
+NGLOBAL global;
+APTR ioptr ;
+struct RPacket *RP;
+{
+   INETGLOBAL tg = global->n.d.tg;
+   int len, nfound, size;
+   long i, j;
+
+   for(;;)
+   {     
+      while(tg->fhscurmask == 0)
+      {
+         tg->fhscurmask = tg->fhsmask;
+   
+         BUG(("to select: fds=%08lx\n", tg->fhscurmask));   
+         /* First we wait for any outstanding activity */
+         if ((nfound = select(32, &tg->fhscurmask, 0, 0, &tg->timeout)) == -1)
+         {
+            BUGR("Select Failed");
+            return(1);
+         }
+         else if (nfound == 0)
+         {
+            BUG(("select timed out\n"));
+            tg->fhscurmask = 0;
+         }
+      }
+   
+      /* We have something that has happened on a connection               */
+      /* Find out what it is.  We will give first attack to anyone that    */
+      /* is establishing a new connection.                                 */
+      if (tg->fhscurmask & tg->sockmask)
+      {
+         /* Reset the flag to indicate that we have processed it           */
+         tg->fhscurmask ^= tg->sockmask;
+         /* We have a new connection */
+         BUG(("Special event\n"));
+         if (tg->fhscount >= (MAXCONNECT-1))
+         {
+            BUG(("Too many connections, ignoring it\n"));
+         }
+         else
+         {
+            len = sizeof(&tg->sin);
+            tg->fhs[tg->fhscount] = accept(tg->sock, &tg->sin, &len);
+            if (tg->fhs[tg->fhscount] == -1)
+            {
+               BUGR("Accept Error");
+            }
+            else
+            {
+               tg->fhsmask |= INETMASK(tg->fhs[tg->fhscount]);
+               BUG(("New connection %ld on: port=%ld Addr=%08lx\n",
+                     tg->fhscount, tg->sin.sin_port, tg->sin.sin_addr.s_addr));
+               tg->fhscount++;
+               RP->Type = ACTION_NETWORK_START;
+               RP->Arg1 = tg->fhs[tg->fhscount];
+               RP->Arg2 = tg->sin.sin_port;
+               RP->DLen = 0;
+               BUG(("Done\ntype %d, Args %lx %lx %lx %lx\n", RP->Type, 
+                    RP->Arg1, RP->Arg2, 
+                    RP->Arg3, RP->Arg4));
+               return(0);
+            }
+         }
+      }
+   
+      /* No new connections, but someone came in with a request */
+      for(i = 0; i < tg->fhscount; i++)
+      {
+         if (tg->fhscurmask & INETMASK(tg->fhs[i]))
+         {
+            tg->curcon = tg->fhs[i];
+
+            /* This is the one that sent us a message */
+            /* Reset the flag so that we know that we have processed it    */
+            tg->fhscurmask ^= INETMASK(tg->curcon);
+            BUG(("GetRPacket: reading %d from Connection %ld. . .", RPSIZEN, i));
+
+            RP->DataP[0] = '\0';
+            size = read(tg->curcon, RP, RPSIZEN);
+            /* DO a sanity check on what we get.  If it is even slightly wrong  */
+            /* we should immediately terminate the connection.  If it was a     */
+            /* legitimate user, he will have to reestablish the connection.     */
+            /* Note that this will cause any outstanding locks or file handles  */
+            /* to be purged automatically.                                      */
+            if ((size != RPSIZEN)       ||
+                (RP->DLen > NETBUFSIZE) ||
+                (RP->DLen < 0)          ||
+                ((RP->DLen != 0) &&
+                 (read(tg->curcon, RP->DataP, RP->DLen) != RP->DLen)))
+            {
+               /* Something is wrong here, assume that the connection */
+               /* is now closed and get rid of it.                    */
+               BUGR("Connection Closed");
+               tg->fhsmask ^= INETMASK(tg->curcon);
+               close(tg->curcon);
+               /* We need to return a packet indicating that the connection     */
+               /* has now been broken                                           */
+               RP->Type = ACTION_NETWORK_STOP;
+               RP->Arg1 = tg->curcon;
+               RP->Arg2 = tg->sin.sin_port;
+               RP->DLen = 0;
+               BUG(("Done\ntype %d, Args %lx %lx %lx %lx\n", RP->Type, 
+                    RP->Arg1, RP->Arg2, 
+                    RP->Arg3, RP->Arg4));
+               /* We also need to remove the dead connection from the table of  */
+               /* open connections.                                             */
+               tg->fhscount--;
+               for(j = i; j < tg->fhscount; j++)
+               {
+                  tg->fhs[j] = tg->fhs[j+1];
+               }
+               return(0);
+            }
+ 
+            BUG(("Done\ntype %d, Args %lx %lx %lx %lx\n", RP->Type, 
+                 RP->Arg1, RP->Arg2, 
+                 RP->Arg3, RP->Arg4));
+
+            /* See if we have a monitor process to inform of the event          */
+            if(global->n.infoport)
+            {
+               struct Message *m;
+               while(m=GetMsg(global->n.ntirec.m.mn_ReplyPort))
+               {
+                  if(m == &global->n.ntirec.m)
+                     global->n.inuse_rec = 0;
+                  else
+                     global->n.inuse_trans = 0;
+               }
+               global->n.inf_rec += RPSIZEN + RP->DLen;
+                  
+               if(!global->n.inuse_rec)
+               {
+                  BUG(("GetRPacket: Writing status info to port %lx: RECEIVE %ld\n",
+                     global->n.infoport, global->n.inf_rec))
+         
+                  global->n.ntirec.nti_bytes = global->n.inf_rec;
+                  global->n.ntirec.nti_direction = NTI_RECEIVE;
+                  PutMsg(global->n.infoport, &global->n.ntirec.m);
+         
+                  global->n.inuse_rec = 1;
+                  global->n.inf_rec = 0;
+               }
+#if DEBUG
+               else
+                  BUG(("GetRPacket: Skipping status write, packet outstanding\n"))
+#endif
+            }
+            return(0);
+         }
+      }
+   
+      BUGR("UNKNOWN HANDLE!");
+      tg->fhscurmask = 0;
+   }
+}
+@

@@ -1,0 +1,1 @@
+foo(){kprintf("shit\n");}

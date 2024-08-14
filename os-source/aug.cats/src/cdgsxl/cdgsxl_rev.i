@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	51
+DATE	MACRO
+		dc.b	'16.12.93'
+	ENDM
+VERS	MACRO
+		dc.b	'cdgsxl 1.51'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdgsxl 1.51 (16.12.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdgsxl 1.51 (16.12.93)',0
+	ENDM

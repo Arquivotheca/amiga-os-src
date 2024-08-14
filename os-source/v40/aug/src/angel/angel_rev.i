@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'7.1.91'
+	ENDM
+VERS	MACRO
+		dc.b	'angel 37.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'angel 37.1 (7.1.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: angel 37.1 (7.1.91)',0
+	ENDM

@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'13.10.93'
+	ENDM
+VERS	MACRO
+		dc.b	'SimFreeAnim 1.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'SimFreeAnim 1.2 (13.10.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: SimFreeAnim 1.2 (13.10.93)',0
+	ENDM

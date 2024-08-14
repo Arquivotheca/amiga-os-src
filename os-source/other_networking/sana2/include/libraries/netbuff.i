@@ -1,0 +1,44 @@
+	IFND	LIBRARIES_NETBUFF_I
+LIBRARIES_NETBUFF_I	SET	1
+**
+**	$Id$
+**
+**	NetBuff library structure definitions.
+**
+**	(C) Copyright 1991 Raymond S. Brand
+**		All Rights Reserved
+**
+**	(C) Copyright 1991 Commodore-Amiga Inc.
+**		All Rights Reserved
+**
+
+	IFND	EXEC_TYPES_I
+	INCLUDE	"exec/types.i"
+	ENDC	; !EXEC_TYPES_I
+	IFND	EXEC_LISTS_I
+	INCLUDE	"exec/lists.i"
+	ENDC	; !EXEC_LISTS_I
+
+
+NETBUFFNAME	MACRO
+		dc.b	'netbuff.library',0
+		ds.w	0
+		ENDM
+
+
+ STRUCTURE NETBUF,0
+	STRUCT	NB_LIST,MLH_SIZE
+	ULONG	NB_COUNT
+	LABEL	NB_SIZE
+
+
+ STRUCTURE NETBUFFSEGMENT,0
+	STRUCT	NBS_NODE,MLN_SIZE
+	ULONG	NBS_PHYSICALSIZE
+	ULONG	NBS_DATAOFFSET
+	ULONG	NBS_DATACOUNT
+	APTR	NBS_BUFFER
+	LABEL	NBS_SIZE
+
+
+	ENDC	; LIBRARIES_NETBUFF_I

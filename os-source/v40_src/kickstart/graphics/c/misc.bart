@@ -1,0 +1,871 @@
+*******************************************************************************
+*
+*    $Id: misc.asm,v 39.27 92/07/21 14:46:56 spence Exp $
+*
+*******************************************************************************
+
+    include    'exec/types.i'
+    include    'exec/nodes.i'
+    include    'exec/lists.i'
+    include    'exec/interrupts.i'
+    include    'exec/libraries.i'
+    include     'exec/ables.i'
+    include    '/gfxbase.i'
+    include    '/vp_internal.i'
+    include    '/gfx.i'
+    include    '/view.i'
+
+    include    'hardware/blit.i'
+    include    'hardware/intbits.i'
+    include    'hardware/dmabits.i'
+    include    '/cia8520.i'
+    include    'hardware/custom.i'
+    include    '/sane_names.i'
+    include    'hardware/custom.i'
+    include    '/macros.i'
+    include    '/a/submacs.i'
+    include    '/rastport.i'
+    include    '/clip.i'
+    include    '/display.i'
+
+    xref    _LVOGfxSpare1,_LVOReplyMsg
+    xref    _LVODoHookClipRects
+    xref    _LVOGetBitMapAttr
+
+    section    graphics
+DEFSTOP equ     0
+SYSTRAP equ     $1e
+SUPERVISOR equ  -60
+IC_COLDRESET    equ 1
+
+*MOLLYFIX    equ    1
+ANUTHABADAGNUS    equ    1
+DEBUGCOLOR  equ 0
+PRINTF    equ 0
+*HEDLEY    equ 0
+
+    xref    _custom
+    xref    _ciab
+    xref    _intena
+    xref    _intreq
+    xref    _intreqr
+    xref    _dmacon
+    xref    _dmaconr
+    xref    _vposr
+    xref    _vhposr
+
+    xref    _cpwrup
+    xref    _dflt_clrs
+    xref    _DisownBlitter
+    xref    _disownnodec
+    xref    waitblitdone
+
+    xref    _LVOAbleICR
+    xref    _LVOSetICR
+    xref    _Debug
+
+    xdef    _get_denise_id
+    xdef    _OpenGfx
+    xdef    _CloseGfx
+    xdef    _ExpungeGfx
+    xdef    _ExtFuncGfx,_AlwaysReturnsZero
+    xdef    _FindMSBSet
+
+    xref    _LVOOpenLibrary,_LVOInstallLayerHook
+    xref    _LVOSortLayerCR,_LVOInitResident,_LVOFindResident
+
+_OpenGfx:
+    tst.l    gb_LayersBase(a6)
+    bne.s    _ExtFuncGfx
+    move.l    a6,-(a7)
+    move.l    gb_ExecBase(a6),a6
+    lea    lname(pc),a1
+    jsr    _LVOFindResident(a6)    ; this will init layers, which will poke its base into gb_lbase
+    move.l    d0,a1
+    moveq    #0,d1
+    jsr    _LVOInitResident(a6)
+    move.l    (a7)+,a6
+_ExtFuncGfx:
+    move.l  a6,d0
+    rts
+
+_CloseGfx:
+_ExpungeGfx:
+_AlwaysReturnsZero:
+    moveq    #0,d0        * this library is currently never removed
+    rts
+
+*    xdef    _FetchGBase
+*_FetchGBase:
+*    move.l    a6,d0
+*    rts
+
+    xdef    _vbasm
+_vbasm:
+    lea.l    _custom,a0
+    movem.l    d2/d3,-(sp)
+    move.l    gb_current_monitor(a1),d2
+    move.l    d2,d3
+    beq.s    no_moni
+    move.l    d2,a6
+    move.w    ms_total_rows(a6),vtotal(a0)
+
+* Check if beamcon0 should be changed from a LoadView(). Some applications
+* (and bootmenu) write directly to beamcon0, so we don't want to overwrite them.
+
+    btst.b    #BMB_CHANGE,gb_Bugs(a1)
+    beq.s    no_beamcon0
+    move.w    ms_BeamCon0(a6),beamcon0(a0)
+    bclr.b    #BMB_CHANGE,gb_Bugs(a1)
+no_beamcon0:
+    btst.b    #MSB_REQUEST_SPECIAL,ms_Flags+1(a6)
+    sne    d3
+    lea    gb_MonitorVBlank(a1),a6
+    move.l    asi_Start(a6),d2    ; vbstrt and vbstop
+no_moni:
+    btst    #2,gb_Modes+1(a1)    ; lace?
+    if <>
+        moveq    #0,d1
+        move.l    gb_ExecBase(a1),a6
+        move.w    gb_TopLine(a1),d1
+        DISABLE                    ; blit ints fucking this up.
+        move.l    vposr(a0),d0     ; too far?
+        and.l    #$007FF00,d0
+        cmp.l    d1,d0
+        if <
+*            long or short frame?
+            tst.b    vposr(a0) 
+            if >= 
+                move.l    d2,vbstrt(a0)    ; write VBSTRT, VBSTOP
+                move.l gb_SHFlist(a1),cop2ptr(a0)
+            else
+                IFD    VBLANK_BUG
+                btst.b    #BMB_BUG_VBLANK,gb_Bugs(a1)
+                beq.s    1$
+                add.l    #$10000,d2
+1$:                ENDC
+                move.l    d2,vbstrt(a0)    ; write VBSTRT, VBSTOP
+                move.l  gb_LOFlist(a1),cop2ptr(a0)
+            endif
+        endif
+        ENABLE
+    else
+        IFD    VBLANK_BUG
+        btst.b    #BMB_BUG_VBLANK,gb_Bugs(a1)
+        beq.s    1$
+        add.l    #$10000,d2
+1$:        ENDC
+
+* If the display mode just changed from Lace to non-laced, then the 
+* mode may be stuck in the ShortFrame mode. So make sure it's Long.
+
+        DISABLE
+        tst.b    d3
+        beq.s    not_special
+        move.w    vposr(a0),d0
+        or.w    #VPOSRLOF,d0
+        move.w    d0,vposw(a0)
+not_special:
+        move.l    d2,vbstrt(a0)    ; write VBSTRT, VBSTOP
+        move.l  gb_LOFlist(a1),cop2ptr(a0)
+        ENABLE
+    endif
+    movem.l    (sp)+,d2/d3
+
+    lea    _ciab,a6
+    and.b    #$7f,ciacrb(a6)
+    clr.l    d0
+    move.b    d0,ciatodhi(a6)
+    move.b    d0,ciatodmid(a6)
+    move.b    vhposr(a0),ciatodlow(a6)    * start timer
+    or.b    #$80,ciacrb(a6)            * back to alarm mode
+*    check for those Wait_TOF 
+    clr.b    gb_VBlank(a1)
+    move.l    gb_ExecBase(a1),a6        * get ExecBase
+    move.l  d2,-(sp)
+    lea    gb_DBList(a1),a0            ; prev node
+    move.l    (a0),d2
+    beq.s    no_dbscan
+    move.l    a1,-(a7)
+
+scan_next:
+    move.l    d2,a1
+    sub.l    #1,dbi_Count1(a1)        ; decrement frame counter
+    bne.s    no_wakeup
+    
+    move.l    a0,-(a7)
+    add.l    #dbi_SafeMessage,a1
+    jsr    _LVOReplyMsg(a6)
+    move.l    (a7)+,a0
+    move.l    d2,a1
+    move.l    (a1),d2                ; prev->next=cur->next
+    move.l    d2,(a0)
+    bne.s    scan_next
+    bra.s    done_dbscan
+no_wakeup:
+    move.l    d2,a0
+    move.l    (a0),d2
+    bne.s    scan_next
+    
+done_dbscan:
+    move.l    (a7)+,a1
+
+no_dbscan:
+    move.l    gb_TOF_WaitQ(a1),a1
+    move.l    (a1),d2                    * get Succ
+    if <>
+        repeat
+            moveq    #$0,d0            * now stores bit # in LN_PRI!
+            move.b    LN_PRI(a1),d0
+            bset    d0,d0
+            move.l    LN_NAME(a1),a1
+            JSRFAR    Signal
+            move.l    d2,a1            * recall next ptr
+            move.l    (a1),d2
+        until =
+    endif
+; now, let's scan our db list, decrementing frame counters and deleting and singalling expired nodes.
+
+    move.l    (sp)+,d2
+    clr.l    d0
+*    returns with ccr set to zero
+    rts
+
+    xdef    _BLTBYTES,bltbytes
+
+; int __asm BLTBYTES(register __d0 UWORD xmin,register __d1 UWORD xmax);
+_BLTBYTES:
+bltbytes:
+    add.w    #16,d1
+    and.w    #$FFF0,d1
+    and.w    #$FFF0,d0
+    sub.w    d0,d1
+    asr.w    #3,d1        * convert to bytes per row
+    ext.l    d1
+    move.l    d1,d0        * return in d0
+    rts
+
+    xdef    _timasm
+    xref    _AbleICR
+_timasm:
+* assume this interrupt for me for now.
+* a1 points to GfxBase
+* a6 is saved by interrupt handler
+* if 
+*    test
+*    move.l    _vposr,d0
+    move.l  gb_cia(a1),a6   * get resource ptr
+    move.l  a1,-(sp)        * save GfxBase
+    moveq.l #4,d0
+    jsr     _LVOAbleICR(a6)         * disable timer interrupt
+    move.l  (sp)+,a1
+*   and.w   #DMAF_BLTDONE,_dmaconr
+*   if =
+*       move    #$2300,sr   * go to blitter interrupt priority
+    if gb_blthd(a1)=#0.l
+        ifne    DEBUGCOLOR
+        move.w  #$FFF,$dff180
+        endc
+        move.w  #BITSET+INTF_BLIT,_intena
+        move.w  #BITSET+INTF_BLIT,_intreq
+    endif
+*   endif
+    rts
+
+    ifnd MOLLYFIX
+mgetout    macro
+    rts
+    endm
+    endc
+
+    ifd    MOLLYFIX
+mgetout    macro
+    bra    getout
+    endm
+getout:
+*
+*        bart - 10.07.85
+*        enable_interrupts
+*        end bart
+*
+    rts
+    endc
+
+    xdef    _bltasm
+_bltasm:
+* assume a5-a6,d0-d1 have been saved by Carls routines
+* Carl says a6 does not need to be preserved
+    ifd    MOLLYFIX
+*
+*        bart - 10.07.85
+*        disable_interrupts
+*        end bart
+*
+    endc
+donextblit:
+    move.w  #INTF_BLIT,intreq(a0)   * turn off interrupt
+doblitnow:
+    move.l  gb_blthd(a1),d0 * get first thing on list
+    if <> .ex
+*       does QBlitter own the blitter?
+        btst    #QBOWNERn,gb_Flags+1(a1)
+        if =
+            mgetout * waiting for synchronous task to disown blitter
+        endif
+        move.l  a1,a6
+        move.l  d0,a1
+*       a0 points to iochips
+        ifne    DEBUGCOLOR
+            move.w  #$FF0,$180(a0)
+        endc
+        ifeq    ANUTHABADAGNUS
+            WAITBLITDONE * cant break interrupt cause timasm might ring
+        endc
+        ifne    ANUTHABADAGNUS
+*           BAD Agnus setting blitter interrupt bit too early,
+*           so need an extra check. Do here, instead of in WAITBLITDONE 
+*           macro for more local penalty. - spence Feb 11 1991
+*           lea        _dmaconr,a5        * doesn't work this way :-( (???)
+            tst.b    _dmaconr        * only needed if BAD Agnus
+            btst     #14-8,_dmaconr
+            if =
+                 tst.b    _dmaconr    * only needed if BAD Agnus
+                 bra.s    doblitnow1
+            endif
+            repeat
+                nop     * waste some time
+                nop
+                btst #14-8,_dmaconr
+            until =
+*           must test again incase blitter has not actually stopped
+            tst.b    _dmaconr        * only needed if BAD Agnus
+            tst.b    _dmaconr        * only needed if BAD Agnus
+        endc
+doblitnow1:
+        move.l  4(a1),a5    * get ptr to routine to call
+        jsr     (a5)
+        move.l  gb_blthd(a6),a1 * this does not affect ccr
+        if = .ex
+            ifeq    ANUTHABADAGNUS
+                   WAITBLITDONE
+            endc
+            ifne    ANUTHABADAGNUS
+*               lea        _dmaconr,a5
+                tst.b    _dmaconr            * only needed if BAD Agnus
+                btst     #14-8,_dmaconr
+                if =
+                    tst.b    _dmaconr            * only needed if BAD Agnus
+                    bra.s    doblitnow2
+                endif
+                repeat
+                    nop     * waste some time
+                    nop
+                    btst #14-8,_dmaconr
+                until =
+*               must test again incase blitter has not actually stopped
+                tst.b    _dmaconr            * only needed if BAD Agnus
+                tst.b    _dmaconr            * only needed if BAD Agnus
+            endc
+doblitnow2:
+            move.l  (a1),gb_blthd(a6)   /* remove from list */
+            bsr doclean
+            subq.w  #1,gb_BlitLock(a6)
+            move.w  gb_BeamSync(a6),d0
+            if =
+                if  gb_blthd(a6)=#0.l
+		    clr.l  gb_blttl(a6)
+                    bclr   #QBOWNERn,gb_Flags+1(a6)
+                    tst.w  gb_BlitLock(a6)
+                    bsr _disownnodec
+*                   kill blitter interrupts if the last blit
+                    move.w  #INTF_BLIT,_intena
+                    mgetout
+                endif
+            else    .ex * check for beam position
+*               check for beam wrap to enter catch up mode
+dobeam:
+                ifne    DEBUGCOLOR
+                    move.w  #$F,$dff180
+                endc
+                move.l  _vposr,d1
+                asr.l   #8,d1
+                and.l    #$7FF,d1
+*               the next statement could actual be 'if d1.w'
+                if #1.w>d1    /* hit it on row 0?*/
+                    move.w    gb_MaxDisplayRow(a6),d1
+                    addq.w    #1,d1
+                endif
+                if d1<d0.w .extend
+                    ifne    DEBUGCOLOR
+                        move.w #$F0,$dff180
+                    endc
+                    if gb_VBlank(a6).b=#0
+*                       catch up mode
+*                       put all beam blits at rear of standard blit q
+*                       a1 points to first standard blit
+*                       have to count number of blits that are being put
+*                       on this q and add to BlitLock
+do_cu:
+*                          count number of bsblits
+                        moveq   #0,d0
+                        move.l  gb_bsblthd(a6),d1
+                        repeat
+			    addq.w  #1,d0
+			    move.l  d1,a0
+			    move.l  (a0),d1
+                        until   =
+                        tst.l   gb_blthd(a6)
+                        bne.s   alltail
+                        move.l  gb_bsblthd(a6),gb_blthd(a6)
+			bra.s   allrear
+alltail:                move.l	gb_blttl(a6),a0
+                        move.l  gb_bsblthd(a6),(a0)
+allrear:                move.l  gb_bsblttl(a6),gb_blttl(a6)
+                        clr.l   gb_bsblthd(a6)              * zero list
+                        clr.l   gb_bsblttl(a6)              * zero list
+                        clr.w   gb_BeamSync(a6)
+                        btst    #QBOWNERn,gb_Flags+1(a6)
+                        if =
+                            ifne    DEBUGCOLOR
+                                move.w  #$f00,$dff180
+                            endc
+                            addq.w  #1,gb_BlitLock(a6)
+                            if <>
+                                subq.w  #1,gb_BlitLock(a6)
+                                add.w   d0,gb_BlitLock(a6)
+                                mgetout
+                            endif
+                            subq.w  #1,gb_BlitLock(a6)
+                            bset    #QBOWNERn,gb_Flags+1(a6)
+                        endif
+                        add.w   d0,gb_BlitLock(a6)
+                    else .ex
+*                       we may have stepped on vblank interrupt
+*                       check if there is vblank interrupt pending
+*                       and.w   #INTF_VERTB,_intreqr (might be bad for hardware)
+                        move.w  _intreqr,d0
+                        and.w   #INTF_VERTB,d0
+                        if <>
+*                           drop priority to 2
+                            move.w  #INTF_BLIT,_intena
+*                            btst    #QBOWNERn,gb_Flags+1(a6)
+*                            sne     d0
+*                            bclr    #QBOWNERn,gb_Flags+1(a6)
+*                            not.l   gb_blthd(a6) * prevent reentrancy
+                            move    #$2200,sr   * let vblank occur
+                            move    #$2300,sr   * if timer rings will reenter
+*                            not.l   gb_blthd(a6)
+*                            tst.b   d0
+*                            beq.s   reenable
+*                            bset    #QBOWNERn,gb_Flags+1(a6)
+reenable:                   move.w  #BITSET+INTF_BLIT,_intena
+                            bra     do_cu
+                        endif
+                        if gb_blthd(a6).l=#0
+*                           must queue something up to make sure 
+*                           we get tickled as soon as beam
+*                           approaches
+                            bsr start_timer
+                            if  gb_blthd(a6)=#0.l
+                                btst.b    #QBOWNERn,gb_Flags+1(a6)
+                                sne    d0
+                                tst.w   gb_BlitLock(a6)
+                                bsr _disownnodec
+                                tst.w   gb_BlitLock(a6)
+                                blt.s    relinquish_ownership
+                                tst.b    d0
+                                bne.s    remain_owner
+relinquish_ownership:           bclr    #QBOWNERn,gb_Flags+1(a6)
+remain_owner:            
+                            endif
+                            mgetout
+                        endif
+                    endif   start up this blit ( matches test of VBLANK)
+                else
+*                   remove bs blit from bs queue
+                    move.l  gb_bsblthd(a6),a0
+                    move.l  (a0),gb_bsblthd(a6) * remove from bs list
+                    if =
+                        clr.w   gb_BeamSync(a6) * no more bs blits
+			clr.l   gb_bsblttl(a6)  * last one removed
+                    else
+                        move.l  (a0),a1
+			clr.l   (a0)
+                        move.w  bn_beamsync(a1),d0
+                        move.w  d0,gb_BeamSync(a6)
+                    endif
+*                   insert the beam blit node 
+*                   in the rear of standard blit list
+                    tst.l  gb_blthd(a6)
+                    bne.s  attail
+                    move.l a0,gb_blthd(a6)
+		    bra.s  inrear
+attail:             move.l gb_blttl(a6),a1
+                    move.l a0,(a1)
+inrear:             move.l a0,gb_blttl(a6)
+                    btst    #QBOWNERn,gb_Flags+1(a6)
+                    if =
+                        ifne    DEBUGCOLOR
+                            move.w  #$f00,$dff180
+                        endc
+                        addq.w  #1,gb_BlitLock(a6)
+                        if <>
+                            mgetout
+                        endif
+                        bset    #QBOWNERn,gb_Flags+1(a6)
+                    else
+                        addq.w  #1,gb_BlitLock(a6)
+                    endif
+                endif
+*               restart interrupt routine
+                lea _custom,a0
+                ifne DEBUGCOLOR
+                    move.w  #$f0f,$180(a0)
+                endc
+                move.l  a6,a1
+                bra doblitnow
+            endif * if beamsync node waiting after doclean
+        endif * if not yet done with head bslthd
+    else    * check beam blit q
+        move.w  gb_BeamSync(a1),d0
+        if <>
+            move.l  a1,a6
+            bra     dobeam
+        endif
+        mgetout
+    endif
+    lea _custom,a0
+    move.l  a6,a1
+    tst.b    dmaconr(a0)  * bart - 03.08.90 - if bad agnus
+    btst.b    #DMAB_BLTDONE-8,dmaconr(a0)
+*   check for shorty blit
+    beq donextblit
+    mgetout
+
+*    xdef    _jam
+*_jam:
+*    move.l  4(sp),a0    * get ptr
+*    move.l  8(sp),d0    * get value
+*    move.l  12(sp),d1   * get byte count
+*    asr.l   #2,d1       * convert to long count
+*    subq.l  #1,d1       * predecrement for dbra
+*jamagin:
+*    move.l  d0,(a0)+
+*    dbf d1,jamagin
+*    rts
+
+doclean:
+*   enter with a1 pointing to blit node
+    btst    #CLEANMEn,bn_stat(a1)
+    if <>
+    move.l  bn_cleanup(a1),a5
+    jsr (a5)
+    endif
+    rts
+
+    xdef    _IDivS_ceiling
+*   if there is a residue bump up the quotient
+*   this probably only works for positive quotients
+; int __asm IDivS_ceiling(register __d0 int a,register __d1 int b);
+_IDivS_ceiling:
+    divs    d1,d0
+    move.l  d0,d1
+    ext.l   d0
+    swap    d1
+    if  d1.w
+    addq    #1,d0
+    endif
+    rts
+
+    xdef    _IDivS_round
+*   rounded signed division
+; int __asm IDivS_round(register __d0 int a, register __d1 int b);
+_IDivS_round:
+    add.l   d0,d0       * pre multiply by 2
+    divs    d1,d0   * now divide it
+    if  >
+    add.w   #1,d0
+    endif
+    ext.l   d0
+    asr.l   #1,d0           * now drop the round bit if unneeded
+    rts
+
+    ifne    PRINTF
+    xdef    _printf
+    xref    _kprintf
+_printf:
+    jmp     _kprintf
+    endc
+
+
+    xdef    start_timer
+start_timer:
+    btst    #1,gb_system_bplcon0+1(a6)
+    if <>
+    asr.w   #1,d0   * if genloc then this counter is halfassed
+    endif
+    lea     _ciab,a0
+    ror.w   #8,d0
+    move.b  d0,ciatodmid(a0)
+    rol.w   #8,d0
+    move.b  d0,ciatodlow(a0)
+    move.l  a6,-(sp)
+    move.l    #$4,d0
+    move.l  gb_cia(a6),a6
+    jsr        _LVOSetICR(a6)    * clear interrupt first
+    move.l  #$84,d0
+    jsr     _LVOAbleICR(a6)    * now enable next one
+    move.l  (sp)+,a6
+    rts
+
+
+    xdef    _rotate
+; UWORD __asm rotate(register __d0 UWORD data, register __d1 UWORD count);
+*    rotates a UWORD right by n
+*    rotate(data,n)
+_rotate
+    ror.w    d1,d0
+    rts
+
+
+    include    'exec/ables.i'
+    xref    _intena
+
+    xdef    _Disable
+_Disable:
+    move.l    a6,-(a7)
+    move.l    gb_ExecBase(a6),a6                        * don't know if gfxbase set.
+    DISABLE
+    move.l    (a7)+,a6
+    rts
+
+    xdef    _Enable
+_Enable:
+    move.l    a6,-(a7)
+    move.l    gb_ExecBase(a6),a6                        * don't know if gfxbase set.
+    ENABLE
+    move.l    (a7)+,a6
+    rts
+
+    INCLUDE "utility/hooks.i"
+    xdef    _hookEntry
+
+_hookEntry:
+     movem.l    a5/a6,-(sp)        ; save library base
+     move.l    h_Data(a0),a6        ; restore context
+    move.l    h_SubEntry(a0),a5 ; fetch C entry point ...
+    jsr    (a5)            ; ... and call it
+     movem.l    (sp)+,a5/a6        ; restore library base
+    rts                ; and get the hell outa here...!
+
+
+my_name
+*    dc.b    'The Amiga Wizards bring this power to you',10,0
+
+    data
+    xdef    gfx_end
+gfx_end:    dc.b    0       * this will go somewhere at the end
+    cnop    0,2
+
+    section    graphics2
+**************************************************************************
+
+* this code added Oct 23 1991 for 2.05 A300 build - better detection of
+* non-ECS denise (esp. on A1000).
+
+_intenar    equ    $dff01c
+_intenaw    equ    $dff09a
+_deniseid equ    $dff07c
+
+_get_denise_id:
+    move.w    d2,-(sp)
+    move.l    $4,a1
+    DISABLE    a1,NOFETCH
+
+    move.w    _intenar,-(sp)
+    move.w    #$0009,_intenaw
+    move.w    _deniseid,a0
+    move.w    #16,d1
+    moveq    #0,d0
+1$:    tst.w    _intenar
+    move.w    _deniseid,d0
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    tst.w    d5
+    move.w    d0,d2
+    and.w    #$000f,d2
+    cmp.w    #$0009,d2
+    beq.s    no_id
+    cmp.w    a0,d0
+    bne.s    no_id
+    dbra    d1,1$
+    and.w    #$ff,d0
+bye:    move.w    (sp)+,d1
+    bset    #15,d1
+    move.w    d1,_intenaw
+    not.w    d1
+    move.w    d1,_intenaw
+    ENABLE    a1,NOFETCH
+    move.w    (sp)+,d2
+    rts
+
+no_id:    moveq    #-1,d0
+    bra.s    bye
+
+; int __asm rectXrect(register __a0 struct Rectangle *l,register __a1 struct Rectangle *cr);
+    xdef    _rectXrect,_crectXrect
+_crectXrect:
+    movem.l    4(a7),a0/a1
+_rectXrect:
+;    if ( (cr->MaxX < l->MinX) ||
+;     (cr->MinX > l->MaxX) ||
+;     (cr->MaxY < l->MinY) ||
+;     (cr->MinY > l->MaxY) ) return(FALSE);
+;   else return(TRUE);
+    moveq    #0,d0
+    move.w    (a0)+,d1    ; d1=minx
+    cmp.w    ra_MaxX(a1),d1
+    bgt.s    no_int
+    move.w    (a0)+,d1    ; d1=miny
+    cmp.w    ra_MaxY(a1),d1
+    bgt.s    no_int
+    move.w    (a0)+,d1    ; d1=maxx
+    cmp.w    ra_MinX(a1),d1
+    blt.s    no_int
+    move.w    (a0)+,d1    ; d1=maxy
+    cmp.w    ra_MinY(a1),d1
+    blt.s    no_int
+    moveq    #-1,d0
+no_int:    rts
+
+
+
+*
+*  result = DelayAndRead(address,number)
+*
+*    UWORD = DelayAndRead(UWORD *,ULONG)
+*                    (only 16 bits are used in the number)
+*
+*    This function reads the address given the number of times given
+*    and returns the value of the last read.  This is usefull for doing
+*    delays with respect to the custom chips.
+*
+*    The value returned is the next read.  So if you pass in a 1, it will
+*    read it once and then read it again and return that value...
+*
+        XDEF    _DelayAndRead
+_DelayAndRead:    move.l    4(sp),a0    ; Get address...
+        move.l    8(sp),d1    ; Get count...
+        moveq.l    #0,d0        ; Clear d0...
+DAR_Loop:    move.w    (a0),d0        ; Read...
+        dbra    d1,DAR_Loop    ; Do it for count...
+        rts            ; We be done.
+
+
+; void __asm GetRPBounds(register __a1 struct RastPort *rp,register __a0 struct Rectangle *rect);
+_GetRPBounds::
+    movem.l    a4/a5/d2-d7,-(sp)
+    move.l    rp_Layer(a1),d0
+    bne.s    yeslayer
+yes_bm:    move.l    a0,a5            ; save rectangle ptr
+    clr.l    (a0)            ; minx=miny=0
+    move.l    rp_BitMap(a1),a0
+    move.l    a0,a4
+    moveq    #BMA_WIDTH,d1
+    jsr    _LVOGetBitMapAttr(a6)
+    subq.l    #1,d0
+    move.w    d0,ra_MaxX(a5)
+    move.l    a4,a0
+    moveq    #BMA_HEIGHT,d1
+    jsr    _LVOGetBitMapAttr(a6)
+    subq    #1,d0
+    move.w    d0,ra_MaxY(a5)
+    movem.l    (sp)+,a4/a5/d2-d7
+    rts
+yeslayer:
+    move.l    d0,a5            ; layer
+    tst.l    lr_SuperBitMap(a5)
+    beq.s    not_super
+    move.l    d0,a1
+    add.l    #lr_SuperBitMap-rp_BitMap,a1
+    bra.s    yes_bm
+
+not_super:
+    LOCKLAYER
+    move.w    #32767,d0        ; d0=minx
+    move.w    d0,d1            ; d1=miny
+    move.w    #-32767,d2        ; d2=maxx
+    move.w    d2,d3            ; d3=maxy
+    move.l    lr_ClipRect(a5),a4
+cr_lp:    cmp.w    #0,a4
+    beq.s    no_more_crs
+    tst.l    cr_lobs(a4)        ; lobs?
+    beq.s    got_cr
+    tst.l    cr_BitMap(a4)        ; if lobs & (bm=0), obscured.
+    beq.s    next_cr
+got_cr:
+    movem.w    cr_MinX(a4),d4/d5/d6/d7    ; fetch minx/miny/maxx/maxy
+    sub.w    lr_MinX(a5),d4
+    sub.w    lr_MinX(a5),d6
+    add.w    lr_Scroll_X(a5),d4
+    add.w    lr_Scroll_X(a5),d6
+
+    sub.w    lr_MinY(a5),d5
+    sub.w    lr_MinY(a5),d7
+    add.w    lr_Scroll_Y(a5),d5
+    add.w    lr_Scroll_Y(a5),d7
+
+    cmp.w    d4,d0            ; if minx>cr_minx, minx=cr_minx
+    ble.s    no_updminx
+    move.w    d4,d0
+no_updminx:
+    cmp.w    d6,d2            ; maxx < cr_maxx?
+    bge.s    no_updmaxx
+    move.w    d6,d2
+no_updmaxx:
+    cmp.w    d5,d1
+    ble.s    no_updminy
+    move.w    d5,d1
+no_updminy:
+    cmp.w    d7,d3
+    bge.s    no_updmaxy
+    move.w    d7,d3
+no_updmaxy:
+next_cr:
+    move.l    cr_Next(a4),a4
+    bra.s    cr_lp
+no_more_crs
+    movem.w    d0-d3,(a0)
+    UNLOCKLAYER
+    movem.l    (sp)+,a4/a5/d2-d7
+    rts
+
+; UWORD * __asm CopyWords(register __a0 UWORD *source, register __a1 UWORD *dest, register __d0 int nwords);
+_CopyWords::
+    subq.l    #1,d0
+1$:    move.w    (a0)+,(a1)+
+    dbra    d0,1$
+    move.l    a1,d0
+    rts
+
+; UBYTE __asm FindMSBSet(register __d1 UBYTE thisbyte);
+_FindMSBSet:
+    move.b    d1,d0
+    beq.s    2$
+    moveq    #7,d0
+1$:
+    asl.b    #1,d1
+    dbcs    d0,1$
+2$:
+    rts
+
+lname    dc.b    'layers.library',0
+
+    end     stupid metacomco assembler

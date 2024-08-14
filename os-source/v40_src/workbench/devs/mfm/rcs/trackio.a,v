@@ -1,0 +1,718 @@
+head	40.8;
+access;
+symbols;
+locks; strict;
+
+
+40.8
+date	93.03.05.02.34.45;	author LPOMA;	state Exp;
+branches;
+next	38.2;
+
+38.2
+date	92.01.15.10.45.16;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.23.50;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.8
+log
+@Fixed a small bug with the return error code from a successful TD_SEEK.
+@
+text
+@**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       trackIO.a  -- track IO code
+*
+**************************************************************************
+        section ,CODE
+        include "mfm.i"
+        include "mfm_ext.i"
+
+;--------------------------------------------------------------------------
+;   write_track() 
+;   writes the physical track currently in the track buffer.
+;
+;   If the gaps between sectors are fond to be below the threshold limit
+;   of gap size, then expand the gaps in the track memory.
+;   The routine returns the error # or 0 if no error.
+;
+;
+; Inputs:
+; =======
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+; a4 = track buffer struct ptr
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; d0 = 0 if no error
+;    = error
+;
+;       Register usage:
+;       ================
+TDReq       equr    a1      ;= TD Request
+OldTPtr     equr    a1      ;= temp old track buffer ptr
+NewTPtr     equr    a2      ;= temp new track buffer ptr
+TrkStrt     equr    a4      ;= track buffer struct ptr
+Header      equr    a5      ;= header array ptr
+MFMSecLen   equr    d0      ;= MFM sector length
+Temp        equr    d1      ;= temp reg
+FillLW      equr    d1      ;= temp reg; Fill longword
+HDindex     equr    d2      ;= temp last sector header index
+WriteSz     equr    d3      ;= Write Size reg
+TrkPtr      equr    d4      ;= track ptr
+Gap_Corr    equr    d5      ;= total sector gap correction
+new_Gap_Corr equr   d6      ;= new total sector gap correction
+Flags       equr    d7      ;= Disk Flags reg
+
+    IFND    READONLY
+
+        XREF    fill_index_sec
+        XREF    fix_premark
+        XDEF    write_track
+
+MM_write_track  reg     d2/d3/d4/d5/d6/d7/a2/a5
+
+write_track:
+        movem.l  MM_write_track,-(sp)
+;-- Find if track modified at all
+        move.b  mdu_DFLAGS(Unit),Flags  ; move disk flags into reg
+        btst    #MDUB_TRK_MOD,Flags     ; test TRACK MODIFIED flag
+        beq     write_track_end         ; go if track not modified
+
+;-- Find if write protected
+        btst    #MDUB_WRITE_PROT,UNIT_FLAGS(Unit)  ; clear write protect bit
+        bne     rawwrite_prot    ; go if Raw write protected
+
+*** Test if the track is fixed.  A normal read may damage proper sector-to-sector spacing
+wr_tst_if_trk_fixed:
+        btst    #MDUB_TRK_FIXED,Flags   ; chk if track already fixed
+        bne     wr_track_fixed          ; go if track fixed
+
+***** Track not fixed.  Fix it
+wr_fix_track:
+        move.l  head(TrkStrt),Header     ; get address of beginning of sector header array
+
+**** Check to see if track in buffer is synced to index pulse
+*   if not synced assume index information in the middle of the buffer and
+*   write the entire track unmodified (as best as possible
+        btst    #MDUB_TRK_SYNCED,Flags  ; test TRACK index SYNCED flag
+        bne.s   write_synced_track      ; synced; write synced track
+
+    ; track not synced
+        move.l  trk_buf(TrkStrt),TrkPtr  ; get address of beginning of track buffer read
+        subi.l  #50,TrkPtr              ; point a few? bytes ahead of the start of
+        move.l  trk_writesz_max(TrkStrt),WriteSz   ; load track write size maximum
+                                        ; the track buffer
+ KPRINTF    S_track_not_synced
+        bra     wr_IO                  ; not synced; write track unmodified
+
+write_synced_track:
+*** Put index mark in front of track and set TrkPtr to beginning of index mark
+write_track_index:
+        move.l  h_data(Header),TrkPtr   ; get ptr to first sector data
+        moveq.l #0,Temp                 ; clear temp
+        move.b  h_amdm_gap(Header),Temp ; get sector addr mark to data mark gap
+        sub.l   Temp,TrkPtr             ; sub gap from beginning of data
+        move.l  TrkPtr,ArgD0            ; pass TrkPtr
+
+        jsr     fill_index_sec          ; go fill index part of track buffer
+
+* TrkPtr = RetD0 = Start of index in buffer
+        move.l  RetD0,TrkPtr            ; return ptr to track buffer from begin of index mark
+ KPRINTF    S_2,TrkPtr,h_amdm_gap(Header)
+
+        moveq.w #1,HDindex              ; start off index #
+        move.w  sec_gap_opti(TrkStrt),h_sec_gap(Header)    ; set sector gap of first sector to optimal gap size
+        moveq.l #0,Gap_Corr             ; set total sector gap correction to zero
+
+wr_fix_sector:
+ KPRINTF    S_3,Header,h_data(Header),Flags,h_track(Header)
+        cmp.b   #NOSECTOR,h_sec(Header) ; chk if NO SECTOR
+        beq.s   wr_chk_last_sector      ; go find last valid sector if NO SECTOR found here
+
+wr_fix_premarks:
+        move.l  h_data(Header),ArgA0    ; pass ptr to data mark to fix
+        jsr     fix_premark             ; fix the data prior to Data mark
+
+        moveq.l #0,Temp                 ; clear temp
+        move.b  h_amdm_gap(Header),Temp ; get sector addr mark to data mark gap
+        sub.l   Temp,ArgA0              ; point to addr mark
+
+        jsr     fix_premark             ; fix the data prior to Data mark
+
+** This is a fix to the problem with the Amiga's data separator circuit when
+** the disk data rate changes from a faster rate to a slower rate.
+** To date, it has been observed that a number of bytes of data are lost
+** before the data separator locks into the correct (slower) data rate.
+** So far, no data loss has been detected when going from the slower
+** to the faster data rate.
+** The proble m manifests itself when the track data is written first with the Amiga
+** (approx. 225 Kbits/sec) then one or more sectors of data are written to
+** by the floppy hardware on an IBM PC (approx. 250 Kbits/sec).  When read back on
+** the Amiga, the gap following the sector written on the PC may be smaller than
+** it actually is (less 24 bytes in one case).
+** The current strategy for the fix is to copy only the sectors necessary to
+** make the gap back to the optimal size.  The gap size received is checked against
+** the threshold gap size to determine if it should be enlarged.
+***
+*** beginning of part I of data separator fix
+wr_chk_sector_gap:
+        move.w  sec_gap_opti(TrkStrt),Temp ; get optimal sector gap size
+        sub.w   h_sec_gap(Header),Temp    ; calc gap size difference
+        cmpi.w  #SEC_GAP_DELTA_MSZ,Temp   ; chk sector gap against threshold size
+        blt.s   wr_gap_ok               ; go if not below threshold
+
+wr_calc_gap_corr:
+        add.w   Temp,Gap_Corr           ; add to total sector gap correction
+
+wr_gap_ok:
+    ; We change the definition of 'h_sec_gap'.  It now becomes the accumulated
+    ; total of the sector gap plus the addr mark to data mark gap (h_amdm_gap)
+    ;
+    ; We also change the definition of 'h_amdm_gap' and 'h_sec_err'.  It now becomes the 
+    ; accumulated total of the sector gap correction to be applied to the gap preceding the sector
+    ; pointed to in the header element.
+        moveq.l #0,Temp                 ; clear temp reg
+        move.b  h_amdm_gap(Header),Temp ; move addr mark to data mark gap into temp reg
+        add.w   Temp,h_sec_gap(Header)  ; add addr mark to data mark gap to sector gap
+        move.w  Gap_Corr,h_sec_corr(Header) ; set sector gap correction to last correction value
+***
+*** end of part I of data separator fix
+
+wr_nxt_sec:
+        cmp.w   num_sec_trk(TrkStrt),HDindex     ; cmp index with # sectors per track
+        bge.s   wr_find_end_trk_data    ; go find end of track data
+
+        addq.w  #1,HDindex              ; dec header array index
+        adda.l  #header_sz,Header   ; point to next header element
+        bra.s   wr_fix_sector           ; go fix next sector
+
+wr_chk_last_sector:
+        subq.w  #1,HDindex              ; dec  index; if <= 0 problem occurred (?)
+        blt     wr_no_sectors           ; Problem; no valid sectors available
+ 
+        suba.l  #header_sz,Header   ; dec header to prev element
+
+;  Find the end of the track data
+wr_find_end_trk_data:
+        move.l  h_data(Header),WriteSz  ; get ptr to last sector data
+
+        moveq.l #8,Temp            ;correct for 0=256 normalized sec len (MFM)
+        add.b   h_sec_len(Header),Temp  ; add sec length value (0=128; 1=256 etc)
+        moveq.l #0,MFMSecLen
+        bset    Temp,MFMSecLen          ; calc actual MFM sector byte length
+
+        add.l   #8,MFMSecLen            ; add extra pad bytes to extend beyond CRC data
+        add.l   MFMSecLen,WriteSz       ; add MFM sec len to ptr of last sec data
+        move.l  WriteSz,OldTPtr         ; move the pointer to the end of the track buffer data into temp
+        add.l   Gap_Corr,WriteSz        ; adjust for corrected gaps
+        move.l  WriteSz,NewTPtr         ; copy the new end of the track buffer data pointer
+        sub.l   TrkPtr,WriteSz          ; sub begin from end of trk buffer; = trk buffer size
+        cmp.l   trk_writesz_max(TrkStrt),WriteSz  ; chk if Write size larger than maximum
+        ble.s   wr_fetd_end             ; WriteSz <= maximum write size; within write limits
+
+ KPRINTF    S_WriteSz_TB,WriteSz
+
+;  WriteSz > maximum write size; decrement header to previous sector and check again
+        subq.w  #1,HDindex              ; dec header array index
+        suba.l  #header_sz,Header   ; dec header to prev element
+        bra.s   wr_find_end_trk_data    ; try again to find last sector
+
+wr_fetd_end:
+
+        tst.l   Gap_Corr            ; set flags for gap correction
+        beq     wr_IO               ; go if no gap correction needed (ie flags Z = 0)
+
+** Correct the gaps.  Correct from the bottom of the track buffer memory on up
+***
+*** beginning of part II of data separator fix
+wr_expand_gaps:
+    ; NewTPtr points to end of the data to be written out
+        move.w  h_sec_corr(Header),new_Gap_Corr    ; get new sector gap correction value
+
+        sub.w   new_Gap_Corr,Gap_Corr  ; sub the new from the previous gap correction
+        ble.w   wr_add_new_gap_end      ; if the correction is the same, do not add new gap
+
+    ; Add new gap NULLs because the new correction value less then the new value
+wr_add_new_gap:
+        move.l  #MFM_4E4E,FillLW    ; store MFM Fill longword
+        lsr.w   #2,Gap_Corr         ; make size of new gap into LWs
+        bcc.s   wr_gnf_lw           ; branch if correction value multiple of LW
+ ; else fill one extra word with NULLs
+        move.w  FillLW,-(NewTPtr)   ; put MFM Fill in word
+wr_gnf_lw:
+        subq.w  #1,Gap_Corr         ; adjust for 'dbf'
+wr_gap_null_fill:
+        move.l  FillLW,-(NewTPtr)   ; put MFM Fill
+        dbf     Gap_Corr,wr_gap_null_fill  ; loop until fill
+
+wr_add_new_gap_end:
+    ; Move the sector from its old location to its new (corrected) location
+        moveq.l #0,Gap_Corr
+        move.w  new_Gap_Corr,Gap_Corr   ; move the new gap correction
+        beq.s   wr_expand_gaps_end  ; go if = 0; ie no more gap correction needed
+wr_move_old_sector:
+        move.l  OldTPtr,Temp        ; temp store current Old track buffer ptr
+        sub.l   h_data(Header),Temp ; sub ptr to beginning of data; size should always be > 64K
+        add.w   h_sec_gap(Header),Temp ; add the total sector gap size.
+                                    ; The size should now be the entire sector including all old gaps
+
+        lsr.w   #2,Temp             ; make size of new gap into LWs
+        bcc.s   wr_mos_lw           ; branch if correction value multiple of LW
+ ; else more one extra word;
+        move.w  -(OldTPtr),-(NewTPtr)  ; put MFM Fill in word
+wr_mos_lw:
+        subq.w  #2,Temp             ; adjust for 'dbf' and byte pad after data CRC
+wr_move_old_sec_lw:
+        move.l  -(OldTPtr),-(NewTPtr)   ; move LW
+        dbf     Temp,wr_move_old_sec_lw ; loop until all moved
+
+        add.l   Gap_Corr,h_data(Header) ; add the new gap correction to the data pointer
+
+        move.b  #0,h_sec_err(Header)    ; zero out sector err for reuse
+        suba.l  #header_sz,Header       ; dec header to prev element
+        subq.w  #1,HDindex              ; dec  index
+        bgt     wr_expand_gaps          ; go if more sectors left to correct
+
+wr_expand_gaps_end:
+***
+*** end of part II of data separator fix
+
+wr_IO:
+        move.l  TrkPtr,trk_start(TrkStrt)       ; load pre-determined track starting address
+        move.l  WriteSz,trk_writesz(TrkStrt)    ; load pre-determined track write size
+        bset    #MDUB_TRK_FIXED,Flags   ; set TRACK FIXED flag
+
+wr_track:
+        lea.l   mdu_TDREQ(Unit),TDReq   ; store TD ioReq ptr in reg
+        move.l  TrkPtr,IO_DATA(TDReq)   ; put track buffer ptr
+        move.b  #IOTDF_INDEXSYNC,IO_FLAGS(TDReq)    ;sync to index pulse 
+        move.l  trk_in_buf(TrkStrt),IO_OFFSET(TDReq) ; put track #
+        move.w  #TD_RAWWRITE,IO_COMMAND(TDReq)      ; put cmd
+        move.l  WriteSz,IO_LENGTH(TDReq)        ; put track write buffer length
+
+        BEGINIO                 ; BeginIO() of raw track
+                                ; V1.2 and V1.3 Kickstarts
+                                ; requires the use of this command instead
+                                ; of DoIO() or SendIO().
+
+        lea.l   mdu_TDREQ(Unit),TDReq           ; store TD ioReq ptr in reg
+        CALLSYS WaitIO          ; Wait for reply
+       
+        tst.l   RetD0
+        bne.s   rawwrite_err     ; go if Raw write error
+
+ KPRINTF    S_1,trk_in_buf(TrkStrt),TrkPtr,WriteSz
+
+        bclr    #MDUB_TRK_MOD,Flags     ; clear TRACK MODIFIED flag
+        move.b  Flags,mdu_DFLAGS(Unit)  ; store disk flags
+
+write_track_end:
+        movem.l  (sp)+,MM_write_track
+        rts
+
+
+rawwrite_err:
+        move.b  IO_ERROR(TDReq),RetD0   ; return error from TD
+        bra.s   write_track_end
+wr_no_sectors:
+        move.b  #TDERR_TooFewSecs,RetD0  ; return too fews sectors
+rawwrite_prot:
+        bra.s   write_track_end
+    ;** Track already fixed.  Load pre-determined values for TrkPtr and WriteSz
+wr_track_fixed:
+ KPRINTF    S_track_fixed
+        move.l  trk_start(TrkStrt),TrkPtr      ; load pre-determined track starting address
+        move.l  trk_writesz(TrkStrt),WriteSz   ; load pre-determined track write size
+        bra     wr_track                   ; go write track
+
+    ENDC
+;
+;--------------------------------------------------------------------------
+;   read_track() 
+;   Reads the physical track specified and finds and lists the sectors.
+;   This routine will also allow for formatting and seeking a track.
+;   The routine returns the error # or 0 if no error.
+;
+; Inputs:
+; =======
+; d0 = physical track number
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+; a4 = track buffer struct ptr
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; d0 = 0 if no error
+;    = error
+;
+;       Register usage:
+;       ================
+;TDReq   equr    a1      ;= TD Request
+TrackNum equr   d0      ;= physical track number
+TrkNum  equr    d3      ;= temp track num store
+TTrkPtr equr    d4      ;= temp track ptr store
+;TrkStrt     equr    a4      ;= track buffer struct ptr
+
+        XREF    format_track
+        XREF    sec_srch_mfm
+        XDEF    read_track
+
+MM_read_track     reg    d3/d4
+
+
+read_track:
+        movem.l MM_read_track,-(sp)
+
+        move.l  TrackNum,TrkNum             ; temp store track number
+        cmp.l   trk_in_buf(TrkStrt),TrkNum   ; chk if track already in buffer
+        beq     read_track_no_err           ; track in buffer
+
+    IFND    READONLY
+        btst    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; test TRACK MODIFIED flag
+        beq.s   read_trk                        ; go if track not modified
+
+        bsr     write_track                     ; track modified; go write track
+    ENDC
+
+read_trk:
+        bclr    #MDUB_TRK_FIXED,mdu_DFLAGS(Unit) ; clear TRACK FIXED flag
+        move.l  trk_buf(TrkStrt),TTrkPtr         ; put track buffer ptr
+
+read_agn:
+        lea.l   mdu_TDREQ(Unit),TDReq           ; store TD ioReq ptr in reg
+        move.w  #TD_RAWREAD,IO_COMMAND(TDReq)   ; put cmd
+        move.l  TrkNum,IO_OFFSET(TDReq)         ; put track #
+        move.l  TTrkPtr,IO_DATA(TDReq)          ; put track buffer ptr
+
+    IFND    READONLY
+        move.b  mdu_DFLAGS(Unit),d0
+        andi.b  #MDUF_TRK_FORMAT|MDUF_TRK_SEEK,d0
+                                        ; test TRACK FORMAT or TRACK SEEK flags
+        beq.s   read_rawtrk             ; do not format or seek; regular read
+
+seek_trk:        ; seek the track only
+        move.b  #0,IO_FLAGS(TDReq)              ; no sync flags
+        move.l  #10,IO_LENGTH(TDReq)             ; no track length
+        bra.s   read_bgn
+    ENDC
+        
+
+read_rawtrk:        ; read the raw track
+        move.b  #IOTDF_INDEXSYNC|IOTDF_WORDSYNC,IO_FLAGS(TDReq) ;sync to index pulse 
+        move.l  trk_read_size(TrkStrt),IO_LENGTH(TDReq)  
+                                            ; put track read buffer length
+
+read_bgn:
+        BEGINIO                 ; BeginIO() of raw track
+                                ; V1.2 and V1.3 Kickstarts 
+                                ; requires the use of this command instead
+                                ; of DoIO() or SendIO().
+
+        lea.l   mdu_TDREQ(Unit),TDReq           ; store TD ioReq ptr in reg
+        CALLSYS WaitIO          ; Wait for reply
+       
+        tst.l   RetD0
+        bne.s   read_track_end  ; go if Raw Read error ;return error in D0 
+
+        bclr    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; clear TRACK MODIFIED flag
+
+        move.l  TrkStrt,ArgD0           ; pass unit track buffer struct ptr
+
+        btst    #MDUB_TRK_SEEK,mdu_DFLAGS(Unit)  ; test TRACK SEEK flag
+        beq.s   format_secs       ; do not format; regular read
+
+seek_fini:
+        move.l  #NOTRACK,trk_in_buf(TrkStrt)  ; set NO TRACK in buffer
+        bra.s   read_track_no_err
+
+    IFND    READONLY
+format_secs:
+        btst    #MDUB_TRK_FORMAT,mdu_DFLAGS(Unit)  ; test TRACK FORMAT flag
+        beq.s   read_secs       ; do not format; regular read
+
+make_secs:          ; format by making sectors in track buffer
+        jsr     format_track    ; go format sectors in MFM
+        bra.s   read_secs_done
+
+    ENDC
+
+read_secs:
+        jsr     sec_srch_mfm    ; go search for sector headers in MFM
+
+*******
+** return = 0 if no error.  = error # if error
+**
+** The following checks must be made when reading in a new track to insure
+** that the track meets certain requirements of being writable.
+**
+read_secs_done:
+        tst.l   RetD0
+        beq.s   read_track_fini
+
+        sub.b   #1,mdu_CurrRetryCnt(Unit)    ; dec retry counter
+        ble.s   read_track_fini ; go if exhausted retries <= 0
+
+read_track_err1:
+    ; If error = MDERR_WrongTrack then re-reference track 00
+        cmpi.b  #MDERR_WrongTrack,RetD0  ; chk if correct track
+        beq     goto_trk_00     ; go Track reference because on wrong track
+
+read_retry:
+        bra     read_agn        ; ? error in decoding track
+
+read_track_err2:
+read_track_fini:
+        move.l  TrkNum,trk_in_buf(TrkStrt)    ; set TRACK # in track in buffer ptr
+
+    ; If RETRIES exhausted, error is returned in RetD0.
+    ; If error = TDERR_BadSecPreamble then error = 0 and clear TRACK index SYNCED flag
+        cmpi.b  #TDERR_BadSecPreamble,RetD0  ; chk sector preamble (index)
+        bne.s   read_track_synced            ; index mark synced to index pulse
+
+        bclr    #MDUB_TRK_SYNCED,mdu_DFLAGS(Unit)  ; clear TRACK index SYNCED flag
+        bra.s   read_track_no_err            ; go if track not synced
+
+read_track_synced:
+        bset    #MDUB_TRK_SYNCED,mdu_DFLAGS(Unit)  ; set TRACK index SYNCED flag
+
+read_track_no_err:
+        moveq.l #0,RetD0                    ; return with no error
+read_track_end:
+        movem.l (sp)+,MM_read_track
+        rts
+
+
+;### V3.06c fix for prob with drive getting confused and stepping to wrong track
+goto_trk_00:
+read_trk_00:
+    ; go read block ZERO w/AmigaDOS format
+        lea.l   mdu_TDREQ(Unit),TDReq           ; store TD ioReq ptr in reg
+        move.w  #CMD_READ,IO_COMMAND(TDReq)     ; put cmd
+        move.l  #0,IO_OFFSET(TDReq)             ; put track #
+        move.l  TTrkPtr,IO_DATA(TDReq)          ; put track buffer ptr
+        move.l  #0,IO_LENGTH(TDReq)     ; put one block length
+
+        CALLSYS DoIO          ; Do IO   -- ignore errors
+
+; the following lines of code is used for diagnostic purposes only -- use with "Memwatch"
+;        addi.l  #1,trk_buf_max(TrkStrt)    ; inc trk_buf_max to reflect wrong track retries
+;        addi.l  #1,0    ; inc to reflect wrong track retries
+;        move.l  RetD0,0    ; store return code for trackdisk operation
+
+        cmpi.l  #0,RetD0    ; compare NO ERROR from reading AmigaDOS block 0
+        beq.s   clr_retrycnt    ; NO ERROR; clear retry counter
+
+        cmpi.l  #TDERR_TooFewSecs,RetD0    ; compare TDERR_TooFewSecs from reading AmigaDOS block 0
+        beq.s   clr_retrycnt    ; TDERR_TooFewSecs; clear retry counter
+
+        bra     read_agn        ; go read sector again
+
+clr_retrycnt:
+        move.b  #0,mdu_CurrRetryCnt(Unit)    ; zero retry counter
+
+        bra     read_agn        ; go read sector again
+;
+;--------------------------------------------------------------------------
+; This code calculates the physical track, sector based
+; on the disk byte offset given and the current disk params.
+;
+;-------- IT IS ASSUMED that the disk only has:
+;   -- at most 2 surfaces
+;   -- < 256 tracks
+;
+; Inputs:
+; =======
+; d0 = disk byte offset
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+;TrkStrt  equr    a4      ;= track buffer struct ptr
+; a6 = AbsExecBase pointer
+;
+DiskFlg equr    d2      ;= unit disk flags
+;
+; Results:
+; ========
+; d0 = physical track
+;    = -1   If ERROR occurred -- set IO_ERROR field in IOReq struct
+;--------------------------------------------------------------------------
+        XDEF    calc_psec
+
+MM_calc_psec    equr    d2
+
+calc_psec:
+        move.l  MM_calc_psec,-(sp)
+
+        clr.l   d1
+        move.b  sec_len_shift(TrkStrt),d1
+        lsr.l   d1,ArgD0                ; calc block #
+
+        move.b  mdu_DFLAGS(Unit),DiskFlg    ; get track flags
+        move.b  #0,slct_head(TrkStrt)        ; clear # in head
+
+;------ calc physical track
+        divu    num_sec_trk(TrkStrt),RetD0 ; calc track # in 15:0 and sec # in 31:16
+        move.l  RetD0,d1                ; copy results
+
+        btst    #MDUB_SINGLE_SIDED,DiskFlg  ; chk if single-sided
+        bne.s   chk_trk_bnds            ; go if single-sided
+
+        move.b  d1,slct_head(TrkStrt)       ; put track #;
+        andi.b  #1,slct_head(TrkStrt)       ; calc head #
+
+        lsr.b   #1,d1                   ; fix to S34 track # (logical); head in X
+
+chk_trk_bnds:
+        move.b  d1,slct_trk(TrkStrt)  ; put selected track # (logical)
+        cmp.w   num_trks(TrkStrt),RetD0  ; chk track bounds
+        bge.s   trk_err                 ; track # too high
+
+;------ calc physical sector
+        andi.l  #$FFFF,RetD0            ; clear upper word only and leave track #
+
+;------ check if single-sided drive and/or track double-step
+        andi.b  #(MDUF_SINGLE_SIDED|MDUF_DOUBLE_STEP),DiskFlg    ; isolate bits to test
+        beq.s   calc_sec                ; go if NO flags set
+
+        lsl.w   #1,RetD0                ; multiply by 2 (= left shift by 1)
+                                        ; to align on even numbered tracks 
+
+;------ check if single-sided drive and NOT track double-step
+        cmpi.b  #MDUF_SINGLE_SIDED,DiskFlg
+        beq.s   calc_sec                ; go if double sided only
+
+;------ check if NOT single-sided drive and track double-step
+chk_dbl_trk:
+        cmpi.b  #MDUF_DOUBLE_STEP,DiskFlg
+        beq.s   calc_dbl_trk            ; go if track double-step only
+
+;-------- MUST BE single-sided drive and track double-step
+        lsl.w   #1,RetD0                ; multiply by 2 (= left shift by 1)
+                                        ; to align on even numbered tracks 
+        bra.s   calc_sec
+
+calc_dbl_trk:
+        bclr    #1,RetD0                ; check if 2nd surface and clear
+        beq.s   calc_sec
+
+        addq.l  #1,RetD0                ; compensate for track #ing of 2nd surface
+
+calc_sec:
+        clr.w   RetD1                   ; clear lower word (= track #)
+        swap    RetD1                   ; put sec # in lower word
+        add.b   sec_off(TrkStrt),RetD1  ; correct for sector # offset
+
+        move.b  RetD1,slct_sec(TrkStrt) ; put selected sector #
+
+calc_psec_fini:
+        move.l  (sp)+,MM_calc_psec
+        rts
+
+trk_err:
+        move.b  #MDERR_OutofTracks,IO_ERROR(IOReq)  ; ran out of tracks
+        move.l  #-1,RetD0               ; track error
+        bra.s   calc_psec_fini
+
+
+    ifd DEBUG
+        section ,DATA
+S_track_not_synced  dc.b    $0D,$0A,'Track not synced',0
+S_track_fixed   dc.b    $0D,$0A,'Track already fixed',0
+S_1     dc.b    $0D,$0A,'trk = %ld  TrkPtr = %lx  WriteSz = %ld',0
+S_2     dc.b    $0D,$0A,'   TrkPtr = %lx  amdm_gap = %ld',0
+S_3     dc.b    $0D,$0A,' Header = %lx  data = %lx  Flags = %lx  Sec = %lx',0
+S_WriteSz_TB    dc.b    $0D,$0A,'WriteSz too big',0
+    endc
+
+        end
+@
+
+
+38.2
+log
+@Fix bug with writing to an already updated track.
+@
+text
+@d410 1
+a410 1
+        bra.s   read_track_end
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d45 2
+a46 2
+Gap_Corr    equr    d5      ;= total setor gap correction
+new_Gap_Corr equr   d6      ;= new total setor gap correction
+d68 4
+a71 3
+
+* TrkPtr = RetD0 = Start of first sector in track buffer
+        move.l  trk_buf(TrkStrt),TrkPtr  ; get address of beginning of track buffer
+d73 2
+a74 1
+* TrkPtr = RetD0 = Start of index in buffer
+d81 1
+a81 1
+        bne.s   write_track_index       ; synced; write track with index prefix
+d84 1
+d86 1
+d88 2
+a89 1
+        bra.s   write_raw               ; not synced; write track unmodified
+d91 2
+d102 1
+d104 1
+a105 1
+write_raw:
+d111 1
+a114 3
+        btst    #MDUB_TRK_FIXED,Flags   ; chk if track already fixed
+        bne     wr_nxt_sec              ; go if track already fixed
+
+d131 1
+a131 1
+** The problem manifests itself when the track data is written first with the Amiga
+d173 1
+a173 1
+        subq.w  #1,HDindex              ; dec  index; if <= 0 problem occured (?)
+d193 1
+a193 1
+        cmp.l   trk_write_size(TrkStrt),WriteSz  ; chk if Write size larger than maximum
+d196 2
+d205 2
+a206 2
+        btst    #MDUB_TRK_FIXED,Flags   ; chk if track already fixed
+        bne     wr_IO               ; go if track already fixed
+d255 1
+a255 1
+        suba.l  #header_sz,Header   ; dec header to prev element
+d264 5
+d287 2
+a289 1
+        bset    #MDUB_TRK_FIXED,Flags   ; set TRACK FIXED flag
+d304 6
+d362 1
+a424 1
+        bclr    #MDUB_TRK_FIXED,mdu_DFLAGS(Unit) ; clear TRACK FIXED flag
+d598 11
+@

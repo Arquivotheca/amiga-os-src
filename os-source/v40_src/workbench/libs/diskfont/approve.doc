@@ -1,0 +1,290 @@
+### Software bug-fix/feature-change approval form
+
+### Name: Darren Greenwald
+### Date: July 6th, 1992
+### Module: diskfont.library
+### bug/change: Support for multiple fonts which differ only by DPI
+### Priority (a/b/c): b
+
+### Technical description of fix:
+
+AddDiskFont() function needs to scan the Gfx font list prior to calling
+AddFont(), and compare the font to be added with any already on the list.
+A compare is made for matching name (implied when scanning font list in
+Forbid()); YSize (exact match); Style (Italic, Bold, Underlined); Flags
+(Revpath).  If the font to be added matches all of these, the font is
+marked as a DUPLICATE in the TextFont extension structure.
+
+If there are DUPLICATES, but all of these have been marked as DUPLICATES,
+the font which is added is not so marked.  Therefore,
+
+	Topaz 20 3:1 is opened first ... it is NOT a DUPLICATE.
+
+	The Application uses a TextAttr specifying Topaz 20, but
+	no DPI tag.  If it OpenFont()'s Topaz 20 at least once,
+	it will then get Topaz 20 3:1 for the duration that Topaz 20
+	3:1 is opened, even if a Topaz 20 1:1 (or other better match
+	is opened by some other application) is suddenly opened.
+
+	Once Topaz 20 3:1 is closed by everyone, if it is then
+	removed, and flushed, the next application to OpenFont()
+	Topaz 20 will get back NULL.  This will force it to use
+	OpenDiskFont() which may return, or create a Topaz 20
+	1:1.  Because all other (if any) Topaz 20's on the Font
+	List are marked as DUPLICATES, the newly created Topaz 20
+	is NOT.  It is then usable within OpenFont() if the DPI
+	tag is not provided.
+
+
+
+Other modifications in opendiskfont.c -
+
+Must use ExtendFont() to determine if SOURCE font has tags rather
+than checking the FSF_TAGGED bit in the Style field; this incorrect
+code slipped back in when Bob separated Bullet from diskfont.library.
+Without the WeighTAMatch() fix, this code is never executed.
+
+A minor modification is required when determining SOURCE font for
+scaled fonts.  Currently the code may select an existing scaled
+font for the SOURCE font.  So for example, Topaz 20 4:1 may be
+created from Topaz 20 2:1 rather than going back to disk, or ROMFONT
+for the source.  Without the WeighTAMatch() fix, this code is never
+executed.
+
+The function which generates an OUTLINE font does another call
+to OpenFont() to check to see if an OUTLINE font already exists;
+in the process it does not clone the OT_DotSize tag, so subsequent
+attempts to open an outline font which match in every way except
+for OT_DotSize currently does not work -- requires cloning of
+the OT_DotSize tag.  Once again, without the WeighTAMatch() fix
+this code path is never executed.
+
+
+### Ramification of fix on other modules/applications:
+
+Modifications required to graphics.library OpenFont(), and WeighTAMatch().
+
+Modifications required to Intuition; must copy TTextAttr structure for
+COMMSEQ keys in menus.
+
+Modifications required to GadTools; must copy TTextAttr structure for
+UNDERLINED keys in gadget labels.
+
+====
+
+AvailFonts() may return multiple occurences of a font which differ
+only by DPI; this turns out to be an existing behavior, though more
+restricted:
+
+*	buffer - filled with struct AvailFontsHeader followed by the
+*		[T]AvailFonts elements, There will be duplicate entries
+*		for fonts found both in memory and on disk, differing
+*		only by type.  The existance of a disk font in the
+*		buffer indicates that it exists as an entry in a font
+*		contents file -- the underlying font file has not been
+*		checked for validity, thus an OpenDiskFont of it may
+*		fail.
+
+***IT is NOT yet clear to me IF or IF not AvailFonts should HIDE
+DUPLICATE fonts; perhaps a NEW AvailFonts type flag is needed indicating
+SHOW me those too; to some degree, the AFF_SCALED bit suffices.  The
+problem is it is possible to have ONLY duplicate fonts on the list, and
+no match for the non-duplicate.  In actual use this is not a new
+problem since any font could be expunged between AvailFont(), and
+OpenFont().
+
+
+ASL.library has code to remove duplicates from the font list, and
+I did not notice any problem in DPAINT III, however to be fair we
+do not know what other applications may be adversly affected by
+multiple occurences of fonts which have the same name, Y size, style,
+and flags.
+
+On the other hand, the application must set a bit when calling AvailFonts()
+to get back scaled fonts (AFF_SCALED), so many existing applications will
+not get back any of the scaled fonts per documentation.
+
+
+===
+
+
+### Comments:
+
+This is a work around should we decide to fix WeighTAMatch() to compare
+difference in DPI when deciding how closely a TextAttr matches another.
+
+It works out by that opening a scaled disk font returns the DISK
+based version of that font if an exact Y size match exists, even if
+someone else has already opened a scaled version of that disk font.
+This is because:
+
+	Open Topaz 11 2:1 causes Topaz 11 1:1 from disk to be opened
+	first, and added to the Gfx Font List.  Therefore, Topaz 11
+	2:1 is a DUPLICATE by the time it is created.  So an application
+	opening a DISKFONT of a size which is known to exist gets back
+	the actual DISKFONT if it uses only a TextAttr instead of a
+	tagged TextAttr.
+
+	The other variation is that Topaz 11 1:1 is flushed, which
+	means that OpenFont() returns NULL forcing the caller to
+	go through OpenDiskFont() once.
+
+IPREFS MUST continue to Open, and keep open fonts without specifying
+DPI tags so that anyone creating TextAttr() structures from System
+TextFont() structures will be assured that the NON-DUPLICATE version
+of the font stays on the Gfx Font List.
+
+ASL.LIBRARIES show font feature works out well because it opens
+fonts without tags; it therefore SHOWS the same thing as the application
+will get back if it does OpenFont() without using the DPI tag.
+
+### Management decissions:
+
+        1. code review required:
+                By:
+        2. approved:
+                By: 
+                        
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+### Software bug-fix/feature-change approval form
+
+### Name: Darren Greenwald
+### Date: July 6th, 1992
+### Module: graphics.library
+### bug/change: Support for multiple fonts which differ only by DPI
+### Priority (a/b/c): b
+
+### Technical description of fix:
+
+WeighTAMatch() requires reworking.  The fix involves the following
+functional changes --
+
+1.) If the TARGET TextAttr does not have a DPI tag, the TARGET
+    is assumed to have a 1:1 aspect ratio.  This is necessary so
+    that Topaz 8 can be scaled; the current WeighTAMatch() code, and
+    the patch provided by Bob Kodiak treats a font without DPI as
+    if it would be a PERFECT match, regardless of requested DPI.  This
+    means that OpenDiskFont() of scaled Topaz 8 is not possible because
+    WeighTAMatch() returned PERFECT match regardless of the request.
+
+    Of interest, a scaled Topaz 9 is possible with the Bob's WeighTAMatch
+    fix because it is marked as having a 2:1 aspect ratio.
+
+2.) Code change such that WeighTAMatch() returns meaninful values for
+    fonts which differ in DPI, but not Y size, style, or flags.
+
+    The new method weighs differences in Y more heavily than differences
+    in DPI.  Therefore, differences in DPI are only important if two
+    fonts match exactly in Y.  While the original code attempted to
+    Multiply a weight for difference in X vs difference in Y, this
+    was non-deterministic, and caused diskfont.library to randomly
+    select source fonts.  An example is --
+
+	Request Topaz 20 2:1
+
+	No font exists of Y size 20, Y size 40, or Y size 10, so ...
+
+	Y size 9 2:1 is considered, and the weight was (PERFECT - ((20-9)*32))
+							32767-352=32415
+
+	Y size 11 2:1 is considered, and the weight was (PERFECT - ((20-11)*64))
+							 32767-576=32191
+
+	As you can see, Topaz 9 was considered a better match for the SOURCE
+        --------------------------------------------------------------------
+
+	On the other hand, asking for Topaz 20 1:1 results in ...
+
+	Y size 9 2:1 is considered, and the weight was (PERFECT - ((20-9)*64))
+							32767-704=32063
+
+	Y size 11 2:1 is considered, and the weight was (PERFECT - ((20-11)*32))
+							 32727-288=32479
+
+	As you can see, Topaz 11 was considered a better match for the SOURCE
+        --------------------------------------------------------------------
+
+
+    In order to maintain a consistent look, it would have been better if
+    Topaz 11 was thought to be the SOURCE for both cases.  Topaz is infact
+    the exception to the rule since no other font exists as a ROM font.
+
+
+    By weighing Y differences more heavily than DPI, the behavior is
+    deterministic.  Because only an exact 1:1 is required for WeighTAMatch
+    to return a PERFECT match value, two fonts of very similar DPI's
+    cannot be confused IF the caller provides the DPI tag specifying
+    a FONT that has already been opened via OpenDiskFont().  In other
+    words, a font with a 9999:10000 DPI cannot be confused with a
+    font which has a 1:1 DPI ratio because:
+
+	9999 * 32 / 10000 = 31.9968, or simply 31 (since the fractional
+		portion of the calculation is dropped).  Regardless of
+		precsion, an exact DPI match is required for WeighTAMatch()
+		to return an PERFECT match number.
+
+		The inverse is NOT true though.  A DPI of 1:33 can be confused
+		with a DPI of 1:34 within OpenFont().  However this is
+		not a new problem; it means that if someone asks for
+		a DPI of 1:32 via OpenFont (but not OpenDiskFont), they
+		might get back either font.  The correct solution is
+		to have opened the 1:32 font via OpenDiskFont() before
+		using OpenFont().
+
+
+3.)  Check for EXACT match of OT_DotSize if requested, and subtract
+     a FUDGE factor from PERFECT match if --
+
+		OT_DotSize is specified in the request, and does not
+		match the TARGET font. 
+
+
+4.)  WeighTAMatch() provides PRIVATE return for OpenFont() in register
+     D1 indicating if DPI, DOT size, and/or BOTH are specified in the
+     request.  If so, OpenFont() will ignore DUPLICATE fonts.
+
+OpenFont() requires a minor modification.
+
+1.)  OpenFont needs to screen out duplicates IF the OpenFont() call is made
+     without tags (using a TextAttr instead of a TTextAttr structure).  The
+     check for DUPLICATES is a bit stored in one of the many free TextFont
+     Extension flags; because WeighTAMatch() is not provided with a pointer
+     to a TextFont (just TextAttr or TTextAttr structures), the check must
+     be done within OpenFont() rather than WeighTAMatch().
+
+
+### Ramification of fix on other modules/applications:
+
+Changes to diskfont.library required.
+
+Intuition, and GadTools need to copy TTextAttr structures.
+
+Worst case is an application which OpenDiskFont()s using DPI tag, but
+not providing this in subsequent TextAttr's.  A variation is the application
+which uses a System TextFont pointer, creates a TextAttr from it, Opens
+it, but uses the original pointer rather than that returned from OpenFont().
+This will not create a problem as long as IPREFS does not open fonts
+using the DPI tag since it will then always get back a NON-DUPLICATE font.
+
+
+===
+
+
+### Comments:
+
+This code change considers OT_DotSize only in terms of PERFECT, or
+IMPERFECT match.  Most callers will NOT specify OT_DotSize, but if
+they do, then we want WeighTAMatch() to return an IMPERFECT match
+value if an exact match is not found, or compared against in OpenFont().
+
+
+### Management decissions:
+
+        1. code review required:
+                By:
+        2. approved:
+                By: 
+                        
+
+

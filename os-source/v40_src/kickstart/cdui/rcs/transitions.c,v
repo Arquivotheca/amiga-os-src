@@ -1,0 +1,1794 @@
+head     40.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+40.4
+date     93.05.06.17.42.04;  author vertex;  state Exp;
+branches ;
+next     40.3;
+
+40.3
+date     93.04.20.15.20.16;  author vertex;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     93.04.19.15.53.56;  author vertex;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     93.04.15.18.59.47;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Handles all startup animation transitions and effects
+@
+
+
+40.4
+log
+@Allocates low-cost screen before expensive one, in order to avoid memory fragging
+Now inits audio device before doing anything else, in order to avoid fragging
+@
+text
+@
+#include <exec/types.h>
+#include <exec/ports.h>
+#include <exec/memory.h>
+#include <intuition/intuition.h>
+#include <intuition/screens.h>
+#include <intuition/pointerclass.h>
+#include <graphics/videocontrol.h>
+#include <graphics/layers.h>
+#include <graphics/sprite.h>
+#include <cdtv/debox.h>
+#include <string.h>
+
+#include <clib/exec_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/alib_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+
+#include "cduibase.h"
+#include "transitions.h"
+#include "sound.h"
+#include "cycler.h"
+#include "utils.h"
+#include "displayanim.h"
+
+
+/*****************************************************************************/
+
+
+#define SCR_X_OFFSET (0)
+#define SCR_Y_OFFSET (0)
+
+#define MAIN_CD_BITMAP_Y_OFFSET 108
+#define MAIN_CD_BITMAP_X_OFFSET 380
+#define MAIN_CD_SPRITE_Y_OFFSET 100
+#define MAIN_CD_SPRITE_X_OFFSET 377
+#define EXIT_CD_SPRITE_Y_OFFSET 10
+#define EXIT_SCREEN_Y_OFFSET    44
+#define EXIT_SCREEN_Y_DELTA     90
+
+
+/*****************************************************************************/
+
+
+struct ColorBatch16
+{
+    UWORD           cb_NumColors;
+    UWORD           cb_FirstColor;
+    struct RGBEntry cb_Colors[16];
+    UWORD           cb_EndMarker;
+};
+
+struct ColorBatch32
+{
+    UWORD           cb_NumColors;
+    UWORD           cb_FirstColor;
+    struct RGBEntry cb_Colors[32];
+    UWORD           cb_EndMarker;
+};
+
+struct ColorBatch256
+{
+    UWORD           cb_NumColors;
+    UWORD           cb_FirstColor;
+    struct RGBEntry cb_Colors[256];
+    UWORD           cb_EndMarker;
+};
+
+
+/*****************************************************************************/
+
+
+/* debox magic data */
+extern UBYTE * __far background;
+extern UBYTE * __far cds;
+extern UBYTE * __far cd;
+extern UBYTE * __far amiga32_red;
+extern UBYTE * __far palette0;
+extern UBYTE * __far palette1;
+extern UBYTE * __far palette2;
+extern UBYTE * __far palette3;
+extern UBYTE disc_in[];
+
+
+/*****************************************************************************/
+
+
+#undef SysBase
+
+static VOID FlipCDIn(VOID)
+{
+ULONG            i;
+struct CDUILib  *CDUIBase;
+struct ExecBase *SysBase;
+LONG             x, y;
+BOOL             aborting;
+WORD             frameCount;
+LONG             delta;
+WORD             wait;
+WORD             flipCount;
+
+    SysBase  = (*((struct ExecBase **) 4));
+    CDUIBase = SysBase->ThisTask->tc_UserData;
+
+    i          = 0;
+    x          = -200;
+    y          = CDUIBase->cb_CDYOffset;
+    aborting   = FALSE;
+    frameCount = 80;
+    delta      = 15;
+    wait       = 60;
+    flipCount  = 1;
+
+    while (TRUE)
+    {
+        if (x == MAIN_CD_SPRITE_X_OFFSET)
+        {
+            if (wait)
+                wait--;
+
+            if (!wait)
+                aborting = TRUE;
+        }
+
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i],CDUIBase->cb_Sprites[i+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+1],CDUIBase->cb_Sprites[i+1+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2],CDUIBase->cb_Sprites[i+2+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+3],CDUIBase->cb_Sprites[i+3+4],NULL);
+
+        MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+4],x,y);
+        MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2+4],x+86,y);
+
+        WaitTOF();
+
+        if (!flipCount--)
+        {
+            flipCount = 1;
+
+            i += 4;
+            if (i >= 36)
+                i = 0;
+        }
+
+        if (!frameCount--)
+        {
+            delta -= 5;
+            frameCount = 11;
+        }
+
+        if (!i && aborting)
+            break;
+
+        if (x < MAIN_CD_SPRITE_X_OFFSET)
+            x += delta;
+        else
+            x = MAIN_CD_SPRITE_X_OFFSET;
+    }
+
+    Wait(SIGBREAKF_CTRL_C);
+
+    Forbid();
+    Signal(CDUIBase->cb_CDUITask,SIGF_SINGLE);
+    CDUIBase->cb_FlipperTask = NULL;
+}
+
+#define SysBase CDUIBase->cb_SysLib
+
+
+/*****************************************************************************/
+
+
+//#define ICOLOR(c) (*((SHORT *)0xdff180)=(c))
+#define ICOLOR(c) ;
+
+#undef SysBase
+
+static VOID FlipCD(VOID)
+{
+LONG             i,j;
+struct CDUILib  *CDUIBase;
+struct ExecBase *SysBase;
+BOOL             aborting;
+WORD             x;
+WORD             frameCount;
+
+    SysBase  = (*((struct ExecBase **) 4));
+    CDUIBase = SysBase->ThisTask->tc_UserData;
+
+    i        = 0;
+    aborting = FALSE;
+
+    CDUIBase->cb_Sprites[0]->es_SimpleSprite.x = MAIN_CD_SPRITE_X_OFFSET;
+    CDUIBase->cb_Sprites[1]->es_SimpleSprite.x = MAIN_CD_SPRITE_X_OFFSET;
+    CDUIBase->cb_Sprites[2]->es_SimpleSprite.x = MAIN_CD_SPRITE_X_OFFSET + 86;
+    CDUIBase->cb_Sprites[3]->es_SimpleSprite.x = MAIN_CD_SPRITE_X_OFFSET + 86;
+
+    while (TRUE)
+    {
+        if (SetSignal(0,0) & SIGBREAKF_CTRL_C)
+            aborting = TRUE;
+
+        if (SetSignal(0,SIGBREAKF_CTRL_D) & SIGBREAKF_CTRL_D)
+        {
+            for (j = 0; j < 36; j++)
+                CDUIBase->cb_Sprites[j]->es_SimpleSprite.y = EXIT_CD_SPRITE_Y_OFFSET;
+
+            Signal(CDUIBase->cb_CDUITask,SIGF_SINGLE);
+            Wait(SIGBREAKF_CTRL_D);
+        }
+
+        if (SetSignal(0,0) & SIGBREAKF_CTRL_E)
+            break;
+
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i],CDUIBase->cb_Sprites[i+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+1],CDUIBase->cb_Sprites[i+1+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2],CDUIBase->cb_Sprites[i+2+4],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+3],CDUIBase->cb_Sprites[i+3+4],NULL);
+
+        for (j = 0; j < 3; j++)
+            WaitTOF();
+
+        i += 4;
+        if (i >= 36)
+            i = 0;
+
+        if (!i && aborting)
+            break;
+    }
+
+    if (SetSignal(0,0) & SIGBREAKF_CTRL_E)
+    {
+        Signal(CDUIBase->cb_CDUITask,SIGF_SINGLE);
+        Wait(SIGBREAKF_CTRL_E);
+
+        x = MAIN_CD_SPRITE_X_OFFSET;
+        frameCount = 0;
+
+        SetAPen(CDUIBase->cb_RastPort,0);
+
+        // move CD towards the right, kicking out the 32...
+        while (TRUE)
+        {
+            if (x >= MAIN_CD_SPRITE_X_OFFSET + 50)
+                ScrollRaster(CDUIBase->cb_RastPort,-18,0,500,0,
+                             CDUIBase->cb_Screen->Width - 1, 48);
+
+            if (x >= MAIN_CD_SPRITE_X_OFFSET + 167)
+                break;
+
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+4],CDUIBase->cb_Sprites[i],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+1+4],CDUIBase->cb_Sprites[i+1],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2+4],CDUIBase->cb_Sprites[i+2],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+3+4],CDUIBase->cb_Sprites[i+3],NULL);
+
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i],x,EXIT_CD_SPRITE_Y_OFFSET);
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2],x+86,EXIT_CD_SPRITE_Y_OFFSET);
+
+            WaitTOF();
+
+            if (!frameCount)
+            {
+                frameCount = 2;
+
+                i += 4;
+                if (i >= 36)
+                    i = 0;
+            }
+            frameCount--;
+            x += 7;
+        }
+        x -= 7;
+
+        frameCount = 0;
+        while (TRUE)
+        {
+            if (x >= -70)
+            {
+                RectFill(CDUIBase->cb_RastPort,
+                         x+70,0,x+79,CDUIBase->cb_Screen->Height - 1);
+            }
+
+            if (x <= -100)
+                break;
+
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+4],CDUIBase->cb_Sprites[i],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+1+4],CDUIBase->cb_Sprites[i+1],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2+4],CDUIBase->cb_Sprites[i+2],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+3+4],CDUIBase->cb_Sprites[i+3],NULL);
+
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i],x,EXIT_CD_SPRITE_Y_OFFSET);
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[i+2],x+86,EXIT_CD_SPRITE_Y_OFFSET);
+
+            WaitTOF();
+
+            if (!frameCount)
+            {
+                frameCount = 2;
+
+                i -= 4;
+                if (i < 0)
+                    i = 32;
+            }
+            frameCount--;
+
+            x -= 9;
+        }
+        SetRast(CDUIBase->cb_RastPort,0);
+    }
+
+    Wait(SIGBREAKF_CTRL_C);
+
+    Forbid();
+    Signal(CDUIBase->cb_CDUITask,SIGF_SINGLE);
+    CDUIBase->cb_FlipperTask = NULL;
+}
+
+#define SysBase CDUIBase->cb_SysLib
+
+
+/*****************************************************************************/
+
+
+static VOID MakeCDs(struct CDUILib *CDUIBase, WORD x)
+{
+struct BitMap      *tmpBM;
+struct BitMap      *cdsBM;
+struct BMInfo      *cdsBMInfo;
+UWORD               i,j;
+
+    GetBM(CDUIBase,&cds,&cdsBM,&cdsBMInfo);
+
+    tmpBM = AllocBitMap(64,45,4,BMF_CLEAR|BMF_INTERLEAVED,NULL);
+    for (i = 0; i < 18; i++)
+    {
+        BltBitMap(cdsBM,(i % 6) * 43, (i / 6) * 44,
+                  tmpBM,0,0,
+                  43,44,0xc0,0xff,NULL);
+
+        WaitBlit();
+
+        for (j = 0; j < 2; j++)
+        {
+            CDUIBase->cb_Sprites[i*2+j] = AllocSpriteData(tmpBM,
+                                                          SPRITEA_Width,    43,
+                                                          SPRITEA_Attached, j & 1,
+                                                          TAG_DONE);
+        }
+    }
+    FreeBitMap(tmpBM);
+    FreeBM(CDUIBase,cdsBM,cdsBMInfo);
+
+    for (i = 0; i < 4; i++)
+    {
+        GetExtSprite(CDUIBase->cb_Sprites[i],GSTAG_SPRITE_NUM,i+1,TAG_DONE);
+        CDUIBase->cb_Sprites[i]->es_SimpleSprite.num = i;
+    }
+
+    /* miror the first four sprites after the four last one, makes other code
+     * much simpler, trust me
+     */
+    for (i = 36; i < 40; i++)
+        CDUIBase->cb_Sprites[i] = CDUIBase->cb_Sprites[i - 36];
+
+    RemakeDisplay();
+
+    MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[0],x,MAIN_CD_SPRITE_Y_OFFSET);
+    MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[1],x,MAIN_CD_SPRITE_Y_OFFSET);
+    MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[2],x + 86,MAIN_CD_SPRITE_Y_OFFSET);
+    MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[3],x + 86,MAIN_CD_SPRITE_Y_OFFSET);
+}
+
+
+/*****************************************************************************/
+
+
+static VOID NukeCDs(struct CDUILib *CDUIBase)
+{
+UWORD i;
+
+    for (i = 1; i < 5; i++)
+        FreeSprite(i);
+
+    for (i = 0; i < 36; i++)
+        FreeSpriteData(CDUIBase->cb_Sprites[i]);
+}
+
+
+/*****************************************************************************/
+
+
+static const cmsVCTags[] =
+{
+    VC_IntermediateCLUpdate, FALSE,
+    VTAG_SPODD_BASE_SET,     80,
+    VTAG_SPEVEN_BASE_SET,    80,
+    VTAG_SPRITERESN_SET,     SPRITERESN_140NS,
+    TAG_DONE
+};
+
+static struct Screen *CreateMainScreen(struct CDUILib *CDUIBase, Tag tag, ...)
+{
+    return (OpenScreenTags(NULL,
+                           SA_VideoControl, cmsVCTags,
+                           TAG_MORE,        (struct TagItem *)&tag));
+}
+
+
+/*****************************************************************************/
+
+
+static const cbsVCTags[] =
+{
+    VC_IntermediateCLUpdate, FALSE,
+    VTAG_SPODD_BASE_SET,     16,
+    VTAG_SPEVEN_BASE_SET,    16,
+    VTAG_SPRITERESN_SET,     SPRITERESN_140NS,
+    TAG_DONE
+};
+
+static struct Screen *CreateBootingScreen(struct CDUILib *CDUIBase,
+                                          struct BitMap *bm,
+                                          struct BMInfo *bmInfo,
+                                          APTR colors)
+{
+struct Rectangle  rect;
+struct Screen    *sp;
+
+    QueryOverscan(HIRESLACE_KEY,&rect,OSCAN_MAX);
+    rect.MinX += 8;
+    rect.MinY += EXIT_SCREEN_Y_DELTA;
+    rect.MaxY  = rect.MinY + bmInfo->bmi_Height - 1;
+
+    sp = OpenScreenTags(NULL,
+                        SA_Width,           716,
+                        SA_Height,          bmInfo->bmi_Height,
+                        SA_Depth,           bmInfo->bmi_Depth,
+                        SA_DisplayID,       HIRESLACE_KEY,
+                        SA_BitMap,          bm,
+                        SA_Draggable,       FALSE,
+                        SA_Exclusive,       TRUE,
+                        SA_Behind,          TRUE,
+                        SA_Quiet,           TRUE,
+                        SA_ShowTitle,       FALSE,
+                        SA_DClip,           &rect,
+                        SA_VideoControl,    cbsVCTags,
+                        SA_Colors32,        colors,
+                        SA_BackFill,        LAYERS_NOBACKFILL,
+                        TAG_DONE);
+
+    return(sp);
+}
+
+
+/*****************************************************************************/
+
+
+static void CreateWindow(struct CDUILib *CDUIBase, BOOL flipper)
+{
+struct Window *oldWindow;
+
+    // hold off the CD flipper while we change things...
+    if (flipper)
+        SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_D);
+
+    CDUIBase->cb_RastPort = &CDUIBase->cb_Screen->RastPort;
+    CDUIBase->cb_BitMap   = CDUIBase->cb_RastPort->BitMap;
+    CDUIBase->cb_ViewPort = &CDUIBase->cb_Screen->ViewPort;
+
+    // CD flipper can resume
+    if (flipper)
+    {
+        ScreenToFront(CDUIBase->cb_Screen);
+        Signal(CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_D);
+    }
+
+    oldWindow = CDUIBase->cb_Window;
+
+    CDUIBase->cb_Window = OpenWindowTags(NULL,
+                                 WA_CustomScreen,  CDUIBase->cb_Screen,
+                                 WA_Borderless,    TRUE,
+                                 WA_Backdrop,      TRUE,
+                                 WA_Activate,      TRUE,
+                                 WA_RMBTrap,       TRUE,
+                                 WA_Pointer,       CDUIBase->cb_Pointer,
+                                 WA_RptQueue,      1,
+                                 WA_NoCareRefresh, TRUE,
+                                 WA_SimpleRefresh, TRUE,
+                                 WA_BackFill,      LAYERS_NOBACKFILL,
+                                 TAG_DONE);
+
+    if (oldWindow)
+        CloseWindow(oldWindow);
+}
+
+
+/*****************************************************************************/
+
+
+static void DestroyWindow(struct CDUILib *CDUIBase)
+{
+    CloseWindow(CDUIBase->cb_Window);
+    CDUIBase->cb_Window = NULL;
+}
+
+
+/*****************************************************************************/
+
+
+void CloseMainScreen(struct CDUILib *CDUIBase)
+{
+    DestroyWindow(CDUIBase);
+    IBASE_NUKEPOINTER(IntuitionBase) = (STRPTR)FALSE;
+    CloseScreenQuiet(CDUIBase,CDUIBase->cb_Screen);
+    FreeBM(CDUIBase,CDUIBase->cb_BackgroundBM,NULL);
+}
+
+
+/*****************************************************************************/
+
+
+void NothingToMain(struct CDUILib *CDUIBase)
+{
+struct Rectangle      rect;
+struct Screen        *oldScreen;
+struct BitMap        *bm;
+struct BMInfo        *bmInfo;
+struct BMInfo        *backgroundBMInfo;
+struct ColorBatch256 *colors256;
+struct ColorBatch16  *colors16;
+struct ColorBatch32   black;
+ULONG                 i;
+struct BitMap        *paletteBM;
+struct BMInfo        *paletteBMInfo;
+
+    /* Open shallow screen
+     * Start fanfare
+     * Move disc into view
+     * Open expensive screen
+     * Close low-cost screen
+     * Fade in aurora
+     * Start CD flipping
+     * Move CD in from left to its target position
+     * Render CD bitmap
+     * Stop CD flipping
+     */
+
+    IBASE_NUKEPOINTER(IntuitionBase) = (STRPTR)TRUE;
+
+    black.cb_NumColors  = 32;
+    black.cb_FirstColor = 0;
+    black.cb_EndMarker  = 0;
+    for (i = 0; i < 32; i++)
+    {
+        black.cb_Colors[i].Red   = 0;
+        black.cb_Colors[i].Green = 0;
+        black.cb_Colors[i].Blue  = 0;
+    }
+
+    /* Activate the audio device */
+    InitResident (FindResident ("audio.device"), NULL);
+
+    GetBM(CDUIBase,&palette3,&paletteBM,&paletteBMInfo);
+    CDUIBase->cb_LowCostColors = (struct ColorBatch32 *)GetBMInfoRGB32(paletteBMInfo,32,0);
+    FreeBM(CDUIBase,paletteBM,paletteBMInfo);
+    GetBM(CDUIBase,&amiga32_red,&CDUIBase->cb_LowCostBM,&CDUIBase->cb_LowCostBMInfo);
+    CDUIBase->cb_LowCostScreen = CreateBootingScreen(CDUIBase,CDUIBase->cb_LowCostBM,CDUIBase->cb_LowCostBMInfo,&black);
+
+    colors256 = AllocVec(sizeof(struct ColorBatch256), MEMF_ANY);
+
+    // decompress main background
+    GetBM(CDUIBase,&background,&CDUIBase->cb_BackgroundBM,&backgroundBMInfo);
+    CDUIBase->cb_BitMapColors = (struct ColorBatch256 *)GetBMInfoRGB32(backgroundBMInfo,256,0);
+
+    *colors256 = *((struct ColorBatch256 *)CDUIBase->cb_BitMapColors);
+    /* The colors used for the Amiga logo's border need to come up black.
+     * However, we need the color values in the picture file itself,
+     * because we'll fade them in from black.  So let's nuke the colors
+     * in the copy of the color-table we'll use to open the screen.
+     */
+    for ( i = CYCLE_AMIGABORDER_FIRST; i <= CYCLE_AMIGABORDER_LAST; i++ )
+    {
+        colors256->cb_Colors[i].Red   = 0;
+        colors256->cb_Colors[i].Green = 0;
+        colors256->cb_Colors[i].Blue  = 0;
+    }
+
+    // decompress animation's colors
+    bmInfo   = DecompBMInfo(NULL, NULL, &palette0);
+    colors16 = (struct ColorBatch16 *)GetBMInfoRGB32(bmInfo,16,0);
+
+    // decompress the cycling aurora colors
+    CDUIBase->cb_AuroraBM[0]     = DecompBMInfo(NULL, NULL, &palette1);
+    CDUIBase->cb_AuroraColors[0] = GetBMInfoRGB32(CDUIBase->cb_AuroraBM[0],256,0);
+    CDUIBase->cb_AuroraBM[1]     = DecompBMInfo(NULL, NULL, &palette2);
+    CDUIBase->cb_AuroraColors[1] = GetBMInfoRGB32(CDUIBase->cb_AuroraBM[1],256,0);
+
+    // activate sound sub-task
+    CDUIBase->cb_FanfareTask = CreateTask("Fanfare",21,FanfarePlayer,1024);
+    SyncSignal(CDUIBase,CDUIBase->cb_FanfareTask,SIGBREAKF_CTRL_D);
+
+    QueryOverscan(HIRESLACE_KEY,&rect,OSCAN_MAX);
+    rect.MinX += 8;
+
+    CDUIBase->cb_Screen = CreateMainScreen(CDUIBase,
+                             SA_Width,      716,
+                             SA_Height,     565,
+                             SA_Depth,      4,
+                             SA_DisplayID,  HIRESLACE_KEY,
+                             SA_Draggable,  FALSE,
+                             SA_Exclusive,  TRUE,
+                             SA_Quiet,      TRUE,
+                             SA_ShowTitle,  FALSE,
+                             SA_DClip,      &rect,
+                             SA_Colors32,   &black,
+                             SA_BackFill,   LAYERS_NOBACKFILL,
+                             TAG_DONE);
+
+    CreateWindow(CDUIBase,FALSE);
+
+    oldScreen = CDUIBase->cb_Screen;
+
+    CDUIBase->cb_Screen = CreateMainScreen(CDUIBase,
+                             SA_Width,           716,
+                             SA_Height,          565,
+                             SA_Depth,           8,
+                             SA_DisplayID,       HIRESLACE_KEY,
+                             SA_BitMap,          CDUIBase->cb_BackgroundBM,
+                             SA_Draggable,       FALSE,
+                             SA_Exclusive,       TRUE,
+                             SA_Quiet,           TRUE,
+                             SA_Behind,          TRUE,
+                             SA_ShowTitle,       FALSE,
+                             SA_DClip,           &rect,
+                             SA_Colors32,        colors256,
+                             SA_BackFill,        LAYERS_NOBACKFILL,
+                             TAG_DONE);
+
+    DisplayAnim(oldScreen,disc_in,CDUIBase,(APTR)colors16);
+
+    FreeBMInfoRGB32((ULONG *)colors16);
+    FreeBMInfo(bmInfo);
+
+    CreateWindow(CDUIBase,FALSE);
+
+    FreeBMInfo(backgroundBMInfo);
+
+    ScreenToFront(CDUIBase->cb_Screen);
+    CloseScreenQuiet(CDUIBase,oldScreen);
+
+    GetBM(CDUIBase,&cd,&bm,&bmInfo);
+    MakeCDs(CDUIBase, -170);
+
+    CDUIBase->cb_BgSaveBM = AllocBitMap(168,70,8,BMF_INTERLEAVED,NULL);
+    BltBitMap(CDUIBase->cb_BitMap,MAIN_CD_BITMAP_X_OFFSET,MAIN_CD_BITMAP_Y_OFFSET,
+              CDUIBase->cb_BgSaveBM,0,0,
+              168,70,0xc0,0xff,NULL);
+
+    CDUIBase->cb_CyclerTask = CreateTask("Cycler",21,ColorCycler,8192);
+
+    CDUIBase->cb_CDYOffset = MAIN_CD_SPRITE_Y_OFFSET;
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",22,FlipCDIn,4096);
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_C);
+
+    BltBitMap(bm,0,0,
+              CDUIBase->cb_BitMap,MAIN_CD_BITMAP_X_OFFSET,MAIN_CD_BITMAP_Y_OFFSET,
+              168,70,0xc0,0xff,NULL);
+
+    NukeCDs(CDUIBase);
+    FreeBM(CDUIBase,bm,bmInfo);
+    FreeVec(colors256);
+}
+
+
+/*****************************************************************************/
+
+
+void NothingToBooting(struct CDUILib *CDUIBase)
+{
+struct BMInfo       *bmInfo;
+struct ColorBatch32 *colors;
+struct BMInfo       *paletteBMInfo;
+struct BitMap       *paletteBM;
+
+    /* Open low-cost screen
+     * Create CD
+     * Start flipping CD
+     * Move CD in from left to its target position
+     * Keep flipping CD
+     */
+
+    IBASE_NUKEPOINTER(IntuitionBase) = (STRPTR)TRUE;
+
+    GetBM(CDUIBase,&palette3,&paletteBM,&paletteBMInfo);
+    colors = (struct ColorBatch32 *)GetBMInfoRGB32(paletteBMInfo,32,0);
+
+    GetBM(CDUIBase,&amiga32_red,&CDUIBase->cb_BackgroundBM,&bmInfo);
+    CDUIBase->cb_Screen = CreateBootingScreen(CDUIBase,CDUIBase->cb_BackgroundBM,bmInfo,colors);
+    ScreenToFront(CDUIBase->cb_Screen);
+
+    CreateWindow(CDUIBase,FALSE);
+
+    MakeCDs(CDUIBase,-170);
+
+    FreeBMInfo(bmInfo);
+    FreeBMInfoRGB32((ULONG *)colors);
+    FreeBM(CDUIBase,paletteBM,paletteBMInfo);
+
+    CDUIBase->cb_CDYOffset = EXIT_CD_SPRITE_Y_OFFSET;
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",22,FlipCDIn,4096);
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_C);
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",22,FlipCD,4096);
+}
+
+
+/*****************************************************************************/
+
+
+void DoorClosedToMain(struct CDUILib *CDUIBase)
+{
+struct BitMap *bm;
+struct BMInfo *bmInfo;
+
+    /* stop flipping CD, restoring bitmap version */
+
+    GetBM(CDUIBase,&cd,&bm,&bmInfo);
+
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_C);
+
+    BltBitMap(bm,0,0,
+              CDUIBase->cb_BitMap,MAIN_CD_BITMAP_X_OFFSET,MAIN_CD_BITMAP_Y_OFFSET,
+              168,70,0xc0,0xff,NULL);
+    WaitBlit();
+
+    NukeCDs(CDUIBase);
+    FreeBM(CDUIBase,bm,bmInfo);
+}
+
+
+/*****************************************************************************/
+
+
+void DoorClosedToBooting(struct CDUILib *CDUIBase)
+{
+struct Screen *oldScreen;
+
+    /* Fly disc off the screen
+     * Fade out stars and aurora
+     * Open low-cost screen
+     * Close expensive screen
+     */
+
+    oldScreen = CDUIBase->cb_Screen;
+
+    CDUIBase->cb_Screen = CDUIBase->cb_LowCostScreen;
+    LoadRGB32(&CDUIBase->cb_Screen->ViewPort,CDUIBase->cb_LowCostColors);
+    FreeBMInfoRGB32((ULONG *)CDUIBase->cb_LowCostColors);
+    FreeBMInfo(CDUIBase->cb_LowCostBMInfo);
+
+    // CTRL_D is a request to fade out leaving an image which matches
+    // the low-cost screen
+    SyncSignal(CDUIBase,CDUIBase->cb_CyclerTask,SIGBREAKF_CTRL_D);
+
+    FreeBMInfoRGB32(CDUIBase->cb_BitMapColors);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[1]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[1]);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[0]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[0]);
+    FreeBitMap(CDUIBase->cb_BgSaveBM);
+
+    CreateWindow(CDUIBase,TRUE);
+
+    CloseScreenQuiet(CDUIBase,oldScreen);
+    FreeBM(CDUIBase,CDUIBase->cb_BackgroundBM,NULL);
+
+    CDUIBase->cb_BackgroundBM = CDUIBase->cb_LowCostBM;
+}
+
+
+/*****************************************************************************/
+
+
+void DoorClosedToClosing(struct CDUILib *CDUIBase)
+{
+    /* fade out */
+
+    // CTRL_C is a request to fade the cycler out completely
+    SyncSignal(CDUIBase,CDUIBase->cb_CyclerTask,SIGBREAKF_CTRL_C);
+
+    FreeBMInfoRGB32(CDUIBase->cb_BitMapColors);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[1]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[1]);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[0]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[0]);
+    FreeBitMap(CDUIBase->cb_BgSaveBM);
+
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_C);
+
+    NukeCDs(CDUIBase);
+
+    CloseMainScreen(CDUIBase);
+
+    if (CDUIBase->cb_FanfareTask)
+        SyncSignal(CDUIBase,CDUIBase->cb_FanfareTask,SIGBREAKF_CTRL_C);
+}
+
+
+/*****************************************************************************/
+
+
+void MainToDoorClosed(struct CDUILib *CDUIBase)
+{
+    MakeCDs(CDUIBase,MAIN_CD_SPRITE_X_OFFSET);
+
+    BltBitMap(CDUIBase->cb_BgSaveBM,0,0,
+              CDUIBase->cb_BitMap,MAIN_CD_BITMAP_X_OFFSET,MAIN_CD_BITMAP_Y_OFFSET,
+              168,70,0xc0,0xff,NULL);
+    WaitBlit();
+
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",22,FlipCD,4096);
+}
+
+
+/*****************************************************************************/
+
+
+void MainToClosing(struct CDUILib *CDUIBase)
+{
+    /* fade out, and shut down */
+
+    // CTRL_C is a request to fade the cycler out completely
+    SyncSignal(CDUIBase,CDUIBase->cb_CyclerTask,SIGBREAKF_CTRL_C);
+
+    FreeBMInfoRGB32(CDUIBase->cb_BitMapColors);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[1]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[1]);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[0]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[0]);
+    FreeBitMap(CDUIBase->cb_BgSaveBM);
+
+    CloseMainScreen(CDUIBase);
+
+    if (CDUIBase->cb_FanfareTask)
+        SyncSignal(CDUIBase,CDUIBase->cb_FanfareTask,SIGBREAKF_CTRL_C);
+}
+
+
+/*****************************************************************************/
+
+
+void BootingToClosing(struct CDUILib *CDUIBase)
+{
+    /* Move flipping CD towards the right, erasing 32
+     * Reverse flip direction on CD
+     * Move flipping CD towards the left, erasing Amiga
+     * Clear to black
+     * Close screen
+     */
+
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_E);
+    SyncSignal(CDUIBase,CDUIBase->cb_FlipperTask,SIGBREAKF_CTRL_C);
+
+    NukeCDs(CDUIBase);
+
+    CloseMainScreen(CDUIBase);
+
+    if (CDUIBase->cb_FanfareTask)
+        SyncSignal(CDUIBase,CDUIBase->cb_FanfareTask,SIGBREAKF_CTRL_C);
+}
+@
+
+
+40.3
+log
+@Fixed memory loss
+Fixed sprite trash
+@
+text
+@d17 1
+d536 2
+d553 19
+a607 10
+    black.cb_NumColors  = 32;
+    black.cb_FirstColor = 0;
+    black.cb_EndMarker  = 0;
+    for (i = 0; i < 32; i++)
+    {
+        black.cb_Colors[i].Red   = 0;
+        black.cb_Colors[i].Green = 0;
+        black.cb_Colors[i].Blue  = 0;
+    }
+
+d748 1
+a748 6
+struct BitMap       *bm;
+struct BMInfo       *bmInfo;
+struct Screen       *oldScreen;
+struct ColorBatch32 *colors;
+struct BitMap       *paletteBM;
+struct BMInfo       *paletteBMInfo;
+a755 2
+    GetBM(CDUIBase,&amiga32_red,&bm,&bmInfo);
+
+d758 4
+a761 7
+    GetBM(CDUIBase,&palette3,&paletteBM,&paletteBMInfo);
+    colors = (struct ColorBatch32 *)GetBMInfoRGB32(paletteBMInfo,32,0);
+
+    CDUIBase->cb_Screen = CreateBootingScreen(CDUIBase,bm,bmInfo,colors);
+    FreeBMInfoRGB32((ULONG *)colors);
+    FreeBM(CDUIBase,paletteBM,paletteBMInfo);
+    FreeBMInfo(bmInfo);
+d779 1
+a779 1
+    CDUIBase->cb_BackgroundBM = bm;
+@
+
+
+40.2
+log
+@*** empty log message ***
+@
+text
+@d335 1
+a337 1
+        tmpBM = AllocBitMap(64,45,4,BMF_CLEAR|BMF_INTERLEAVED,NULL);
+a350 2
+
+        FreeBitMap(tmpBM);
+d352 1
+a478 6
+    if (!CDUIBase->cb_PointerBM)
+    {
+        CDUIBase->cb_PointerBM = AllocBitMap(64,1,2,BMF_CLEAR,NULL);
+        CDUIBase->cb_Pointer   = NewObject(NULL,"pointerclass",POINTERA_BitMap, CDUIBase->cb_PointerBM,TAG_DONE);
+    }
+
+d505 2
+a506 7
+    DisposeObject(CDUIBase->cb_Pointer);
+    FreeBitMap(CDUIBase->cb_PointerBM);
+
+    CDUIBase->cb_Window    = NULL;
+    CDUIBase->cb_Pointer   = NULL;
+    CDUIBase->cb_PointerBM = NULL;
+}
+a606 1
+                             SA_ColorMapEntries, 32,
+d755 1
+d759 1
+d765 7
+a775 1
+    FreeBMInfo(bmInfo);
+d791 7
+a803 6
+    FreeBMInfoRGB32(CDUIBase->cb_BitMapColors);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[1]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[1]);
+    FreeBMInfoRGB32(CDUIBase->cb_AuroraColors[0]);
+    FreeBMInfo(CDUIBase->cb_AuroraBM[0]);
+
+a834 2
+    CloseMainScreen(CDUIBase);
+
+d840 3
+@
+
+
+40.1
+log
+@Initial V40 RCS checkin
+@
+text
+@d25 1
+d33 2
+a34 2
+#define SCR_X_OFFSET (CDUIBase->cb_XOffset)
+#define SCR_Y_OFFSET (CDUIBase->cb_YOffset)
+d42 1
+d84 1
+d101 1
+a101 1
+WORD             delta;
+d128 4
+a131 4
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i) % 36],CDUIBase->cb_Sprites[(i+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+1) % 36],CDUIBase->cb_Sprites[(i+1+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2) % 36],CDUIBase->cb_Sprites[(i+2+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+3) % 36],CDUIBase->cb_Sprites[(i+3+4) % 36],NULL);
+d133 2
+a134 2
+        MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+4) % 36],x,y);
+        MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2+4) % 36],x+86,y);
+d140 5
+a144 2
+            i         += 4;
+            flipCount  = 1;
+d153 1
+a153 1
+        if ((i % 36 == 0) && aborting)
+d175 3
+d182 1
+a182 1
+ULONG            i,j;
+d207 2
+a208 2
+            for (i = 0; i < 36; i++)
+                CDUIBase->cb_Sprites[i]->es_SimpleSprite.y = EXIT_CD_SPRITE_Y_OFFSET;
+d217 4
+a220 4
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i) % 36],CDUIBase->cb_Sprites[(i+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+1) % 36],CDUIBase->cb_Sprites[(i+1+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2) % 36],CDUIBase->cb_Sprites[(i+2+4) % 36],NULL);
+        ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+3) % 36],CDUIBase->cb_Sprites[(i+3+4) % 36],NULL);
+d226 2
+d229 1
+a229 1
+        if ((i % 36 == 0) && aborting)
+d250 1
+a250 1
+            if (x >= MAIN_CD_SPRITE_X_OFFSET + 160)
+d253 4
+a256 4
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+4) % 36],CDUIBase->cb_Sprites[(i) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+1+4) % 36],CDUIBase->cb_Sprites[(i+1) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2+4) % 36],CDUIBase->cb_Sprites[(i+2) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+3+4) % 36],CDUIBase->cb_Sprites[(i+3) % 36],NULL);
+d258 2
+a259 2
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i) % 36],x,EXIT_CD_SPRITE_Y_OFFSET);
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2) % 36],x+86,EXIT_CD_SPRITE_Y_OFFSET);
+a264 1
+                i          += 4;
+d266 4
+d274 1
+d288 4
+a291 4
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+4) % 36],CDUIBase->cb_Sprites[(i) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+1+4) % 36],CDUIBase->cb_Sprites[(i+1) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2+4) % 36],CDUIBase->cb_Sprites[(i+2) % 36],NULL);
+            ChangeExtSpriteA(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+3+4) % 36],CDUIBase->cb_Sprites[(i+3) % 36],NULL);
+d293 2
+a294 2
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i) % 36],x,EXIT_CD_SPRITE_Y_OFFSET);
+            MoveSprite(CDUIBase->cb_ViewPort,CDUIBase->cb_Sprites[(i+2) % 36],x+86,EXIT_CD_SPRITE_Y_OFFSET);
+a299 1
+                i         -= 4;
+d301 4
+d362 6
+a394 628
+#undef SysBase
+
+/* These are the color registers that the rainbow-colored gradient
+ * reflection in the disc and the CD are drawn with:
+ */
+#define CYCLE_RAINBOW_FIRST	23
+#define CYCLE_RAINBOW_LAST	47
+#define CYCLE_RAINBOW_COUNT	(CYCLE_RAINBOW_LAST-CYCLE_RAINBOW_FIRST+1)
+
+/* These are the color registers that the rotating perimeter and center
+ * of the disc (as well as the twinkling stars) are drawn with:
+ */
+#define CYCLE_PERIMETER_FIRST	48
+#define CYCLE_PERIMETER_LAST	61
+#define CYCLE_PERIMETER_COUNT	(CYCLE_PERIMETER_LAST-CYCLE_PERIMETER_FIRST+1)
+
+/* These are the color registers that the face of the disc is drawn with:
+ * (Cycling this creates the impression of a reflection from the upper
+ * aurora).
+ */
+#define CYCLE_FACE_FIRST	8
+#define CYCLE_FACE_LAST		21
+#define CYCLE_FACE_COUNT	(CYCLE_FACE_LAST-CYCLE_FACE_FIRST+1)
+
+/* These are the color registers used to draw the upper aurora: */
+#define CYCLE_AURORATOP_FIRST	192
+#define CYCLE_AURORATOP_LAST	255
+#define CYCLE_AURORATOP_COUNT	(CYCLE_AURORATOP_LAST-CYCLE_AURORATOP_FIRST+1)
+
+/* These are the color registers used to draw the lower aurora: */
+#define CYCLE_AURORABOTTOM_FIRST	128
+#define CYCLE_AURORABOTTOM_LAST		191
+#define CYCLE_AURORABOTTOM_COUNT	(CYCLE_AURORABOTTOM_LAST-CYCLE_AURORABOTTOM_FIRST+1)
+
+/* These are the color registers used to draw the aurora effect in the
+ * words "Amiga" and "32":
+ */
+#define CYCLE_AURORAAMIGA_FIRST	96
+#define CYCLE_AURORAAMIGA_LAST	127
+#define CYCLE_AURORAAMIGA_COUNT	(CYCLE_AURORAAMIGA_LAST-CYCLE_AURORAAMIGA_FIRST+1)
+
+/* These are the color registers used to draw the border around the
+ * Amiga CD 32 logo:
+ */
+#define CYCLE_AMIGABORDER_FIRST	64
+#define CYCLE_AMIGABORDER_LAST	77
+#define CYCLE_AMIGABORDER_COUNT	(CYCLE_AMIGABORDER_LAST-CYCLE_AMIGABORDER_FIRST+1)
+
+/* Rainbow diffraction effect in disc */
+static const struct ColorEffect DiscRainbowEffect =
+{
+    CE_LOOPER,
+    4,
+    CYCLE_RAINBOW_FIRST, CYCLE_RAINBOW_LAST,
+    0,
+};
+
+/* Gray perimeter and center of disc, plus some stars */
+static const struct ColorEffect DiscPerimeterEffect =
+{
+    CE_LOOPER,
+    5,
+    CYCLE_PERIMETER_FIRST, CYCLE_PERIMETER_LAST,
+    0,
+};
+
+/* Border around "Amiga" and "32" */
+static const struct ColorEffect AmigaBorderEffect =
+{
+    CE_LOOPER,
+    6,
+    CYCLE_AMIGABORDER_FIRST, CYCLE_AMIGABORDER_LAST,
+    0,
+};
+
+/* Gray face of disc */
+static const struct ColorEffect DiscFaceEffect =
+{
+    CE_LOOPER,
+    4,
+    CYCLE_FACE_FIRST, CYCLE_FACE_LAST,
+    0,
+};
+
+static const struct ColorEffect AuroraEffect =
+{
+    CE_SHOOTER,
+    1,
+    0,95,
+    CEPALETTE_ALT2,
+};
+
+static const struct ColorEffect AmigaAuroraEffect =
+{
+    CE_SHOOTER,
+    2,
+    96,165,
+    CEPALETTE_ALT2,
+};
+
+static const struct ColorEffect BlueAuroraEffect =
+{
+    CE_SHOOTER,
+    1,
+    47,79,
+    CEPALETTE_ALT1,
+};
+
+static const struct ColorEffect MultiAuroraEffect =
+{
+    CE_SHOOTER,
+    1,
+    96,255,
+    CEPALETTE_ALT1,
+};
+
+static const struct ColorEffect DelayEffect =
+{
+    CE_WAITER,
+    60,
+    0,0,
+    0,
+};
+
+static const struct ColorEffect SlowFadeInEffect =
+{
+    CE_INFADER,
+    4,
+    10,0,
+    0,
+};
+
+static const struct ColorEffect FadeOutEffect =
+{
+    CE_OUTFADER,
+    1,
+    0,0,
+    0,
+};
+
+static void
+initCycle( struct ColorCycle *cycle, const struct ColorEffect *effect,
+    UWORD colorbase, UWORD numcolors, UWORD termination )
+{
+    cycle->cy_Effect = (struct ColorEffect *)effect;
+    cycle->cy_Phase = 0;
+    cycle->cy_Halted = FALSE;
+    cycle->cy_NumColors = numcolors;
+    cycle->cy_ColorBase = colorbase;
+    cycle->cy_CountDown = effect->ce_Period;
+    cycle->cy_Termination = termination;
+}
+
+#define NUM_FADE_STEPS 20
+
+/* First, operate on all CE_LOOPERs, since they move colors in
+ * the source color table, which we'll need to pick up when we
+ * make our working copy of the color table.
+ */
+static VOID processLoopers( struct CDUILib *CDUIBase )
+{
+    WORD dst, cyclenum;
+    struct ColorCycle *cycle;
+    struct ColorEffect *effect;
+    struct RGBEntry *rgbentry;
+    struct RGBEntry temp;
+
+    for ( cyclenum = 0; cyclenum < NUM_CYCLES; cyclenum++ )
+    {
+	cycle = &CDUIBase->cb_Cycles[ cyclenum ];
+	if ( ( effect = cycle->cy_Effect ) && ( effect->ce_Type == CE_LOOPER ) )
+	{
+	    /* The disc face cycle is special because it only runs when
+	     * the top aurora is running.  This is because it's supposed
+	     * to be a reflection of the top aurora.  We don't have a great
+	     * way of providing for interconnections, so we let a little
+	     * special-case stuff affect the purity of the color-effect
+	     * engine.
+	     */
+	    if ( cyclenum == CYCLE_FACE )
+	    {
+		struct ColorCycle *acycle;
+		struct ColorEffect *aeffect;
+		acycle = &CDUIBase->cb_Cycles[ CYCLE_AURORATOP ];
+		aeffect = acycle->cy_Effect;
+
+		/* If the top aurora exists, and is a shooter, and is not halted,
+		 * and is in the most active part of its phase, then we want the
+		 * face-cycling effect to be enabled, otherwise we want it off.
+		 * (NB: halting a looper takes effect as soon as the phase
+		 * returns to normal).
+		 * Shooter phases run from zero to the number of colors in
+		 * the shoot plus the number in the destination bitmap.  The
+		 * most active part of the phase is defined to be any phase
+		 * where half or more of the shoot-colors are on-screen.
+		 */
+		if ( ( aeffect ) && ( aeffect->ce_Type == CE_SHOOTER ) &&
+		    ( !acycle->cy_Halted ) && ( acycle->cy_Phase >= acycle->cy_NumColors/2 ) &&
+		    ( acycle->cy_Phase <= aeffect->ce_LastColor - aeffect->ce_FirstColor + acycle->cy_NumColors/2 ) )
+		{
+		    cycle->cy_Halted = FALSE;
+		    /* Another kludge that uglies the code but beautifies the
+		     * result:  We double the speed of the face-cycle when
+		     * the MultiAuroraEffect is in effect.  This is because
+		     * the bands are closer together, so it's like a higher
+		     * frequency.
+		     */
+		    if ( aeffect == &MultiAuroraEffect )
+		    {
+			cycle->cy_CountDown = ( cycle->cy_CountDown+1 ) >> 1;
+		    }
+		}
+		else
+		{
+		    cycle->cy_Halted = TRUE;
+		}
+	    }
+
+	    /* Unless the cycle is halted, we count down by one.  Note
+	     * that an order to halt only takes effect when the phase
+	     * hits zero.  If the countdown we hits zero, then we reset
+	     * the countdown value and cycle the colors by one step.
+	     */
+	    if ( ( ( !cycle->cy_Halted ) || ( cycle->cy_Phase != 0 ) ) &&
+		( --cycle->cy_CountDown == 0 ) )
+	    {
+		cycle->cy_CountDown = effect->ce_Period;
+		rgbentry = ((struct ColorBatch256 *)CDUIBase->cb_BitMapColors)->cb_Colors;
+
+		dst = cycle->cy_ColorBase + cycle->cy_NumColors - 1;
+		temp = rgbentry[dst];
+		while ( dst >= cycle->cy_ColorBase + 1 )
+		{
+		    rgbentry[dst] = rgbentry[dst-1];
+		    dst--;
+		}
+		rgbentry[dst] = temp;
+		if ( ++cycle->cy_Phase == cycle->cy_NumColors )
+		{
+		    cycle->cy_Phase = 0;
+		}
+	    }
+
+	}
+    }
+}
+
+/* Now do all the shooters, which replace colors not originally
+ * in the destination.  Shooters always copy their colors, regardless
+ * of whether the CountDown expires, since the original colors in the
+ * ctable are not at all the ones from the shooters, whose color palette
+ * is really separate from the source picture.
+ */
+static VOID processShooters( struct CDUILib *CDUIBase, struct ColorBatch256 *ctable )
+{
+    WORD dst, src, src2, cyclenum;
+    struct ColorCycle *cycle;
+    struct ColorEffect *effect;
+    struct RGBEntry *sourceRGB;
+
+    for ( cyclenum = 0; cyclenum < NUM_CYCLES; cyclenum++ )
+    {
+	cycle = &CDUIBase->cb_Cycles[ cyclenum ];
+	if ( ( effect = cycle->cy_Effect ) && ( effect->ce_Type == CE_SHOOTER ) )
+	{
+	    sourceRGB = (struct RGBEntry *)((ULONG)CDUIBase->cb_AuroraColors[effect->ce_Palette] + 4);
+
+	    /* For a shooting color cycle, we want the destination colors
+	     * to all start as the first color to shoot, then we load in more
+	     * and more of the effect colors, until they've all paraded through,
+	     * and finally we trail out to all the final color of the shoot.
+	     * Thus, cy_Phase must run from zero through the number of colors in
+	     * the effect plus number of colors in the destination, to allow the
+	     * fade from/to initial/final color.
+	     */
+	    src = effect->ce_LastColor + cycle->cy_NumColors - cycle->cy_Phase;
+	    for ( dst = cycle->cy_NumColors-1; dst >= 0; dst-- )
+	    {
+		src2 = src;
+		if ( src < effect->ce_FirstColor )
+		{
+		    src2 = effect->ce_FirstColor;
+		}
+		if ( src > effect->ce_LastColor )
+		{
+		    src2 = effect->ce_LastColor;
+		}
+		ctable->cb_Colors[cycle->cy_ColorBase+dst] = sourceRGB[src2];
+		src--;
+	    }
+
+	    if ( ( !cycle->cy_Halted ) && ( --cycle->cy_CountDown == 0 ) )
+	    {
+		cycle->cy_CountDown = effect->ce_Period;
+
+		cycle->cy_Phase++;
+		if ( cycle->cy_Phase > effect->ce_LastColor - effect->ce_FirstColor + 1 + cycle->cy_NumColors)
+		{
+		    /* We're done this effect.  Let's decide what to do based
+		     * on the termination condition.
+		     */
+		    if ( cycle->cy_Termination == CYTERM_DELAY )
+		    {
+			initCycle( cycle, &DelayEffect, cycle->cy_ColorBase, cycle->cy_NumColors, 0 );
+		    }
+		    else /* cycle->cy_Termination == CYTERM_HOLD */
+		    {
+			cycle->cy_Halted = TRUE;
+		    }
+		}
+	    }
+	}
+    }
+}
+
+/* Now we do any post-processing or independent effects such as
+ * fading or waiting
+ */
+static void processFaders( struct CDUILib *CDUIBase, struct ColorBatch256 *ctable )
+{
+    WORD dst, cyclenum;
+    struct ColorCycle *cycle;
+    struct ColorEffect *effect;
+    struct ColorEffect *AuroraTable[] =
+    {
+	&AuroraEffect,
+	&BlueAuroraEffect,
+	&MultiAuroraEffect
+    };
+    for ( cyclenum = 0; cyclenum < NUM_CYCLES; cyclenum++ )
+    {
+	cycle = &CDUIBase->cb_Cycles[ cyclenum ];
+	if ( ( effect = cycle->cy_Effect ) && ( effect->ce_Type >= CE_WAITER ) )
+	{
+	    if ( effect->ce_Type == CE_WAITER )
+	    {
+		if ( ( !cycle->cy_Halted ) && ( --cycle->cy_CountDown == 0 ) )
+		{
+		    cycle->cy_CountDown = effect->ce_Period;
+
+		    /* We're done this effect, pick the next one */
+		    initCycle( cycle, AuroraTable[CDUIBase->cb_AuroraIndex], cycle->cy_ColorBase, cycle->cy_NumColors, CYTERM_DELAY );
+
+		    if ( ++CDUIBase->cb_AuroraIndex == 3 )
+		    {
+			CDUIBase->cb_AuroraIndex = 0;
+		    }
+		}
+	    }
+	    else if ( ( effect->ce_Type == CE_INFADER ) || ( effect->ce_Type == CE_OUTFADER ) )
+	    {
+		WORD fadelevel;
+		WORD phase;
+		/* ce_FirstColor is the number of countdowns to wait before
+		 * beginning the fade...
+		 */
+		phase = cycle->cy_Phase - effect->ce_FirstColor;
+		if ( phase < 0 )
+		{
+		    phase = 0;
+		}
+
+		/* We know how to fade in or out.  So set the fade level accordingly,
+		 * and then scale the colors in the range.
+		 */
+		if ( effect->ce_Type == CE_INFADER )
+		{
+		    fadelevel = phase;
+		}
+		else
+		{
+		    fadelevel = NUM_FADE_STEPS - phase;
+		}
+
+		/* Special case: if fadelevel is 100%, then we don't need to scale,
+		 * since the factor is unity.
+		 */
+		if ( fadelevel != NUM_FADE_STEPS )
+		{
+		    for ( dst = cycle->cy_ColorBase; dst < cycle->cy_ColorBase + cycle->cy_NumColors; dst++ )
+		    {
+			ctable->cb_Colors[dst].Red = ( ctable->cb_Colors[dst].Red / NUM_FADE_STEPS ) * fadelevel;
+			ctable->cb_Colors[dst].Green = ( ctable->cb_Colors[dst].Green / NUM_FADE_STEPS ) * fadelevel;
+			ctable->cb_Colors[dst].Blue = ( ctable->cb_Colors[dst].Blue / NUM_FADE_STEPS ) * fadelevel;
+		    }
+		}
+
+		/* Our caller needs to know if there were any active
+		 * faders, so let's help him out.
+		 */
+		if ( !cycle->cy_Halted )
+		{
+		    if ( --cycle->cy_CountDown == 0 )
+		    {
+			cycle->cy_CountDown = effect->ce_Period;
+
+			/* Effective phase goes from 0 to NUM_FADE_STEPS, inclusive */
+			if ( phase >= NUM_FADE_STEPS )
+			{
+			    cycle->cy_Halted = TRUE;
+			}
+			else
+			{
+			    cycle->cy_Phase++;
+			}
+		    }
+		}
+	    }
+	}
+    }
+}
+
+static VOID ColorCycler(VOID)
+{
+    struct CDUILib         *CDUIBase;
+    struct ExecBase        *SysBase;
+    struct ColorBatch256 cb;
+    BOOL proceed;
+    BOOL broken;
+
+    SysBase = (*((struct ExecBase **) 4));
+    CDUIBase = SysBase->ThisTask->tc_UserData;
+
+    /* Initialize the three regular color cycles */
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_RAINBOW ], &DiscRainbowEffect, CYCLE_RAINBOW_FIRST, CYCLE_RAINBOW_COUNT, 0 );
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_PERIMETER ], &DiscPerimeterEffect, CYCLE_PERIMETER_FIRST, CYCLE_PERIMETER_COUNT, 0 );
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_AMIGABORDER ], &AmigaBorderEffect, CYCLE_AMIGABORDER_FIRST, CYCLE_AMIGABORDER_COUNT, 0 );
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FACE ], &DiscFaceEffect, CYCLE_FACE_FIRST, CYCLE_FACE_COUNT, 0 );
+
+    /* The trim of the word Amiga uses colors 64-77, and we want to keep those
+     * black for a while.  So we set up a fader that covers 64-77.  A little
+     * cooperation is required to make the fade-in work, because for us
+     * to fade, the cb_BitMapColors has to contain the full-scale colors,
+     * but the screen opener had better ensure that the colors 64-77 were
+     * pre-set to black.
+     */
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FADER1 ], &SlowFadeInEffect, CYCLE_AMIGABORDER_FIRST, CYCLE_AMIGABORDER_COUNT, 0 );
+    /* Now we have a whole bunch of stuff to kick off.
+     * Start the top aurora with the regular multicolor one,
+     * Start the bottom aurora with a delay,
+     * Start the Amiga-aurora that fills the letters with red,
+     * and release the fader which will bring the border around
+     * the word Amiga in.
+     */
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_AURORATOP ], &AuroraEffect, CYCLE_AURORATOP_FIRST, CYCLE_AURORATOP_COUNT, CYTERM_DELAY );
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_AURORAAMIGA ], &AmigaAuroraEffect, CYCLE_AURORAAMIGA_FIRST, CYCLE_AURORAAMIGA_COUNT, CYTERM_HOLD );
+    initCycle( &CDUIBase->cb_Cycles[ CYCLE_AURORABOTTOM ], &DelayEffect, CYCLE_AURORABOTTOM_FIRST, CYCLE_AURORABOTTOM_COUNT, 0 );
+
+//kprintf("*** Cycler entry\n");
+    /* We prevent the exit from the cycler until all the outstanding
+     * faders have completed
+     */
+    proceed = TRUE;
+    broken = FALSE;
+    while ( proceed )
+    {
+	/* First, operate on all CE_LOOPERs, since they move colors in
+	 * the source color table, which we'll need to pick up when we
+	 * make our working copy of the color table.
+	 */
+	processLoopers( CDUIBase );
+
+	/* Now make a working copy of the source color table (after
+	 * looper effects are done), so we can fade the values therein.
+	 */
+	cb = *((struct ColorBatch256 *)CDUIBase->cb_BitMapColors);
+
+	/* Now do all the shooters, which replace colors not originally
+	 * in the destination.
+	 */
+	processShooters( CDUIBase, &cb );
+
+	/* Now we do any post-processing or independent effects such as
+	 * fading or waiting.  processFaders() tells us if any faders
+	 * were active.
+	 */
+	processFaders( CDUIBase, &cb );
+
+	WaitTOF();
+	LoadRGB32(CDUIBase->cb_ViewPort,(ULONG *)&cb);
+	if ( broken )
+	{
+	    /* We must not exit until all pending effects are
+	     * complete.  A pending effect is any one of the
+	     * three faders still in action (i.e. not halted)
+	     * or if the Amiga-logo border has not returned
+	     * to its natural phase (we need that in order
+	     * to cleanly transition to the low-cost screen).
+	     *
+	     * NB: This code assumes you don't use CYCLE_FADER2
+	     * or CYCLE_FADER3 for anything except the final
+	     * exit, because the "exit to completely black"
+	     * code doesn't use them (hence doesn't reset
+	     * their cy_Halted flags).
+	     */
+	    BOOL transitioning = FALSE;
+	    LONG i;
+	    for ( i = CYCLE_FADER1; i <= CYCLE_FADER3; i++ )
+	    {
+		if ( ( CDUIBase->cb_Cycles[ i ].cy_Effect ) &&
+		    ( !CDUIBase->cb_Cycles[ i ].cy_Halted ) )
+		{
+		    transitioning = TRUE;
+		}
+	    }
+	    if ( CDUIBase->cb_Cycles[ CYCLE_AMIGABORDER ].cy_Phase )
+	    {
+		transitioning = TRUE;
+	    }
+	    if ( !transitioning )
+	    {
+		proceed = FALSE;
+	    }
+	}
+
+	if ( !broken )
+	{
+	    ULONG sigs;
+	    WORD cyclenum;
+	    struct ColorCycle *cycle;
+
+	    if ( sigs = (SetSignal(0,0) & (SIGBREAKF_CTRL_C|SIGBREAKF_CTRL_D)))
+	    {
+		broken = TRUE;
+		/* Waiters are liable to turn into shooters when they expire,
+		 * so in preparation for exit, let's halt all waiters in their
+		 * tracks
+		 */
+		for ( cyclenum = 0; cyclenum < NUM_CYCLES; cyclenum++ )
+		{
+		    cycle = &CDUIBase->cb_Cycles[ cyclenum ];
+		    if ( ( cycle->cy_Effect ) && ( cycle->cy_Effect->ce_Type == CE_WAITER ) )
+		    {
+			cycle->cy_Halted = TRUE;
+		    }
+		}
+		if ( sigs & SIGBREAKF_CTRL_C )
+		{
+		    /* Fade completely to black, so just use a single fader to
+		     * bring all the colors down.  We also halt the Amiga
+		     * Border color cycling, because that must arrive in
+		     * its original color ordering before exit is permitted.
+		     */
+		    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FADER1 ], &FadeOutEffect, 0, 256, 0 );
+		    CDUIBase->cb_Cycles[ CYCLE_AMIGABORDER ].cy_Halted = TRUE;
+		}
+		if ( sigs & SIGBREAKF_CTRL_D )
+		{
+		    /* Fade all colors except those which are used in the low-cost
+		     * screen.  Those colors are 64-77, and 80-96, 96-127
+		     */
+		    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FADER1 ], &FadeOutEffect, 0, 64, 0 );
+		    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FADER2 ], &FadeOutEffect, 77, 3, 0 );
+		    initCycle( &CDUIBase->cb_Cycles[ CYCLE_FADER3 ], &FadeOutEffect, 128, 128, 0 );
+		    CDUIBase->cb_Cycles[ CYCLE_AMIGABORDER ].cy_Halted = TRUE;
+		}
+	    }
+	}
+    }
+//kprintf("*** Cycler exit\n");
+    Forbid();
+    Signal(CDUIBase->cb_CDUITask,SIGF_SINGLE);
+    CDUIBase->cb_CyclerTask = NULL;
+}
+
+#define SysBase CDUIBase->cb_SysLib
+
+
+/*****************************************************************************/
+
+
+static ULONG Replicate(ULONG colorByte)
+{
+    return ((colorByte << 24) | (colorByte << 16) | (colorByte << 8) | colorByte);
+}
+
+
+/*****************************************************************************/
+
+
+#define NUM_FADE_STEPS 20
+
+
+VOID FadeAnimOut(struct CDUILib *CDUIBase)
+{
+ULONG                  i,j;
+struct ColorBatch256  *cb1, *cb2;
+
+    cb1 = AllocVec(sizeof(struct ColorBatch256),MEMF_ANY);
+    cb2 = AllocVec(sizeof(struct ColorBatch256),MEMF_ANY);
+
+    cb2->cb_NumColors  = 256;
+    cb2->cb_FirstColor = 0;
+    cb2->cb_EndMarker  = 0;
+
+    SyncSignal(CDUIBase,CDUIBase->cb_CyclerTask,SIGBREAKF_CTRL_C);
+
+    GetRGB32(CDUIBase->cb_ViewPort->ColorMap,0,256,(ULONG *)&cb1->cb_Colors);
+
+    for (i = 0; i <= NUM_FADE_STEPS; i++)
+    {
+        for (j = 0; j < 256; j++)
+        {
+            cb2->cb_Colors[j].Red   = (cb1->cb_Colors[j].Red / NUM_FADE_STEPS) * (NUM_FADE_STEPS - i);
+            cb2->cb_Colors[j].Green = (cb1->cb_Colors[j].Green / NUM_FADE_STEPS) * (NUM_FADE_STEPS - i);
+            cb2->cb_Colors[j].Blue  = (cb1->cb_Colors[j].Blue / NUM_FADE_STEPS) * (NUM_FADE_STEPS - i);
+        }
+
+        WaitTOF();
+        LoadRGB32(CDUIBase->cb_ViewPort,(ULONG *)cb2);
+    }
+
+    for (i = 0; i < 256; i++)
+    {
+        cb2->cb_Colors[i].Red   = 0;
+        cb2->cb_Colors[i].Green = 0;
+        cb2->cb_Colors[i].Blue  = 0;
+    }
+    LoadRGB32(CDUIBase->cb_ViewPort,(ULONG *)cb2);
+
+    FreeVec(cb1);
+    FreeVec(cb2);
+}
+
+
+/*****************************************************************************/
+
+
+d434 2
+a435 2
+    rect.MinY  = EXIT_SCREEN_Y_OFFSET;
+    rect.MaxY  = EXIT_SCREEN_Y_OFFSET + bmInfo->bmi_Height - 1;
+d469 3
+a471 3
+    CDUIBase->cb_RastPort  = &CDUIBase->cb_Screen->RastPort;
+    CDUIBase->cb_BitMap    = CDUIBase->cb_RastPort->BitMap;
+    CDUIBase->cb_ViewPort  = &CDUIBase->cb_Screen->ViewPort;
+d475 2
+d478 1
+d527 1
+d548 1
+a548 1
+    /* Open low-cost screen
+a647 2
+    ScreenToFront(CDUIBase->cb_Screen);
+
+d652 1
+d666 1
+a666 1
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",21,FlipCDIn,4096);
+a671 1
+    WaitBlit();
+a675 2
+
+    SyncSignal(CDUIBase,CDUIBase->cb_FanfareTask,SIGBREAKF_CTRL_C);
+d686 2
+a687 2
+struct ColorBatch32  black;
+WORD                 i;
+d698 2
+a699 9
+    black.cb_NumColors  = 32;
+    black.cb_FirstColor = 0;
+    black.cb_EndMarker  = 0;
+    for (i = 0; i < 32; i++)
+    {
+        black.cb_Colors[i].Red   = 0;
+        black.cb_Colors[i].Green = 0;
+        black.cb_Colors[i].Blue  = 0;
+    }
+d702 1
+a702 1
+    CDUIBase->cb_Screen = CreateBootingScreen(CDUIBase,CDUIBase->cb_BackgroundBM,bmInfo,&black);
+d709 1
+a709 3
+    colors = (struct ColorBatch32 *)GetBMInfoRGB32(bmInfo,32,0);
+    LoadRGB32(CDUIBase->cb_ViewPort,(ULONG *)colors);
+
+d711 1
+a711 1
+    FreeBMInfo(bmInfo);
+d714 1
+a714 1
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",21,FlipCDIn,4096);
+d716 1
+a716 1
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",21,FlipCD,4096);
+d753 2
+d766 2
+a767 1
+    colors = (struct ColorBatch32 *)GetBMInfoRGB32(bmInfo,32,0);
+d770 1
+a777 1
+    ScreenToFront(CDUIBase->cb_Screen);
+d807 3
+d825 1
+a825 1
+    CDUIBase->cb_FlipperTask = CreateTask("Flipper",21,FlipCD,4096);
+d846 3
+d870 3
+@

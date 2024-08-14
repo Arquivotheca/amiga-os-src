@@ -1,0 +1,49 @@
+# $Id: makefile,v 1.1 92/09/10 14:43:59 gregm Exp $
+#
+#
+
+COBJS = buildreq.o
+AOBJS = envoyface.o
+
+all : envoy.library
+
+envoyend.o : envoyend.asm
+            casm -a $*.asm -cqy -iinc: -o$*.o
+
+envoyface.o : envoy_rev.i envoybase.i
+
+fd/envoy_lib.fd: envoy_lib.sfd
+        sfd envoy_lib.sfd
+        copy FD/envoy_lib.fd envoy_lib.fd
+        copy PROTOS/envoy_protos.h INCLUDE:clib
+        copy PRAGMAS/envoy_pragmas.h INCLUDE:pragmas
+
+
+$(COBJS)       :
+                     lc -. -b0 -d1 -rr -mes -cfist -v -O $*.c
+
+
+$(AOBJS)       :
+                     casm -a $*.asm -cqy -iinc: -o$*.o
+
+envoy.library   : $(COBJS) $(AOBJS) envoyend.o fd/envoy_lib.fd
+                 blink $(AOBJS) $(COBJS) envoyend.o to envoy.library NODEBUG LIB lib:lcr.lib lib:small.lib lib:debug.lib
+                 copy envoy.library libs:
+
+release: envoy.library fd/envoy_lib.fd
+        copy FD/envoy_lib.fd envoy:fd NOPRO
+        copy PROTOS/envoy_protos.h envoy:include/clib NOPRO
+        copy PROTOS/envoy_protos.h ""
+        copy PRAGMAS/envoy_pragmas.h envoy:include/pragmas NOPRO
+        copy PRAGMAS/envoy_pragmas.h ""
+        copy envoy.h envoy:include/envoy NOPRO
+        copy envoy.h include:envoy NOPRO
+        copy RAM envoy:src/stubs/ NOPRO all
+        copy #?.c #?.asm #?.h #?.rev envoy.library makefile envoy:src/envoy NOPRO
+
+bump:
+         co -l envoy_rev.rev
+         bumprev 40 envoy_rev
+         ci -u -m"" envoy_rev.rev
+         touch envoyface.asm
+

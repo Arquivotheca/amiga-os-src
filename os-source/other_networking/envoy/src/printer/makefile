@@ -1,0 +1,33 @@
+
+CUOBJS = update.o
+CPOBJS = pon.o
+COBJS = $(CUOBJS) $(CPOBJS)
+
+all     : update pon
+
+
+pon.o    : pon.c
+update.o : update.c
+
+$(COBJS) :
+            lc -d1 -b0 -v -O $*.c
+
+update   :  update.o
+            blink $(CUOBJS) to update lib lib:lc.lib lib:amiga.lib
+
+pon      :  pon.o
+            blink $(CPOBJS) to pon lib lib:lc.lib
+
+bumpu    :
+            co -l printinstall.rev
+            bumprev 37 printinstall
+            ci -u -m"" printinstall.rev
+
+bumpp    :
+            co -l printV37.rev
+            bumprev 37 printV37
+            ci -u -m"" printV37.rev
+
+release : update
+    copy pon.c pon update.c update makefile envoy:src/printer
+    protect envoy:src/printer/#? +rewd

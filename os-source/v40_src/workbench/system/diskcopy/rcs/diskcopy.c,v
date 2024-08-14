@@ -1,0 +1,2960 @@
+head     38.19;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.19
+date     94.03.25.15.39.30;  author jesup;  state Exp;
+branches ;
+next     38.18;
+
+38.18
+date     93.08.05.12.02.56;  author vertex;  state Exp;
+branches ;
+next     38.17;
+
+38.17
+date     93.01.12.16.09.12;  author vertex;  state Exp;
+branches ;
+next     38.16;
+
+38.16
+date     92.07.21.17.49.36;  author vertex;  state Exp;
+branches ;
+next     38.15;
+
+38.15
+date     92.06.29.15.41.03;  author vertex;  state Exp;
+branches ;
+next     38.14;
+
+38.14
+date     92.05.31.09.53.23;  author vertex;  state Exp;
+branches ;
+next     38.13;
+
+38.13
+date     92.05.21.10.17.58;  author vertex;  state Exp;
+branches ;
+next     38.12;
+
+38.12
+date     92.04.27.10.08.46;  author vertex;  state Exp;
+branches ;
+next     38.11;
+
+38.11
+date     92.04.08.17.10.22;  author vertex;  state Exp;
+branches ;
+next     38.10;
+
+38.10
+date     92.03.23.15.55.07;  author vertex;  state Exp;
+branches ;
+next     38.9;
+
+38.9
+date     92.03.17.12.11.40;  author vertex;  state Exp;
+branches ;
+next     38.8;
+
+38.8
+date     92.03.03.12.36.27;  author vertex;  state Exp;
+branches ;
+next     38.7;
+
+38.7
+date     92.03.02.10.57.13;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     92.02.26.13.57.47;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.02.26.13.52.05;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.02.13.12.59.14;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.01.31.09.25.32;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.01.20.17.30.33;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.12.20.14.17.07;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Track level disk copier
+@
+
+
+38.19
+log
+@Revised order of operations so that fssm isn't grabbed until user hits
+return.
+@
+text
+@
+#include <exec/types.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include <exec/errors.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <dos/filehandler.h>
+#include <libraries/gadtools.h>
+#include <workbench/startup.h>
+#include <workbench/workbench.h>
+#include <devices/bootblock.h>
+#include <devices/trackdisk.h>
+#include <intuition/intuition.h>
+#include <string.h>
+#include <stdio.h>
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/icon_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/locale_protos.h>
+#include <clib/gadtools_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/icon_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/locale_pragmas.h>
+#include <pragmas/gadtools_pragmas.h>
+
+#include "texttable.h"
+#include "comparemem.h"
+#include "diskcopy_rev.h"
+
+
+/****************************************************************************/
+
+
+/* define names that make SENSE! */
+#define de_SectorsPerTrack de_BlocksPerTrack
+#define de_SectorSize      de_SizeBlock
+
+/* because <dos/dos.h> has these incorrectly defined in 2.04 */
+#ifdef ID_INTER_DOS_DISK
+#undef ID_INTER_DOS_DISK
+#endif
+
+#ifdef ID_INTER_FFS_DISK
+#undef ID_INTER_FFS_DISK
+#endif
+
+#ifndef ACTION_SERIALIZE_DISK
+#define ACTION_SERIALIZE_DISK 4200
+#endif
+
+#define WORDSPERBLOCK	  128
+#define HASHSIZE	  (WORDSPERBLOCK - 56)
+#define NUMBMPAGES	  26
+#define T_SHORT	          2
+#define ST_ROOT	          1
+#define ID_BAD_DISK       (0x42414400L) /* 'BAD\0' */
+#define ID_BUSY_DISK      (0x42555359L) /* 'BUSY'  */
+#define ID_INTER_DOS_DISK (0x444F5302L)	/* 'DOS\2' */
+#define ID_INTER_FFS_DISK (0x444F5303L)	/* 'DOS\3' */
+
+struct HeadRootBlock
+{
+    ULONG            rb_Type;
+    ULONG            rb_HeaderKey;
+    ULONG            rb_HighSeqNum;
+    ULONG            rb_HashSize;
+    ULONG            rb_Reserved;
+    ULONG            rb_CheckSum;
+};
+
+/* And in between of the head and tail portions of the root block
+ * come the hash table entries for the root dir
+ */
+
+struct TailRootBlock
+{
+    ULONG            rb_BMFlag;
+    ULONG            rb_BitMapPages[NUMBMPAGES];
+    struct DateStamp rb_LastDate;
+    UBYTE            rb_DiskName[13*4];
+    struct DateStamp rb_CreateDate;
+    ULONG            rb_HashChain;
+    ULONG            rb_Parent;
+    ULONG            rb_Extension;
+    ULONG            rb_SecondaryType;
+};
+
+
+/****************************************************************************/
+
+
+struct TextAttr topazAttr =
+{
+    "topaz.font",
+     8,
+     FS_NORMAL,
+     FPF_ROMFONT
+};
+
+
+/*****************************************************************************/
+
+
+#define TEMPLATE     "FROM/A,TO/A,NAME/K,NOVERIFY/S,MULTI/S" VERSTAG
+#define OPT_FROM     0
+#define OPT_TO	     1
+#define OPT_NAME     2
+#define OPT_NOVERIFY 3
+#define OPT_MULTI    4
+#define OPT_COUNT    5
+
+
+/****************************************************************************/
+
+
+#define MAXERRORS          2
+#define NAMELENGTH         32
+
+#define ERROR_INCOMPATIBLE 1
+#define ERROR_OPENFAIL     2
+#define ERROR_BAD_VERIFY   3
+
+
+/****************************************************************************/
+
+
+struct GlobalData
+{
+    APTR               gd_DOSBase;
+    APTR               gd_IntuitionBase;
+    APTR               gd_GadToolsBase;
+    APTR               gd_UtilityBase;
+    APTR               gd_IconBase;
+    APTR               gd_GfxBase;
+    struct LocaleInfo  gd_LocaleInfo;
+
+    struct Screen     *gd_Screen;
+    struct Window     *gd_Window;
+    APTR               gd_VisualInfo;
+    struct DrawInfo   *gd_DrawInfo;
+    struct TextFont   *gd_Font;
+    ULONG              gd_IntuiSig;
+    struct Gadget     *gd_LastAdded;
+    struct Gadget     *gd_Gadgets;
+
+    /* must be long aligned !!! */
+    struct InfoData    gd_FromInfo;
+    struct InfoData    gd_ToInfo;
+    struct FileInfoBlock gd_FIB;
+
+    char               gd_FromName[NAMELENGTH];
+    char               gd_ToName[NAMELENGTH];
+    char	       gd_NewName[NAMELENGTH];
+
+    ULONG	       gd_TotalCyl;
+    ULONG	       gd_Read;
+    ULONG	       gd_Written;
+    ULONG	       gd_Verified;
+    ULONG              gd_ErrorCyl;
+    BOOL               gd_ErrorRead;
+
+    BOOL               gd_GUI;
+};
+
+#define DOSBase       global->gd_DOSBase
+#define IntuitionBase global->gd_IntuitionBase
+#define GadToolsBase  global->gd_GadToolsBase
+#define UtilityBase   global->gd_UtilityBase
+#define IconBase      global->gd_IconBase
+#define GfxBase       global->gd_GfxBase
+#define LocaleBase    global->gd_LocaleInfo.li_LocaleBase
+
+
+/*****************************************************************************/
+
+
+#define BTOCSTR(bstr)  ((STRPTR)((ULONG)BADDR(bstr) + 1))
+#define D_S(type,name) char a_##name[sizeof(type)+3]; \
+		       type *name = (type *)((LONG)(a_##name+3) & ~3);
+
+#define GetStr(str)   (GetString(&global->gd_LocaleInfo,str))
+#define CheckBreak()  (CheckSignal(global->gd_IntuiSig | SIGBREAKF_CTRL_C))
+#define PrintErr(err) (PrintFault(err,GetStr(MSG_DC_FAILED_TITLE)))
+#define OnCursor()    (PutStr("\233 p"))
+#define OffCursor()   (PutStr("\2330 p"))
+
+VOID VPrintF(struct GlobalData *global, STRPTR str, STRPTR arg1, ... );
+VOID PrintF(struct GlobalData *global, AppStringsID str, STRPTR arg1, ... );
+BOOL WaitUser(struct GlobalData *global);
+VOID kprintf(STRPTR,...);
+
+BOOL WBExplain(struct GlobalData *global);
+LONG CheckWBArg(struct GlobalData *global, STRPTR name, BPTR lock, STRPTR result, STRPTR volName);
+BOOL OpenDCWindow(struct GlobalData *global);
+VOID CloseDCWindow(struct GlobalData *global);
+LONG DiskCopy(struct GlobalData *global,
+              struct DosList *from, struct DosList *to,
+              BOOL multi, BOOL verify);
+
+
+/****************************************************************************/
+
+
+#define GAUGE_LEFT     8
+#define GAUGE_RIGHT    386
+#define GAUGE_TOP      28
+#define GAUGE_BOTTOM   39
+#define GAUGE_WIDTH    (GAUGE_RIGHT-GAUGE_LEFT+1)
+#define GAUGE_HEIGHT   (GAUGE_BOTTOM-GAUGE_TOP+1)
+
+
+/****************************************************************************/
+
+
+LONG main(VOID)
+{
+struct GlobalData __aligned  gd;
+struct GlobalData           *global;
+struct Library              *SysBase = (*((struct Library **) 4));
+struct Process              *process;
+struct WBStartup            *WBenchMsg = NULL;
+struct WBArg                *wbarg;
+LONG                         wbcnt;
+struct RdArgs               *rdargs;
+LONG                         opts[OPT_COUNT];
+LONG                         failureCode  = ERROR_INVALID_RESIDENT_LIBRARY;
+STRPTR                       fromName;
+STRPTR                       toName;
+char                         volumeName[NAMELENGTH];
+ULONG                        i;
+struct DosList              *dl;
+struct DosList              *from;
+struct DosList              *to;
+
+    memset(&gd,0,sizeof(struct GlobalData));
+    global = &gd;
+
+    process = (struct Process *)FindTask(NULL);
+    if (!process->pr_CLI)
+    {
+        WaitPort(&process->pr_MsgPort);
+        WBenchMsg = (struct WBStartup *)GetMsg(&process->pr_MsgPort);
+    }
+
+    DOSBase        = OpenLibrary("dos.library",37);
+    IntuitionBase  = OpenLibrary("intuition.library",37);
+    GfxBase        = OpenLibrary("graphics.library",37);
+    UtilityBase    = OpenLibrary("utility.library",37);
+    GadToolsBase   = OpenLibrary("gadtools.library",37);
+    IconBase       = OpenLibrary("icon.library",37);
+    global->gd_GUI = (process->pr_CLI == NULL);
+
+    if (DOSBase && IntuitionBase && GfxBase && UtilityBase && GadToolsBase && IconBase)
+    {
+        if (LocaleBase = OpenLibrary("locale.library",38))
+            global->gd_LocaleInfo.li_Catalog = OpenCatalogA(NULL,"sys/system.catalog",NULL);
+
+        if (WBenchMsg)
+        {
+            wbarg = WBenchMsg->sm_ArgList;
+            wbcnt = WBenchMsg->sm_NumArgs;
+
+            if ((wbcnt == 2) || (wbcnt == 3))
+            {
+                CheckWBArg(global,wbarg[1].wa_Name,wbarg[1].wa_Lock,global->gd_FromName,volumeName);
+                if (wbcnt == 3)
+                {
+                    CheckWBArg(global,wbarg[2].wa_Name,wbarg[2].wa_Lock,global->gd_ToName,NULL);
+                }
+                else
+                {
+                    strcpy(global->gd_ToName,global->gd_FromName);
+                }
+
+                UnLock(wbarg[1].wa_Lock);
+                wbarg[1].wa_Lock = NULL;
+
+                if (wbcnt == 3)
+                {
+                    UnLock(wbarg[2].wa_Lock);
+                    wbarg[2].wa_Lock = NULL;
+                }
+
+                dl   = LockDosList(LDF_DEVICES | LDF_READ);
+                from = FindDosEntry(dl,global->gd_FromName,LDF_DEVICES | LDF_READ);
+                to   = FindDosEntry(dl,global->gd_ToName,LDF_DEVICES | LDF_READ);
+                UnLockDosList(LDF_DEVICES | LDF_READ);
+
+                if (!from)
+                {
+                    failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                    PrintF(global,MSG_DC_BADDEVICE,global->gd_FromName);
+                }
+                else if (!to)
+                {
+                    failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                    PrintF(global,MSG_DC_BADDEVICE,global->gd_ToName);
+                }
+                else
+                {
+                    failureCode = ERROR_NO_FREE_STORE;
+                    if (OpenDCWindow(global))
+                    {
+                        if (volumeName[0])
+                        {
+                            BumpRevision(&global->gd_NewName[1],volumeName);
+                            global->gd_NewName[0] = strlen(&global->gd_NewName[1]);
+                        }
+
+                        failureCode = DiskCopy(global,from,to,FALSE,TRUE);
+                        CloseDCWindow(global);
+                    }
+                }
+            }
+            else
+            {
+                failureCode = ERROR_INVALID_COMPONENT_NAME;
+                WBExplain(global);
+            }
+        }
+        else
+        {
+            memset(opts,0,sizeof(opts));
+            if (rdargs = ReadArgs(TEMPLATE,opts,NULL))
+            {
+                fromName = (STRPTR)opts[OPT_FROM];
+                toName   = (STRPTR)opts[OPT_TO];
+                if (opts[OPT_NAME])
+                {
+                    strncpy(&global->gd_NewName[1],(STRPTR)opts[OPT_NAME],NAMELENGTH-1);
+                    global->gd_NewName[0] = strlen((STRPTR)opts[OPT_NAME]);
+                }
+
+                if ((strlen(fromName) <= NAMELENGTH) && (strlen(toName) <= NAMELENGTH))
+                {
+                    strcpy(global->gd_FromName,fromName);
+                    strcpy(global->gd_ToName,toName);
+
+                    i = 1;   /* skip over the BSTR length byte */
+                    while ((global->gd_NewName[i] != ':') && global->gd_NewName[i])
+                        i++;
+                    global->gd_NewName[i] = 0;
+
+                    i = 0;
+                    while ((global->gd_FromName[i] != ':') && global->gd_FromName[i])
+                        i++;
+                    global->gd_FromName[i] = 0;
+
+                    i = 0;
+                    while ((global->gd_ToName[i] != ':') && global->gd_ToName[i])
+                        i++;
+                    global->gd_ToName[i] = 0;
+
+                    dl   = LockDosList(LDF_DEVICES | LDF_READ);
+                    from = FindDosEntry(dl,global->gd_FromName,LDF_DEVICES | LDF_READ);
+                    to   = FindDosEntry(dl,global->gd_ToName,LDF_DEVICES | LDF_READ);
+                    UnLockDosList(LDF_DEVICES | LDF_READ);
+
+                    if (!from)
+                    {
+                        failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                        PrintF(global,MSG_DC_BADDEVICE,global->gd_FromName);
+                    }
+                    else if (!to)
+                    {
+                        failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                        PrintF(global,MSG_DC_BADDEVICE,global->gd_ToName);
+                    }
+                    else
+                    {
+                        sprintf(global->gd_FromName,"%b",from->dol_Name);
+                        sprintf(global->gd_ToName,"%b",to->dol_Name);
+
+                        failureCode = DiskCopy(global,from,to,(BOOL)opts[OPT_MULTI],!(BOOL)opts[OPT_NOVERIFY]);
+                    }
+                }
+                else
+                {
+                    failureCode = ERROR_INVALID_COMPONENT_NAME;
+                    PrintErr(ERROR_INVALID_COMPONENT_NAME);
+                }
+            }
+            else
+            {
+                failureCode = IoErr();
+                PrintErr(failureCode);
+            }
+        }
+
+        if (LocaleBase)
+        {
+            CloseCatalog(global->gd_LocaleInfo.li_Catalog);
+            CloseLibrary(LocaleBase);
+        }
+    }
+
+    if (DOSBase)
+        SetIoErr(failureCode);
+
+    CloseLibrary(IconBase);
+    CloseLibrary(GadToolsBase);
+    CloseLibrary(UtilityBase);
+    CloseLibrary(GfxBase);
+    CloseLibrary(IntuitionBase);
+    CloseLibrary(DOSBase);
+
+    if (WBenchMsg)
+    {
+        Forbid();
+        ReplyMsg(WBenchMsg);
+    }
+
+    if (!failureCode)
+        return(RETURN_OK);
+
+    if (failureCode == ERROR_BREAK)
+        return(RETURN_WARN);
+
+    return(RETURN_FAIL);
+}
+
+
+/****************************************************************************/
+
+
+BOOL FindVolumeDevice(struct GlobalData *global, struct MsgPort *volumeHandler,
+                      STRPTR result)
+{
+struct DosList *dl;
+BOOL            state;
+
+    state = FALSE;
+    dl    = LockDosList(LDF_DEVICES | LDF_READ);
+    while (dl = NextDosEntry(dl,LDF_DEVICES | LDF_READ))
+    {
+	if (dl->dol_Task == volumeHandler)
+	{
+	    state = TRUE;
+            sprintf(result,"%b",dl->dol_Name);
+            break;
+	}
+    }
+
+    UnLockDosList(LDF_DEVICES | LDF_READ);
+
+    return(state);
+}
+
+
+/****************************************************************************/
+
+
+LONG CheckWBArg(struct GlobalData *global, STRPTR name, BPTR lock,
+                STRPTR result, STRPTR volName)
+{
+BPTR  parent;
+ULONG i;
+
+    if (name && lock)
+    {
+        if (parent = ParentDir(lock))
+        {
+            UnLock(parent);
+            return(ERROR_OBJECT_WRONG_TYPE);
+        }
+
+        if (IoErr() || !Info(lock,&global->gd_FromInfo))
+        {
+            return(IoErr());
+        }
+
+        if (volName)
+        {
+            if (!Examine(lock,&global->gd_FIB))
+                return(IoErr());
+
+            strcpy(volName,global->gd_FIB.fib_FileName);
+        }
+
+        if (!FindVolumeDevice(global,((struct DosList *)BADDR(global->gd_FromInfo.id_VolumeNode))->dol_Task,result))
+        {
+            return(ERROR_OBJECT_WRONG_TYPE);
+        }
+    }
+    else
+    {
+        /* wbarg did not have a lock, must be an uninitialized disk */
+        strcpy(result,name);
+    }
+
+    i = 0;
+    while ((result[i] != ':') && result[i])
+        i++;
+    result[i] = 0;
+
+    return(0);
+}
+
+
+/****************************************************************************/
+
+
+VOID VPrintF(struct GlobalData *global, STRPTR str, STRPTR arg1, ... )
+{
+    VPrintf(str,(LONG *)&arg1);
+}
+
+
+/*****************************************************************************/
+
+
+VOID PrintF(struct GlobalData *global, AppStringsID str, STRPTR arg1, ... )
+{
+struct EasyStruct est;
+STRPTR            ptr;
+
+    if (str == 0)
+        ptr = "Couldn't read cylinder %lu";
+    else
+        ptr = GetStr(str);
+
+    if (!global->gd_GUI)
+    {
+        VPrintf(ptr,(LONG *)&arg1);
+        VPrintf("\n",NULL);
+    }
+    else
+    {
+        est.es_StructSize   = sizeof(struct EasyStruct);
+        est.es_Flags        = 0;
+        est.es_Title        = GetStr(MSG_DC_FAILED_TITLE);
+        est.es_TextFormat   = ptr;
+        est.es_GadgetFormat = GetStr(MSG_DC_CANCEL_GAD);
+
+        EasyRequestArgs(NULL,&est,NULL,&arg1);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+BOOL WaitUser(struct GlobalData *global)
+{
+char ch;
+
+    OnCursor();
+    Flush(Output());
+
+    if (IsInteractive(Input()))
+    {
+        ch = 0;
+        while (WaitForChar(Input(),30))
+        {
+            if (Read(Input(),&ch,1) != 1)
+                ch = -1;
+        }
+
+        ch = -1;
+        while (TRUE)
+        {
+            if (WaitForChar(Input(),100000))
+            {
+                if (Read(Input(),&ch,1) == 1)
+                {
+                    if (ch != '\n')
+                    {
+                        Read(Input(),&ch,1);
+                    }
+                    OffCursor();
+                    Flush(Output());
+                    return(TRUE);
+                }
+            }
+            else if (CheckBreak())
+            {
+                PutStr("\n");
+                return(FALSE);
+            }
+        }
+    }
+
+    return(TRUE);
+}
+
+
+/*****************************************************************************/
+
+
+BOOL WBWaitUser(struct GlobalData *global, AppStringsID str, STRPTR arg1, ...)
+{
+struct EasyStruct est;
+
+    est.es_StructSize   = sizeof(struct EasyStruct);
+    est.es_Flags        = 0;
+    est.es_Title        = GetStr(MSG_DC_REQUEST_TITLE);
+    est.es_TextFormat   = GetStr(str);
+    est.es_GadgetFormat = GetStr(MSG_DC_WBCOPY_GAD);
+
+    return (EasyRequestArgs(NULL,&est,NULL,&arg1));
+}
+
+
+/*****************************************************************************/
+
+
+BOOL WBExplain(struct GlobalData *global)
+{
+struct EasyStruct est;
+
+    est.es_StructSize   = sizeof(struct EasyStruct);
+    est.es_Flags        = 0;
+    est.es_Title        = GetStr(MSG_DC_REQUEST_TITLE);
+    est.es_TextFormat   = GetStr(MSG_DC_WBEXPLAIN);
+    est.es_GadgetFormat = GetStr(MSG_DC_CANCEL_GAD);
+
+    return (EasyRequestArgs(NULL,&est,NULL,NULL));
+}
+
+
+/*****************************************************************************/
+
+
+BOOL WriteProtect(struct GlobalData *global, STRPTR deviceName)
+{
+struct EasyStruct est;
+ULONG             idcmp;
+
+    est.es_StructSize   = sizeof(struct EasyStruct);
+    est.es_Flags        = 0;
+    est.es_Title        = GetStr(MSG_DC_REQUEST_TITLE);
+    est.es_TextFormat   = GetStr(MSG_DC_WRITEPROTECT);
+    est.es_GadgetFormat = GetStr(MSG_DC_WRITEPROTECT_GAD);
+
+    idcmp = IDCMP_DISKINSERTED;
+
+    return (EasyRequestArgs(NULL,&est,&idcmp,&deviceName));
+}
+
+
+/****************************************************************************/
+
+
+VOID CloseDCWindow(struct GlobalData *global)
+{
+    if (global->gd_Window)
+        CloseWindow(global->gd_Window);
+
+    if (global->gd_DrawInfo)
+        FreeScreenDrawInfo(global->gd_Screen,global->gd_DrawInfo);
+
+    FreeVisualInfo(global->gd_VisualInfo);
+    UnlockPubScreen(NULL,global->gd_Screen);
+
+    if (global->gd_Font)
+        CloseFont(global->gd_Font);
+
+    FreeGadgets(global->gd_Gadgets);
+}
+
+
+/****************************************************************************/
+
+
+struct Gadget *CreateDCGadget(struct GlobalData *global, ULONG kind,
+                              struct NewGadget *ng, ULONG tags, ...)
+{
+    ng->ng_TextAttr   = &topazAttr;
+    ng->ng_UserData   = 0;
+    ng->ng_Flags      = NULL;
+    ng->ng_VisualInfo = global->gd_VisualInfo;
+    ng->ng_GadgetText = GetStr((ULONG)ng->ng_GadgetText);
+
+    return(global->gd_LastAdded = CreateGadgetA(kind,global->gd_LastAdded,ng,(struct TagItem *)&tags));
+}
+
+
+/****************************************************************************/
+
+
+VOID DrawBB(struct GlobalData *global, WORD x, WORD y,
+                                       WORD w, WORD h, ULONG tags, ...)
+{
+    DrawBevelBoxA(global->gd_Window->RPort,x+global->gd_Window->BorderLeft,
+                                           y+global->gd_Window->BorderTop,
+                                           w,h,(struct TagItem *)&tags);
+}
+
+
+/****************************************************************************/
+
+
+VOID PlaceText(struct GlobalData *global, STRPTR text, WORD x, WORD y)
+{
+struct Window   *window;
+struct RastPort *rp;
+
+    window = global->gd_Window;
+    rp     = window->RPort;
+
+    SetAPen(rp,global->gd_DrawInfo->dri_Pens[TEXTPEN]);
+    Move(rp,x+window->BorderLeft,y+window->BorderTop);
+    Text(rp,text,strlen(text));
+}
+
+
+/****************************************************************************/
+
+
+VOID PutTick(struct GlobalData *global, WORD left)
+{
+struct Window *window;
+
+    window = global->gd_Window;
+    RectFill(window->RPort,window->BorderLeft+left,
+                           window->BorderTop+GAUGE_BOTTOM+1,
+                           window->BorderLeft+left+1,
+                           window->BorderTop+GAUGE_BOTTOM+2);
+}
+
+
+/*****************************************************************************/
+
+
+BOOL OpenDCWindow(struct GlobalData *global)
+{
+struct TagItem    tags[10];
+struct NewGadget  ng;
+struct Window    *window;
+STRPTR            str;
+
+    if (global->gd_Screen = LockPubScreen(NULL))
+    {
+        if (global->gd_DrawInfo = GetScreenDrawInfo(global->gd_Screen))
+        {
+            if (global->gd_VisualInfo = GetVisualInfoA(global->gd_Screen,NULL))
+            {
+                if (global->gd_Font = OpenFont(&topazAttr))
+                {
+                    tags[0].ti_Tag  = WA_Title;
+                    tags[0].ti_Data = (ULONG)GetStr(MSG_DC_TITLE);
+                    tags[1].ti_Tag  = WA_InnerWidth;
+                    tags[1].ti_Data = 394;
+                    tags[2].ti_Tag  = WA_InnerHeight;
+                    tags[2].ti_Data = 88;
+                    tags[3].ti_Tag  = WA_Flags;
+                    tags[3].ti_Data = WFLG_SMART_REFRESH | WFLG_ACTIVATE | WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_NOCAREREFRESH;
+                    tags[4].ti_Tag  = WA_AutoAdjust;
+                    tags[4].ti_Data = TRUE;
+                    tags[5].ti_Tag  = WA_PubScreen;
+                    tags[5].ti_Data = (ULONG)global->gd_Screen;
+                    tags[6].ti_Tag  = WA_IDCMP;
+                    tags[6].ti_Data = BUTTONIDCMP;
+                    tags[7].ti_Tag  = TAG_DONE;
+
+                    if (window = OpenWindowTagList(NULL,tags))
+                    {
+                        global->gd_Window = window;
+                        SetFont(window->RPort,global->gd_Font);
+                        global->gd_IntuiSig = (1L << window->UserPort->mp_SigBit);
+
+                        str = GetStr(MSG_DC_COPYING_HDR);
+                        PlaceText(global,str,(window->Width-TextLength(window->RPort,str,strlen(str))) / 2,GAUGE_TOP-6);
+
+                        DrawBB(global,GAUGE_LEFT,GAUGE_TOP,GAUGE_WIDTH,GAUGE_HEIGHT,GTBB_Recessed,TRUE,
+                                                                                    GT_VisualInfo, global->gd_VisualInfo,
+                                                                                    TAG_DONE);
+
+                        SetAPen(window->RPort,global->gd_DrawInfo->dri_Pens[TEXTPEN]);
+                        PutTick(global,GAUGE_LEFT);
+                        PutTick(global,GAUGE_LEFT+(GAUGE_WIDTH/4));
+                        PutTick(global,GAUGE_LEFT+(GAUGE_WIDTH/2));
+                        PutTick(global,GAUGE_LEFT+((GAUGE_WIDTH/4)*3));
+                        PutTick(global,GAUGE_RIGHT-1);
+
+                        PlaceText(global,"0%",GAUGE_LEFT,GAUGE_TOP+GAUGE_HEIGHT+12);
+                        PlaceText(global,"50%",GAUGE_LEFT+(GAUGE_WIDTH/2)-12,GAUGE_TOP+GAUGE_HEIGHT+12);
+                        PlaceText(global,"100%",GAUGE_RIGHT-32,GAUGE_TOP+GAUGE_HEIGHT+12);
+
+                        global->gd_Gadgets = CreateContext(&global->gd_LastAdded);
+
+                        ng.ng_TopEdge    = window->BorderTop+71;
+                        ng.ng_LeftEdge   = window->BorderLeft+138;
+                        ng.ng_Width      = 119;
+                        ng.ng_Height     = 14;
+                        ng.ng_GadgetText = (STRPTR)MSG_DC_STOP_GAD;
+                        ng.ng_GadgetID   = 0;
+
+                        CreateDCGadget(global,BUTTON_KIND,&ng,TAG_DONE);
+
+                        if (global->gd_LastAdded)
+                        {
+                            AddGList(window,global->gd_Gadgets,-1,-1,NULL);
+                            RefreshGList(global->gd_Gadgets,window,NULL,-1);
+                            GT_RefreshWindow(window,NULL);
+                            return(TRUE);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CloseDCWindow(global);
+
+    return(FALSE);
+
+}
+
+
+/*****************************************************************************/
+
+
+#define SP_READING   0
+#define SP_WRITING   1
+#define SP_VERIFYING 2
+
+VOID ShowProgress(struct GlobalData *global, UWORD state, BOOL forceUpdate)
+{
+struct Window *window = global->gd_Window;
+ULONG          currentCyl, totalCyl;
+
+    if (window)
+        currentCyl = global->gd_Read + global->gd_Written + global->gd_Verified;
+    else if (state == SP_READING)
+        currentCyl = global->gd_Read;
+    else if (state == SP_WRITING)
+        currentCyl = global->gd_Written;
+    else if (state == SP_VERIFYING)
+        currentCyl = global->gd_Verified;
+
+    totalCyl = global->gd_TotalCyl;
+
+    if (totalCyl >= 1000)
+    {
+        if (currentCyl % 50 == 0)
+            forceUpdate = TRUE;
+    }
+    else if ((window && (totalCyl >= 300)) || (!window && (totalCyl >= 100)))
+    {
+        if (currentCyl % 10 == 0)
+            forceUpdate = TRUE;
+    }
+    else
+    {
+        forceUpdate = TRUE;
+    }
+
+    if (forceUpdate)
+    {
+        window = global->gd_Window;
+        if (!window)
+        {
+            if (state == SP_READING)
+                VPrintF(global,GetStr(MSG_DC_READING),(STRPTR)currentCyl,(STRPTR)(totalCyl-currentCyl-1));
+            else if (state == SP_WRITING)
+                VPrintF(global,GetStr(MSG_DC_WRITING),(STRPTR)currentCyl,(STRPTR)(totalCyl-currentCyl-1));
+            else if (state == SP_VERIFYING)
+                VPrintF(global,GetStr(MSG_DC_VERIFYING),(STRPTR)currentCyl,(STRPTR)(totalCyl-currentCyl-1));
+            Flush(Output());
+        }
+        else
+        {
+            SetAPen(window->RPort,global->gd_DrawInfo->dri_Pens[FILLPEN]);
+
+            RectFill(window->RPort,window->BorderLeft+GAUGE_LEFT+2,
+                                   window->BorderTop+GAUGE_TOP+1,
+                                   window->BorderLeft+GAUGE_LEFT+((GAUGE_WIDTH-5)*currentCyl/totalCyl)+2,
+                                   window->BorderTop+GAUGE_BOTTOM-1);
+        }
+    }
+}
+
+
+/****************************************************************************/
+
+
+ULONG GetSectorsPerBlock(struct DosEnvec *env)
+{
+UBYTE count;
+ULONG num;
+
+    count = 0;
+    num = env->de_SectorPerBlock;
+    while (num)
+    {
+        if (num & 1)
+            count++;
+
+        num /= 2;
+    }
+
+    /* if it's not a power of two, make it always 1 */
+    if (count != 1)
+        return(1);
+
+    return(env->de_SectorPerBlock);
+}
+
+
+/*****************************************************************************/
+
+
+LONG Serialize(struct GlobalData *global,
+               struct DosList *to,
+               struct DosEnvec *toEnv,
+               struct IOStdReq *toIO,
+               ULONG *diskType)
+{
+struct Library   *SysBase = (*((struct Library **) 4));
+LONG              result;
+LONG              sum = 0;
+LONG             *p;
+ULONG             i;
+ULONG             rootBlk;
+ULONG             sectorsPerCyl;
+ULONG             sectorsPerBlk;
+ULONG             numCyls;
+ULONG             blocksPerDisk;
+ULONG             bytesPerSector;
+ULONG             bytesPerBlk;
+ULONG             bytesPerCyl;
+struct HeadRootBlock *headRoot;
+struct TailRootBlock *tailRoot;
+
+    result = 0;
+
+    if (!DoPkt0(to->dol_Task,ACTION_SERIALIZE_DISK)
+    && ((result = IoErr()) == ERROR_ACTION_NOT_KNOWN))
+    {
+        if ((*diskType == ID_KICKSTART_DISK) || (*diskType == ID_NOT_REALLY_DOS))
+            return(0);
+
+        sectorsPerBlk       = GetSectorsPerBlock(toEnv);
+        sectorsPerCyl       = toEnv->de_SectorsPerTrack * toEnv->de_Surfaces;
+        numCyls             = toEnv->de_HighCyl - toEnv->de_LowCyl + 1;
+        blocksPerDisk       = sectorsPerCyl * numCyls / sectorsPerBlk;
+        rootBlk             = (blocksPerDisk - 1 + toEnv->de_Reserved >> 1);
+        bytesPerSector      = toEnv->de_SectorSize*4;
+        bytesPerCyl         = bytesPerSector * sectorsPerCyl;
+        bytesPerBlk         = bytesPerSector * sectorsPerBlk;
+        global->gd_ErrorCyl = numCyls >> 1;
+
+        if (!(headRoot = AllocVec(bytesPerBlk,MEMF_PUBLIC)))
+            return(ERROR_NO_FREE_STORE);
+
+        tailRoot = (struct TailRootBlk *)((ULONG)headRoot + bytesPerBlk - sizeof(struct TailRootBlock));
+
+
+        toIO->io_Command = CMD_READ;
+        toIO->io_Length  = bytesPerBlk;
+        toIO->io_Data    = headRoot;
+        toIO->io_Offset  = rootBlk * bytesPerBlk + (toEnv->de_LowCyl * bytesPerCyl);
+        if (result = DoIO(toIO))
+        {
+            FreeVec(headRoot);
+            return(result);
+        }
+
+        DateStamp(&tailRoot->rb_CreateDate);
+        DateStamp(&tailRoot->rb_LastDate);
+
+        if (global->gd_NewName[0])
+            strcpy(tailRoot->rb_DiskName,global->gd_NewName);
+
+        for (p = (LONG *)headRoot, i=0; i<bytesPerBlk / 4; i++, sum = sum + *p++);
+        headRoot->rb_CheckSum -= sum;
+
+        toIO->io_Command = CMD_WRITE;
+        toIO->io_Length  = bytesPerBlk;
+        toIO->io_Data    = headRoot;
+        toIO->io_Offset  = rootBlk * bytesPerBlk + (toEnv->de_LowCyl * bytesPerCyl);
+
+        result = DoIO(toIO);
+
+        FreeVec(headRoot);
+    }
+    else
+    {
+        if (global->gd_NewName[0])
+            if (!DoPkt1(to->dol_Task,ACTION_RENAME_DISK,MKBADDR(global->gd_NewName)))
+                result = IoErr();
+    }
+
+    return(result);
+}
+
+
+/*****************************************************************************/
+
+
+struct SyncBuffer
+{
+    struct SyncBuffer *buf_Next;
+    char               buf_Data;   /* data for buffer starts here */
+};
+
+
+/****************************************************************************/
+
+
+VOID MotorOff(struct GlobalData *global, struct IOStdReq *ioReq)
+{
+struct Library *SysBase = (*((struct Library **) 4));
+
+    ioReq->io_Command = TD_MOTOR;
+    ioReq->io_Length  = 0;
+    DoIO(ioReq);
+}
+
+
+/****************************************************************************/
+
+
+#define MAX_ATTEMPTS 3
+
+
+LONG SyncCopy(struct GlobalData *global, struct SyncBuffer *copyBufs, BOOL readFrom,
+              ULONG bytesPerCyl, ULONG bytesPerSector, ULONG numCylinders,
+              struct IOStdReq *fromIO, ULONG fromCyl,
+              struct IOStdReq *toIO, ULONG toCyl,
+              APTR verifyBuf, APTR sector0Buf, BOOL singleUnit)
+{
+struct Library     *SysBase    = (*((struct Library **) 4));
+ULONG               maxFromCyl = fromCyl+numCylinders;
+ULONG               maxToCyl   = toCyl+numCylinders;
+ULONG               originalFrom;
+LONG                result;
+APTR                ptr;
+ULONG              *longp;
+struct SyncBuffer  *buf;
+UBYTE               attempts;
+
+    global->gd_Read     = 0;
+    global->gd_Written  = 0;
+    global->gd_Verified = 0;
+    global->gd_TotalCyl = numCylinders;
+    if (global->gd_Window)
+    {
+        if (verifyBuf)
+            global->gd_TotalCyl = numCylinders * 3;
+        else
+            global->gd_TotalCyl = numCylinders * 2;
+    }
+
+    if (!singleUnit)
+    {
+            if (!readFrom)
+            {
+                VPrintF(global,GetStr(MSG_DC_INSERT_NEXTDEST),global->gd_ToName);
+	            VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+        	if (!WaitUser(global))
+	        {
+        	        return(ERROR_BREAK);
+		}
+            }
+    }
+
+    result       = 0;
+    originalFrom = fromCyl;
+    while (!result && (toCyl < maxToCyl))
+    {
+        if (readFrom)
+        {
+            if (singleUnit)
+            {
+                MotorOff(global,fromIO);
+                if (global->gd_Window)
+                {
+		  /* only wait if not the first (first is done in DiskCopy()) */
+		  if (fromCyl != originalFrom)
+                    if (!WBWaitUser(global,MSG_DC_WBINSERT_SOUR,global->gd_FromName))
+                    {
+                        result = ERROR_BREAK;
+                        break;
+                    }
+                }
+                else
+                {
+		    if (fromCyl != originalFrom)
+		    {
+		        VPrintF(global,"\n","");
+
+                        VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+                        VPrintF(global,GetStr(MSG_DC_PRESSRETURN_2),"");
+
+                        if (!WaitUser(global))
+                        {
+                            result = ERROR_BREAK;
+                            break;
+                        }
+		    }
+                }
+            }
+
+            buf = copyBufs;
+            while (buf && (fromCyl < maxFromCyl))
+            {
+                ShowProgress(global,SP_READING,FALSE);
+	        global->gd_Read++;
+
+                attempts = 0;
+                do
+                {
+                    if (CheckBreak())
+                    {
+                        result = ERROR_BREAK;
+                        break;
+                    }
+                    else
+                    {
+                        fromIO->io_Command = CMD_READ;
+                        fromIO->io_Length  = bytesPerCyl;
+                        fromIO->io_Data    = &buf->buf_Data;
+                        fromIO->io_Offset  = fromCyl * bytesPerCyl;
+
+                        if (result = DoIO(fromIO))
+                            global->gd_ErrorCyl = fromCyl;
+
+                        attempts++;
+                    }
+                }
+                while (result && (attempts < MAX_ATTEMPTS));
+
+                if (result)
+                {
+                    global->gd_ErrorRead = TRUE;
+                    break;
+                }
+
+                if (fromCyl == originalFrom)  /* just read first cylinder */
+                {
+                    CopyMemQuick(&buf->buf_Data,sector0Buf,bytesPerSector);
+                    longp  = (ULONG *)&buf->buf_Data;
+                    *longp = ID_BAD_DISK;
+                }
+                fromCyl++;
+                buf = buf->buf_Next;
+            }
+
+            if (result)
+                break;
+        }
+
+        if (singleUnit)
+        {
+            MotorOff(global,toIO);
+            if (global->gd_Window)
+            {
+                if (!WBWaitUser(global,MSG_DC_WBINSERT_DEST,global->gd_FromName))
+                {
+                    result = ERROR_BREAK;
+                    break;
+                }
+            }
+            else
+            {
+                VPrintF(global,"\n","");
+                VPrintF(global,GetStr(MSG_DC_INSERT_DEST),global->gd_ToName);
+                VPrintF(global,GetStr(MSG_DC_PRESSRETURN_2),"");
+                if (!WaitUser(global))
+                {
+                    result = ERROR_BREAK;
+                    break;
+                }
+            }
+        }
+
+        buf = copyBufs;
+        while (buf && (toCyl < maxToCyl) && (result == 0))
+        {
+            ShowProgress(global,SP_WRITING,FALSE);
+            global->gd_Written++;
+
+            attempts = 0;
+            do
+            {
+                if (CheckBreak())
+                {
+                    result = ERROR_BREAK;
+                    break;
+                }
+
+                global->gd_ErrorCyl = toCyl;
+
+                toIO->io_Command = TD_FORMAT;
+                toIO->io_Length  = bytesPerCyl;
+                toIO->io_Data    = &buf->buf_Data;
+                toIO->io_Offset  = toCyl * bytesPerCyl;
+                if (!(result = DoIO(toIO)))
+                {
+                    toIO->io_Command = CMD_UPDATE;
+                    if (!(result = DoIO(toIO)))
+                    {
+                        toIO->io_Command = CMD_CLEAR;
+                        if (!(result = DoIO(toIO)))
+                        {
+                            if (verifyBuf)
+                            {
+                                ShowProgress(global,SP_VERIFYING,FALSE);
+
+                                toIO->io_Command = CMD_READ;
+                                toIO->io_Length  = bytesPerCyl;
+                                toIO->io_Data    = verifyBuf;
+                                toIO->io_Offset  = toCyl * bytesPerCyl;
+                                if (!(result = DoIO(toIO)))
+                                {
+                                    ptr = CompareMem(&buf->buf_Data,verifyBuf);
+                                    if ((ULONG)ptr != (ULONG)&buf->buf_Data + bytesPerCyl)
+                                    {
+                                        result = ERROR_BAD_VERIFY;
+                                    }
+                                    else
+                                    {
+                                        global->gd_Verified++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (result == TDERR_WriteProt)
+                {
+                    if (!WriteProtect(global,global->gd_ToName))
+                        break;
+                }
+                else if (result == 0)
+                {
+                    toCyl++;
+                    buf = buf->buf_Next;
+                }
+                else
+                {
+                    attempts++;
+                }
+            }
+            while (result && (attempts < MAX_ATTEMPTS));
+        }
+    }
+
+    if (result == 0)
+    {
+        attempts = 0;
+        do
+        {
+            toIO->io_Command = CMD_WRITE;
+            toIO->io_Length  = bytesPerSector;
+            toIO->io_Data    = sector0Buf;
+            toIO->io_Offset  = (toCyl - numCylinders) * bytesPerCyl;
+            if (!(result = DoIO(toIO)))
+            {
+                toIO->io_Command = CMD_UPDATE;
+                result = DoIO(toIO);
+            }
+            attempts++;
+        }
+        while (result && (attempts < MAX_ATTEMPTS));
+    }
+
+    if (!global->gd_GUI)
+    {
+        VPrintF(global,"%s","\n");
+        OnCursor();
+    }
+    else if (result == 0)
+    {
+        ShowProgress(global,SP_VERIFYING,TRUE);
+    }
+
+    return(result);
+}
+
+
+/*****************************************************************************/
+
+
+#define MAXMEM 2*1024*1024   /* 2 megs */
+
+
+/* There are three different cases handled by this routine:
+ *
+ *  1 - Copying from drive 'A' to drive 'A'
+ *  2 - Copying from drive 'A' to drive 'B' where 'A' and 'B' are partitions on
+ *      the same physical device
+ *  3 - Copying from drive 'A' to drive 'B' where 'A' and 'B' are partitions on
+ *      different physical devices
+ *
+ * If enough memory exists, case #1 will be handled by reading the entire
+ * disk in memory and entering multicopy mode. If this cannot be done, as much
+ * data as possible is buffered and the user is prompted to insert the source
+ * and destination disks when needed.
+ *
+ * Case #2 is handled just like case #1, except that the user is never prompted
+ * to insert source and destination disks.
+ *
+ * Case #3 is handled by copying single tracks from the source to the
+ * destination, unless multidisk mode is requested in which case an attempt
+ * is made to read the whole disk in memory at once.
+ *
+ * An alternate approach to case #3 is to allocate a minimal number of buffers
+ * and make the read/write phases occur asynchronously. This enables maximum
+ * throughput on DMA devices. This approach is implemented in the ASyncCopy()
+ * function. It is not currently used as it effectively has no performance
+ * benefits.
+ *
+ * All cases normally never consume more than 2M of memory. If the disk is
+ * larger than 2M, a multi-stage operation is done just like if there was not
+ * enough memory to hold the whole disk in memory. If multicopy mode is
+ * requested however, an attempt is made to allocate as much memory as
+ * needed to hold the entire source disk.
+ */
+
+LONG DiskCopy(struct GlobalData *global,
+              struct DosList *from, struct DosList *to,
+              BOOL multi, BOOL verify)
+{
+struct Library           *SysBase = (*((struct Library **) 4));
+struct FileSysStartupMsg *fromFSSM;
+struct FileSysStartupMsg *toFSSM;
+struct DosEnvec          *fromEnv;
+struct DosEnvec          *toEnv;
+struct IOStdReq          *fromIO;
+struct IOStdReq          *toIO;
+struct MsgPort           *ioPort;
+ULONG                     sectorsPerBlk;
+ULONG                     cylsPerDisk;
+ULONG                     bytesPerCyl;
+ULONG                     numBuffers;
+ULONG                     allocated;
+struct SyncBuffer        *copyBufs;
+struct SyncBuffer        *buf;
+UBYTE                    *verifyBuf;
+UBYTE                    *sector0Buf;
+LONG                      result;
+UBYTE                    *ptr;
+BOOL                      ok;
+BOOL                      sameDevice;
+BOOL                      first;
+char                      dosString[100];
+STRPTR                    errorStr;
+STRPTR                    disk;
+
+    if (!from->dol_Task)
+    {
+        strcpy(dosString,global->gd_FromName);
+        strcat(dosString,":");
+        if (!DeviceProc(dosString))
+            return(ERROR_NO_DISK);
+    }
+
+    if (!to->dol_Task)
+    {
+        strcpy(dosString,global->gd_ToName);
+        strcat(dosString,":");
+        if (!DeviceProc(dosString))
+            return(ERROR_NO_DISK);
+    }
+
+    result = ERROR_NO_FREE_STORE;
+    ioPort = CreateMsgPort();
+    fromIO = CreateIORequest(ioPort,sizeof(struct IOStdReq));
+    toIO   = CreateIORequest(ioPort,sizeof(struct IOStdReq));
+    if (fromIO && toIO)
+    {
+
+    result   = ERROR_OBJECT_WRONG_TYPE;
+    fromFSSM = (struct FileSysStartupMsg *)BADDR(from->dol_misc.dol_handler.dol_Startup);
+    toFSSM   = (struct FileSysStartupMsg *)BADDR(to->dol_misc.dol_handler.dol_Startup);
+    if (fromFSSM && toFSSM)
+    {
+
+      /* must wait for insertion of source/dest before checking size of disk */
+      result = 0;
+      if (fromFSSM != toFSSM)
+      {
+        if (global->gd_Window)
+        {
+            if (!WBWaitUser(global,MSG_DC_WBINSERT_BOTH,global->gd_FromName,global->gd_ToName))
+            {
+                result = ERROR_BREAK;
+            }
+        }
+        else
+        {
+            VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+            VPrintF(global,GetStr(MSG_DC_INSERT_DEST),global->gd_ToName);
+            VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+            if (!WaitUser(global))
+            {
+                result = ERROR_BREAK;
+            }
+        }
+      } else {
+	/* single-unit copy.  Give first insertion message. */
+        if (global->gd_Window)
+        {
+	    if (!WBWaitUser(global,MSG_DC_WBINSERT_SOUR,global->gd_FromName))
+		result = ERROR_BREAK;
+	} else {
+            VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+            VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+            if (!WaitUser(global))
+                result = ERROR_BREAK;
+	}
+      }
+
+    if (!result)
+    {
+
+    result   = ERROR_OBJECT_WRONG_TYPE;
+    fromEnv = (struct DosEnvec *)BADDR(fromFSSM->fssm_Environ);
+    toEnv   = (struct DosEnvec *)BADDR(toFSSM->fssm_Environ);
+    if (fromEnv && toEnv)
+    {
+    cylsPerDisk   = fromEnv->de_HighCyl - fromEnv->de_LowCyl + 1;
+    bytesPerCyl   = (fromEnv->de_SectorSize*4) * fromEnv->de_SectorsPerTrack * fromEnv->de_Surfaces;
+    sectorsPerBlk = GetSectorsPerBlock(fromEnv);
+
+    /* This check is present for silly CD-ROM drives that say they have 0
+     * sectors per track. It would be nice if the whole DiskCopy program
+     * were purely sector-oriented, which would avoid the problem
+     */
+    if (bytesPerCyl > 0)
+    {
+
+    result = ERROR_INCOMPATIBLE;
+    if ((cylsPerDisk   == toEnv->de_HighCyl - toEnv->de_LowCyl + 1)
+    &&  (bytesPerCyl   == (toEnv->de_SectorSize*4) * toEnv->de_SectorsPerTrack * toEnv->de_Surfaces)
+    &&  (sectorsPerBlk == GetSectorsPerBlock(toEnv)))
+    {
+        result = ERROR_NO_DISK;
+        if ((DoPkt1(from->dol_Task,ACTION_DISK_INFO,MKBADDR(&global->gd_FromInfo)))
+        &&  (DoPkt1(to->dol_Task,ACTION_DISK_INFO,MKBADDR(&global->gd_ToInfo))))
+        {
+            /* check volume for inhibited already */
+            result = ERROR_OBJECT_IN_USE;
+            if ((global->gd_FromInfo.id_DiskType != ID_BUSY_DISK) && (toEnv->de_TableSize < DE_DOSTYPE) || (global->gd_ToInfo.id_DiskType != ID_BUSY_DISK))
+            {
+                if (DoPkt1(from->dol_Task,ACTION_INHIBIT,DOSTRUE))
+                {
+                    if (DoPkt1(to->dol_Task,ACTION_INHIBIT,DOSTRUE))
+                    {
+                        sameDevice = ((strcmp((STRPTR)BTOCSTR(fromFSSM->fssm_Device),(STRPTR)BTOCSTR(toFSSM->fssm_Device)) == 0)
+                                     && (fromFSSM->fssm_Unit == toFSSM->fssm_Unit));
+
+                        copyBufs   = NULL;
+                        verifyBuf  = NULL;
+                        numBuffers = 1;
+                        ok         = TRUE;
+
+                        if (verify)
+                        {
+                            if (verifyBuf = AllocVec(bytesPerCyl+4,MEMF_PUBLIC))
+                            {
+                                verifyBuf[bytesPerCyl] = 1;   /* for CompareMem() */
+                            }
+                            else
+                            {
+                                ok = FALSE;
+                            }
+                        }
+
+                        if (!(sector0Buf = AllocVec(fromEnv->de_SectorSize*4,MEMF_PUBLIC)))
+                            ok = FALSE;
+
+                        if (sameDevice)
+                        {
+                            numBuffers = cylsPerDisk;
+
+                            if (numBuffers * bytesPerCyl > MAXMEM)
+                                numBuffers = MAXMEM / (cylsPerDisk * bytesPerCyl);
+
+                            if (!numBuffers)
+                                numBuffers = 1;
+                        }
+
+                        if (multi)
+                            numBuffers = cylsPerDisk;
+
+                        allocated = 0;
+                        while ((allocated < numBuffers) && (AvailMem(MEMF_LARGEST|MEMF_CHIP) > 30000))
+                        {
+                            if (!(buf = AllocVec(bytesPerCyl+sizeof(struct SyncBuffer)+4,MEMF_PUBLIC)))
+                            {
+                                break;
+                            }
+
+                            ptr              = (UBYTE *)&buf->buf_Data;
+                            ptr[bytesPerCyl] = 0;           /* for CompareMem() */
+                            buf->buf_Next    = copyBufs;
+                            copyBufs         = buf;
+                            allocated++;
+                        }
+
+                        if (multi && (allocated < numBuffers))
+                            ok = FALSE;
+
+                        result = ERROR_NO_FREE_STORE;
+                        if (ok && allocated)
+                        {
+                            result = 0;
+                            if ((allocated != numBuffers) && (global->gd_Window))
+                            {
+                                if (fromFSSM == toFSSM)
+                                {
+                                    if (!WBWaitUser(global,MSG_DC_COPYEXPLAIN_1,global->gd_FromName,numBuffers*4/allocated))
+                                        result = ERROR_BREAK;
+                                }
+                                else
+                                {
+                                    if (!WBWaitUser(global,MSG_DC_COPYEXPLAIN_2,global->gd_FromName,global->gd_ToName))
+                                        result = ERROR_BREAK;
+                                }
+                            }
+                        }
+
+                        if (result == 0)
+                        {
+                            first = TRUE;
+                            do
+                            {
+                                result = ERROR_OPENFAIL;
+                                errorStr = (STRPTR)BTOCSTR(fromFSSM->fssm_Device);
+                                if (!OpenDevice((STRPTR)BTOCSTR(fromFSSM->fssm_Device),fromFSSM->fssm_Unit,fromIO,fromFSSM->fssm_Flags))
+                                {
+                                    errorStr = (STRPTR)BTOCSTR(toFSSM->fssm_Device);
+                                    if (!OpenDevice((STRPTR)BTOCSTR(toFSSM->fssm_Device),toFSSM->fssm_Unit,toIO,toFSSM->fssm_Flags))
+                                    {
+                                        result = SyncCopy(global,copyBufs,first,
+                                                          bytesPerCyl,fromEnv->de_SectorSize*4,cylsPerDisk,
+                                                          fromIO,fromEnv->de_LowCyl,
+                                                          toIO,toEnv->de_LowCyl,
+                                                          verifyBuf,sector0Buf,
+                                                          (fromFSSM == toFSSM));
+
+                                        if (result == 0)
+                                            result = Serialize(global,to,toEnv,toIO,(ULONG *)sector0Buf);
+
+                                        MotorOff(global,toIO);
+                                        CloseDevice(toIO);
+                                    }
+                                    MotorOff(global,fromIO);
+                                    CloseDevice(fromIO);
+                                }
+
+                                first = FALSE;
+                            }
+                            while (multi && (result == 0));
+                        }
+
+                        while (copyBufs)
+                        {
+                            buf = copyBufs->buf_Next;
+                            FreeVec(copyBufs);
+                            copyBufs = buf;
+                        }
+                        FreeVec(verifyBuf);
+                        FreeVec(sector0Buf);
+
+                        DoPkt1(to->dol_Task,ACTION_INHIBIT,DOSFALSE);
+                    }
+                    DoPkt1(from->dol_Task,ACTION_INHIBIT,DOSFALSE);
+                }
+            }
+        }
+    }
+
+    }   /* num cylinders > 0 check */
+    }   /* environment check */
+    }	/* disk insertion break check */
+    }   /* startup message check */
+    }   /* io allocation check */
+
+    DeleteMsgPort(ioPort);
+    DeleteIORequest(fromIO);
+    DeleteIORequest(toIO);
+
+    if (result)
+    {
+        if ((result != ERROR_BREAK) && (!global->gd_GUI))
+            VPrintF(global,"%s: ",GetStr(MSG_DC_FAILED_TITLE));
+
+        disk = global->gd_ToName;
+        if (global->gd_ErrorRead)
+            disk = global->gd_FromName;
+
+        switch (result)
+        {
+            case ERROR_BAD_VERIFY    : PrintF(global,MSG_DC_VERIFYERROR,disk);
+                                       return(ERROR_NOT_A_DOS_DISK);
+
+            case ERROR_INCOMPATIBLE  : PrintF(global,MSG_DC_INCOMPATIBLEERROR,global->gd_FromName,global->gd_ToName);
+                                       return(ERROR_NOT_A_DOS_DISK);
+
+            case IOERR_OPENFAIL      : PrintF(global,MSG_DC_FAILED_NODEVICE,errorStr);
+                                       return(ERROR_DEVICE_NOT_MOUNTED);
+
+            case TDERR_DiskChanged   : PrintF(global,MSG_DC_FAILED_DISKCHANGED,disk);
+                                       return(ERROR_NO_DISK);
+
+            case TDERR_WriteProt     : result = ERROR_DISK_WRITE_PROTECTED;
+
+            case TDERR_SeekError     : if (result == TDERR_SeekError)
+                                           result = ERROR_SEEK_ERROR;
+
+            default                  : if (result >= ERROR_NO_FREE_STORE)
+                                       {
+                                           if ((result != ERROR_BREAK) || (!global->gd_GUI))
+                                           {
+                                               Fault(result,NULL,dosString,sizeof(dosString));
+                                               PrintF(global,MSG_DC_FAILED_DOS,dosString);
+                                           }
+                                           return(result);
+                                       }
+
+                                       if (global->gd_ErrorRead)
+                                           PrintF(global,MSG_DC_FAILED_BADREAD,(STRPTR)global->gd_ErrorCyl);
+                                       else
+                                           PrintF(global,MSG_DC_FAILED_BADCYL,(STRPTR)global->gd_ErrorCyl);
+
+                                       return(ERROR_NOT_A_DOS_DISK);
+        }
+    }
+
+    return(0);
+}
+@
+
+
+38.18
+log
+@Now correctly uses fssm_Flags for OpenDevice()
+@
+text
+@d1055 1
+a1055 15
+        if (global->gd_Window)
+        {
+            if (!WBWaitUser(global,MSG_DC_WBINSERT_BOTH,global->gd_FromName,global->gd_ToName))
+            {
+                return(ERROR_BREAK);
+            }
+        }
+        else
+        {
+            if (readFrom)
+            {
+                VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+                VPrintF(global,GetStr(MSG_DC_INSERT_DEST),global->gd_ToName);
+            }
+            else
+d1058 5
+a1063 6
+            VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+            if (!WaitUser(global))
+            {
+                return(ERROR_BREAK);
+            }
+        }
+d1077 2
+d1088 1
+d1091 1
+a1091 4
+                    VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+                    if (fromCyl == originalFrom)
+                        VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+                    else
+d1094 6
+a1099 5
+                    if (!WaitUser(global))
+                    {
+                        result = ERROR_BREAK;
+                        break;
+                    }
+d1380 39
+d1578 1
+@
+
+
+38.17
+log
+@Corrected handling of devices with >512 bytes/block
+@
+text
+@d1507 1
+a1507 1
+                                if (!OpenDevice((STRPTR)BTOCSTR(fromFSSM->fssm_Device),fromFSSM->fssm_Unit,fromIO,0))
+d1510 1
+a1510 1
+                                    if (!OpenDevice((STRPTR)BTOCSTR(toFSSM->fssm_Device),toFSSM->fssm_Unit,toIO,0))
+@
+
+
+38.16
+log
+@Enabled "read-error" message
+@
+text
+@d42 4
+d69 1
+a69 1
+struct RootBlock
+d77 8
+a84 1
+    ULONG            rb_HashTable[HASHSIZE];
+d660 2
+a661 5
+    if (global->gd_VisualInfo)
+        FreeVisualInfo(global->gd_VisualInfo);
+
+    if (global->gd_Screen)
+        UnlockPubScreen(NULL,global->gd_Screen);
+d882 26
+d923 5
+d929 3
+a931 3
+ULONG             blocksPerCyl;
+ULONG             numCyls;
+struct RootBlock *root;
+d941 2
+a942 1
+        blocksPerCyl        = toEnv->de_BlocksPerTrack * toEnv->de_Surfaces;
+d944 5
+a948 2
+        rootBlk             = (blocksPerCyl * numCyls - 1 + toEnv->de_Reserved >> 1) + (toEnv->de_LowCyl * blocksPerCyl);
+        bytesPerBlk         = toEnv->de_SizeBlock*4;
+d951 1
+a951 1
+        if (!(root = AllocVec(bytesPerBlk,MEMF_PUBLIC)))
+d954 3
+d959 2
+a960 2
+        toIO->io_Data    = root;
+        toIO->io_Offset  = rootBlk * bytesPerBlk;
+d963 1
+a963 1
+            FreeVec(root);
+d967 2
+a968 2
+        DateStamp(&root->rb_CreateDate);
+        DateStamp(&root->rb_LastDate);
+d971 1
+a971 1
+            strcpy(root->rb_DiskName,global->gd_NewName);
+d973 2
+a974 2
+        for (p = (LONG *)root, i=0; i<bytesPerBlk / 4; i++, sum = sum + *p++);
+        root->rb_CheckSum -= sum;
+d978 2
+a979 2
+        toIO->io_Data    = root;
+        toIO->io_Offset  = rootBlk * bytesPerBlk;
+d983 1
+a983 1
+        FreeVec(root);
+d1026 1
+a1026 1
+              ULONG bytesPerCyl, ULONG bytesPerBlock, ULONG numCylinders,
+d1029 1
+a1029 1
+              APTR verifyBuf, APTR block0Buf, BOOL singleUnit)
+d1154 1
+a1154 1
+                    CopyMemQuick(&buf->buf_Data,block0Buf,bytesPerBlock);
+d1269 2
+a1270 2
+            toIO->io_Length  = bytesPerBlock;
+            toIO->io_Data    = block0Buf;
+d1347 1
+d1355 1
+a1355 1
+UBYTE                    *block0Buf;
+d1398 3
+a1400 2
+    cylsPerDisk = fromEnv->de_HighCyl - fromEnv->de_LowCyl + 1;
+    bytesPerCyl = (fromEnv->de_SizeBlock*4) * fromEnv->de_BlocksPerTrack * fromEnv->de_Surfaces;
+d1403 2
+a1404 2
+     * blocks per track. It would be nice if the whole DiskCopy program
+     * were purely block-oriented, which would avoid the problem
+d1410 3
+a1412 2
+    if ((cylsPerDisk == toEnv->de_HighCyl - toEnv->de_LowCyl + 1)
+    &&  (bytesPerCyl == (toEnv->de_SizeBlock*4) * toEnv->de_BlocksPerTrack * toEnv->de_Surfaces))
+d1446 1
+a1446 1
+                        if (!(block0Buf = AllocVec(fromEnv->de_SizeBlock*4,MEMF_PUBLIC)))
+d1513 1
+a1513 1
+                                                          bytesPerCyl,fromEnv->de_SizeBlock*4,cylsPerDisk,
+d1516 1
+a1516 1
+                                                          verifyBuf,block0Buf,
+d1520 1
+a1520 1
+                                            result = Serialize(global,to,toEnv,toIO,(ULONG *)block0Buf);
+d1541 1
+a1541 1
+                        FreeVec(block0Buf);
+@
+
+
+38.15
+log
+@Fixed bad errors reported on read errors
+@
+text
+@d1550 1
+a1550 1
+                                           PrintF(global,0 /* MSG_DC_FAILED_BADREAD */,(STRPTR)global->gd_ErrorCyl);
+@
+
+
+38.14
+log
+@Made CTRL-C work while it is reading
+@
+text
+@d118 1
+a118 2
+#define ERROR_BADVERIFY    3
+#define ERROR_BAD_DISK     4
+d157 1
+a159 1
+    WORD               gd_Pad0;
+d512 1
+d514 5
+d521 1
+a521 1
+        VPrintf(GetStr(str),(LONG *)&arg1);
+d529 1
+a529 1
+        est.es_TextFormat   = GetStr(str);
+d894 2
+d934 1
+a940 1
+        result = 0;
+d1101 2
+d1104 1
+d1186 1
+a1186 1
+                                        result = ERROR_BADVERIFY;
+d1316 1
+d1516 4
+d1522 1
+a1522 1
+            case ERROR_BADVERIFY     : PrintF(global,MSG_DC_VERIFYERROR,global->gd_ToName);
+d1531 1
+a1531 1
+            case TDERR_DiskChanged   : PrintF(global,MSG_DC_FAILED_DISKCHANGED,"");
+d1549 5
+a1553 6
+            case TDERR_BadSecPreamble:
+            case TDERR_BadSecID      :
+            case TDERR_BadHdrSum     :
+            case TDERR_BadSecSum     :
+            case TDERR_TooFewSecs    :
+            case TDERR_BadSecHdr     : PrintF(global,MSG_DC_FAILED_BADCYL,(STRPTR)global->gd_ErrorCyl);
+@
+
+
+38.13
+log
+@Now checks for BlocksPerTrack of 0 and aborts
+@
+text
+@d1076 1
+@
+
+
+38.12
+log
+@Fixed problems with devices that don't start at cylinder 0
+@
+text
+@d1342 7
+d1490 1
+@
+
+
+38.11
+log
+@*** empty log message ***
+@
+text
+@d885 2
+d895 3
+a897 1
+        rootBlk             = toEnv->de_LowCyl + (toEnv->de_BlocksPerTrack * toEnv->de_Surfaces * (toEnv->de_HighCyl - toEnv->de_LowCyl + 1) - 1 + toEnv->de_Reserved >> 1);
+d899 1
+a899 1
+        global->gd_ErrorCyl = rootBlk;
+d1095 1
+a1095 2
+                fromCyl++;
+                if (fromCyl == 1)  /* just read first cylinder */
+d1101 1
+a1101 1
+
+d1214 1
+a1214 1
+            toIO->io_Offset  = toCyl - numCylinders;
+@
+
+
+38.10
+log
+@No longer writes a date on non-dos disks
+@
+text
+@a1396 2
+                                if (multi)
+                                    ok = FALSE;
+d1406 3
+@
+
+
+38.9
+log
+@Fixed low memory crashing bug
+Fixed incorrect failure path if DeviceProc() fails on either target or source
+@
+text
+@d875 2
+a876 1
+               struct IOStdReq *toIO)
+d890 3
+d1448 1
+a1448 1
+                                            result = Serialize(global,to,toEnv,toIO);
+@
+
+
+38.8
+log
+@Fixed Serialize() so it initializes "result" variable correctly
+@
+text
+@a1298 4
+    ioPort = CreateMsgPort();
+    fromIO = CreateIORequest(ioPort,sizeof(struct IOStdReq));
+    toIO   = CreateIORequest(ioPort,sizeof(struct IOStdReq));
+
+d1315 7
+d1477 1
+@
+
+
+38.7
+log
+@No longer overwrites the right edge of the fuel gauge by one pixel when a diskcopy
+  is completed
+@
+text
+@d925 1
+@
+
+
+38.6
+log
+@Now listens for disk insertion events in the "disk is write protected" requester
+@
+text
+@d627 1
+a627 1
+    idcmp = IDCMP_DISKINSERTED
+d862 1
+a862 1
+                                   window->BorderLeft+GAUGE_LEFT+((GAUGE_WIDTH-5)*currentCyl/totalCyl)+3,
+@
+
+
+38.5
+log
+@Correctly prints error messages instead of just flashing the window on screen
+@
+text
+@d619 1
+d627 3
+a629 1
+    return (EasyRequestArgs(NULL,&est,NULL,&deviceName));
+@
+
+
+38.4
+log
+@Fixed error reporting
+Now retries 3 times on read/write errors
+No longer displays a "***Break" requester when aborting from WB
+@
+text
+@d114 1
+a114 1
+#define NAMELENGTH         30
+d144 1
+a151 1
+    BOOL               gd_GUI;
+d158 3
+d265 1
+d267 1
+d269 1
+d271 1
+d328 1
+a328 1
+                    strncpy(&global->gd_NewName[1],(STRPTR)opts[OPT_NAME],NAMELENGTH);
+d451 2
+a452 1
+LONG CheckWBArg(struct GlobalData *global, STRPTR name, BPTR lock, STRPTR result, STRPTR volName)
+a1324 1
+
+@
+
+
+38.3
+log
+@Now works when IO streams are redirected to NIL:
+@
+text
+@d60 1
+a60 1
+#define ID_COPY_DISK      (0x434F5059L) /* 'COPY' */
+d729 1
+a729 1
+                    tags[2].ti_Data = 96;
+d766 1
+a766 1
+                        ng.ng_TopEdge    = window->BorderTop+75;
+d949 3
+d966 1
+d1050 2
+a1051 1
+                if (CheckBreak())
+d1053 10
+a1062 3
+                    result = ERROR_BREAK;
+                    break;
+                }
+d1064 7
+a1070 5
+                fromIO->io_Command = CMD_READ;
+                fromIO->io_Length  = bytesPerCyl;
+                fromIO->io_Data    = &buf->buf_Data;
+                fromIO->io_Offset  = fromCyl * bytesPerCyl;
+                fromCyl++;
+d1072 1
+a1072 3
+                if (result = DoIO(fromIO))
+                {
+                    global->gd_ErrorCyl = fromCyl;
+a1073 1
+                }
+d1075 1
+d1080 1
+a1080 1
+                    *longp = ID_COPY_DISK;
+d1115 1
+a1115 1
+        while (buf && (toCyl < maxToCyl))
+d1120 2
+a1121 1
+            if (CheckBreak())
+d1123 5
+a1127 3
+                result = ERROR_BREAK;
+                break;
+            }
+d1129 1
+a1129 1
+            global->gd_ErrorCyl = toCyl;
+d1131 4
+a1134 7
+            toIO->io_Command = TD_FORMAT;
+            toIO->io_Length  = bytesPerCyl;
+            toIO->io_Data    = &buf->buf_Data;
+            toIO->io_Offset  = toCyl * bytesPerCyl;
+            if (!(result = DoIO(toIO)))
+            {
+                toIO->io_Command = CMD_UPDATE;
+d1137 1
+a1137 1
+                    toIO->io_Command = CMD_CLEAR;
+d1140 2
+a1141 1
+                        if (verifyBuf)
+d1143 1
+a1143 12
+                            ShowProgress(global,SP_VERIFYING,FALSE);
+                            global->gd_Verified++;
+
+                            toIO->io_Command = CMD_READ;
+                            toIO->io_Length  = bytesPerCyl;
+                            toIO->io_Data    = verifyBuf;
+                            toIO->io_Offset  = toCyl * bytesPerCyl;
+                            if (result = DoIO(toIO))
+                                break;
+
+                            ptr = CompareMem(&buf->buf_Data,verifyBuf);
+                            if ((ULONG)ptr != (ULONG)&buf->buf_Data + bytesPerCyl)
+d1145 18
+a1162 2
+                                result = ERROR_BADVERIFY;
+                                break;
+a1166 1
+            }
+d1168 14
+a1181 9
+            if (result == TDERR_WriteProt)
+            {
+                if (!WriteProtect(global,global->gd_ToName))
+                    break;
+            }
+            else
+            {
+                toCyl++;
+                buf = buf->buf_Next;
+d1183 1
+d1189 2
+a1190 5
+        toIO->io_Command = CMD_WRITE;
+        toIO->io_Length  = bytesPerBlock;
+        toIO->io_Data    = block0Buf;
+        toIO->io_Offset  = toCyl - numCylinders;
+        if (!(result = DoIO(toIO)))
+d1192 10
+a1201 2
+            toIO->io_Command = CMD_UPDATE;
+            result = DoIO(toIO);
+d1203 1
+a1219 21
+/****************************************************************************/
+
+
+LONG MapError(LONG error)
+{
+    switch (error)
+    {
+        case TDERR_DiskChanged: return(ERROR_NO_DISK);
+
+        case TDERR_WriteProt  : return(ERROR_DISK_WRITE_PROTECTED);
+
+        case TDERR_SeekError  : return(ERROR_SEEK_ERROR);
+
+        default               : if (error >= ERROR_NO_FREE_STORE)
+                                    return(error);
+
+                                return(ERROR_BAD_DISK);
+    }
+}
+
+
+d1330 2
+a1331 2
+            if (((fromEnv->de_TableSize < DE_DOSTYPE) || (global->gd_FromInfo.id_DiskType != ID_BUSY_DISK))
+            &&  ((toEnv->de_TableSize < DE_DOSTYPE) || (global->gd_ToInfo.id_DiskType != ID_BUSY_DISK)))
+d1470 1
+a1470 1
+        if (result != ERROR_BREAK)
+a1474 11
+            case TDERR_BadSecPreamble:
+            case TDERR_BadSecID      :
+            case TDERR_BadHdrSum     :
+            case TDERR_BadSecSum     :
+            case TDERR_TooFewSecs    :
+            case TDERR_BadSecHdr     : PrintF(global,MSG_DC_FAILED_BADCYL,(STRPTR)global->gd_ErrorCyl);
+                                       break;
+
+            case IOERR_OPENFAIL      : PrintF(global,MSG_DC_FAILED_NODEVICE,errorStr);
+                                       break;
+
+d1476 1
+a1476 1
+                                       break;
+d1479 4
+a1482 1
+                                       break;
+d1485 1
+a1485 1
+                                       break;
+d1487 1
+a1487 6
+            default                  : Fault(MapError(result),NULL,dosString,sizeof(dosString));
+                                       PrintF(global,MSG_DC_FAILED_DOS,dosString);
+                                       break;
+        }
+        return(MapError(result));
+    }
+d1489 12
+a1500 2
+    return(0);
+}
+d1502 7
+a1508 75
+
+/*****************************************************************************/
+
+
+/* ASync copy from source to destination. This is the optimal way of doing
+ * device to device copies, but in reality it doesn't make any significant
+ * performance impact. This code is fully functional, although it doesn't
+ * set the first longword on a partition to ID_COPY_DISK during the
+ * copy operation.
+ */
+
+/*
+/* ASync states, ordering of these is important and must follow the order in
+ * which the operations are performed
+ */
+#define AS_READ   0
+#define AS_WRITE  1
+#define AS_UPDATE 2
+#define AS_CLEAR  3
+#define AS_VERIFY 4
+
+struct ASyncBuffer
+{
+    struct IOStdReq buf_Req;
+    ULONG           buf_State;
+    ULONG           buf_CylinderNum;
+    char            buf_Data;   /* data for buffer starts here */
+};
+
+
+LONG ASyncCopy(struct GlobalData *global, ULONG bytesPerCyl, ULONG numCylinders,
+               struct IOStdReq *fromIO, ULONG fromCyl,
+               struct IOStdReq *toIO, ULONG toCyl,
+               APTR verifyBuf)
+{
+struct Library     *SysBase = (*((struct Library **) 4));
+LONG                result;
+struct ASyncBuffer *buf;
+struct MinList      freeList;
+struct MinList	    readList;
+ULONG               cylNum;
+ULONG               allocated;
+ULONG               received;
+BOOL                writing;
+UBYTE              *ptr;
+
+    VPrintF(global,GetStr(MSG_DC_INSERT_SOUR),global->gd_FromName);
+    VPrintF(global,GetStr(MSG_DC_INSERT_DEST),global->gd_ToName);
+    VPrintF(global,GetStr(MSG_DC_PRESSRETURN_1),"");
+    if (!WaitUser(global))
+    {
+        return(ERROR_BREAK);
+    }
+
+    NewList((struct List *)&freeList);
+    NewList((struct List *)&readList);
+
+    cylNum    = 0;
+    result    = 0;
+    allocated = 0;
+    received  = 0;
+    writing   = FALSE;
+
+    while ((allocated < 10) && (allocated < numCylinders) && ((allocated == 0) || (allocated * bytesPerCyl < MAXMEM)))
+    {
+        if (buf = AllocVec(bytesPerCyl+sizeof(struct ASyncBuffer)+4,MEMF_PUBLIC))
+        {
+	    ptr = (UBYTE *)&buf->buf_Data;
+	    ptr[bytesPerCyl] = 0;  /* for CompareMem() */
+            AddHead((struct List *)&freeList,(struct Node *)buf);
+            allocated++;
+        }
+        else
+        {
+            break;
+d1512 1
+a1512 160
+    if (!allocated)
+        return(ERROR_NO_FREE_STORE);
+
+    do
+    {
+        if (CheckBreak())
+        {
+            result = ERROR_BREAK;
+            break;
+        }
+
+        while (buf = (struct ASyncBuffer *)RemHead((struct List *)&freeList))
+        {
+            if (cylNum < numCylinders)
+            {
+                buf->buf_Req.io_Message = fromIO->io_Message;
+                buf->buf_Req.io_Device  = fromIO->io_Device;
+                buf->buf_Req.io_Unit    = fromIO->io_Unit;
+                buf->buf_Req.io_Command = CMD_READ;
+                buf->buf_Req.io_Length  = bytesPerCyl;
+                buf->buf_Req.io_Data    = &buf->buf_Data;
+                buf->buf_Req.io_Offset  = (cylNum+fromCyl) * bytesPerCyl;
+                buf->buf_State          = AS_READ;
+                buf->buf_CylinderNum    = cylNum++;
+                SendIO(&buf->buf_Req);
+            }
+            else
+            {
+                FreeVec(buf);
+                allocated--;
+            }
+        }
+
+        if (allocated == 0)
+            break;
+
+        if (writing || IsListEmpty((struct List *)&readList))
+        {
+            WaitPort(global->gd_IOPort);
+            buf = (struct ASyncBuffer *)GetMsg(global->gd_IOPort);
+            received++;
+
+            if (result = buf->buf_Req.io_Error)
+            {
+                if (result == TDERR_WriteProt)
+                {
+                    if (!WriteProtect(global,global->gd_ToName))
+                    {
+                        AddHead((struct List *)&freeList,buf);
+                        break;
+                    }
+
+                    buf->buf_State--;   /* try the operation again, relies on ordering of the state transitions */
+                    result = 0;
+                    writing = FALSE;
+                }
+                else
+                {
+                    AddHead((struct List *)&freeList,buf);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            buf = (struct ASyncBuffer *)RemHead((struct List *)&readList);
+        }
+
+        /* update fuel gauge */
+
+        switch (buf->buf_State)
+        {
+            case AS_READ  : if (writing)
+                            {
+                                AddTail((struct List *)&readList,(struct Node *)buf);
+                            }
+                            else
+                            {
+                                buf->buf_Req.io_Message = toIO->io_Message;
+                                buf->buf_Req.io_Device  = toIO->io_Device;
+                                buf->buf_Req.io_Unit    = toIO->io_Unit;
+                                buf->buf_Req.io_Command = TD_FORMAT;
+                                buf->buf_Req.io_Length  = bytesPerCyl;
+                                buf->buf_Req.io_Data    = &buf->buf_Data;
+                                buf->buf_Req.io_Offset  = (buf->buf_CylinderNum+toCyl) * bytesPerCyl;
+                                buf->buf_State          = AS_WRITE;
+                                SendIO(&buf->buf_Req);
+                                writing = TRUE;
+                            }
+                            break;
+
+            case AS_WRITE : if (verifyBuf)
+                            {
+                                buf->buf_Req.io_Message = toIO->io_Message;
+                                buf->buf_Req.io_Device  = toIO->io_Device;
+                                buf->buf_Req.io_Unit    = toIO->io_Unit;
+                                buf->buf_Req.io_Command = CMD_UPDATE;
+                                buf->buf_State          = AS_UPDATE;
+                                SendIO(&buf->buf_Req);
+                            }
+                            else
+                            {
+                                AddHead((struct List *)&freeList,buf);
+                                writing = FALSE;
+                            }
+                            break;
+
+            case AS_UPDATE: buf->buf_Req.io_Message = toIO->io_Message;
+                            buf->buf_Req.io_Device  = toIO->io_Device;
+                            buf->buf_Req.io_Unit    = toIO->io_Unit;
+                            buf->buf_Req.io_Command = CMD_CLEAR;
+                            buf->buf_State          = AS_CLEAR;
+                            SendIO(&buf->buf_Req);
+                            break;
+
+            case AS_CLEAR : if (verifyBuf)
+                            {
+                                buf->buf_Req.io_Message = toIO->io_Message;
+                                buf->buf_Req.io_Device  = toIO->io_Device;
+                                buf->buf_Req.io_Unit    = toIO->io_Unit;
+                                buf->buf_Req.io_Command = CMD_READ;
+                                buf->buf_Req.io_Length  = bytesPerCyl;
+                                buf->buf_Req.io_Data    = verifyBuf;
+                                buf->buf_Req.io_Offset  = (buf->buf_CylinderNum+toCyl) * bytesPerCyl;
+                                buf->buf_State          = AS_VERIFY;
+                                SendIO(&buf->buf_Req);
+                                writing = FALSE;
+                            }
+                            break;
+
+            case AS_VERIFY: ptr = CompareMem(&buf->buf_Data,verifyBuf);
+                            if ((ULONG)ptr != (ULONG)&buf->buf_Data + bytesPerCyl)
+                                result = ERROR_BADVERIFY;
+
+                            AddHead((struct List *)&freeList,buf);
+                            break;
+        }
+    }
+    while (allocated && (result == 0));
+
+    while (buf = (struct ASyncBuffer *)RemHead((struct List *)&freeList))
+    {
+        FreeVec(buf);
+        allocated--;
+    }
+
+    while (buf = (struct ASyncBuffer *)RemHead((struct List *)&readList))
+    {
+        FreeVec(buf);
+        allocated--;
+    }
+
+    while (allocated)
+    {
+        WaitPort(global->gd_IOPort);
+        FreeVec(GetMsg(global->gd_IOPort));
+        allocated--;
+    }
+
+    return(result);
+a1513 1
+*/
+@
+
+
+38.2
+log
+@No longer causes a crash when trying to diskcopy devices that haven't yet
+been loaded, such as RAD: on bootup.
+
+Now turns off the drive motor before asking the user to swap disks
+
+Correctly determines whether a device is already busy
+
+No longer requires that both disks to diskcopy be inserted in the drives
+prior to starting the command
+
+Fixed minor screen printing problems, was forgetting some linefeeds in
+some places, and putting too many in other places
+
+Always leaves at least 30K of chip RAM free
+
+Fuel gauge now looks better
+
+Prints out the correct number of disk swaps when copying on the same
+device, was always printing 10.
+
+Error messages are correctly output, 38.1 has some dummy messages instead
+of the real thing.
+@
+text
+@d260 1
+a260 1
+                failureCode = CheckWBArg(global,wbarg[1].wa_Name,wbarg[1].wa_Lock,global->gd_FromName,volumeName);
+d262 1
+a262 1
+                    failureCode = CheckWBArg(global,wbarg[2].wa_Name,wbarg[2].wa_Lock,global->gd_ToName,NULL);
+d534 1
+a534 2
+    ch = 0;
+    while (WaitForChar(Input(),30))
+d536 6
+a541 3
+        if (Read(Input(),&ch,1) != 1)
+            ch = -1;
+    }
+d543 2
+a544 4
+    ch = -1;
+    while (TRUE)
+    {
+        if (WaitForChar(Input(),100000))
+d546 1
+a546 1
+            if (Read(Input(),&ch,1) == 1)
+d548 1
+a548 1
+                if (ch != '\n')
+d550 7
+a556 1
+                    Read(Input(),&ch,1);
+a557 3
+                OffCursor();
+                Flush(Output());
+                return(TRUE);
+d559 5
+a563 5
+        }
+        else if (CheckBreak())
+        {
+            PutStr("\n");
+            return(FALSE);
+d566 2
+d1472 1
+a1472 1
+            case TDERR_BadSecHdr     : PrintF(global,MSG_DC_FAILED_BADCYL,global->gd_ErrorCyl);
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@a41 14
+#define NAMELENGTH         30
+#define ERROR_INCOMPATIBLE 1
+#define ERROR_OPENFAIL     2
+#define ERROR_BADVERIFY    3
+#define ERROR_BAD_DISK     4
+
+#undef BADDR
+#define BADDR( bptr )   (((long)bptr) << 2)
+#define BTOCSTR(bstr)   ((TEXT *)(BADDR(bstr) + 1))
+
+
+/****************************************************************************/
+
+
+d113 12
+a133 1
+    struct Process    *gd_Process;
+a143 4
+    struct MsgPort    *gd_IOPort;
+    struct IOStdReq   *gd_FromIO;
+    struct IOStdReq   *gd_ToIO;
+
+d151 1
+a151 1
+    WORD               gd_Dummy;  /* to longword align */
+d157 1
+d172 4
+d199 2
+a200 2
+#define GAUGE_LEFT     20
+#define GAUGE_RIGHT    374
+d240 7
+a246 7
+    DOSBase            = OpenLibrary("dos.library",37);
+    IntuitionBase      = OpenLibrary("intuition.library",37);
+    GfxBase            = OpenLibrary("graphics.library",37);
+    UtilityBase        = OpenLibrary("utility.library",37);
+    GadToolsBase       = OpenLibrary("gadtools.library",37);
+    IconBase           = OpenLibrary("icon.library",37);
+    global->gd_Process = process;
+d248 1
+a248 1
+    if (DOSBase && IntuitionBase && GfxBase && UtilityBase && GadToolsBase)
+d253 4
+a256 3
+        global->gd_IOPort = CreateMsgPort();
+        global->gd_FromIO = CreateIORequest(global->gd_IOPort,sizeof(struct IOStdReq));
+        global->gd_ToIO   = CreateIORequest(global->gd_IOPort,sizeof(struct IOStdReq));
+d258 7
+a264 14
+        if (global->gd_FromIO && global->gd_ToIO)
+        {
+            if (WBenchMsg)
+            {
+                wbarg       = WBenchMsg->sm_ArgList;
+                wbcnt       = WBenchMsg->sm_NumArgs;
+
+	        if ((wbcnt == 2) || (wbcnt == 3))
+	        {
+                    failureCode = CheckWBArg(global,wbarg[1].wa_Name,wbarg[1].wa_Lock,global->gd_FromName,volumeName);
+                    if (wbcnt == 3)
+                        failureCode = CheckWBArg(global,wbarg[2].wa_Name,wbarg[2].wa_Lock,global->gd_ToName,NULL);
+                    else
+                        strcpy(global->gd_ToName,global->gd_FromName);
+d266 2
+a267 2
+                    UnLock(wbarg[1].wa_Lock);
+                    wbarg[1].wa_Lock = NULL;
+d269 25
+a293 1
+                    if (wbcnt == 3)
+d295 8
+a302 2
+                        UnLock(wbarg[2].wa_Lock);
+                        wbarg[2].wa_Lock = NULL;
+d304 40
+d362 4
+a365 12
+                        failureCode = ERROR_NO_FREE_STORE;
+                        if (OpenDCWindow(global))
+                        {
+                            if (volumeName[0])
+                            {
+                                BumpRevision(&global->gd_NewName[1],volumeName);
+                                global->gd_NewName[0] = strlen(&global->gd_NewName[1]);
+                            }
+
+                            failureCode = DiskCopy(global,from,to,FALSE,TRUE);
+                            CloseDCWindow(global);
+                        }
+d371 1
+a371 1
+                    WBExplain(global);
+d376 2
+a377 65
+                memset(opts,0,sizeof(opts));
+                if (rdargs = ReadArgs(TEMPLATE,opts,NULL))
+                {
+                    fromName = (STRPTR)opts[OPT_FROM];
+                    toName   = (STRPTR)opts[OPT_TO];
+                    if (opts[OPT_NAME])
+                    {
+                        strncpy(&global->gd_NewName[1],(STRPTR)opts[OPT_NAME],NAMELENGTH);
+                        global->gd_NewName[0] = strlen((STRPTR)opts[OPT_NAME]);
+                    }
+
+                    if ((strlen(fromName) <= NAMELENGTH) && (strlen(toName) <= NAMELENGTH))
+                    {
+                        strcpy(global->gd_FromName,fromName);
+                        strcpy(global->gd_ToName,toName);
+
+                        i = 1;   /* skip over the BSTR length byte */
+                        while ((global->gd_NewName[i] != ':') && global->gd_NewName[i])
+                            i++;
+                        global->gd_NewName[i] = 0;
+
+                        i = 0;
+                        while ((global->gd_FromName[i] != ':') && global->gd_FromName[i])
+                            i++;
+                        global->gd_FromName[i] = 0;
+
+                        i = 0;
+                        while ((global->gd_ToName[i] != ':') && global->gd_ToName[i])
+                            i++;
+                        global->gd_ToName[i] = 0;
+
+                        dl   = LockDosList(LDF_DEVICES | LDF_READ);
+                        from = FindDosEntry(dl,global->gd_FromName,LDF_DEVICES | LDF_READ);
+                        to   = FindDosEntry(dl,global->gd_ToName,LDF_DEVICES | LDF_READ);
+                        UnLockDosList(LDF_DEVICES | LDF_READ);
+
+                        if (!from)
+                        {
+                            failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                            PrintF(global,MSG_DC_BADDEVICE,global->gd_FromName);
+                        }
+                        else if (!to)
+                        {
+                            failureCode = ERROR_DEVICE_NOT_MOUNTED;
+                            PrintF(global,MSG_DC_BADDEVICE,global->gd_ToName);
+                        }
+                        else
+                        {
+                            sprintf(global->gd_FromName,"%b",from->dol_Name);
+                            sprintf(global->gd_ToName,"%b",to->dol_Name);
+
+                            failureCode = DiskCopy(global,from,to,(BOOL)opts[OPT_MULTI],!(BOOL)opts[OPT_NOVERIFY]);
+                        }
+                    }
+                    else
+                    {
+                        failureCode = ERROR_INVALID_COMPONENT_NAME;
+                        PrintErr(ERROR_INVALID_COMPONENT_NAME);
+                    }
+                }
+                else
+                {
+                    failureCode = IoErr();
+                    PrintErr(failureCode);
+                }
+a379 9
+        else
+        {
+            failureCode = ERROR_NO_FREE_STORE;
+            PrintErr(failureCode);
+        }
+
+        DeleteMsgPort(global->gd_IOPort);
+        DeleteIORequest(global->gd_FromIO);
+        DeleteIORequest(global->gd_ToIO);
+d388 1
+a388 1
+    if (DOSBase && (!WBenchMsg))
+d392 3
+a395 1
+    CloseLibrary(GfxBase);
+a396 2
+    CloseLibrary(UtilityBase);
+    CloseLibrary(GadToolsBase);
+d506 1
+a506 1
+    if (global->gd_Process->pr_CLI)
+a526 11
+VOID NewList(struct List *list)
+{
+    list->lh_Head     = (struct Node *)&list->lh_Tail;
+    list->lh_Tail     = NULL;
+    list->lh_TailPred = (struct Node *)&list->lh_Head;
+}
+
+
+/****************************************************************************/
+
+
+d755 1
+a755 1
+                        PlaceText(global,"0%",GAUGE_LEFT-6,GAUGE_TOP+GAUGE_HEIGHT+12);
+d757 1
+a757 1
+                        PlaceText(global,"100%",GAUGE_RIGHT-14,GAUGE_TOP+GAUGE_HEIGHT+12);
+d810 1
+a810 1
+    totalCyl   = global->gd_TotalCyl;
+d817 1
+a817 1
+    else if (totalCyl >= 100)
+d856 4
+a859 2
+LONG WriteRoot(struct GlobalData *global, struct IOStdReq *ioReq,
+               ULONG bytesPerBlock, ULONG rootBlk)
+d861 1
+a861 1
+struct Library   *SysBase    = (*((struct Library **) 4));
+d866 2
+d870 28
+a897 2
+    if (!(root = AllocVec(bytesPerBlock,MEMF_PUBLIC)))
+        return(ERROR_NO_FREE_STORE);
+d899 9
+a907 5
+    ioReq->io_Command = CMD_READ;
+    ioReq->io_Length  = bytesPerBlock;
+    ioReq->io_Data    = root;
+    ioReq->io_Offset  = rootBlk * bytesPerBlock;
+    if (result = DoIO(ioReq))
+d909 3
+a911 2
+        FreeVec(root);
+        return(result);
+a913 17
+    DateStamp(&root->rb_CreateDate);
+    DateStamp(&root->rb_LastDate);
+
+    if (global->gd_NewName[0])
+        strcpy(root->rb_DiskName,global->gd_NewName);
+
+    for (p = (LONG *)root, i=0; i<bytesPerBlock / 4; i++, sum = sum + *p++);
+    root->rb_CheckSum -= sum;
+
+    ioReq->io_Command = CMD_WRITE;
+    ioReq->io_Length  = bytesPerBlock;
+    ioReq->io_Data    = root;
+    ioReq->io_Offset  = rootBlk * bytesPerBlock;
+    result = DoIO(ioReq);
+
+    FreeVec(root);
+
+d931 13
+d1007 1
+d1018 3
+d1026 1
+d1054 2
+d1057 1
+d1075 1
+d1086 1
+d1109 2
+d1172 1
+a1172 1
+    if (global->gd_Process->pr_CLI)
+d1255 3
+d1272 21
+d1316 3
+a1318 3
+            /* check volume for inhibited already, or no disk in drive */
+            if (((fromEnv->de_TableSize < DE_DOSTYPE) || (global->gd_FromInfo.id_DiskType != ID_NO_DISK_PRESENT))
+            &&  ((toEnv->de_TableSize < DE_DOSTYPE) || (global->gd_ToInfo.id_DiskType != ID_NO_DISK_PRESENT)))
+d1362 1
+a1362 1
+                        while (allocated < numBuffers)
+d1379 1
+a1379 1
+                        if (ok)
+d1386 1
+a1386 1
+                                    if (!WBWaitUser(global,MSG_DC_COPYEXPLAIN_1,global->gd_FromName,10))
+d1403 2
+a1404 1
+                                if (!OpenDevice((STRPTR)BTOCSTR(fromFSSM->fssm_Device),fromFSSM->fssm_Unit,global->gd_FromIO,0))
+d1406 2
+a1407 1
+                                    if (!OpenDevice((STRPTR)BTOCSTR(toFSSM->fssm_Device),toFSSM->fssm_Unit,global->gd_ToIO,0))
+d1411 2
+a1412 2
+                                                          global->gd_FromIO,fromEnv->de_LowCyl,
+                                                          global->gd_ToIO,toEnv->de_LowCyl,
+d1417 1
+a1417 18
+                                        {
+                                            if (!DoPkt0(to->dol_Task,ACTION_SERIALIZE_DISK)
+                                            && ((result = IoErr()) == ERROR_ACTION_NOT_KNOWN))
+                                            {
+                                                result = WriteRoot(global,global->gd_ToIO,toEnv->de_SizeBlock*4,
+                                                                   toEnv->de_LowCyl + (toEnv->de_BlocksPerTrack * toEnv->de_Surfaces * cylsPerDisk - 1 + toEnv->de_Reserved >> 1));
+                                            }
+                                            else
+                                            {
+                                                if (global->gd_NewName[0])
+                                                    if (!DoPkt1(to->dol_Task,ACTION_RENAME_DISK,MKBADDR(global->gd_NewName)))
+                                                        result = IoErr();
+                                            }
+                                        }
+
+                                        global->gd_ToIO->io_Command = TD_MOTOR;
+                                        global->gd_ToIO->io_Length  = 0;
+                                        DoIO(global->gd_ToIO);
+d1419 2
+a1420 1
+                                        CloseDevice(global->gd_ToIO);
+d1422 2
+a1423 5
+                                    global->gd_FromIO->io_Command  = TD_MOTOR;
+                                    global->gd_FromIO->io_Length   = 0;
+                                    DoIO(global->gd_FromIO);
+
+                                    CloseDevice(global->gd_FromIO);
+d1451 4
+d1467 1
+a1467 1
+            case TDERR_BadSecHdr     : PrintF(global,MSG_DC_FAILED_BADCYL,0);
+d1470 1
+a1470 1
+            case IOERR_OPENFAIL      : PrintF(global,MSG_DC_FAILED_NODEVICE,"");
+@

@@ -1,0 +1,545 @@
+head     36.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+36.0
+date     90.10.26.11.41.43;  author eric;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Put under RCS
+@
+
+
+36.0
+log
+@added to rcs
+@
+text
+@// (C) Copyright 1979 Tripos Research Group
+//     University of Cambridge
+//     Computer Laboratory
+//     Modified Aug 82 TJK to check only write file if parameters substituted
+
+SECTION "EXECUTE"
+
+GET "bcpl/LIBHDR"
+GET "bcpl/CLIHDR"
+GET "bcpl/MANHDR"
+GET "bcpl/FH3MANIFESTS"
+
+GLOBAL $( subch         :  ug
+          busch         :  ug +  1
+          defch         :  ug +  2
+          dirch         :  ug +  3
+          ch            :  ug +  4
+
+          instream      :  ug +  5
+          outstream     :  ug +  6
+          sys.stream    :  ug +  7
+
+          rdargskey     :  ug +  8
+          parameters    :  ug +  9
+          keyword       :  ug + 10
+          defstart      :  ug + 11
+          keygiven      :  ug + 12
+
+          newfile       :  ug + 13
+
+          par.stream    :  ug + 14
+
+          err.p         :  ug + 15
+          err.l         :  ug + 16
+
+          c.rcode       :  ug + 17
+          c.result2     :  ug + 18
+       $)
+
+
+
+MANIFEST $( fileupb        =      20
+            workfileupb    =       5
+            taskposlwb     =      15
+            taskposupb     =      16
+            switchpos      =      12
+
+            parsupb        =     100
+            rdargskeyupb   =      50
+            keywordupb     =      10
+            keycharsmax    =      21
+	    prot.script	   = 	  64
+         $)
+
+
+LET start() BE
+  $( LET cfile = VEC fileupb
+     LET item = ?
+
+     LET rkvec  = VEC rdargskeyupb
+     LET parvec = VEC parsupb
+     LET keyvec = VEC keywordupb
+
+     LET newf    = VEC workfileupb
+     LET workfile = ?
+     LET tlock = ?
+     LET newstream = ?
+     LET tid = taskid()
+     LET wp = getlong( tinfo.windowptr, tid )
+
+     err.p     := level()
+     c.rcode   := 0
+     c.result2 := 0
+
+     sys.stream:= output()
+     par.stream:= input()
+     outstream := 0
+     instream := 0
+
+     keygiven := FALSE
+
+     subch, busch := '<', '>'
+     defch, dirch := '$', '.'
+
+     newfile    := newf
+     newfile%0 := 0
+
+     rdargskey  := rkvec
+     parameters := parvec
+     keyword    := keyvec
+
+     item := rditem(cfile,fileupb)
+     IF item <= 0 THEN
+     $( IF item \= 0 THEN
+           reportcerr("Incorrect file name")
+        RETURN
+     $)
+     instream := findinput(cfile)
+
+
+     IF instream = 0 THEN $( // look other places
+	LET dir = currentdir(false) 
+            currentdir (TRUE,locatedir("S:")) // Try default directory
+      	    instream := findinput(cfile)
+            freeobj(currentdir(false))
+        currentdir(TRUE, dir)
+     $)
+
+     IF instream = 0 THEN reportcerr("Can't open %S",cfile)
+
+
+     selectinput(instream)
+
+     // ?? Have a look at the first character. If it is '.' then
+     // ?? we must go ahead and handle full command handling.
+     // ?? Otherwise we don't need to write the output file.
+     // Blank lines are ignored. Write a command file if C called
+     // within another C file.
+     // *** PJF: If the first char is not a dot, we cannot assume that
+     // the file does not contain comments just because it doesn't
+     // have a directive as the first line !!!
+     // Guess we'll leave this bug in - if the guy wants comments
+     // he'll have to put one on line 1 too.
+
+     ch := rdch() repeatwhile ch = '*N'
+
+     UNLESS (ch='.') | (cli.currentinput NE cli.standardinput) DO
+     // No need for full command expansion
+     $( unrdch()
+	IF cli.interactive DO testflags(2)
+        cli.currentinput := instream
+        stop(0)
+     $)
+
+     // Construct work-file name
+     // Is there a T: defined ?
+	putlong( tinfo.windowptr, tid, -1 )    // search quietly
+	tlock := locatedir("T:")
+	putlong( tinfo.windowptr, tid, wp )	// make noise again
+	TEST tlock = 0 	THEN workfile    := ":T/Command-0-Tnn"
+			ELSE $( workfile := "T:Command-00-Tnn"
+			     freeobj(tlock)
+			$)
+
+     FOR j = 0 TO workfile % 0 DO
+       newfile % j := workfile % j
+
+     $( LET t = getlong (tinfo.tasknum,taskid())
+        FOR j = taskposupb TO taskposlwb BY -1 DO
+          $( newfile % j := t REM 10 + '0'
+             t := t/10
+          $)
+     $)
+
+     IF cli.currentinput \= cli.standardinput THEN
+       IF cli.commandfile % 0 >= switchpos THEN
+         newfile % switchpos := cli.commandfile % switchpos NEQV 1
+
+     outstream := findoutput(newfile)
+
+     IF outstream = 0 THEN
+     $( // Attempt to create the T directory if that is the problem
+        IF result2(FALSE)=error.objectnotfound THEN
+        $( LET lock = createdir( ":T" )
+           UNLESS lock=0 DO freeobj(lock)
+           outstream := findoutput(newfile)
+        $)
+        IF outstream = 0 THEN
+           reportcerr("Can't open work file *"%S*"",newfile)
+     $)
+     selectoutput(outstream)
+
+     IF cli.interactive THEN testflags(flag.commbreak)
+
+     UNTIL ch = endstreamch DO
+       TEST ch = dirch THEN handledirective()
+        ELSE substitute()
+
+     endread()
+
+     // Now copy rest of current input.
+
+     selectinput(cli.currentinput)
+
+     IF cli.currentinput \= cli.standardinput THEN
+       $(
+          $( ch := rdch()
+             IF ch = endstreamch THEN
+               BREAK
+             wrch(ch)
+          $) REPEAT
+
+       $)
+
+     endwrite()
+
+     newstream :=findinput(newfile)
+
+     IF cli.currentinput \= cli.standardinput THEN $(
+        endread()
+	putlong( tinfo.windowptr, tid, -1 )    // delete quietly
+        if (cli.commandfile%0) THEN deletefile(cli.commandfile)
+	putlong( tinfo.windowptr, tid, wp )	// make noise again
+     $)
+
+     cli.currentinput := newstream
+
+     FOR j = 0 TO newfile % 0 DO
+       cli.commandfile % j := newfile % j
+
+
+  err.l:
+     selectoutput(sys.stream)
+     stop(c.rcode)
+  $)
+
+
+
+AND handledirective() BE // Called after reading 'dirch'
+  $( ch := rdch()
+     UNLESS ch = '*N' | ch = ' ' | ch = endstreamch THEN
+       $( LET item,c = ?,?
+          unrdch()
+
+         item := rditem(keyword,keywordupb)
+          c := (item \= 1 -> -1,
+                   findarg("KEY,K,DEFAULT,DEF,*
+                           *BRA,KET,DOLLAR,DOT",keyword))
+          IF c < 0 THEN
+            reportcerr("Invalid directive")
+
+          SWITCHON c INTO
+
+            $( CASE 0: CASE 1:
+                 // KEY for RDARGS.
+                 IF keygiven THEN
+                   reportcerr("More than one K directive")
+
+                 $( LET item = rditem(rdargskey,rdargskeyupb)
+                    IF item <= 0 THEN
+                      reportcerr("Illegal K directive")
+
+                    selectinput(par.stream)
+                    selectoutput(sys.stream)
+                    defstart := rdargs(rdargskey,
+                      parameters,parsupb); unrdch()
+                    selectoutput(outstream)
+                    selectinput(instream)
+                    IF defstart = 0 THEN
+                      reportcerr("Parameters unsuitable for*
+                                 * key *"%S*"", rdargskey)
+
+                    keygiven := TRUE
+                 $)
+                 ENDCASE
+
+               CASE 2: CASE 3:
+                 // DEFAULT keyword [=] value
+                 $( LET item = rditem(keyword,keywordupb)
+                    LET keyn = ?
+
+                    IF item < 0 THEN
+                      reportcerr("Illegal keyword")
+
+                    IF item = 0 THEN
+                      ENDCASE
+
+                    UNLESS keygiven THEN
+                        reportcerr("No K directive")
+                    keyn := findarg(rdargskey,keyword)
+
+                    IF (keyn >= 0) & (parameters ! keyn = 0) THEN
+                      $( LET dupb = parsupb+parameters-defstart
+                         item := substrditem(defstart,dupb)
+
+                         IF item = -2 THEN
+                           item := substrditem(defstart,dupb)
+
+                         IF item <= 0 THEN
+                           $( IF item \= 0 THEN
+                                reportcerr("Illegal D item")
+                              ENDCASE
+                           $)
+
+                         parameters ! keyn := defstart
+                         defstart := defstart +
+                           (defstart % 0)/bytesperword + 1
+                      $)
+                    ENDCASE
+
+                 $)
+
+
+               DEFAULT: // Set new character.
+                 (@@ subch) ! (c - 4) := getch()
+                 ENDCASE
+
+            $)
+
+          ch := rdch()
+
+       $)
+
+     UNTIL ch = '*N' | ch = endstreamch DO ch := rdch()
+
+     ch := rdch()
+
+  $)
+
+
+
+AND substitute() BE
+  $( LET writing, substituting = TRUE, FALSE
+     UNTIL ch = '*N' | ch = endstreamch DO
+
+     TEST (ch = subch) & writing THEN // <key$default>
+       $( LET keyn, l , cliflag = ?, 0, FALSE
+          writing := FALSE
+          substituting := TRUE
+
+          UNLESS keygiven THEN
+            reportcerr("No K directive")
+
+          ch := rdch()
+	  IF ch = defch THEN $(
+		TEST rdch() = defch THEN $(
+		     cliflag := TRUE
+		     writen(getlong(tinfo.tasknum,taskid()))
+		$)
+		ELSE unrdch()
+	  $)
+	  IF cliflag = 0 THEN $(
+             UNTIL ch = busch | ch = defch | ch = '*N'  | ch = endstreamch DO $(
+               IF l >= keycharsmax THEN reportcerr("Keyword too long*N")
+               l := l + 1
+               keyword % l := ch
+               ch := rdch()
+             $)
+             keyword % 0 := l
+
+             keyn := findarg(rdargskey,keyword)
+
+             TEST keyn < 0 | (parameters!keyn = 0) THEN writing := TRUE
+             ELSE TEST parameters!keyn = -1 THEN writes(keyword)
+             ELSE writes(parameters!keyn)
+
+             IF ch = defch THEN ch := rdch()
+	  $)
+       $)
+      ELSE $(
+          TEST (ch = busch) & substituting THEN $(
+             writing := TRUE
+             substituting := FALSE
+           $)
+           ELSE IF writing THEN wrch(ch)
+           ch := rdch()
+       $)
+
+     wrch('*N')
+     ch := rdch()
+
+  $)
+
+
+AND getch() = VALOF // Get single character item.
+  $( LET item = rditem(keyword,keywordupb)
+
+     IF item = 0 THEN
+       $( ch := rdch(); unrdch()
+          IF (ch = '*N') | (ch = endstreamch) THEN
+            RESULTIS -2
+       $)
+
+     IF (item <= 0) | (keyword % 0 \= 1) THEN
+       reportcerr("Invalid directive argument")
+
+     RESULTIS keyword % 1
+  $)
+
+
+
+AND reportcerr(format,parm1,parm2) BE
+  $( 
+     c.result2 := result2(false)
+     IF outstream \= 0 THEN $(
+        endwrite()
+        IF newfile%0 \= 0 THEN deletefile(newfile)
+        selectoutput(sys.stream)
+        $)
+     IF instream \= 0 THEN endread()
+
+     writes("EXECUTE: "); writef(format,parm1,parm2)
+     wrch('*N')
+     c.rcode := 20
+     longjump(err.p, err.l)
+  $)
+
+// Read an item from command line
+// returns -2    "=" Symbol
+//         -1    error
+//          0    *N, ;, endstreamch
+//          1    unquoted item
+//          2    quoted item
+
+/*
+AND dbg(s,a,b,c,d) BE
+$( LET safe=output()
+   selectoutput(sys.stream)
+   writef(s,a,b,c,d)
+   newline()
+   selectoutput(safe)
+$)
+*/
+
+AND substrditem(v, size) = VALOF
+ $( LET p = 0
+    LET pmax = ((size+1)<<2)-1
+    LET ch = ?
+    LET quoted = FALSE
+    LET substituting = FALSE
+    LET writing = TRUE
+
+    FOR i=0 TO size DO v!i := 0
+
+    ch := rdch() REPEATWHILE ch='*S'
+
+    IF ch='"' DO
+    $( quoted := TRUE
+       ch := rdch()
+    $)
+
+    UNTIL ch='*N' | ch=endstreamch DO
+    $( TEST (ch = subch) & writing THEN
+       $( LET keyn,l,cliflag = ?,0,FALSE
+          substituting := TRUE
+       //*** dbg("Found a substitute char")
+          UNLESS keygiven DO reportcerr("No K directive")
+          ch := rdch()
+	  IF ch = defch THEN $(
+		TEST rdch() = defch THEN $(
+		     cliflag := TRUE
+		     writen(getlong(tinfo.tasknum,taskid()))
+		$)
+		ELSE unrdch()
+	  $)
+	  IF cliflag = FALSE $(
+             UNTIL ch=busch | ch=defch | ch = '*N' | ch=endstreamch DO $(
+               IF l >= keycharsmax THEN reportcerr("Keyword too long*N")
+               l := l + 1
+               keyword % l := ch
+               ch := rdch()
+             $)
+             keyword %0 := l
+ 	      //*** dbg("Keyword found = %S", keyword)
+             keyn := findarg(rdargskey,keyword)
+             TEST (keyn<0) | (parameters!keyn = 0) THEN writing := TRUE
+	     ELSE $(
+          	 LET s = (parameters!keyn = -1) -> keyword, parameters!keyn
+	     //*** dbg("Writing out %S",s)
+             UNLESS substwrites(s,pmax,v,@@p) DO RESULTIS -1
+             $)
+             IF ch=defch THEN ch := rdch()  
+	  $)
+       $)
+       ELSE
+       $( TEST (ch=busch) & substituting THEN
+          $( writing := TRUE
+             substituting := FALSE
+          $)
+          ELSE 
+          $(
+             TEST quoted THEN
+             $( IF ch='"' RESULTIS 2
+                IF ch='**' DO
+                $( ch := rdch()
+                   IF capitalch(ch)='E' DO ch := '*E'
+                   IF capitalch(ch)='N' DO ch := '*N'
+                $)
+             $)   
+             ELSE
+                IF (ch=';') | (ch='*S') | (ch='=') BREAK
+
+             IF writing THEN 
+                UNLESS substwrch(ch,pmax,v,@@p)
+                  DO RESULTIS -1
+          $)
+
+          ch := rdch()
+       $)
+    $)
+ 
+    unrdch()
+    IF quoted RESULTIS -1
+    TEST p=0 THEN
+    $( IF ch='=' DO
+       $( rdch()
+          RESULTIS -2
+       $)
+       RESULTIS 0
+    $)
+    ELSE
+       RESULTIS 1
+ $)
+ 
+AND substwrch(ch,pmax,v,lvp) = VALOF
+$( LET p = !lvp
+   p := p + 1
+   IF p > pmax RESULTIS FALSE
+   v%p := ch
+   v%0 := p
+   !lvp := p
+   RESULTIS TRUE
+$)
+
+AND substwrites(s,pmax,v,lvp) = VALOF
+$( FOR i=1 TO s%0 DO
+    UNLESS substwrch(s%i,pmax,v,lvp)
+      DO RESULTIS FALSE
+   RESULTIS TRUE
+$)
+@

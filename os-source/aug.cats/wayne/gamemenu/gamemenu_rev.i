@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	12
+DATE	MACRO
+		dc.b	'30.11.93'
+	ENDM
+VERS	MACRO
+		dc.b	'GameMenu 1.12'
+	ENDM
+VSTRING	MACRO
+		dc.b	'GameMenu 1.12 (30.11.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: GameMenu 1.12 (30.11.93)',0
+	ENDM

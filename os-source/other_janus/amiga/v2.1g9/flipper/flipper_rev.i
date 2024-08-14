@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	63
+DATE	MACRO
+		dc.b	'10.9.91'
+	ENDM
+VERS	MACRO
+		dc.b	'flipper 36.63'
+	ENDM
+VSTRING	MACRO
+		dc.b	'flipper 36.63 (10.9.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: flipper 36.63 (10.9.91)',0
+	ENDM

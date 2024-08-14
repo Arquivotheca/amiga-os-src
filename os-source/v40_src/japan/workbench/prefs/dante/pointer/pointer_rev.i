@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'26.8.92'
+	ENDM
+VERS	MACRO
+		dc.b	'pointer 39.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'pointer 39.10 (26.8.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: pointer 39.10 (26.8.92)',0
+	ENDM

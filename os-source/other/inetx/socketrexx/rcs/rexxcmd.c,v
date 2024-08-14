@@ -1,0 +1,188 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     91.02.07.10.28.48;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@
+/*
+ * rexx command parsing
+ */
+
+#include "rexxinet.h"
+
+int 	Socket(), Saccept(), Slisten(), Sclose(), Sgetpeername(),
+	Sgetsockname(), Ssendto(), Srecvfrom(), Sbind(), Sconnect(),
+	Sgetservbyname(), Sgethostbyname(), Sgethostbyaddr(),
+	charswaiting(), Sgetservbyport(), addrt(), delrt(), gifaddr(),
+	gifnetmask(), gifmetric(), sarp(), darp(), sslipdev(), sifaddr(),
+	sifflags(), sifmtu(), sifbrdaddr(), gifconf(), sifnetmask(),
+	sifdstaddr(), sifmetric(), nettext(), Sshutdown(), netquit(),
+	garp(), Sgethostname(), Sgetuser(), gifdstaddr(), gifflags(),
+	gifbrdaddr();
+
+/*
+ * Mask definitions for required arguments.
+ */
+#define ARGS1	0x02		/* call needs arg1		*/
+#define ARGS2	0x04		/* call needs arg2		*/
+#define ARGS3	0x08		/* call needs arg3		*/
+#define ARGS4	0x10		/* call needs arg4		*/
+#define NOARG	0x00		/* no args required		*/
+#define NONE	0		/* no port spec in this command	*/
+
+/*
+ * Rexx accessible functions
+ */
+static struct {
+	int	(*func)();	/* function that implements call	*/
+	u_char	flags;		/* various flag settings for cmd	*/
+	u_char	usesport;	/* arg1 holds port variable		*/
+	char	*name;		/* ascii name of call			*/
+} cmd[] = {
+{Ssendto, 	ARGS1|ARGS2,		ARGS1,	"socket_send"},
+{Srecvfrom, 	ARGS1|ARGS2|ARGS3,	ARGS1,	"socket_recv"},
+{Ssendto,	ARGS1|ARGS2|ARGS3,	ARGS1,	"socket_sendto"},
+{Srecvfrom,	ARGS1|ARGS2|ARGS3|ARGS4,ARGS1,	"socket_recvfrom"},
+{Saccept, 	ARGS1,			ARGS1,	"socket_accept"},
+{Slisten, 	ARGS1|ARGS2,		ARGS1,	"socket_listen"},
+{Sclose, 	ARGS1,			ARGS1,	"socket_close"},
+{Sgetpeername, 	ARGS1|ARGS2,		ARGS1,	"socket_getpeername"},
+{Sgetsockname, 	ARGS1|ARGS2,		ARGS1,	"socket_getsockname"},
+{Sbind,		ARGS1|ARGS2,		ARGS1,	"socket_bind"},
+{Sconnect,	ARGS1|ARGS2,		ARGS1,	"socket_connect"},
+{Sshutdown,	ARGS1|ARGS2,		ARGS1,	"socket_shutdown"},
+{Socket, 	ARGS1|ARGS2,		NONE,	"socket_socket"},
+{charswaiting,	ARGS1,			ARGS1,	"socket_charswaiting"},
+{Sgetservbyname,ARGS1|ARGS2,		NONE,	"socket_getservbyname"},
+{Sgetservbyport,ARGS1|ARGS2,		NONE,	"socket_getservbyport"},
+{Sgethostbyname,ARGS1,			NONE,	"socket_gethostbyname"},
+{Sgethostbyaddr,ARGS1|ARGS2,		NONE,	"socket_gethostbyaddr"},
+{sifaddr,	ARGS1|ARGS2,		NONE,	"socket_IFsetaddr"},
+{gifaddr,	ARGS1|ARGS2,		NONE,	"socket_IFgetaddr"},
+{sifdstaddr,	ARGS1|ARGS2,		NONE,	"socket_IFsetdstaddr"},
+{gifdstaddr,	ARGS1|ARGS2,		NONE,	"socket_IFgetdstaddr"},
+{sifflags,	ARGS1|ARGS2,		NONE,	"socket_IFsetflags"},
+{gifflags,	ARGS1,			NONE,	"socket_IFgetflags"},
+{gifconf,	NOARG,			NONE,	"socket_IFgetconf"},
+{gifbrdaddr,	ARGS1|ARGS2,		NONE,	"socket_IFgetbrdaddr"},
+{sifbrdaddr,	ARGS1|ARGS2,		NONE,	"socket_IFsetbrdaddr"},
+{gifnetmask,	ARGS1|ARGS2,		NONE,	"socket_IFgetnetmask"},
+{sifnetmask,	ARGS1|ARGS2,		NONE,	"socket_IFsetnetmask"},
+{gifmetric,	ARGS1,			NONE,	"socket_IFgetmetric"},
+{sifmetric,	ARGS1|ARGS2,		NONE,	"socket_IFsetmetric"},
+{sslipdev,	ARGS1|ARGS2|ARGS3|ARGS4,NONE,	"socket_IFsetslipdev"},
+{addrt,	 	ARGS1|ARGS2|ARGS3,	NONE,	"socket_rtaddaddr"},
+{delrt,	 	ARGS1|ARGS2|ARGS3,	NONE,	"socket_rtdeladdr"},
+{garp,	 	ARGS1|ARGS2,		NONE,	"socket_arpgetaddr"},
+{sarp,	 	ARGS1|ARGS2|ARGS3,	NONE,	"socket_arpsetaddr"},
+{darp,	 	ARGS1,			NONE,	"socket_arpdeladdr"},
+{nettext,	ARGS1,			NONE,	"socket_errtxt"},
+{Sgetuser,	NOARG,			NONE,	"socket_getuser"},
+{netquit,	NOARG,			NONE,	"socket_quit"},
+{Sgethostname,	NOARG,			NONE,	"socket_gethostname"}
+};
+#define NUMCMD (sizeof(cmd)/sizeof(cmd[0]))
+
+/*
+ * Parse a rexx standard message, call the corresponding internal func,
+ * and reply if we didn't block.
+ */
+void rexx_parse(rm)
+	register struct RexxMsg *rm;
+{
+	register int i, op;
+	struct port *p;
+
+	/*
+	 * search table for command; if not found use normal rexx method
+	 * for reporting no command
+	 */
+	for(i = 0; i <= NUMCMD; i++){
+		if(i == NUMCMD){ /* command not found! */
+			rm->rm_Result1 = RC_ERROR;
+			rm->rm_Result2 = ERR10_001;
+			ReplyMsg(rm);
+			return ;
+		} else if(strcasecmp(cmd[i].name, rm->rm_Args[0])==0){
+			break;
+		}
+	}
+
+	/*
+	 * Check that we have all the args called for
+	 */
+	rm->rm_Result2 = rm->rm_Result1 = 0;
+	for(op = 0; op < 6; op++){
+		if((cmd[i].flags & (1 << op)) && rm->rm_Args[op]==0){
+			seterror(rm, EINVAL);
+			ReplyMsg(rm);
+			return ;
+		}
+	}
+
+	/*
+	 * issue command
+	 */
+	p = 0;
+	if(cmd[i].usesport != NONE && (p = getport(rm)) == 0){
+		return ;
+	}
+	op = (*cmd[i].func)(p, rm, FIRST);
+	if(op == REPLY){
+		if(rm->rm_Result1 == 0 && rm->rm_Result2 == 0){
+			if(rm->rm_Action & RXFF_RESULT){
+				rm->rm_Result2 = CVi2arg(0, 2);
+			}
+		}
+		ReplyMsg(rm);
+	} else { /* block rexx packet on socket */
+		FD_SET(ports[op].sock, &wait);
+		ports[op].rm = rm;
+		ports[op].cmd = i;
+	}
+}
+
+/*
+ * Rerun a rexx msg that blocked on a particular socket
+ */
+rerun(i)
+{
+	register struct port *p;
+	register struct RexxMsg *rm;
+
+	p = ports + i;
+	rm = p->rm;
+	rm->rm_Result1 = rm->rm_Result2 = 0;
+	if((*cmd[p->cmd].func)(p, p->rm, RERUN) == REPLY){
+		if(rm->rm_Result1 == 0 && rm->rm_Result2 == 0){
+			if(rm->rm_Action & RXFF_RESULT){
+				rm->rm_Result2 = CVi2arg(0, 2);
+			}
+		}
+		FD_CLR(p->sock, &wait);
+		ReplyMsg(p->rm);
+		p->cmd = -1;
+		p->rm = 0;
+	}
+}
+@

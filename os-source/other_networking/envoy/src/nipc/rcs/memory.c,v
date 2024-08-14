@@ -1,0 +1,1790 @@
+head     1.22;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.22
+date     94.02.07.19.50.16;  author kcd;  state Exp;
+branches ;
+next     1.21;
+
+1.21
+date     93.09.03.17.40.58;  author kcd;  state Exp;
+branches ;
+next     1.20;
+
+1.20
+date     93.04.08.11.42.55;  author gregm;  state Exp;
+branches ;
+next     1.19;
+
+1.19
+date     93.04.05.11.17.39;  author gregm;  state Exp;
+branches ;
+next     1.18;
+
+1.18
+date     93.02.15.10.39.16;  author kcd;  state Exp;
+branches ;
+next     1.17;
+
+1.17
+date     92.12.16.14.43.48;  author kcd;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     92.11.19.14.18.50;  author kcd;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     92.11.02.14.04.34;  author kcd;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.07.13.19.14.35;  author kcd;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.06.22.15.21.01;  author gregm;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.06.18.14.24.59;  author kcd;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     92.06.08.09.50.09;  author kcd;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     92.05.15.12.45.15;  author kcd;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.04.30.13.16.57;  author gregm;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.04.10.14.53.16;  author kcd;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.04.05.18.10.51;  author gregm;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.03.23.10.21.23;  author gregm;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.03.06.19.09.32;  author kcd;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.03.04.17.00.17;  author gregm;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.27.21.00.27;  author kcd;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.02.20.11.52.12;  author gregm;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.02.13.10.02.48;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@NIPC's memory management buffering routines.
+@
+
+
+1.22
+log
+@Fixed an edge condition bug in BufferPointer.
+@
+text
+@/**************************************************************************
+**
+** memory.c     - NIPC Memory management routines
+**
+** Copyright 1992, Commodore-Amiga, Inc.
+**
+** $Id: memory.c,v 1.21 93/09/03 17:40:58 kcd Exp Locker: kcd $
+**
+***************************************************************************
+
+/*------------------------------------------------------------------------*/
+
+#include "nipcinternal.h"
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include "nipcinternal_protos.h"
+
+#include <pragmas/exec_pragmas.h>
+#include "externs.h"
+
+/*------------------------------------------------------------------------*/
+
+#define MIN(x, y) ((x) < (y) ? (x):(y))
+#define MAX(x, y) ((x) > (y) ? (x):(y))
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * InitMemory()
+ *
+ * Allocates the NIPC memory pool's initial puddle.
+ *
+ *
+ */
+BOOL InitMemory(void)
+{
+    struct NBase *nb = gb;
+    InitSemaphore(&nb->PoolLock);
+    gb->MemoryPool = ECreatePool(0,25*1024,25*1024);
+    if (gb->MemoryPool)
+        return(TRUE);
+    else
+        return(FALSE);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * DeinitMemory(void)
+ *
+ * Free NIPC's memory pool's puddle.
+ *
+ */
+void DeinitMemory(void)
+{
+    EDeletePool(gb->MemoryPool);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * AllocBuffEntry(size) UWORD size;
+ *
+ * Attempts to allocate an initialize a buffentry of the given size. If unable
+ * to allocate this memory, this function will return a null pointer.
+ *
+ */
+struct BuffEntry *AllocBuffEntry(size)
+UWORD size;
+{
+    struct BuffEntry *buffe;
+    ONTIMER(13);
+    buffe = (struct BuffEntry *) EAllocPooled(gb->MemoryPool,sizeof(struct BuffEntry));
+    if (buffe == 0L)
+    {
+        OFFTIMER(13);
+        return ((struct BuffEntry *) 0L);
+    }
+    buffe->be_data = (UBYTE *) EAllocPooled(gb->MemoryPool,size);
+    if (buffe->be_data == 0)
+    {
+        EFreePooled(gb->MemoryPool, buffe, sizeof(struct BuffEntry));
+        OFFTIMER(13);
+        return ((struct BuffEntry *) 0L);
+    }
+
+    buffe->be_physicallength = size;
+    buffe->be_offset = 0;
+    buffe->be_length = 0;
+//    buffe->be_cookie = 0xC0EDBABE;
+    OFFTIMER(13);
+    return (buffe);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * FreeBuffEntry(buffe) struct BuffEntry *buffe;
+ *
+ * Frees an old BuffEntry structure.
+ *
+ * Note:  Make sure that you've removed this buffentry from any buffer lists
+ * before making this call.
+ *
+ */
+void FreeBuffEntry(buffe)
+struct BuffEntry *buffe;
+{
+    EFreePooled(gb->MemoryPool,buffe->be_data, buffe->be_physicallength);
+    EFreePooled(gb->MemoryPool,buffe, sizeof(struct BuffEntry));
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * AllocBuffer(initial_size) UWORD initial_size;
+ *
+ * AllocBuffer allocates and creates a Buffer structure.  If you pass a non-zero
+ * value for initial_size, AllocBuffer will allocate a BuffEntry of that
+ * size, and insert it as the first BuffEntry on this Buffer's list.
+ *
+ * If AllocBuffer cannot allocate enough memory to meet the requirements you
+ * have set, it will return a null pointer.
+ *
+ */
+struct Buffer *AllocBuffer(i_size)
+UWORD i_size;
+{
+    struct Buffer *buffer;
+    struct BuffEntry *buffentry;
+    ONTIMER(14);
+
+    buffer = (struct Buffer *) EAllocPooled(gb->MemoryPool,sizeof(struct Buffer) );
+    if (buffer == 0L)
+    {
+        OFFTIMER(14);
+        return ((struct Buffer *) 0L);
+    }
+    NewList((struct List *) & (buffer->buff_list));
+    buffer->buff_refcnt = 0;
+    buffer->buff_timeout = 0;
+
+    if (i_size)
+    {
+        buffentry = AllocBuffEntry(i_size);
+        if (buffentry == 0L)
+        {
+            EFreePooled(gb->MemoryPool, buffer, sizeof(struct Buffer));
+            OFFTIMER(14);
+            return ((struct Buffer *) 0L);
+        }
+        AddHead((struct List *) & (buffer->buff_list), (struct Node *) buffentry);
+    }
+//    buffer->buff_cookie = 0xDEADF00D;
+    OFFTIMER(14);
+    return (buffer);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * FreeBuffer(buff) struct Buffer *buff;
+ *
+ * FreeBuff will free up a Buffer structure, as well as free all BuffEntries
+ * associated with it.  Make SURE that you haven't done anything crazy like
+ * freed up a BuffEntry without getting it off of the Buffer list first.
+ *
+ */
+void __asm FreeBuffer(register __a0 struct Buffer *buff)
+{
+    struct BuffEntry *tbe;
+
+    if(!buff->buff_refcnt)
+    {
+        while (tbe = (struct BuffEntry *) RemHead((struct List *) & (buff->buff_list)))
+            FreeBuffEntry(tbe);
+
+        EFreePooled(gb->MemoryPool, buff, sizeof(struct Buffer));
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * BuffPointer(buff,offset,buffe) struct Buffer *buff; ULONG offset; struct
+ * BuffEntry **buffe;
+ *
+ * BuffPointer will return a UBYTE pointer to the specific data element that's
+ * <offset> length into the Buffer, or return a null if that element doesn't
+ * exist.
+ *
+ */
+
+UBYTE *BuffPointer(buff, offset, buffe)
+struct Buffer *buff;
+ULONG offset;
+struct BuffEntry **buffe;
+{
+    UBYTE *loc;
+    struct BuffEntry *be;
+
+    if (IsListEmpty((struct List *) & (buff->buff_list)))
+        return ((UBYTE *) 0L);
+
+    be = (struct BuffEntry *) buff->buff_list.mlh_Head;
+    while (TRUE)
+    {
+        if (offset < be->be_length)
+        {
+            loc = (UBYTE *) (((ULONG) be->be_data + (ULONG) be->be_offset) + offset);
+            *buffe = be;
+            return (loc);
+        }
+        offset -= be->be_length;
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+        if (be->be_link.mln_Succ == 0)
+            return ((UBYTE *) 0L);
+    }
+}
+
+/*------------------------------------------------------------------------*/
+#undef SysBase
+#define SysBase (*(void **)4L)
+/*
+ * CopyToBuffer(targetbuff,source,length) ULONG length; UBYTE *source; struct
+ * Buffer *targetbuff;
+ *
+ * Copies length bytes from source to the buffer, starting from location zero.
+ * If successful, returns TRUE.  If the Buffer isn't large enough to hold the
+ * data, the function will return FALSE.
+ *
+ */
+BOOL CopyToBuffer(targetbuff, source, length)
+ULONG length;
+UBYTE *source;
+struct Buffer *targetbuff;
+{
+    struct BuffEntry *be;
+    ONTIMER(4);
+    if (IsListEmpty((struct List *) & (targetbuff->buff_list)))
+        return (FALSE);
+    be = (struct BuffEntry *) targetbuff->buff_list.mlh_Head;
+
+    while (length)
+    {
+        be->be_length = MIN(be->be_physicallength, length);
+        CopyMem(source, be->be_data, be->be_length);
+        be->be_offset = 0;
+        length -= be->be_length;
+        source = (UBYTE *) (source + be->be_length);
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+        if ((be->be_link.mln_Succ == 0) && (length != 0))
+            return (FALSE);
+    }
+    OFFTIMER(4);
+    return (TRUE);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * CopyFromBuffer(target,sourcebuff,length) UBYTE *target; struct Buffer
+ * *sourcebuff; ULONG length;
+ *
+ * Copies length bytes from the source buffer to contiguous memory.
+ *
+ * Returns nothing - you'd darned well better have length bytes free at
+ * sourcebuff.
+ *
+ */
+
+void __asm CopyFromBuffer(register __a1 UBYTE *target, register __a0 struct Buffer *sourcebuff,
+                          register __d0 ULONG length)
+{
+    ULONG templength;
+    struct BuffEntry *be;
+    ONTIMER(5);
+    if (IsListEmpty((struct List *) & (sourcebuff->buff_list)))
+        return;
+    be = (struct BuffEntry *) sourcebuff->buff_list.mlh_Head;
+
+    while (length)
+    {
+        templength = MIN(be->be_length, length);
+        CopyMem(&(((UBYTE *)be->be_data)[be->be_offset]), target, templength);
+        length -= templength;
+        target = (UBYTE *) &target[templength];
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+        if ((be->be_link.mln_Succ == 0) && (length != 0))
+            return;
+    }
+    OFFTIMER(5);
+}
+
+#undef SysBase
+#define SysBase        (NIPCBASE->nb_SysBase)
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * DataLength(buffer) struct Buffer *buffer;
+ *
+ * Returns a ULONG containing the length of data stored in the Buffer structure
+ * given as an argument.
+ *
+ */
+ULONG __asm DataLength(register __a0 struct Buffer *buffer)
+{
+    ULONG countup;
+    struct BuffEntry *be;
+
+    countup = 0L;
+    be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+
+    while (be->be_link.mln_Succ)
+    {
+        countup += be->be_length;
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+    }
+    return (countup);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * UWORD CalcChecksumBuffer(buffer) struct Buffer *buffer;
+ *
+ *
+ * Does a checksum of a whole buffer.
+ *
+ */
+
+UWORD CalcChecksumBuffer(buffer)
+struct Buffer *buffer;
+{
+
+    UWORD chksum;
+    struct BuffEntry *be;
+
+    chksum = 0;
+    be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+    while (be->be_link.mln_Succ)
+    {
+        if (be->be_length)
+            chksum = CalcChecksum(be->be_data, be->be_length, chksum);
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+    }
+    return (chksum);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * BOOL CopyBuffer(ibuff,offset,length,obuff) struct Buffer *ibuff; struct
+ * Buffer *obuff; ULONG offset, length;
+ *
+ * This function allows data copying from one buffer to another - please note,
+ * though, that it does NOT do sanity checks on the output buffer.  It's YOUR
+ * responsibility to make sure it's large enough!
+ *
+ * BUGS:  I think the return value is always coming back FALSE. I need to check
+ * this out.
+ *
+ */
+BOOL CopyBuffer(ibuff, offset, length, obuff)
+struct Buffer *ibuff;
+struct Buffer *obuff;
+ULONG offset, length;
+{
+
+    struct BuffEntry *ibe;
+    struct BuffEntry *obe;
+
+    UBYTE *iptr, *tptr;
+    ULONG tlen, ilen;
+
+    ONTIMER(3);
+
+    /* Make sure that each list at LEAST has something in it */
+    if (IsListEmpty((struct List *) & ibuff->buff_list) ||
+        IsListEmpty((struct List *) & obuff->buff_list))
+    {
+        OFFTIMER(3);
+        return (FALSE);
+    }
+    /* go in as far as to find the offset */
+
+    iptr = (UBYTE *) BuffPointer(ibuff, offset, &ibe);
+    if (!iptr)
+    {
+        OFFTIMER(3);
+        return (FALSE);
+    }
+    ilen = (ULONG) ((ibe->be_length) - (iptr - (ibe->be_data + ibe->be_offset)));
+
+    obe = (struct BuffEntry *) obuff->buff_list.mlh_Head;
+    obe->be_length = 0;
+    obe->be_offset = 0;
+
+    while (length)
+    {
+        length -= ilen;
+        while (ilen)
+        {
+            /*
+             * we have ilen bytes at iptr.  Break this across the boundries
+             * that the obe has.
+             */
+            if (!obe->be_link.mln_Succ)
+            {
+                OFFTIMER(3);
+                return (FALSE);
+            }
+            tlen = MIN(ilen, (obe->be_physicallength - obe->be_length));
+            tptr = (UBYTE *) (obe->be_data + obe->be_length);
+            obe->be_length += tlen;
+            CopyMem(iptr, tptr, tlen);
+            if (tlen == obe->be_physicallength)
+            {
+                obe = (struct BuffEntry *) obe->be_link.mln_Succ;
+                if (obe->be_link.mln_Succ)
+                {
+                    obe->be_length = 0;
+                    obe->be_offset = 0;
+                }
+            }
+            ilen -= tlen;
+        }
+        ibe = (struct BuffEntry *) ibe->be_link.mln_Succ;
+        if (!ibe->be_link.mln_Succ)
+        {
+            OFFTIMER(3);
+            return (FALSE);
+        }
+        iptr = ibe->be_data + ibe->be_offset;
+        ilen = MIN(ibe->be_length, length);
+    }
+    OFFTIMER(3);
+    return (TRUE);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * struct Buffer *MergeBuffer(buff1, buff2); struct Buffer *buff1; struct
+ * Buffer *buff2;
+ *
+ * MergeBuffer is of unusual usefulness.  Basically, it concatenates the data in
+ * buff2 to the end of buff1, and procedes to delete the (now empty) buff2.
+ * It will then return buff1 as the result.
+ *
+ * buff1={A B C D} buff2={E F G H} MergeBuffer(buff1,buff2) yields buff1={A B C
+ * D E F G H}
+ *
+ */
+
+struct Buffer *MergeBuffer(buff1, buff2)
+struct Buffer *buff1;
+struct Buffer *buff2;
+{
+
+    struct BuffEntry *tbe;
+
+    while (tbe = (struct BuffEntry *) RemHead((struct List *) & (buff2->buff_list)))
+    {
+        AddTail((struct List *) & (buff1->buff_list), (struct Node *) tbe);
+    }
+
+    FreeBuffer(buff2);
+
+    return (buff1);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * struct Buffer *CloneBuffer(ibuff); struct Buffer *ibuff;
+ *
+ * This function creates a copy of the buffer pointed to by ibuff. There IS a
+ * notable significant difference between the copy and the original, though -
+ * the original may have it's data broken into a number of different
+ * BuffEntry's.  The clone has one BuffEntry which encompasses the whole
+ * thing.  If a clone cannot be created, the function returns a NULL.
+ *
+ */
+
+struct Buffer *CloneBuffer(ibuff)
+struct Buffer *ibuff;
+{
+
+    struct Buffer *obuff;
+    ULONG len;
+
+    len = DataLength(ibuff);
+    obuff = AllocBuffer(len);
+    if (!obuff)
+        return (0);
+
+    //if (!CopyBuffer(ibuff, 0, len, obuff))
+        //return (0);
+    CopyBuffer(ibuff, 0, len, obuff);
+
+
+    return (obuff);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+/*
+ * ULONG CountEntries(buffer) struct Buffer *buffer;
+ *
+ * Counts up the number of BuffEntrys in the given buffer, and returns the
+ * total. The most obvious use for this is to find out whether you're dealing
+ * with a truly contiguous Buffer or not.  Note that -empty- BuffEntrys are
+ * not counted.
+ *
+ */
+
+ULONG CountEntries(buffer)
+struct Buffer *buffer;
+{
+    struct BuffEntry *be;
+    ULONG becount;
+
+    becount = 0L;
+
+    be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+    while (be->be_link.mln_Succ)
+    {
+        if (be->be_length)
+            becount++;
+        be = (struct BuffEntry *) be->be_link.mln_Succ;
+    }
+    return (becount);
+}
+
+/*------------------------------------------------------------------------*/
+
+/* ULONG CopyBroken(sourcetable,desttable)
+ *
+ * Copies from source to destination.  Sourcetable and desttable are both
+ * pointers to tables made up of:
+ *      APTR    memloc
+ *      ULONG   length
+ *
+ * A NULL memloc and length will delimit the table.
+ *
+ * The function returns the total number of bytes copied.
+ *
+ */
+
+
+/*
+ULONG CopyBroken(ULONG *st, ULONG *dt,ULONG soff, ULONG doff)
+{
+
+    ULONG bcopied=0L;
+    UBYTE *src, *dest;
+    ULONG srclen=0L, destlen=0L;
+    ULONG t;
+
+    while (soff)
+    {
+
+        ULONG ts;
+
+        if (!srclen)
+        {
+            src = (UBYTE *) st[0];
+            srclen = st[1];
+            st += 2;
+            if (!src)
+                break;
+        }
+
+        ts = MIN(soff,srclen);
+        src = &src[ts];
+        srclen -= ts;
+        soff -= ts;
+
+    }
+
+    while (doff)
+    {
+
+        ULONG ts;
+
+        if (!destlen)
+        {
+            dest = (UBYTE *) dt[0];
+            destlen = dt[1];
+            dt += 2;
+            if (!dest)
+                break;
+        }
+
+        ts = MIN(doff,destlen);
+        dest = &dest[ts];
+        destlen -= ts;
+        doff -= ts;
+    }
+
+    while (TRUE)
+    {
+        if (!srclen)
+        {
+            src = (UBYTE *) st[0];
+            srclen = st[1];
+            st += 2;
+            if (!src)
+                break;
+        }
+        if (!destlen)
+        {
+            dest = (UBYTE *) dt[0];
+            destlen = dt[1];
+            dt += 2;
+            if (!dest)
+                break;
+        }
+
+        t = MIN(srclen,destlen);
+        CopyMem(src,dest,t);
+        srclen -= t;
+        destlen -=t;
+
+        src = &src[t];
+        dest = &dest[t];
+        bcopied += t;
+    }
+    return(bcopied);
+
+}
+*/
+@
+
+
+1.21
+log
+@Minor cleanup/changes.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.20 93/04/08 11:42:55 gregm Exp Locker: kcd $
+d209 1
+a209 1
+        if (offset <= be->be_length)
+@
+
+
+1.20
+log
+@initing the semaphore
+for pool locking
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.19 93/04/05 11:17:39 gregm Exp Locker: gregm $
+d38 1
+a38 1
+    register struct NBase *nb = gb;
+a56 2
+    register struct NBase *nb = gb;
+
+a57 1
+
+a71 1
+    struct NBase *nb = gb;
+d91 1
+a109 1
+    struct NBase *nb = gb;
+a129 1
+    struct NBase *nb = gb;
+d155 1
+a155 1
+
+a171 1
+    struct NBase *nb = gb;
+@
+
+
+1.19
+log
+@Added Init/Deinit for Memory to allocate initial puddle,
+changed Alloc/Free Buffer/BuffEntry's to use pool.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.18 93/02/15 10:39:16 kcd Exp Locker: gregm $
+d39 1
+@
+
+
+1.18
+log
+@Turned off Buffer and BuffEntry caching.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.17 92/12/16 14:43:48 kcd Exp Locker: kcd $
+d30 35
+d77 7
+a83 13
+//    Forbid();
+//        buffe = (struct BuffEntry *) RemHead((struct List *)&nb->BuffEntryCache);
+//    Permit();
+//    if(!buffe)
+//    {
+        buffe = (struct BuffEntry *) AllocMem(sizeof(struct BuffEntry), MEMF_PUBLIC);
+        if (buffe == 0L)
+        {
+            OFFTIMER(13);
+            return ((struct BuffEntry *) 0L);
+        }
+//    }
+    buffe->be_data = (UBYTE *) AllocMem(size, MEMF_PUBLIC);
+d86 1
+a86 1
+        FreeMem(buffe, sizeof(struct BuffEntry));
+d113 2
+a114 5
+    FreeMem(buffe->be_data, buffe->be_physicallength);
+//    Forbid();
+//        AddHead((struct List *)&nb->BuffEntryCache,(struct Node *)buffe);
+//    Permit();
+    FreeMem(buffe, sizeof(struct BuffEntry));
+d138 6
+a143 13
+//    Forbid();
+//        buffer = (struct Buffer *) RemHead((struct List *)&nb->BufferCache);
+//    Permit();
+
+//    if(!buffer)
+//    {
+        buffer = (struct Buffer *) AllocMem(sizeof(struct Buffer), MEMF_PUBLIC);
+        if (buffer == 0L)
+        {
+            OFFTIMER(14);
+            return ((struct Buffer *) 0L);
+        }
+//    }
+d153 1
+a153 1
+            FreeMem(buffer, sizeof(struct Buffer));
+a158 2
+//    if((i_size >65) && (i_size < 80))
+//    	kprintf("%8lx = AllocBuffer(%ld)\n",buffer,i_size)
+a177 6
+//    ULONG bytes;
+
+//    bytes=DataLength(buff);
+
+//    if((bytes > 85) && (bytes < 110))
+//        kprintf("FreeBuffer(%8lx, %8ld) RefCnt=%ld\n",buff,bytes,buff->buff_refcnt);
+d184 1
+a184 4
+//        Forbid();
+//            AddHead((struct List *)&nb->BufferCache,(struct Node *)buff);
+//        Permit();
+        FreeMem(buff, sizeof(struct Buffer));
+@
+
+
+1.17
+log
+@Elminated some dead code & fixed compiler warnings.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.16 92/11/19 14:18:50 kcd Exp Locker: kcd $
+d42 5
+a46 5
+    Forbid();
+        buffe = (struct BuffEntry *) RemHead((struct List *)&nb->BuffEntryCache);
+    Permit();
+    if(!buffe)
+    {
+d53 1
+a53 1
+    }
+d85 4
+a88 4
+    Forbid();
+        AddHead((struct List *)&nb->BuffEntryCache,(struct Node *)buffe);
+    Permit();
+//    FreeMem(buffe, sizeof(struct BuffEntry));
+d112 3
+a114 3
+    Forbid();
+        buffer = (struct Buffer *) RemHead((struct List *)&nb->BufferCache);
+    Permit();
+d116 2
+a117 2
+    if(!buffer)
+    {
+d124 1
+a124 1
+    }
+d173 4
+a176 4
+        Forbid();
+            AddHead((struct List *)&nb->BufferCache,(struct Node *)buff);
+        Permit();
+//        FreeMem(buff, sizeof(struct Buffer));
+@
+
+
+1.16
+log
+@Once again turned on Buffer/BuffEntry caching.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.15 92/11/02 14:04:34 kcd Exp Locker: kcd $
+d161 1
+a161 1
+    ULONG bytes;
+d163 1
+a163 1
+    bytes=DataLength(buff);
+@
+
+
+1.15
+log
+@Removed Buffer and BuffEntry caching.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.14 92/07/13 19:14:35 kcd Exp Locker: kcd $
+d85 4
+a88 4
+//    Forbid();
+//        AddHead((struct List *)&nb->BuffEntryCache,(struct Node *)buffe);
+//    Permit();
+    FreeMem(buffe, sizeof(struct BuffEntry));
+d173 4
+a176 4
+//        Forbid();
+//            AddHead((struct List *)&nb->BufferCache,(struct Node *)buff);
+//        Permit();
+        FreeMem(buff, sizeof(struct Buffer));
+@
+
+
+1.14
+log
+@Fixed a typo caught by SAS/C 6.x
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.13 92/06/22 15:21:01 gregm Exp Locker: kcd $
+d85 4
+a88 4
+    Forbid();
+        AddHead((struct List *)&nb->BuffEntryCache,(struct Node *)buffe);
+    Permit();
+//    FreeMem(buffe, sizeof(struct BuffEntry));
+d140 3
+d161 7
+d173 4
+a176 4
+        Forbid();
+            AddHead((struct List *)&nb->BufferCache,(struct Node *)buff);
+        Permit();
+//        FreeMem(buff, sizeof(struct Buffer));
+@
+
+
+1.13
+log
+@Commented out the CopyBroken stuff.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.12 92/06/18 14:24:59 kcd Exp Locker: gregm $
+d203 1
+a203 1
+        be = (struct BufferEntry *) be->be_link.mln_Succ;
+@
+
+
+1.12
+log
+@Saved a bit of code here and there.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.11 92/06/08 09:50:09 kcd Exp Locker: kcd $
+d543 2
+d625 1
+@
+
+
+1.11
+log
+@Added caching to Buffers and BuffEntrys
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.10 92/05/15 12:45:15 kcd Exp Locker: kcd $
+a300 2
+    if (IsListEmpty((struct List *) & (buffer->buff_list)))
+        return (0L);
+a328 2
+    if (IsListEmpty((struct List *) & (buffer->buff_list)))
+        return (0);
+d454 1
+a454 1
+    while (!IsListEmpty((struct List *) & (buff2->buff_list)))
+a455 1
+        tbe = (struct BuffEntry *) RemHead((struct List *) & (buff2->buff_list));
+d518 2
+a519 1
+    if (!(IsListEmpty((struct List *) & buffer->buff_list)))
+d521 3
+a523 7
+        be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+        while (be->be_link.mln_Succ)
+        {
+            if (be->be_length)
+                becount++;
+            be = (struct BuffEntry *) be->be_link.mln_Succ;
+        }
+@
+
+
+1.10
+log
+@Added timing code.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.9 92/04/30 13:16:57 gregm Exp Locker: kcd $
+a13 1
+#include "externs.h"
+d16 1
+a16 1
+#include <clib/exec_protos.h>
+d20 1
+d39 1
+d42 4
+a45 2
+    buffe = (struct BuffEntry *) AllocMem(sizeof(struct BuffEntry), MEMF_PUBLIC|MEMF_CLEAR);
+    if (buffe == 0L)
+d47 6
+a52 2
+        OFFTIMER(13);
+        return ((struct BuffEntry *) 0L);
+d54 1
+a54 1
+    buffe->be_data = (UBYTE *) AllocMem(size, MEMF_PUBLIC|MEMF_CLEAR);
+d83 1
+d85 4
+a88 1
+    FreeMem(buffe, sizeof(struct BuffEntry));
+d107 1
+d111 6
+a116 2
+    buffer = (struct Buffer *) AllocMem(sizeof(struct Buffer), MEMF_PUBLIC|MEMF_CLEAR);
+    if (buffer == 0L)
+d118 6
+a123 2
+        OFFTIMER(14);
+        return ((struct Buffer *) 0L);
+d126 2
+d156 1
+d158 4
+d163 5
+a167 4
+    while (tbe = (struct BuffEntry *) RemHead((struct List *) & (buff->buff_list)))
+        FreeBuffEntry(tbe);
+
+    FreeMem(buff, sizeof(struct Buffer));
+@
+
+
+1.9
+log
+@Trivial changes.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.8 92/04/10 14:53:16 kcd Exp $
+d40 2
+a41 2
+
+    buffe = (struct BuffEntry *) AllocMem(sizeof(struct BuffEntry), MEMF_PUBLIC + MEMF_CLEAR);
+d43 2
+d46 2
+a47 2
+
+    buffe->be_data = (UBYTE *) AllocMem(size, MEMF_PUBLIC + MEMF_CLEAR);
+d51 1
+d58 1
+d98 2
+a99 2
+
+    buffer = (struct Buffer *) AllocMem(sizeof(struct Buffer), MEMF_CLEAR + MEMF_PUBLIC);
+d101 2
+d104 1
+a104 1
+
+d113 1
+d118 1
+a118 1
+
+d199 1
+a199 1
+
+d215 1
+a215 1
+
+d238 1
+a238 1
+
+d253 1
+d343 2
+d348 2
+d351 1
+a351 1
+
+d356 2
+d359 1
+d376 2
+d379 1
+d397 2
+d400 1
+d404 1
+a404 1
+
+@
+
+
+1.8
+log
+@Added fix for the two copyback routines that weren't getting
+ExecBase correctly.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.7 92/04/05 18:10:51 gregm Exp Locker: kcd $
+d129 1
+a129 3
+    while (!IsListEmpty((struct List *) & (buff->buff_list)))
+    {
+        tbe = (struct BuffEntry *) RemHead((struct List *) & (buff->buff_list));
+a130 1
+    }
+@
+
+
+1.7
+log
+@*** empty log message ***
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.6 92/03/23 10:21:23 gregm Exp $
+d178 2
+a179 1
+
+d250 3
+@
+
+
+1.6
+log
+@The_voodoo_stuff_is_GONE!
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.5 92/03/06 19:09:32 kcd Exp $
+d241 1
+a241 1
+        CopyMem((be->be_data + be->be_offset), target, templength);
+d243 1
+a243 1
+        target = (UBYTE *) (target + templength);
+d484 96
+@
+
+
+1.5
+log
+@Added specific register usages for a few calls.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.4 92/03/04 17:00:17 gregm Exp Locker: kcd $
+@
+
+
+1.4
+log
+@Moved globals to globals.c; externs for these in externs.h.
+@
+text
+@d7 1
+a7 1
+** $Id: memory.c,v 1.3 92/02/27 21:00:27 kcd Exp Locker: gregm $
+d125 1
+a125 2
+void FreeBuffer(buff)
+struct Buffer *buff;
+d228 2
+a229 4
+void CopyFromBuffer(target, sourcebuff, length)
+UBYTE *target;
+struct Buffer *sourcebuff;
+ULONG length;
+d259 1
+a259 2
+ULONG DataLength(buffer)
+struct Buffer *buffer;
+@
+
+
+1.3
+log
+@New formatting. Now uses new internal include files.
+@
+text
+@d7 1
+a7 1
+** $Id$
+d14 1
+@
+
+
+1.2
+log
+@Added CountEntries().
+@
+text
+@d1 17
+d19 1
+d21 1
+a21 4
+/*
+ * $Header: APPN:src/libs/nipc.library/RCS/memory.c,v 1.1 92/02/13 10:02:48 gregm Exp Locker: gregm $
+ *
+ */
+a22 7
+
+
+#include "memory.h"
+#include <exec/memory.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+
+d26 1
+d29 4
+a32 2
+ * AllocBuffEntry(size)
+ * UWORD size;
+a33 3
+ * Attempts to allocate an initialize a buffentry of the given size.
+ * If unable to allocate this memory, this function will return a
+ * null pointer.
+d38 1
+a38 1
+ struct BuffEntry *buffe;
+d40 18
+a57 16
+ buffe = (struct BuffEntry *) AllocMem(sizeof(struct BuffEntry),MEMF_PUBLIC+MEMF_CLEAR);
+ if (buffe == 0L)
+   return( (struct BuffEntry *) 0L);
+
+ buffe->be_data = (UBYTE *) AllocMem(size,MEMF_PUBLIC+MEMF_CLEAR);
+ if (buffe->be_data == 0)
+   {
+   FreeMem(buffe,sizeof(struct BuffEntry));
+   return( (struct BuffEntry *) 0L);
+   }
+
+ buffe->be_physicallength = size;
+ buffe->be_offset = 0;
+ buffe->be_length = 0;
+ return(buffe);
+}
+d59 2
+a60 2
+/* FreeBuffEntry(buffe)
+ * struct BuffEntry *buffe;
+d64 2
+a65 2
+ * Note:  Make sure that you've removed this buffentry from any buffer
+ *        lists before making this call.
+d71 2
+a72 2
+ FreeMem(buffe->be_data,buffe->be_physicallength);
+ FreeMem(buffe,sizeof(struct BuffEntry));
+d75 11
+a85 7
+/* AllocBuffer(initial_size)
+ * UWORD initial_size;
+ *
+ * AllocBuffer allocates and creates a Buffer structure.  If you pass
+ * a non-zero value for initial_size, AllocBuffer will allocate a
+ * BuffEntry of that size, and insert it as the first BuffEntry on
+ * this Buffer's list.
+a86 2
+ * If AllocBuffer cannot allocate enough memory to meet the requirements
+ * you have set, it will return a null pointer.
+d91 2
+a92 2
+ struct Buffer *buffer;
+ struct BuffEntry *buffentry;
+d94 21
+a114 19
+ buffer = (struct Buffer *) AllocMem(sizeof(struct Buffer),MEMF_CLEAR+MEMF_PUBLIC);
+ if (buffer == 0L)
+   return( (struct Buffer *) 0L);
+
+ NewList((struct List *)&(buffer->buff_list));
+
+ if (i_size)
+   {
+   buffentry = AllocBuffEntry(i_size);
+   if (buffentry == 0L)
+      {
+      FreeMem(buffer,sizeof(struct Buffer));
+      return ( (struct Buffer *) 0L);
+      }
+   AddHead((struct List *)&(buffer->buff_list),(struct Node *)buffentry);
+   }
+
+ return(buffer);
+}
+d117 1
+a117 2
+ * FreeBuffer(buff)
+ * struct Buffer *buff;
+d120 2
+a121 3
+ * associated with it.  Make SURE that you haven't done anything crazy
+ * like freed up a BuffEntry without getting it off of the Buffer
+ * list first.
+d127 1
+a127 1
+ struct BuffEntry *tbe;
+d129 19
+a147 18
+ while (!IsListEmpty((struct List *) &(buff->buff_list)))
+   {
+   tbe = (struct BuffEntry *) RemHead((struct List *)&(buff->buff_list));
+   FreeBuffEntry(tbe);
+   }
+
+ FreeMem(buff,sizeof(struct Buffer));
+}
+
+/*
+ * BuffPointer(buff,offset,buffe)
+ * struct Buffer *buff;
+ * ULONG offset;
+ * struct BuffEntry **buffe;
+ *
+ * BuffPointer will return a UBYTE pointer to the specific data element
+ * that's <offset> length into the Buffer, or return a null if that
+ * element doesn't exist.
+d150 1
+a150 1
+UBYTE *BuffPointer(buff,offset,buffe)
+d155 2
+a156 4
+UBYTE *loc;
+struct BuffEntry *be;
+
+ if (IsListEmpty((struct List *) &(buff->buff_list))) return( (UBYTE *) 0L);
+d158 28
+a185 25
+ be = (struct BuffEntry *) buff->buff_list.mlh_Head;
+ while (TRUE)
+   {
+   if (offset <= be->be_length)
+      {
+      loc = (UBYTE *)(((ULONG)be->be_data+(ULONG)be->be_offset)+offset);
+      *buffe = be;
+      return (loc);
+      }
+   offset -= be->be_length;
+   be = (struct BufferEntry *) be->be_link.mln_Succ;
+   if (be->be_link.mln_Succ == 0)
+      return( (UBYTE *) 0L);
+   }
+}
+
+/*
+ * CopyToBuffer(targetbuff,source,length)
+ * ULONG length;
+ * UBYTE *source;
+ * struct Buffer *targetbuff;
+ *
+ * Copies length bytes from source to the buffer, starting from location
+ * zero.  If successful, returns TRUE.  If the Buffer isn't large
+ * enough to hold the data, the function will return FALSE.
+d188 1
+a188 1
+BOOL CopyToBuffer(targetbuff,source,length)
+d193 1
+a193 1
+struct BuffEntry *be;
+d195 21
+a215 2
+ if (IsListEmpty((struct List *) &(targetbuff->buff_list))) return(FALSE);
+ be = (struct BuffEntry *) targetbuff->buff_list.mlh_Head;
+d217 3
+a219 20
+ while (length)
+   {
+   be->be_length = MIN(be->be_physicallength,length);
+   CopyMem(source,be->be_data,be->be_length);
+   be->be_offset = 0;
+   length -= be->be_length;
+   source = (UBYTE *) (source + be->be_length);
+   be = (struct BuffEntry *) be->be_link.mln_Succ;
+   if ((be->be_link.mln_Succ == 0) && (length != 0)) return(FALSE);
+   }
+
+ return(TRUE);
+
+}
+
+/*
+ * CopyFromBuffer(target,sourcebuff,length)
+ * UBYTE *target;
+ * struct Buffer *sourcebuff;
+ * ULONG length;
+d228 1
+a228 1
+void CopyFromBuffer(target,sourcebuff,length)
+d233 2
+a234 2
+ULONG templength;
+struct BuffEntry *be;
+d236 23
+a258 17
+ if (IsListEmpty((struct List *) &(sourcebuff->buff_list))) return;
+ be = (struct BuffEntry *) sourcebuff->buff_list.mlh_Head;
+
+ while (length)
+   {
+   templength = MIN(be->be_length,length);
+   CopyMem((be->be_data+be->be_offset),target,templength);
+   length -= templength;
+   target = (UBYTE *) (target + templength);
+   be = (struct BuffEntry *) be->be_link.mln_Succ;
+   if ((be->be_link.mln_Succ == 0) && (length != 0)) return;
+   }
+}
+
+/*
+ * DataLength(buffer)
+ * struct Buffer *buffer;
+a259 2
+ * Returns a ULONG containing the length of data stored in the Buffer
+ * structure given as an argument.
+d264 2
+a265 2
+ULONG countup;
+struct BuffEntry *be;
+d267 14
+a280 12
+ if (IsListEmpty((struct List *) &(buffer->buff_list))) return(0L);
+ countup = 0L;
+ be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+
+ while (be->be_link.mln_Succ)
+   {
+   countup += be->be_length;
+   be = (struct BuffEntry *) be->be_link.mln_Succ;
+   }
+ return(countup);
+}
+
+d282 2
+a283 2
+/* UWORD CalcChecksumBuffer(buffer)
+ * struct Buffer *buffer;
+d294 2
+a295 2
+ UWORD chksum;
+ struct BuffEntry *be;
+d297 26
+a322 23
+ if (IsListEmpty((struct List *) &(buffer->buff_list))) return(0);
+ chksum = 0;
+ be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+ while (be->be_link.mln_Succ)
+   {
+   if (be->be_length)
+      chksum = CalcChecksum(be->be_data,be->be_length,chksum);
+   be = (struct BuffEntry *) be->be_link.mln_Succ;
+   }
+ return(chksum);
+
+}
+
+/*
+ * BOOL CopyBuffer(ibuff,offset,length,obuff)
+ * struct Buffer *ibuff;
+ * struct Buffer *obuff;
+ * ULONG offset, length;
+ *
+ * This function allows data copying from one buffer to another -
+ * please note, though, that it does NOT do sanity checks on the
+ * output buffer.  It's YOUR responsibility to make sure it's large
+ * enough!
+a323 2
+ * BUGS:  I think the return value is always coming back FALSE.
+ *        I need to check this out.
+d325 1
+a325 1
+BOOL CopyBuffer(ibuff,offset,length,obuff)
+d331 2
+a332 2
+struct BuffEntry *ibe;
+struct BuffEntry *obe;
+d334 35
+a368 34
+UBYTE  *iptr, *tptr;
+ULONG  tlen, ilen;
+
+/* Make sure that each list at LEAST has something in it */
+ if (IsListEmpty((struct List *) &ibuff->buff_list) ||
+     IsListEmpty((struct List *) &obuff->buff_list)) return(FALSE);
+
+/* go in as far as to find the offset */
+
+ iptr = (UBYTE *) BuffPointer(ibuff,offset,&ibe);
+ if (!iptr) return(FALSE);
+ ilen = (ULONG) ((ibe->be_length)-(iptr-(ibe->be_data+ibe->be_offset)));
+
+ obe = (struct BuffEntry *) obuff->buff_list.mlh_Head;
+ obe->be_length = 0;
+ obe->be_offset = 0;
+
+ while (length)
+   {
+   length -= ilen;
+   while(ilen)
+      {
+      /* we have ilen bytes at iptr.  Break this
+       * across the boundries that the obe has.
+       */
+      if (!obe->be_link.mln_Succ) return(FALSE);
+      tlen = MIN(ilen,(obe->be_physicallength-obe->be_length));
+      tptr = (UBYTE *) (obe->be_data + obe->be_length);
+      obe->be_length += tlen;
+      CopyMem(iptr,tptr,tlen);
+      if (tlen == obe->be_physicallength)
+         {
+         obe = (struct BuffEntry *) obe->be_link.mln_Succ;
+         if (obe->be_link.mln_Succ)
+d370 6
+a375 2
+            obe->be_length = 0;
+            obe->be_offset = 0;
+d377 24
+a400 23
+         }
+      ilen -= tlen;
+      }
+   ibe = (struct BuffEntry *) ibe->be_link.mln_Succ;
+   if (!ibe->be_link.mln_Succ) return(FALSE);
+   iptr = ibe->be_data+ibe->be_offset;
+   ilen = MIN(ibe->be_length,length);
+   }
+
+ return(TRUE);
+}
+
+/*
+ * struct Buffer *MergeBuffer(buff1, buff2);
+ * struct Buffer *buff1;
+ * struct Buffer *buff2;
+ *
+ * MergeBuffer is of unusual usefulness.  Basically, it concatenates
+ * the data in buff2 to the end of buff1, and procedes to delete the
+ * (now empty) buff2.  It will then return buff1 as the result.
+ *
+ * buff1={A B C D} buff2={E F G H}
+ * MergeBuffer(buff1,buff2) yields buff1={A B C D E F G H}
+d404 1
+a404 1
+struct Buffer *MergeBuffer(buff1,buff2)
+d409 1
+a409 1
+ struct BuffEntry *tbe;
+d411 21
+a431 20
+ while (!IsListEmpty( (struct List *) &(buff2->buff_list) ))
+   {
+   tbe = (struct BuffEntry *) RemHead((struct List *)&(buff2->buff_list));
+   AddTail((struct List *)&(buff1->buff_list),(struct Node *)tbe);
+   }
+
+ FreeBuffer(buff2);
+
+ return(buff1);
+}
+
+/* struct Buffer *CloneBuffer(ibuff);
+ * struct Buffer *ibuff;
+ *
+ * This function creates a copy of the buffer pointed to by ibuff.
+ * There IS a notable significant difference between the copy and the
+ * original, though - the original may have it's data broken into
+ * a number of different BuffEntry's.  The clone has one BuffEntry
+ * which encompasses the whole thing.  If a clone cannot be created, the
+ * function returns a NULL.
+d439 2
+a440 2
+ struct Buffer *obuff;
+ ULONG len;
+d442 23
+a464 19
+ len = DataLength(ibuff);
+ obuff = AllocBuffer(len);
+ if (!obuff) return(0);
+
+// if (!CopyBuffer(ibuff,0,len,obuff))
+//   return(0);
+ CopyBuffer(ibuff,0,len,obuff);
+
+
+ return(obuff);
+
+}
+
+/* ULONG CountEntries(buffer)
+ * struct Buffer *buffer;
+ *
+ * Counts up the number of BuffEntrys in the given buffer, and returns the total.
+ * The most obvious use for this is to find out whether you're dealing with a
+ * truly contiguous Buffer or not.  Note that -empty- BuffEntrys are not counted.
+d471 2
+a472 28
+struct BuffEntry *be;
+ULONG becount;
+
+ becount = 0L;
+
+ if (!(IsListEmpty( (struct List *) &buffer->buff_list )))
+   {
+   be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+   while (be->be_link.mln_Succ)
+      {
+      if (be->be_length)
+         becount++;
+      be = (struct BuffEntry *) be->be_link.mln_Succ;
+      }
+   }
+ return(becount);
+}
+
+/* UWORD CalcVMTPChecksumBuffer(buffer)
+ * struct Buffer *buffer;
+ *
+ *
+ * Does a checksum of a whole buffer in that utterly weird VMTP manner.  It brings a whole new
+ * meaning to strange.
+ *
+ * Note - data area length MUST be a multiple of 64 bits.
+ *
+ */
+d474 1
+a474 3
+ULONG CalcVMTPChecksumBuffer(buffer)
+struct Buffer *buffer;
+{
+d476 11
+a486 48
+ UWORD chksumA, chksumB, chksum;
+ struct BuffEntry *be;
+ BOOL UseA=TRUE;
+ UWORD checklen, lenc, blen;
+ UBYTE *dptr;
+
+ if (IsListEmpty((struct List *) &(buffer->buff_list))) return(0);
+ chksumA = chksumB = 0;
+
+ be = (struct BuffEntry *) buffer->buff_list.mlh_Head;
+ checklen = 32;
+ while (be->be_link.mln_Succ)
+   {
+   blen = be->be_length;
+   dptr = be->be_data;
+
+   while (blen)
+      {
+      lenc = blen;
+      if (lenc > 32)
+         lenc = 32;
+      checklen -= lenc;
+      blen -= lenc;
+
+      if (UseA)
+         chksum = chksumA;
+      else
+         chksum = chksumB;
+
+      chksum = CalcChecksum(dptr,lenc,chksum);
+
+      if (UseA)
+         chksumA = chksum;
+      else
+         chksumB = chksum;
+
+      dptr = (UBYTE *) ((ULONG) dptr + (ULONG) lenc);
+      if (!blen) be = (struct BuffEntry *) be->be_link.mln_Succ;
+      if (!checklen)
+         {
+         checklen = 32;
+         UseA = !UseA;
+         }
+      }
+   }
+ if (!chksumA) chksumA = 0xFFFF;
+ if (!chksumB) chksumB = 0xFFFF;
+ return(((ULONG)chksumA << 16) | ((ULONG)chksumB));
+a487 2
+
+
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Header$
+d425 16
+d442 12
+@

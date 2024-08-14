@@ -1,0 +1,10 @@
+double   LToD(long int);
+long int DLoToL(double);
+long int DHiToL(double);
+double   DNeg(double);
+double   DAdd(double, double);
+double   DSub(double, double);
+int      DCmp(double, double);
+double   DShift(double, int);
+double   LMul(long int, long int);
+double   DDiv(double, double);

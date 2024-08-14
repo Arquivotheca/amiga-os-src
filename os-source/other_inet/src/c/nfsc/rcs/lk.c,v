@@ -1,0 +1,1344 @@
+head     1.4;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.4
+date     92.10.07.15.07.42;  author bj;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.08.06.15.55.54;  author martin;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.05.22.13.27.20;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.12.15.51.12;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.4
+log
+@added support for new DOS packets.
+@
+text
+@/*-----------------------------------------------------------------------
+ * lk.c  nfsc  SAS
+ *
+ * $Locker:  $
+ *
+ * $Id: lk.c,v 1.3 92/08/17 23:08:54 Martin Exp $
+ *
+ * $Revision: 1.3 $
+ *
+ * $Header: work:a/c/nfsc/RCS/lk.c,v 1.3 92/08/17 23:08:54 Martin Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+
+
+
+/*
+ * Routines which take lock(s) as arguments.
+ *
+ * nfs_parentdir()
+ * nfs_delete()
+ * nfs_createdir()
+ * nfs_locate()
+ * nfs_copydir()
+ * nfs_freelock()
+ * nfs_setprotect()
+ * nfs_setdate()
+ * nfs_rename()
+ * nfs_readlink()
+ * nfs_makelink()
+ */
+
+#include "fs.h"
+#include <string.h>
+
+#define ZEROCOOKIE(c) bzero(&(c), NFS_COOKIESIZE);
+
+/*
+ * Return parent dir & attributes
+*/
+bool_t
+get_parent(mt, dp, dirp, dorp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+	nfs_fh *dirp;
+	struct diropres *dorp;
+{
+	struct diropargs di;
+	enum clnt_stat err;
+
+	di.name = "..";
+	di.dir = *dirp;
+	err = nfs_call(mt, NFSPROC_LOOKUP,xdr_diropargs, &di, xdr_diropres, dorp);
+	if(err != RPC_SUCCESS || dorp->status != NFS_OK){
+		dp->dp_Res2 = fh_status(err, dorp->status);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/*
+ * ParentDir is a little bit tricky at the boundary condition where the
+ * application has asked for ParentDir of an object in the root directory.
+ * For example ParentDir on a lock of usr:tmp is supposed to return a lock
+ * on the volume, and ParentDir on a lock of usr: is supposed to return 0.
+ */
+
+/*
+**	nfs_parentdir (mount_pt mt, struct DosPacket *dp)
+**
+**	ACTION_PARENT
+**
+**	dp->dp_Arg1	BPTR	Lock on object to get the parent of
+**
+**	dp->dp_Res1	BPTR	Parent lock
+**	dp->dp_Res2	CODE	Failure code if Res1 == 0
+**
+**	ACTION_PARENT_FH
+**	
+**	dp->dp_Arg1	BPTR	FileHandle
+*/
+
+void
+nfs_parentdir(mt, dp)
+	struct mount_pt  *mt;
+	struct DosPacket *dp;
+{
+	register struct fdata *fd, *nfd;
+	struct diropres dor;
+
+	if( dp->dp_Type == ACTION_PARENT_FH ) { /* FileHandle */
+		fd = (struct fdata *)dp->dp_Arg1;
+		if(fd==0 || (((u_long)fd)&1) || fd->fd_magic != FD_MAGIC){
+			dp->dp_Res2 = ERROR_INVALID_LOCK;
+			return;
+		}
+	} else  /* Lock */
+		CHECKLOCK(fd, dp);
+
+	/*
+	 * Return 0 if ParentDir on mount point
+	 */
+	if(fd->fd_type == FD_DIR && fd->fd_dir_fid == mt->mt_lock.fd_dir_fid){
+		dp->dp_Res2 = dp->dp_Res1 = 0;
+		return;
+	}
+
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC);
+	if(nfd == (struct fdata *)0){
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+		return;
+	}
+
+	*nfd = *fd;
+	nfd->fd_head = nfd->fd_next = (struct entry *)NULL;
+
+	if(nfd->fd_type == FD_DIR){
+		if(!get_parent(mt, dp, &nfd->fd_dir, &dor)){
+			return;
+		}
+		nfd->fd_dir = dor.diropres_u.diropres.file;
+		nfd->fd_dir_fid = dor.diropres_u.diropres.attributes.fileid;
+	} else {
+		nfd->fd_type = FD_DIR; 	/* Already had parent in fd_dir */
+	}
+
+	nfd->fd_lock.fl_Key = nfd->fd_dir_fid;
+	dp->dp_Res1 = dtob(nfd);
+	mt->mt_nlocks++;
+}
+
+
+/*
+**	nfs_delete (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock that Arg2 is relative to
+**	dp->dp_Arg2	BSTR	Name of object to delete (relative to Arg1)
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+
+void nfs_delete(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd;
+	char name[NFS_MAXNAMLEN];
+	int opc, status, cnt;
+	struct diropargs di;
+	struct diropres dor;
+	enum clnt_stat err;
+	bool_t nfs_status;
+	struct fdata nfd;
+
+	CHECKLOCK(fd, dp);
+
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), &nfd, name);
+	if(status != ALLFOUND){
+		return;
+	}
+
+	cnt = *btod(dp->dp_Arg2, unsigned char *);
+	if (cnt == 0) {
+		dp->dp_Res2 = ERROR_OBJECT_NOT_FOUND;
+		return;
+	}
+
+	di.name = name;
+	if(nfd.fd_type == FD_DIR){
+		opc = NFSPROC_RMDIR;
+		if(nfd.fd_dir_fid != mt->mt_lock.fd_dir_fid){ /* root */
+			if(!get_parent(mt, dp, &nfd.fd_dir, &dor)){
+				return;
+			}
+		}
+		di.dir = dor.diropres_u.diropres.file;
+	} else {
+		opc = NFSPROC_REMOVE;
+		di.dir = nfd.fd_dir;
+	}
+
+	err = nfs_call(mt, opc, xdr_diropargs, &di, xdr_enum, &nfs_status);
+	if(err != RPC_SUCCESS || nfs_status != NFS_OK){
+		dp->dp_Res2 = nfs_status==NFSERR_PERM ?
+				ERROR_DELETE_PROTECTED:fh_status(err, nfs_status);
+		return;
+	}
+
+	dp->dp_Res1 = DOS_TRUE;
+	dp->dp_Res2 = 0;
+}
+
+/*
+**	nfs_createdir(mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock that Arg2 is relative to
+**	dp->dp_Arg2	BSTR	Name of new directory (relative to Arg1)
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+
+void
+nfs_createdir(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *nfd, *fd;
+	char name[NFS_MAXNAMLEN];
+	struct createargs ca;
+	struct diropres dor;
+	enum clnt_stat err;
+	int status;
+	long mask;
+
+	CHECKLOCK(fd, dp);
+
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC);
+	if(nfd == (struct fdata *)0){
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+		return;
+	}
+
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), nfd, name);
+	if(status != LASTNOT){
+		FreeMem(nfd, sizeof(*nfd));
+		return; 	/* Error code already set by ptofh */
+	}
+
+	if(name != (char *)NULL && nfd->fd_type == FD_DIR){
+		ca.where.name = name;
+		ca.where.dir = nfd->fd_dir;
+
+		mask = getumask();
+
+		ca.attributes.mode = (~mask) & 0777;
+		ca.attributes.mode |= NFSMODE_DIR;
+
+		ca.attributes.uid = getuid();
+		ca.attributes.gid = getgid();
+		ca.attributes.size = 512;
+		ca.attributes.atime.seconds = -1;
+		ca.attributes.atime.useconds = -1;
+		ca.attributes.mtime.seconds = -1;
+		ca.attributes.mtime.useconds = -1;
+		err = nfs_call(mt, NFSPROC_MKDIR, xdr_createargs, &ca,
+						  xdr_diropres, &dor);
+		if(err != RPC_SUCCESS || dor.status != NFS_OK){
+			FreeMem(nfd, sizeof(*nfd));
+			dp->dp_Res2 = fh_status(err, dor.status);
+			return;
+		}
+
+
+		nfd->fd_lock = fd->fd_lock;
+		nfd->fd_dir = dor.diropres_u.diropres.file;
+		nfd->fd_dir_fid = dor.diropres_u.diropres.attributes.fileid;
+		nfd->fd_type = FD_DIR;
+		dp->dp_Res1 = dtob(nfd);
+		dp->dp_Res2 = 0;
+		mt->mt_nlocks++;
+
+	} else {
+		dp->dp_Res2 = ERROR_INVALID_COMPONENT_NAME;
+	}
+}
+
+/*
+**	nfs_locate (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock on directory that Arg2 is relative to
+**	dp->dp_Arg2	BSTR	Name or path of object to lock (relative to Arg1)
+**	dp->dp_Arg3	LONG	Mode: ACCESS_READ/SHARED_LOCK, ACCESS_WRITE/EXCLUSIVE_LOCK
+**
+**	dp->dp_Res1	BPTR	Lock on requested object or 0 if failure
+**	dp->dp_Res2	CODE	Failure code if Res1 == 0
+**
+*/
+
+void
+nfs_locate(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *nfd, *fd;
+	char name[NFS_MAXNAMLEN];
+	int status;
+
+	CHECKLOCK(fd, dp);
+
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC);
+	if(nfd == (struct fdata *)0){
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+		return;
+	}
+
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), nfd, name);
+	if(nfd->fd_type==FD_LINK) {
+		dp->dp_Res2 = ERROR_IS_SOFT_LINK;
+		goto bad_locate;
+	}
+
+	if(status != ALLFOUND){
+bad_locate:	FreeMem(nfd, sizeof(*nfd));
+		return;
+	}
+
+	nfd->fd_lock = mt->mt_lock.fd_lock;
+	nfd->fd_lock.fl_Key = nfd->fd_dir_fid;
+	nfd->fd_magic = FD_MAGIC;
+	mt->mt_nlocks++;
+
+	dp->dp_Res1 = dtob(nfd);
+	dp->dp_Res2 = 0;
+}
+
+/*
+**	nfs_copydir (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock (or FileHandle) to duplicate
+**
+**	dp->dp_Res1	BPTR	Duplicated lock or 0 if failure
+**	dp->dp_Res2	CODE	Failure code if Res1 == 0
+**
+**	This function makes a duplicate lock from a lock or filehandle
+*/
+
+void
+nfs_copydir(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd, *nfd;
+
+	if(dp->dp_Arg1 == 0){	/* CopyDir of root = root */
+		return;
+	}
+
+	if( dp->dp_Type == ACTION_COPY_DIR_FH ) { /* FileHandle */
+		fd = (struct fdata *)dp->dp_Arg1;
+		if(fd==0 || (((u_long)fd)&1) || fd->fd_magic != FD_MAGIC){
+			dp->dp_Res2 = ERROR_INVALID_LOCK;
+			return;
+		}
+	} else  /* Lock */
+		CHECKLOCK(fd, dp);
+
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC);
+	if(nfd == (struct fdata *)0){
+		dp->dp_Res2 = ERROR_NO_FREE_STORE;
+		return;
+	}
+
+	*nfd = *fd;
+	nfd->fd_head = nfd->fd_next = (struct entry *)NULL;
+	mt->mt_nlocks++;
+	dp->dp_Res1 = dtob(nfd);
+}
+
+/*
+**	nfs_freelock (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock to free
+**
+**	dp->dp_Res1	BOOL	DOS_TRUE
+**
+*/
+
+void
+nfs_freelock(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd;
+
+	dp->dp_Res1 = DOS_TRUE;
+	if(dp->dp_Arg1 == 0){
+		return;
+	}
+
+	CHECKLOCK(fd, dp);
+
+	mt->mt_nlocks--;
+	fd->fd_magic = 0;	/* firewall */
+	if(fd->fd_head){
+		xdr_free(xdr_my_entry_list, &fd->fd_head);
+		fd->fd_head = fd->fd_next = (struct entry *)NULL;
+	}
+
+	FreeMem(fd, sizeof(*fd));
+}
+
+/*
+**	nfs_setprotect (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	unused
+**	dp->dp_Arg2	BPTR	Lock to which Arg3 is relative
+**	dp->dp_Arg3	BSTR	Name of object (relative to Arg2)
+**	dp->dp_Arg4	LONG	Mask of new protection bits
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+void
+nfs_setprotect(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd, tfd;
+	char name[NFS_MAXNAMLEN];
+	struct sattrargs saa;
+	enum clnt_stat err;
+	struct attrstat fa;
+	int status;
+
+	fd = dp->dp_Arg2==0 ? &mt->mt_lock: btod(dp->dp_Arg2, struct fdata *);
+	if(fd->fd_magic != FD_MAGIC){
+		dp->dp_Res2 = ERROR_INVALID_LOCK;
+		return;
+	}
+
+	if(fd->fd_type != FD_DIR){
+		dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		return;
+	}
+
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg3, char *), &tfd, name);
+	if(status != ALLFOUND){
+		return;
+	}
+
+	if(tfd.fd_type == FD_FILE){
+		saa.file = tfd.fd_file;
+	} else {
+		saa.file = tfd.fd_dir;
+	}
+
+	err = nfs_call(mt, NFSPROC_GETATTR,xdr_nfs_fh, &saa.file,
+						xdr_attrstat, &fa);
+	if(err != RPC_SUCCESS || fa.status != NFS_OK){
+		dp->dp_Res2 = fh_status(err, fa.status);
+		return;
+	}
+
+	saa.attributes.uid = -1;
+	saa.attributes.gid = -1;
+	saa.attributes.size = -1;
+	saa.attributes.atime.seconds = -1;
+	saa.attributes.atime.useconds = -1;
+	saa.attributes.mtime.seconds = -1;
+	saa.attributes.mtime.useconds = -1;
+
+	if(dp->dp_Type == ACTION_SET_PROTECT){
+		saa.attributes.mode = perm_amiga_to_unix(dp->dp_Arg4);
+		saa.attributes.mode |= fa.attrstat_u.attributes.mode & ~07777;
+	} else {
+		saa.attributes.mode = (fa.attrstat_u.attributes.mode & ~07777)| (dp->dp_Arg4 & 07777);
+	}
+
+	err = nfs_call(mt, NFSPROC_SETATTR,	xdr_sattrargs, &saa,
+						xdr_attrstat, &fa);
+	if(err != RPC_SUCCESS || fa.status != NFS_OK){
+		dp->dp_Res2 = fh_status(err, fa.status);
+	} else {
+		dp->dp_Res1 = DOS_TRUE; dp->dp_Res2 = 0;
+	}
+}
+
+/*
+**	nfs_rename (mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock that Arg2 is relative to
+**	dp->dp_Arg2	BSTR	Name of object to rename (relative to Arg1)
+**	dp->dp_Arg3	BPTR	Lock on target directory
+**	dp->dp_Arg4	BSTR	Requested new name for object
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+void
+nfs_rename(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	char tname[NFS_MAXNAMLEN], fname[NFS_MAXNAMLEN];
+	struct fdata *ffd, ffdb, *tfd, tfdb;
+	int status, nfs_status;
+	struct renameargs rna;
+	struct diropres dor;
+
+	CHECKLOCK(ffd, dp);
+
+	tfd = dp->dp_Arg3==0 ? &mt->mt_lock: btod(dp->dp_Arg3, struct fdata *);
+	if(tfd->fd_magic!=FD_MAGIC){
+		dp->dp_Res2 = ERROR_INVALID_LOCK;
+		return;
+	}
+
+   	status = ptofh(mt, dp, ffd, btod(dp->dp_Arg2, char *), &ffdb, fname);
+	if(status != ALLFOUND){
+		return;
+	}
+
+	status = ptofh(mt, dp, tfd, btod(dp->dp_Arg4, char *), &tfdb, tname);
+	if(status != LASTNOT){
+		return;
+	}
+
+	if(tfdb.fd_type != FD_DIR){
+		dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		return;
+	}
+
+	if(ffdb.fd_type == FD_DIR){	/* must lookup parent of from dir */
+		if(!get_parent(mt, dp, &ffdb.fd_dir, &dor)){
+			return;
+		}
+		rna.from.dir = dor.diropres_u.diropres.file;
+	} else {
+		rna.from.dir = ffdb.fd_dir;
+	}
+
+	rna.from.name = fname;
+	rna.to.name = tname;
+	rna.to.dir = tfdb.fd_dir;
+	status = nfs_call(mt, NFSPROC_RENAME, 	xdr_renameargs, &rna,
+					      	xdr_enum, &nfs_status);
+	if(status != RPC_SUCCESS || nfs_status != NFS_OK){
+		dp->dp_Res2 = fh_status(status, nfs_status);
+	} else {
+		dp->dp_Res1 = DOS_TRUE;
+		dp->dp_Res2 = 0;
+	}
+}
+
+
+/*
+**	nfs_readlink(mount_pt mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock on directory that Arg2 is relative to
+**	dp->dp_Arg2	CPTR	Path and name of link relative to Arg1
+**	dp->dp_Arg3	APTR	Buffer for new path string
+**	dp->dp_Arg4	LONG	Size of buffer in bytes
+**
+**	dp->dp_Res1	LONG	Actual length of returned string
+**				-2 not enough space in buffer
+**				-1 other error
+**	dp->dp_Res2	CODE	Failure code
+**
+*/
+
+
+void
+nfs_readlink(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata nfd, *fd;
+	char name[NFS_MAXNAMLEN];
+
+	CHECKLOCK(fd, dp);
+
+
+	(void)ptofh(mt, dp, fd, dp->dp_Arg2, &nfd, name);
+}
+
+/*
+**	nfs_makelink(mount_pt *mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock on directory that Arg2 is relative to
+**	dp->dp_Arg2	BSTR	Name of link to be created (relative to Arg1)
+**	dp->dp_Arg3	CSTR	Target name
+**	dp->dp_Arg4	LONG	Mode of link (must be LINK_SOFT)
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+
+void
+nfs_makelink(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd, nfd;
+	char name[NFS_MAXNAMLEN];
+	struct symlinkargs sla;
+	enum clnt_stat err;
+	int status;
+        bool_t nfs_status;
+
+	/* if it's not a soft link then go away */
+	if(dp->dp_Arg4 != LINK_SOFT) {
+		dp->dp_Res2 = ERROR_NOT_IMPLEMENTED;
+		return;
+	}
+
+	CHECKLOCK(fd,dp);
+
+	/* check to see if Arg1 was really a directory lock */
+	if(fd->fd_type != FD_DIR){
+		dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		return;
+	}
+
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), &nfd, name);
+	if(status != LASTNOT){
+// KPrintF("expected LASTNOT\n");
+	/* set error codes here */
+		return;
+	}
+
+	sla.from.dir = nfd.fd_dir;
+	sla.from.name = name;
+        sla.to = dp->dp_Arg3;
+// KPrintF("Creating a link from %s to %s\n",name,sla.to);
+
+	/* attributes are ignored by Unix servers */
+
+	sla.attributes.mode = (~getumask()) & 0777;
+	sla.attributes.mode |= NFSMODE_LNK;
+	sla.attributes.uid = geteuid();
+	sla.attributes.gid = getegid();
+
+	err = nfs_call(mt, NFSPROC_SYMLINK, xdr_symlinkargs, &sla, xdr_enum, &nfs_status);
+
+	if(err != RPC_SUCCESS || nfs_status != NFS_OK){
+		dp->dp_Res2 = fh_status(err, nfs_status);
+		return;
+	}
+	dp->dp_Res1 = DOSTRUE;
+
+}
+
+
+/*
+**	nfs_fh_from_lk(mount_pt *mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	BPTR to FileHandle
+**	dp->dp_Arg2	BPTR	Lock on file to open
+**
+**	dp->dp_Res1	BOOL	Success/Failure (DOSTRUE/DOSFALSE)
+**	dp->dp_Res2	CODE	Failure code if Res1 is DOSFALSE
+**
+*/
+
+
+void
+nfs_fh_from_lk(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd;
+	struct FileHandle *fh;
+
+	/* if lock is NULL, then return error */
+	if( dp->dp_Arg2 == 0 ) {
+		dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		return;
+	}
+
+	fd = btod(dp->dp_Arg2, struct fdata *);
+
+	/* check for valid lock */
+	if( fd->fd_magic != FD_MAGIC ) {
+		dp->dp_Res2 = ERROR_INVALID_LOCK;
+		return;
+	}
+
+	/* can't return a FileHandle if our lock isn't a file */
+	if(fd->fd_type != FD_FILE){
+		dp->dp_Res2 = ERROR_OBJECT_WRONG_TYPE;
+		return;
+	}
+
+	/* looks like a real lock, so convert it to a filehandle */
+	/* this is easy for us because they are really the same structure */
+	fd->fd_pos = 0;
+	fh = btod(dp->dp_Arg1, struct FileHandle *);
+	fh->fh_Arg1 = (LONG)fd;
+	dp->dp_Res1 = DOSTRUE;
+}
+
+
+/*
+**	nfs_same_lock(mount_pt *mt, struct DosPacket *dp)
+**
+**	dp->dp_Arg1	BPTR	Lock 1
+**	dp->dp_Arg2	BPTR	Lock 2
+**
+**	dp->dp_Res1	BOOL	DOSTRUE if same, DOSFALSE if different
+**	dp->dp_Res2	CODE	Failure code if Res1 is LOCK_DIFFERENT(-1)
+**
+*/
+
+
+void
+nfs_same_lock(mt, dp)
+	struct mount_pt  *mt;
+	register struct DosPacket *dp;
+{
+	register struct fdata *fd1, *fd2;
+	struct nfs_fh *fh1, *fh2;
+
+	fd1 = dp->dp_Arg1==0 ? &mt->mt_lock : btod(dp->dp_Arg1,struct fdata *);
+	fd2 = dp->dp_Arg2==0 ? &mt->mt_lock : btod(dp->dp_Arg2,struct fdata *);
+	if( fd1->fd_magic != FD_MAGIC || fd2->fd_magic != FD_MAGIC ) {
+		dp->dp_Res1 = DOSFALSE;
+		return;
+	}
+
+	if( fd1->fd_type == FD_FILE )
+		fh1 = &fd1->fd_file;
+	else
+		fh1 = &fd1->fd_dir;
+
+	if( fd2->fd_type == FD_FILE )
+		fh2 = &fd2->fd_file;
+	else
+		fh2 = &fd2->fd_dir;
+
+	if( memcmp(fh1, fh2, sizeof(nfs_fh)) ) {
+		dp->dp_Res1 = DOSFALSE;
+		return;
+	} else 
+		dp->dp_Res1 = DOSTRUE;
+
+}
+
+
+enum clnt_stat
+nfs_call(mt, proc, inproc, in, outproc, out)
+	struct mount_pt *mt;
+{
+	(mt)->mt_nstat.ns_nstat[proc]++;
+	return clnt_call((mt)->mt_host, proc, inproc, in, outproc, out, 0L);
+}
+@
+
+
+1.3
+log
+@changed geteuid() calls to getuid()
+works with shared library
+@
+text
+@d1 1
+a1 1
+/* -----------------------------------------------------------------------
+d4 1
+a4 1
+ * $Locker: martin $
+d6 1
+a6 1
+ * $Id: lk.c,v 1.2 91/05/22 13:27:20 martin Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 1.2 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/lk.c,v 1.2 91/05/22 13:27:20 martin Exp Locker: martin $
+d34 1
+d72 2
+d79 3
+d92 8
+a99 1
+	CHECKLOCK(fd, dp);
+d326 1
+a326 1
+**	dp->dp_Arg1	BPTR	Lock to duplicate
+d331 1
+d345 8
+a352 1
+	CHECKLOCK(fd, dp);
+d578 1
+a578 1
+**	nfs_makelink(mount_pt mt, struct DosPacket *dp)
+d643 95
+@
+
+
+1.2
+log
+@added SYMLINK support
+cleaned up code
+recompiled with SAS 5.10
+added comments
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: lk.c,v 1.1 90/11/12 15:51:12 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/nfsc/RCS/lk.c,v 1.1 90/11/12 15:51:12 bj Exp $
+d31 1
+a31 13
+ */ 
+
+#include <exec/types.h>
+#include <exec/memory.h> 
+#include <libraries/dos.h> 
+#include <libraries/dosextens.h> 
+#include <devices/timer.h> 
+ 
+#include <rpc/rpc.h> 
+#include <rpc/xdr.h>
+#include <nfs/nfs.h>
+#include <nfs/perm.h>
+#include <action.h>
+a34 26
+#ifdef LATTICE
+#include <proto/exec.h>
+#endif
+
+
+/* global functions */
+bool_t get_parent  (struct mount_pt *mt, register struct DosPacket *dp, nfs_fh *dirp, struct diropres *dorp);
+void nfs_parentdir (struct mount_pt *mt, struct DosPacket *dp); 
+void nfs_delete    (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_createdir (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_locate    (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_copydir   (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_freelock  (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_setprotect(struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_rename    (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_readlink  (struct mount_pt *mt, register struct DosPacket *dp); 
+void nfs_makelink  (struct mount_pt *mt, register struct DosPacket *dp); 
+enum clnt_stat nfs_call();
+
+
+/* local functions */
+
+/* external functions */
+bool_t xdr_my_entry_list(XDR *xdrs, struct entry **objp);
+
+
+d42 2
+a43 2
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+d47 1
+a47 1
+	struct diropargs di; 
+d52 1
+a52 1
+	err = nfs_call(mt, NFSPROC_LOOKUP,xdr_diropargs, &di, xdr_diropres, dorp); 
+d54 1
+a54 1
+		dp->dp_Res2 = fh_status(err, dorp->status); 
+d61 1
+a61 1
+/* 
+d77 9
+a85 9
+ 
+void 
+nfs_parentdir(mt, dp) 
+	struct mount_pt  *mt; 
+	struct DosPacket *dp; 
+{ 
+	register struct fdata *fd, *nfd; 
+	struct diropres dor; 
+ 
+d96 5
+a100 5
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC); 
+	if(nfd == (struct fdata *)0){ 
+		dp->dp_Res2 = ERROR_NO_FREE_STORE; 
+		return; 
+	} 
+d109 1
+a109 1
+		nfd->fd_dir = dor.diropres_u.diropres.file; 
+d116 1
+a116 1
+	dp->dp_Res1 = dtob(nfd); 
+d118 1
+a118 2
+} 
+ 
+d120 1
+d133 5
+a137 5
+void nfs_delete(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata *fd; 
+d139 2
+a140 2
+	int opc, status, cnt; 
+	struct diropargs di; 
+d143 2
+a144 2
+	bool_t nfs_status; 
+	struct fdata nfd; 
+d148 1
+a148 1
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), &nfd, name); 
+d150 1
+a150 1
+		return; 
+d160 2
+a161 2
+	if(nfd.fd_type == FD_DIR){ 
+		opc = NFSPROC_RMDIR; 
+d169 2
+a170 2
+		opc = NFSPROC_REMOVE; 
+		di.dir = nfd.fd_dir; 
+d173 6
+a178 6
+	err = nfs_call(mt, opc, xdr_diropargs, &di, xdr_enum, &nfs_status); 
+	if(err != RPC_SUCCESS || nfs_status != NFS_OK){ 
+		dp->dp_Res2 = nfs_status==NFSERR_PERM ? 
+				ERROR_DELETE_PROTECTED:fh_status(err, nfs_status); 
+		return; 
+	} 
+d182 2
+a183 2
+} 
+ 
+d196 11
+a206 11
+void 
+nfs_createdir(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata *nfd, *fd; 
+	char name[NFS_MAXNAMLEN]; 
+	struct createargs ca; 
+	struct diropres dor; 
+	enum clnt_stat err; 
+	int status; 
+d208 1
+a208 1
+ 
+d211 5
+a215 5
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC); 
+	if(nfd == (struct fdata *)0){ 
+		dp->dp_Res2 = ERROR_NO_FREE_STORE; 
+		return; 
+	} 
+d217 3
+a219 3
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), nfd, name); 
+	if(status != LASTNOT){ 
+		FreeMem(nfd, sizeof(*nfd)); 
+d221 1
+a221 1
+	} 
+d223 3
+a225 3
+	if(name != (char *)NULL && nfd->fd_type == FD_DIR){ 
+		ca.where.name = name; 
+		ca.where.dir = nfd->fd_dir; 
+d230 1
+a230 1
+		ca.attributes.mode |= NFSMODE_DIR; 
+d232 2
+a233 2
+		ca.attributes.uid = geteuid();
+		ca.attributes.gid = getegid();
+d235 11
+a245 11
+		ca.attributes.atime.seconds = -1; 
+		ca.attributes.atime.useconds = -1; 
+		ca.attributes.mtime.seconds = -1; 
+		ca.attributes.mtime.useconds = -1; 
+		err = nfs_call(mt, NFSPROC_MKDIR, xdr_createargs, &ca, 
+						  xdr_diropres, &dor); 
+		if(err != RPC_SUCCESS || dor.status != NFS_OK){ 
+			FreeMem(nfd, sizeof(*nfd)); 
+			dp->dp_Res2 = fh_status(err, dor.status); 
+			return; 
+		} 
+d248 2
+a249 2
+		nfd->fd_lock = fd->fd_lock; 
+		nfd->fd_dir = dor.diropres_u.diropres.file; 
+d251 3
+a253 3
+		nfd->fd_type = FD_DIR; 
+		dp->dp_Res1 = dtob(nfd); 
+		dp->dp_Res2 = 0; 
+d256 5
+a260 5
+	} else { 
+		dp->dp_Res2 = ERROR_INVALID_COMPONENT_NAME; 
+	} 
+} 
+ 
+d274 15
+a288 15
+nfs_locate(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata *nfd, *fd; 
+	char name[NFS_MAXNAMLEN]; 
+	int status; 
+	 
+	CHECKLOCK(fd, dp);
+
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC); 
+	if(nfd == (struct fdata *)0){ 
+		dp->dp_Res2 = ERROR_NO_FREE_STORE; 
+		return; 
+	} 
+d292 1
+a292 1
+		dp->dp_Res2 = ERROR_IS_SOFT_LINK; 
+d295 1
+a295 1
+ 
+d297 3
+a299 3
+bad_locate:	FreeMem(nfd, sizeof(*nfd)); 
+		return; 
+	} 
+d303 1
+a303 1
+	nfd->fd_magic = FD_MAGIC; 
+d306 4
+a309 4
+	dp->dp_Res1 = dtob(nfd); 
+	dp->dp_Res2 = 0; 
+} 
+ 
+d320 7
+a326 7
+void 
+nfs_copydir(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata *fd, *nfd; 
+ 
+d333 1
+a333 1
+	nfd = (struct fdata *)AllocMem(sizeof(*nfd), MEMF_CLEAR|MEMF_PUBLIC); 
+d343 2
+a344 2
+} 
+ 
+d354 8
+a361 8
+void 
+nfs_freelock(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata *fd; 
+ 
+	dp->dp_Res1 = DOS_TRUE; 
+d363 2
+a364 2
+		return; 
+	} 
+d369 1
+a369 1
+	fd->fd_magic = 0;	/* firewall */ 
+d375 2
+a376 2
+	FreeMem(fd, sizeof(*fd)); 
+} 
+d390 6
+a395 6
+ 
+void 
+nfs_setprotect(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+d414 1
+a414 1
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg3, char *), &tfd, name); 
+d416 1
+a416 1
+		return; 
+d425 4
+a428 4
+	err = nfs_call(mt, NFSPROC_GETATTR,xdr_nfs_fh, &saa.file, 
+						xdr_attrstat, &fa); 
+	if(err != RPC_SUCCESS || fa.status != NFS_OK){ 
+		dp->dp_Res2 = fh_status(err, fa.status); 
+d447 4
+a450 4
+	err = nfs_call(mt, NFSPROC_SETATTR,	xdr_sattrargs, &saa, 
+						xdr_attrstat, &fa); 
+	if(err != RPC_SUCCESS || fa.status != NFS_OK){ 
+		dp->dp_Res2 = fh_status(err, fa.status); 
+d454 1
+a454 1
+} 
+d468 6
+a473 6
+ 
+void 
+nfs_rename(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+d479 1
+a479 1
+	
+d488 1
+a488 1
+   	status = ptofh(mt, dp, ffd, btod(dp->dp_Arg2, char *), &ffdb, fname); 
+d490 1
+a490 1
+		return; 
+d493 1
+a493 1
+	status = ptofh(mt, dp, tfd, btod(dp->dp_Arg4, char *), &tfdb, tname); 
+d495 1
+a495 1
+		return; 
+d515 2
+a516 2
+	status = nfs_call(mt, NFSPROC_RENAME, 	xdr_renameargs, &rna, 
+					      	xdr_enum, &nfs_status); 
+d518 1
+a518 1
+		dp->dp_Res2 = fh_status(status, nfs_status); 
+d523 1
+a523 1
+} 
+d543 9
+a551 9
+nfs_readlink(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+	register struct fdata nfd, *fd; 
+	char name[NFS_MAXNAMLEN]; 
+	 
+	CHECKLOCK(fd, dp);
+
+d553 2
+a554 2
+	(void)ptofh(mt, dp, fd, dp->dp_Arg2, &nfd, name); 
+} 
+d571 4
+a574 4
+nfs_makelink(mt, dp) 
+	struct mount_pt  *mt; 
+	register struct DosPacket *dp; 
+{ 
+d596 1
+a596 1
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), &nfd, name); 
+d600 1
+a600 1
+		return; 
+d609 1
+a609 1
+	
+d618 1
+a618 1
+		dp->dp_Res2 = fh_status(err, nfs_status); 
+d623 1
+a623 2
+} 
+
+a624 1
+#include <nfs/clmsg.h>
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+ * lk.c  nfsc  manx36
+d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d29 2
+a45 1
+#include "nfs_defs.h"
+d51 22
+a74 3
+extern bool_t xdr_my_entry_list();
+extern void *AllocMem();
+
+d90 1
+a90 2
+	err = nfs_call(mt, NFSPROC_LOOKUP, 	xdr_diropargs, &di, 
+						xdr_diropres, dorp); 
+a99 2
+ * ParentDir(Lock: BPTR): BPTR; 
+ *
+d104 12
+a115 1
+ */ 
+a125 6
+/*    kprintf("Now in nfs_parentdir()\n");
+    if (fd->fd_type==FD_DIR)
+        kprintf("Dir = %ld\n",fd->fd_dir_fid);
+    else
+        kprintf("File = %ld\n",fd->fd_file_fid);
+*/
+a130 1
+/*		kprintf("Returning NULL\n");  */
+a144 1
+/*		    kprintf("couldn't get parent\n"); */
+d158 13
+a170 5
+/* 
+ * Delete(Lock: BPTR;  Name: BSTR): BOOLEAN; 
+ * 
+ * Delete object relative to lock.  Pretty simple, all in all. 
+ */ 
+d222 12
+a233 3
+/* 
+ * CreateDir(Lock: BPTR;  Name: BSTR): Lock; 
+ */ 
+d267 1
+a267 3
+		ca.attributes.mode = (~mask) & NFS_INITIALD;
+
+		ca.attributes.mode &= 0777;
+d292 1
+a292 3
+		mt->mt_nlocks += 1;
+
+/*        kprintf("Created Directory.  id = %ld\n",fd->fd_dir_fid); */
+d299 12
+a310 3
+/* 
+ * Locate(Lock: BPTR;  Name: BSTR;  Mode: LONG): Lock; 
+ */ 
+d328 8
+a335 3
+	status = ptofh(mt, dp, fd, btod(dp->dp_Arg2, char *), nfd, name); 
+	if(status != ALLFOUND){ 
+		FreeMem(nfd, sizeof(*nfd)); 
+d342 1
+a342 1
+	mt->mt_nlocks += 1;
+d348 10
+a357 3
+/* 
+ * CopyDir(Lock: BPTR): BPTR; 
+ */ 
+d365 1
+a365 1
+	if(dp->dp_Arg1 == 0){	/* CopyDir of root = root pg 3-13 */
+d379 1
+a379 1
+	mt->mt_nlocks += 1;
+d383 9
+a391 3
+/* 
+ * FreeLock(Lock: BPTR): BOOLEAN;  
+ */ 
+d415 13
+a428 7
+/* 
+ * SetProtect(Arg1: NU;  Lock: BPTR;  Name: BSTR;  Mask: LONG): BOOLEAN; 
+ * ExSetProtect(Arg1: NU;  Lock: BPTR;  Name: BSTR;  Mask: LONG): BOOLEAN; 
+ *
+ * SetProtect applies to owner bits only.
+ * ExSetProtect takes full unix mode word.
+ */ 
+d493 13
+a506 3
+/* 
+ * Rename(Lock: BPTR;  Name: BSTR;  Lock: BPTR;  Name: BSTR): BOOLEAN; 
+ */ 
+d562 101
+@

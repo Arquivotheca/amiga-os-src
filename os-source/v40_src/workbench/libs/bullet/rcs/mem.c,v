@@ -1,0 +1,925 @@
+head     7.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+7.0
+date     91.03.19.18.37.04;  author kodiak;  state Exp;
+branches ;
+next     6.0;
+
+6.0
+date     91.03.18.15.27.52;  author kodiak;  state Exp;
+branches ;
+next     3.1;
+
+3.1
+date     91.02.07.15.40.19;  author kodiak;  state Exp;
+branches ;
+next     3.0;
+
+3.0
+date     90.11.09.17.11.40;  author kodiak;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     90.10.10.04.17.14;  author kodiak;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.10.10.03.12.25;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+7.0
+log
+@after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+@
+text
+@/*
+**	$Id: mem.c,v 6.0 91/03/18 15:27:52 kodiak Exp Locker: kodiak $
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	$Log:	mem.c,v $
+ * Revision 6.0  91/03/18  15:27:52  kodiak
+ * folded in Bullet 1.30
+ * 
+ * Revision 3.1  91/02/07  15:40:19  kodiak
+ * Kodiak Phase 1 Final Release
+ * 
+ * Revision 3.0  90/11/09  17:11:40  kodiak
+ * Kodiak's Alpha 1
+ * 
+*/
+/*  mem.c  */
+/* Copyright (C) Agfa Compugraphic, 1989, 1990. All rights reserved. */
+/* History
+ *    05-May-90  awr   Character buffer is fixed size- allocated once
+ *    22-Jul-90  awr   added caller id parameter to CGIFmove_block()
+ *                     for consistency.
+ *    20-Nov-90  dET   CGIFdefund() added #if CACHE
+ *    04-Dec-90  jfd   Moved "include" statement for  "cgconfig.h" to line
+ *                     following "port.h"
+ *
+ */
+
+#include <exec/types.h>
+#include <exec/libraries.h>
+#include <clib/exec_protos.h>
+#include <pragmas/exec_pragmas.h>
+
+extern struct Library *SysBase;
+
+#include "port.h"
+#include "cgconfig.h"
+#include "debug.h"
+
+/*----------------*/
+/*  MemAlloc      */
+/*----------------*/
+GLOBAL void *
+MemAlloc(size)
+    UWORD size;
+{
+    void *result;
+
+    result = AllocVec(size, 0);
+
+    DBG2("MemAlloc(%ld): $%lx\n", size, result);
+
+    return(result);
+}
+
+
+
+/*----------------*/
+/*  MemFree       */
+/*----------------*/
+GLOBAL void
+MemFree(m)
+void *m;
+{
+    DBG1("MemFree($%lx)\n", m);
+
+    FreeVec(m);
+}
+@
+
+
+6.0
+log
+@folded in Bullet 1.30
+@
+text
+@d2 1
+a2 1
+**	$Id: mem.c,v 3.1 91/02/07 15:40:19 kodiak Exp $
+d8 3
+a23 2
+ *    29-Jul-90  awr   changed conditional compile on MEMstat() from DEBUG
+ *                     to MEM_TRACE
+d30 7
+a39 3
+#include "cgif.h"
+#include "cache.h"
+#include "ix.h"
+a40 79
+#define MEM_TRACE    0      /* set to 1 to trace MEMalloc() & MEMfree() */
+
+#define NP           2      /* number of memory pools */
+#define NH           9      /* number of handles */
+#define FRAG_MIN    64
+
+
+#ifdef DEBUG
+EXTERN VOID MEMstat();
+#endif
+
+
+#define OFFBITS  16
+#define OFF(x)   (x & 0xffff)
+#define PAGE(x)  (UWORD)(x >> OFFBITS)
+
+#if CACHE
+EXTERN HIFFONT    hfontCur;           /* handle of current FONT         */
+EXTERN FONT      *pfontCur;           /* ptr to current FONT            */
+EXTERN MEM_HANDLE hBMlru;
+EXTERN MEM_HANDLE hFNTlru;
+EXTERN VOID       BMfree();
+EXTERN VOID       FNTfree();
+#endif
+
+/* maker.c */
+EXTERN LONG       if_init_face;
+
+/* fm.c */
+EXTERN MEM_HANDLE hchar_buf;
+
+/* ix.c */
+EXTERN MEM_HANDLE hfi;                 /* Font Index */
+EXTERN MEM_HANDLE hss_directory;       /* directory of symbol set file  */
+EXTERN MEM_HANDLE hBUCKlru;
+EXTERN UWORD      init_font_index();
+EXTERN UWORD      init_symbol_set();
+EXTERN VOID       BUCKfree();
+
+/* fc.c     */
+EXTERN VOID     FCcopy_fc();
+
+
+typedef struct
+{
+    ULONG       size;    /* size of free block */
+    MEM_HANDLE  next;    /* next free block */
+} MEMHEAD;
+
+MLOCAL MEM_HANDLE avail[NP];    /* circular linked list of free mem blocks */
+
+typedef struct
+{
+    MEMHEAD  nullblock[NP];    /* empty mem blocks for initialization      */
+#if CACHE
+    DLL BMlru;
+    DLL FNTlru;
+#endif
+    DLL BUCKlru;
+} PAGE0;
+
+MLOCAL PAGE0 page0;
+
+GLOBAL ULONG   mem_fund[NP];    /* Total memory managed by this module     */
+GLOBAL ULONG   mem_avail[NP];   /* Available memory in free list           */
+
+typedef struct
+{
+    UWORD   pool;        /* memory pool that block belongs to */
+    ULONG   size;        /*  size of block given to us thru CGIFfund() */
+    BYTE   *ptr;         /* current address of this block */
+#if MULTICALLER
+    UWORD   id;          /* ID of calling process returned by CGIFinit() */
+#endif
+} MEM;
+
+MLOCAL MEM mem[NH];
+
+
+d42 1
+a42 1
+/*   MEMptr       */
+d44 2
+a45 109
+/*  Convert a memory handle to a pointer */
+GLOBAL BYTE*
+MEMptr(mem_handle)
+    MEM_HANDLE mem_handle;
+{
+#if 0
+    if ((PAGE(mem_handle) > 1) || (OFF(mem_handle) > 20000)) {
+	long *stack, i;
+	stack = (long *) &mem_handle;
+	kprintf("MEMptr %08lx from...\n", mem_handle);
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+	for (i = 0; i < 8; i++)
+	    kprintf(" $%08lx", *++stack);
+	kprintf("\n");
+    }
+#endif
+
+#ifdef  DEBUG
+    if ((PAGE(mem_handle) > NH) && *((UWORD *) 1));
+#endif
+    DBG2("MEMptr($%lx): $%lx\n", mem_handle,
+	    mem[PAGE(mem_handle)].ptr + OFF(mem_handle));
+    return mem[PAGE(mem_handle)].ptr + OFF(mem_handle);
+}
+
+
+
+
+/*----------------*/
+/*   MEMinit      */
+/*----------------*/
+GLOBAL VOID
+MEMinit()
+{
+    UWORD i, j;
+    MEM  *mp;
+    MEM_HANDLE handle;
+
+    DBG("MEMinit()\n");
+    for(i=0, handle = 0; i<NP; i++, handle += sizeof(MEMHEAD))
+    {
+
+      /* Initialize nullblock. This is the start of a circular linked
+       * list of available memory blocks.
+       */
+
+        page0.nullblock[i].size   = 0L;        /* I'm nothing but overhead */
+        page0.nullblock[i].next   = handle;    /* point to me              */
+
+        avail[i]      = handle;          /* point to nullblock       */
+        mem_avail[i]  = 0L;
+        mem_fund[i]   = 0L;
+    }
+
+#if CACHE
+    hBMlru  = handle;    handle += sizeof(DLL);
+    hFNTlru = handle;    handle += sizeof(DLL);
+#endif
+    hBUCKlru = handle;
+
+  /* Initialize page table. */
+
+    mp = mem;
+
+  /* Set page 0 */
+
+    mp->size = sizeof(PAGE0);
+    mp->ptr  = (BYTE*)&page0;
+       
+  /*  Zero out all other block sizes. A zero block size means
+   *  the handle is not in use.
+   */
+
+    for(j=1; j<NH; j++)
+    {
+        mp++;
+        mp->size = 0L;
+    }
+    DBG("MEMinit done.\n");
+}
+
+
+
+/*----------------*/
+/*  MEMalloc      */
+/*----------------*/
+GLOBAL MEM_HANDLE
+MEMalloc(i, size)
+    UWORD i;
+d48 1
+a48 3
+    MEMHEAD    *prev, *p;
+    MEM_HANDLE hprev, hp;
+    ULONG      frag_size;
+d50 1
+a50 5
+#if MEM_TRACE
+    DBG2("\n\nMEMalloc(%ld, %ld)\n", i, size);
+    DBG("-------before------------\n");
+    MEMstat(i);
+#endif
+d52 1
+a52 1
+  /*  Make room for "size" and round to WORD */
+d54 1
+a54 50
+    size += 5;
+    size &= ~1;
+
+#if MEM_TRACE
+    DBG1("    adjusted size %ld\n", size);
+#endif
+
+  /* First fit search for big enough block */
+
+    hprev = avail[i];
+    prev  = (MEMHEAD*)MEMptr(hprev);
+    hp    = prev->next;
+    p     = (MEMHEAD*)MEMptr(hp);
+    for( ; ; )
+    {
+        if(p->size >= size) break;
+        if(hp == avail[i])
+            return (MEM_HANDLE)0L;
+
+        hprev = hp;
+        prev  = p;
+        hp    = p->next;
+        p     = (MEMHEAD*)MEMptr(hp);
+    }
+
+  /* If p is large enough, cut off the end and return it */
+
+    frag_size = p->size - size;
+
+    if(frag_size >= FRAG_MIN)
+    {
+        p->size = frag_size;                   /* shorten p                */
+        hp = hp + frag_size;                   /* new handle for tail      */
+        p = (MEMHEAD*)((BYTE*)p + frag_size);  /* point p at tail of block */
+        p->size = size;
+    }
+    else
+        prev->next = p->next;                  /* unlink p */
+
+    avail[i] = hprev;
+
+    mem_avail[i] -= p->size;
+
+#if MEM_TRACE
+    DBG("-------after------------\n");
+    MEMstat(i);
+    DBG1("    %lx\n",&p->next);
+#endif
+
+    return hp + 4;    /* skip over "size" */
+a58 1
+
+d60 1
+a60 1
+/*  MEMfree       */
+d62 3
+a64 4
+GLOBAL VOID
+MEMfree(i, hm)
+    UWORD i;
+    MEM_HANDLE hm;
+d66 1
+a66 2
+    MEMHEAD    *p, *prev, *next;
+    MEM_HANDLE  hp, hprev, hnext, t;
+d68 1
+a68 69
+
+#if MEM_TRACE
+    DBG2("MEMfree(%ld, %lx)\n", i, hm);
+    DBG("-------before------------\n");
+    MEMstat(i);
+#endif
+
+    if(!hm) return;
+
+    hp = hm - 4;                                /* back up over "size" */
+    p = (MEMHEAD*)MEMptr(hp);
+
+    mem_avail[i] += p->size;                    /* checkbook deposit       */
+
+
+  /* Find the right place to insert p in avail ring */
+
+    hprev = avail[i];
+    prev  = (MEMHEAD*)MEMptr(hprev);
+    hnext = prev->next;
+    next  = (MEMHEAD*)MEMptr(hnext);
+    while(  !(hprev < hp && hp < hnext)  )  /*  stop when hp is between
+                                             *  hprev and hnext
+                                             */
+    {
+      /*  Also stop when hprev is the largest address and hnext is
+       *  the smallest address and hp is the new largest or the
+       *  new smallest
+       */
+
+        if (hprev >= hnext && (hp > hprev || hp < hnext) ) break;
+        hprev = hnext;
+        prev  = next;
+        hnext = next->next;
+        next  = (MEMHEAD*)MEMptr(hnext);
+    }
+
+  /*  p should now be linked between prev and next. Here we check
+   *  whether any or all of the three blocks need to be merged.
+   */
+
+    t = hp + p->size;             /* handle of block just after p     */
+    if(t == hnext && PAGE(hp) == PAGE(hnext))
+    {
+      /* merge p and next */
+
+        p->size += next->size;
+        p->next  = next->next;
+    }
+    else
+        p->next = hnext;   /* link p before next */
+
+    t = hprev + prev->size;
+    if(t == hp && PAGE(hprev) == PAGE(hp))
+    {
+      /* merge prev and p */
+
+        prev->size += p->size;
+        prev->next  = p->next;
+    }
+    else
+        prev->next = hp;
+
+    avail[i] = hprev;
+
+#if MEM_TRACE
+    DBG("-------after------------\n");
+    MEMstat(i);
+#endif
+a69 326
+
+
+
+/*----------------*/
+/*  CGIFfund      */
+/*----------------*/
+UWORD ENTRY
+#if MULTICALLER
+CGIFfund(uCallerId, pool, memptr, size, handle)
+    UWORD  uCallerId;
+#else
+CGIFfund(pool, memptr, size, handle)
+#endif
+    UWORD  pool;
+    BYTE  *memptr;
+    ULONG  size;
+    UWORD *handle;
+{
+    MEM   *mp;
+    UWORD  h;
+
+    if(pool > BUFFER_POOL) return ERR_bad_pool;
+
+  /* Find first available handle */
+
+    mp = mem;
+    for(h=0; h<NH; h++)
+    {
+        if(!mp->size) break;
+        mp++;
+    }
+    if(h == NH) return ERR_out_of_handles;
+
+    *handle = h;    /* return page handle */
+
+  /* fill in pool, size and memory pointer */
+
+    mp->pool = pool;
+    mp->size = size;
+    mp->ptr  = memptr;
+#if MULTICALLER
+    mp->id   = uCallerId;
+#endif
+
+  /* Free the page */
+
+    ((MEMHEAD*)memptr)->size = size;
+    MEMfree(pool, ((ULONG)h << OFFBITS) + 4);
+    mem_fund[pool] += size;
+
+    return SUCCESS;
+}
+
+
+
+
+/*----------------*/
+/* CGIFmove_block */
+/*----------------*/
+UWORD ENTRY
+#if MULTICALLER
+CGIFmove_block(uCallerId, page, memptr)
+    UWORD  uCallerId;
+#else
+CGIFmove_block(page, memptr)
+#endif
+    UWORD page;
+    BYTE *memptr;
+{
+    MEM  *mp;
+
+    if(page > NH) return ERR_bad_handle;
+    mp = mem + page;
+    if(!mp->size) return ERR_bad_handle;    /* page isn't active */
+    mp->ptr = memptr;
+
+  /*  See if the page that moved contains the current FONT. If it does,
+   *  recover the pointer now. This is done here so that we don't have
+   *  to revover the FONT pointer everytine CGIFchar() is called. This
+   *  makes a noticable difference in the cache speed.
+   */
+#if CACHE
+    if(PAGE(hfontCur) == page)
+        pfontCur = (FONT*)MEMptr(hfontCur);
+#endif
+
+    return SUCCESS;
+}
+
+
+
+#if DEFUND
+
+/*----------------*/
+/*  purge_page    */
+/*----------------*/
+/*  Search all entries in the least recently used list whose handle is
+ *  "lru". If any entry has been allocated from the memory block "page",
+ *  then free it using the function "free".
+ */
+MLOCAL VOID
+purge_page(page, lru, free)
+    UWORD      page;
+    MEM_HANDLE lru;            /* handle of lru list */
+    VOID       (*free)();      /* function that frees members of lru list */
+{
+    MEM_HANDLE    hp, hnext;
+
+    hp = ((DLL*)MEMptr(lru))->f;
+    while(hp != lru)
+    {
+        hnext = ((DLL*)MEMptr(hp))->f;
+        if(PAGE(hp) == page)
+            (*free)(hp);
+        hp = hnext;
+    }
+}
+
+/*----------------*/
+/*  CGIFdefund    */
+/*----------------*/
+UWORD ENTRY
+#if MULTICALLER
+CGIFdefund(id, page)
+    UWORD  id;
+#else
+CGIFdefund(page)
+#endif
+    UWORD  page;
+{
+    MEM          *mp;
+    ULONG         size;
+    MEM_HANDLE    hp, hprev, hnext;
+    MEMHEAD      *p, *prev;
+    UWORD         pool;
+    BOOLEAN       reload_font_index;
+    BOOLEAN       reload_ss_dir;
+    UWORD         status;
+    FONTCONTEXT   fc;
+    BOOLEAN       recreate_current_font;
+    BUCKET       *b;
+
+
+    DBG1("CGIFdefund(%ld)\n", page);
+
+    if(page > NH)        return ERR_bad_handle;
+
+    mp = mem + page;
+    if(!(size = mp->size)) return ERR_bad_handle;    /* page isn't active */
+    pool = mp->pool;
+
+  /*================ C A C H E _ P O O L ======================*/
+  /*  If the current font is about to be purged, remember its
+   *  FONTCONTEXT so we can recreate it later.
+   */
+
+#if CACHE
+
+    if(PAGE(hfontCur) == page)
+    {
+        FCcopy_fc(&pfontCur->fc, &fc);
+        recreate_current_font = TRUE;
+    }
+    else
+        recreate_current_font = FALSE;
+
+  /* Free FONTs and BITMAPs using this page */
+
+    purge_page(page, hFNTlru, FNTfree);  /* Free FONTs using this page */
+    purge_page(page, hBMlru, BMfree);    /* Free BITMAPs using this page */
+
+#endif    
+
+  /*================ B U F F E R _ P O O L ======================*/
+
+  /* Free character buffer if using this page */
+
+    if(PAGE(hchar_buf) == page)
+    {
+        MEMfree(BUFFER_POOL, hchar_buf);
+        hchar_buf = (MEM_HANDLE)0L;
+    }
+
+  /* Free BUCKETs with faceheders or face global using this page */
+
+    hp = ((DLL*)MEMptr(hBUCKlru))->f;
+    while(hp != hBUCKlru)
+    {
+        b = (BUCKET*)MEMptr(hp);
+        hnext = b->link.f;
+        if(    page == PAGE(hp)
+            || page == PAGE(b->hface_header_seg)
+            || page == PAGE(b->hfgseg)
+          )
+            BUCKfree(hp);
+
+        hp = hnext;
+    }
+
+    if_init_face = 0;
+
+  /* Free FONTINDEX if it's using this page */
+
+    if(PAGE(hfi) == page)
+    {
+        MEMfree(BUFFER_POOL, ((FONTINDEX*)MEMptr(hfi))->hfnt_index);
+        reload_font_index = TRUE;
+    }
+    else
+        reload_font_index = FALSE;
+
+  /* Free symbol set directory if it's using this page */
+
+    if(PAGE(hss_directory) == page)
+    {
+        MEMfree(BUFFER_POOL, hss_directory);
+        reload_ss_dir = TRUE;
+    }
+    else
+        reload_ss_dir = FALSE;
+
+  /*================ Remove memory block from avail ring =============*/
+
+    hprev = avail[pool];
+    prev  = (MEMHEAD*)MEMptr(hprev);
+    hp    = prev->next;
+    p     = (MEMHEAD*)MEMptr(hp);
+    for( ; ; )
+    {
+        if(PAGE(hp) == page) break;
+        if(hp == avail[pool])
+        {
+            DBG("    failed\n");
+            return ERR_missing_block;
+        }
+        hprev = hp;
+        prev  = p;
+        hp    = p->next;
+        p     = (MEMHEAD*)MEMptr(hp);
+    }
+    avail[pool] = hprev;
+
+    if(p->size != size) return ERR_lost_mem; /* Check that it's all there */
+    prev->next = p->next;                    /* unlink p */
+    mem_avail[pool] -= size;
+
+    mp->size = 0L;                        /* this page is now available */
+
+
+  /*========== reload fontindex and symbol set directory if neccessay ====*/
+
+    if(!hchar_buf)
+        if(!(hchar_buf = MEMalloc(BUFFER_POOL, CHARBUFSIZE)))
+            return ERR_mem_char_buf;
+
+    if(reload_font_index)
+        if(status = init_font_index()) return status;   
+
+    if(reload_ss_dir)
+        if(status = init_symbol_set()) return status;
+
+    if(recreate_current_font)
+#if MULTICALLER
+        return CGIFfont(id, &fc);
+#else
+        return CGIFfont(&fc);
+#endif
+    return SUCCESS;
+}
+#endif
+
+#if MULTICALLER
+/*----------------*/
+/*  MEMinstFree   */
+/*----------------*/
+GLOBAL VOID
+MEMinstFree(id)
+    UWORD id;
+{
+    MEM *pMem = mem;
+    UWORD page;
+
+    for(page=0;page<NH;page++, pMem++)
+        if((pMem->id == id) && pMem->size)
+            CGIFdefund(id, page);
+}
+#endif
+
+
+
+/*----------------*/
+/*  MEMstat       */
+/*----------------*/
+#if MEM_TRACE
+GLOBAL VOID
+MEMstat(i)
+    UWORD  i;
+{
+    ULONG  total, max_size;
+    MEM_HANDLE hp;
+    MEMHEAD  *p;
+
+
+    total    = 0;
+    max_size = 0;
+
+    hp = avail[i];
+    p  = (MEMHEAD*)MEMptr(hp);
+    for( ; ; )
+    {
+        if(p->size > max_size)  max_size = p->size;
+        total += p->size;
+
+        hp = p->next;
+        p  = (MEMHEAD*)MEMptr(hp);
+        if(hp == avail[i])  break;
+    }
+
+    DBG1("MEMstat pool %ld\n",i);
+    DBG1("             Largest free block  %ld\n", max_size);
+    DBG1("             Total available     %ld\n", total);
+    DBG1("             Total in fund       %ld\n", mem_fund[i]);
+    if(mem_avail[i] != total)
+        DBG("?????????? does not compute ?????????\n");
+}
+#endif
+@
+
+
+3.1
+log
+@Kodiak Phase 1 Final Release
+@
+text
+@d2 1
+a2 1
+**	$Id: mem.c,v 3.0 90/11/09 17:11:40 kodiak Exp $
+d8 3
+d23 3
+d30 1
+a33 1
+#include "cgconfig.h"
+d533 2
+d548 1
+a548 1
+    
+@
+
+
+3.0
+log
+@Kodiak's Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d7 4
+a10 1
+**	$Log$
+d117 32
+@
+
+
+2.0
+log
+@from AGFA Bullet 1.20Beta, 02-Oct-90
+@
+text
+@d1 8
+a19 1
+#include <stdio.h>
+d114 5
+d135 1
+d175 1
+d189 1
+a189 1
+    MEM_HANDLE hprev, hp, handle;
+d193 2
+a194 2
+    printf("\n\nMEMmalloc(%u, %u)\n", i, size);
+    printf("-------before------------\n");
+d204 1
+a204 1
+    printf("    adjusted size %u\n", size);
+d244 1
+a244 1
+    printf("-------after------------\n");
+d246 1
+a246 1
+    printf("    %lx\n",&p->next);
+a262 1
+    BYTE *memptr;
+d268 2
+a269 2
+    printf("MEMfree(%u, %lx)\n", i, hm);
+    printf("-------before------------\n");
+d479 1
+a479 1
+    DBG1("CGIFdefund(%d)\n", page);
+d652 1
+a652 1
+    DBG1("MEMstat pool %u\n",i);
+@
+
+
+1.0
+log
+@from AGFA Bullet 1.10, 30-Mar-90
+@
+text
+@d3 8
+d88 1
+a88 1
+    UWORD       pool;    /* memory pool that block belongs to */
+d91 3
+d330 4
+d335 1
+d363 3
+d383 4
+d388 1
+d445 4
+d450 1
+d496 1
+a496 2
+    MEMfree(BUFFER_POOL, hchar_buf);         /* Free the character buffer */
+    hchar_buf = (MEM_HANDLE)0L;
+d498 6
+d572 4
+d583 3
+d587 15
+d603 3
+a605 1
+    return SUCCESS;
+d614 1
+a614 1
+#ifdef DEBUG
+a646 1
+
+@

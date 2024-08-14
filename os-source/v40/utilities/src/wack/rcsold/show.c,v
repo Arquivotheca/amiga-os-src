@@ -1,0 +1,880 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.5
+date     91.04.24.20.50.15;  author peter;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.11.22.16.24.19;  author kodiak;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.09.21.21.00.48;  author jimm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     88.01.21.13.37.53;  author root;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     88.01.21.13.08.14;  author jimm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.5
+log
+@Changed APTR to (ULONG *), so we can once again do pointer math.
+showprocess will now show the cli_CommandName, if any.
+Removed the leading $ from all the hex output.
+Improved spacing on a few things.
+Current node indicator (asterisk) no longer touches address.
+ShowExecBase() now sets NextAddr.
+Changed $Header to $Id.
+@
+text
+@/* $Id: show.c,v 1.4 89/11/22 16:24:19 kodiak Exp $	*/
+
+#include "exec/types.h"
+#include "exec/nodes.h"
+#include "exec/lists.h"
+#include "exec/interrupts.h"
+#include "exec/memory.h"
+#include "exec/ports.h"
+#include "exec/libraries.h"
+#include "exec/devices.h"
+#include "exec/tasks.h"
+#include "exec/resident.h"
+#include "exec/execbase.h"
+
+#include "libraries/dos.h"
+#include "libraries/dosextens.h"
+
+#include "symbols.h"
+
+
+#define LTOB(b_ptr) (b_ptr << 2)
+
+long GetMemL();
+extern APTR CurrAddr;
+extern APTR SpareAddr;
+
+/* #define FMT0 "%06lx  pri=%-3d  '%s'\n"
+   #define FMT1 "%06lx %-7s  pri=%-3d sp=%06lx  '%s'\n" */
+
+#define NAMESIZE 100
+
+GetName (nameAddr, nameStr)
+    APTR nameAddr;
+    char *nameStr;
+{
+    if (nameAddr == 0) {
+	nameStr[0] = 0;
+    }
+    else {
+	GetBlock (nameAddr, nameStr, NAMESIZE);
+	nameStr[NAMESIZE - 1] = 0;
+    }
+}
+
+/***********************************************************************
+*
+*   Show Node
+*
+************************************************************************
+*    Address NT  Pri Name
+*  C XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define NFMT0 "\n  Address NT  Pri Name\n"
+#define NFMT1 "%lc %06lx  %2ld %4ld \"%s\"\n"
+
+ShowNode(n)
+    struct Node *n;
+{
+    struct Node node;
+    char    name[NAMESIZE];
+
+    GetBlock (n, &node, sizeof (node));
+    GetName (node.ln_Name, name);
+
+    Print (NFMT1, ((APTR) n == CurrAddr) ? '*' : ' ', n,
+	    node.ln_Type, node.ln_Pri, name);
+}
+
+ShowNodes()
+{
+    ULONG *n1;
+
+    Forbid();
+    n1 = (ULONG *) CurrAddr;
+    NewLine ();
+
+    while (GetMemL (n1)) {	/* move to list header */
+	n1 = (ULONG *)GetMemL (n1);
+    }
+
+    Print (NFMT0);
+    for (n1 = (ULONG *)GetMemL (n1 - 1); (ULONG *)GetMemL (n1); n1 = (ULONG *)GetMemL (n1)) {
+	ShowNode (n1);
+    }
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show all Tasks
+*
+************************************************************************
+* Address NT  Pri Stat  SigWait  SPReg Name
+* XXXXXX  DD DDDD SSSS XXXXXXXX XXXXXX SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define TFMT0 "\nAddress NT  Pri Stat  SigWait  SPReg Name\n"
+#define TFMT1 "%06lx  %2ld %4ld %s %08lx %06lx \"%s\"\n"
+
+static char *states[] = {
+    "????",
+    " add",
+    " run",
+    "redy",
+    "wait",
+    "expt",
+    "remv"
+};
+
+ShowTaskHead(task)
+    struct Task *task;
+{
+    struct Task tc;
+    char   name[NAMESIZE];
+    UBYTE  state;
+
+    GetBlock (task, &tc, sizeof (tc));
+
+    if (tc.tc_State < TS_INVALID | tc.tc_State > TS_REMOVED)
+	state = 0;
+    else
+	state = tc.tc_State;
+
+    GetName (tc.tc_Node.ln_Name, name);
+    Print (TFMT1, task, tc.tc_Node.ln_Type, tc.tc_Node.ln_Pri,
+	    states[state], tc.tc_SigWait, tc.tc_SPReg, name);
+}
+
+
+ShowTaskList(l)
+    struct Node *l;
+{
+    struct Node *node;
+
+    for (node = l; GetMemL (node); (node = (struct Node *) GetMemL (node)))
+	ShowTaskHead (node);
+}
+
+
+ShowTasks()
+{
+    struct ExecBase eb;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+
+    Print(TFMT0);
+    ShowTaskHead (eb.ThisTask);
+    ShowTaskList (eb.TaskReady);
+    ShowTaskList (eb.TaskWait);
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show all Devices
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+#define DFMT0 "\nAddress NT  Pri Ver Rev Name\n"
+#define DFMT1 "%06lx  %2ld %4ld%4ld%4ld \"%s\"\n"
+
+ShowDeviceHead(device)
+    struct Node *device;
+{
+    struct Library dev; 
+    char name[NAMESIZE];
+
+    GetBlock (device, &dev, sizeof (dev));
+
+    GetName (dev.lib_Node.ln_Name, name);
+
+    Print (DFMT1, device, dev.lib_Node.ln_Type, dev.lib_Node.ln_Pri,
+	dev.lib_Version, dev.lib_Revision, name);
+}
+
+ShowDeviceList()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print (DFMT0);
+    for (node = (struct Node *) eb.DeviceList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowDeviceHead (node);
+    }
+    Permit();
+}
+
+/***********************************************************************
+*
+*   Show all Resources
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+ShowResourceList()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print (DFMT0);
+    for (node = (struct Node *) eb.ResourceList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowDeviceHead (node);
+    }
+    Permit();
+}
+
+/***********************************************************************
+*
+*   Show all Libraries
+*
+************************************************************************
+*  Address NT  Pri Name
+*  XXXXXX  DD DDDD SSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+ShowLibraryList()
+{
+    struct ExecBase eb;
+    long   i;
+    struct Node *node;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print (DFMT0);
+    for (node = (struct Node *) eb.LibList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowDeviceHead (node);
+    }
+    Permit();
+}
+
+/***********************************************************************
+*
+*   Show all Ports
+*
+************************************************************************
+*  Address NT  Pri Flags SigTask/Bit MsgList Name
+*  XXXXXX  DD  DDD  XX   XXXXXX DDD  XXXXXX SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+#define PFMT0 "\nAddress NT  Pri Flags SigTask/Bit MsgList Name\n"
+#define PFMT1 "%06lx  %2ld %4ld  %02lx   %06lx %3ld  %06lx \"%s\"\n"
+
+ShowPortHead(port)
+    struct Node *port;
+{
+    struct MsgPort p;
+    char name[NAMESIZE];
+
+    GetBlock (port, &p, sizeof (p));
+    GetName (p.mp_Node.ln_Name, name);
+    Print (PFMT1, port, p.mp_Node.ln_Type, p.mp_Node.ln_Pri,
+		 p.mp_Flags, p.mp_SigTask, p.mp_SigBit,
+		 20 + (ULONG) port, name);
+}
+
+ShowPortList()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print(PFMT0);
+    for (node = (struct Node *) eb.PortList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowPortHead (node);
+    }
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show all Interrupts
+*
+************************************************************************
+*  IV   Data   Code   Node NT Pri Name
+*  DD XXXXXX XXXXXX XXXXXX DD DDD SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+***********************************************************************/
+
+#define IFMT0 "\nIV   Data   Code   Node NT Name\n"
+#define IFMT1 "%2ld %06lx %06lx %06lx %2ld \"%s\"\n"
+
+ShowIntVects()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node node;
+    char    name[NAMESIZE];
+    char    *n;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print (IFMT0);
+    for (i = 0; i < 16; i++) {
+        name[0] = 0;
+	n = name;
+	if (eb.IntVects[i].iv_Node != 0) {
+	    GetBlock (eb.IntVects[i].iv_Node, &node, sizeof (node));
+	    GetName (node.ln_Name, name);
+	}
+	else {
+	    if (eb.IntVects[i].iv_Code != 0) {
+	    n = "server-chain";
+	    }
+	}
+
+	Print (IFMT1, i, eb.IntVects[i].iv_Data, eb.IntVects[i].iv_Code,
+		eb.IntVects[i].iv_Node, node.ln_Type, n);
+    }
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show all Memory Regions
+*
+************************************************************************
+***********************************************************************/
+#define FMT_REGION "%8lx attr %04lx lower %8lx upper %8lx first %8lx free %ld.\n"
+
+ShowRegion(region)
+    struct MemHeader *region;
+{
+    struct MemHeader  mem;
+
+    GetBlock (region, &mem, sizeof (struct MemHeader));
+
+    Print (FMT_REGION, region, mem.mh_Attributes, 
+	    mem.mh_Lower, mem.mh_Upper, mem.mh_First, mem.mh_Free);
+}
+
+ShowRegionList()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    NewLine ();
+    for (node = (struct Node *) eb.MemList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowRegion (node);
+    }
+}
+
+
+/***********************************************************************
+*
+*   Show all Memory Chunks
+*
+************************************************************************
+***********************************************************************/
+#define	FMT_TITLE \
+"   -----addr--ALLOCATED---size--------   -----addr-----FREE-----size--------\n"
+#define	FMT_END   "   %8lx-%-8lx %8lx #%-8ld\n"
+#define FMT_CHUNK "   %8lx-%-8lx %8lx #%-8ld  %8lx-%-8lx %8lx #%-10ld\n"
+
+ShowMemory(region)
+    struct MemRegion *region;
+{
+    ULONG 	*chunk;
+    struct MemHeader    mem;
+    long    size, lastEnd;
+    ShowRegion (region);
+
+    GetBlock (region, &mem, sizeof (struct MemHeader));
+    lastEnd = (long) mem.mh_Lower;
+
+    Print(FMT_TITLE);
+    for (chunk = (ULONG *) mem.mh_First; chunk; chunk = (ULONG *) GetMemL (chunk)) {
+	size = (long) GetMemL (chunk+1);
+	Print (FMT_CHUNK, lastEnd, ((long)chunk)-1,
+		((long)chunk)-lastEnd, ((long)chunk)-lastEnd,
+		chunk, ((long) chunk)+size-1, size, size);
+	lastEnd = ((long) chunk)+size;
+    }
+    if ((((long)mem.mh_Upper)-lastEnd) != 0)
+	Print (FMT_END, lastEnd, ((long)mem.mh_Upper)-1,
+		((long)mem.mh_Upper)-lastEnd, ((long)mem.mh_Upper)-lastEnd);
+    Print(FMT_TITLE);
+}
+
+ShowMemoryList()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    NewLine ();
+    for (node = (struct Node *) eb.MemList.lh_Head; GetMemL (node);
+	    node = (struct Node *) GetMemL (node)) {
+	                    ShowMemory (node);
+    }
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show Resident Modules
+*
+************************************************************************
+***********************************************************************/
+#define RMFMT0 "\nAddress Pri Type Ver Name\n"
+#define RMFMT1 "%06lx  %4ld%4ld%4ld %s"
+
+ShowModule(m)
+    struct Resident *m;
+{
+    struct Resident r;
+    char name[NAMESIZE];
+
+    GetBlock (m, &r, sizeof (r));
+    GetName (r.rt_IdString, name);
+
+    Print (RMFMT1, m, r.rt_Pri, r.rt_Type, r.rt_Version, name);
+}
+
+ShowResModules()
+{
+    struct ExecBase eb;
+    long    i;
+    struct Node *node;
+    ULONG  mods[100];
+    ULONG  modbase;
+
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    Print (RMFMT0);
+
+    modbase = (ULONG) eb.ResModules;
+
+
+    while( modbase ) {
+	GetBlock (modbase, &mods[0], sizeof (mods));
+	modbase = 0;
+    
+	for (i = 0; mods[i] != 0; i++) {
+	    if( mods[i] & (1<<31) ) {
+		/* link field */
+		modbase = mods[i] & ~(1<<31);
+		break;
+	    }
+	
+	    ShowModule (mods[i]);
+	}
+    }
+}
+
+
+/***********************************************************************
+*
+*   ShowTask
+*
+***********************************************************************/
+
+#define	tft0 "\n'%s' in %s state at priority %ld\n"
+#define tft1 "Type %ld  Flags %02lx  IDNestCnt %ld  TDNestCnt %ld\n"
+#define tft2 "Signal:  Alloc %08lx  Wait  %08lx  Recvd %08lx  Except %08lx\n"
+#define tft3 "Trap:    Data  %08lx  Code  %08lx  Alloc %04lx  Able %04lx\n"
+#define	tft4 "Except:  Data  %08lx  Code  %08lx\n"
+#define	tft5 "Stack:   Reg   %08lx  Lower %08lx  Upper %08lx\n"
+#define tft6 "CPURegs: PC    %08lx  SR    %04lx\n"  
+
+ShowTask()
+{
+    struct Task tc;
+    char    name[100];
+    UBYTE state;
+    long    sp;
+    short   reg;
+
+    Forbid();
+    GetBlock (CurrAddr, &tc, sizeof (tc));
+
+    if (tc.tc_State < TS_INVALID | tc.tc_State > TS_REMOVED)
+	state = 0;
+    else
+	state = tc.tc_State;
+
+    GetName (tc.tc_Node.ln_Name, name);
+    Print (tft0, name, states[state], tc.tc_Node.ln_Pri, (long) CurrAddr);
+
+    Print (tft1, tc.tc_Node.ln_Type, tc.tc_Flags, tc.tc_IDNestCnt,
+	    tc.tc_TDNestCnt);
+
+    Print (tft2, tc.tc_SigAlloc, tc.tc_SigWait, tc.tc_SigRecvd,
+	    tc.tc_SigExcept);
+
+    Print (tft3, tc.tc_TrapData, tc.tc_TrapCode, tc.tc_TrapAlloc,
+	    tc.tc_TrapAble);
+
+    Print (tft4, tc.tc_ExceptData, tc.tc_ExceptCode);
+
+    Print (tft5, tc.tc_SPReg, tc.tc_SPLower, tc.tc_SPUpper);
+
+    if (tc.tc_State == TS_READY | tc.tc_State == TS_WAIT) {
+	sp = (long) tc.tc_SPReg;
+	Print (tft6, GetMemL (sp), GetMem (sp + 4));
+
+	Print ("D: ");
+	for (reg = 0; reg < 8; reg++) {
+	    Print ("%08lx ", GetMemL (sp + 6 + reg * 4));
+	}
+
+	Print ("\nA: ");
+	for (reg = 8; reg < 15; reg++) {
+	    Print ("%08lx ", GetMemL (sp + 6 + reg * 4));
+	}
+    }
+    NewLine ();
+    Permit();
+/*    do_decode (); */
+}
+
+
+/***********************************************************************
+*
+*   ShowProcess
+*
+***********************************************************************/
+
+#define pft0 "SegList      %06lx  StackSize    %06lx  GlobVec  %06lx\n"
+#define pft1 "TaskNum      %6ld  StackBase    %06lx  Result2  %6ld\n"
+#define pft2 "CurrentDir   %06lx  CIS          %06lx  COS      %06lx\n"
+#define pft3 "ConsoleTask  %06lx  FileSysTask  %06lx  CLI      %06lx\n"
+#define pft4 "ReturnAddr   %06lx  PktWait      %06lx\n"
+
+ShowProcess()
+{
+    struct Process  pr;
+    struct Task tc;
+
+    GetBlock (CurrAddr, &tc, sizeof (tc));
+    if (tc.tc_Node.ln_Type != NT_PROCESS) {
+	Print ("\n(NOT A PROCESS!)");
+        ShowTask();
+	return;
+    }
+
+    Forbid();
+    ShowTask();
+    Print ("Process Dependent ------------------------------------------\n");
+    GetBlock (CurrAddr, &pr, sizeof (pr));
+    if (pr.pr_CLI)
+    {
+	Print( "cli_CommandName: " );
+	PrintBSTR( &(((struct CommandLineInterface *)LTOB(pr.pr_CLI))->cli_CommandName) );
+	Print("\n");
+    }
+    Print (pft0, LTOB(pr.pr_SegList), pr.pr_StackSize, pr.pr_GlobVec);
+    Print (pft1, pr.pr_TaskNum, LTOB(pr.pr_StackBase), pr.pr_Result2);
+    Print (pft2, LTOB(pr.pr_CurrentDir), LTOB(pr.pr_CIS), LTOB(pr.pr_COS));
+    Print (pft3, pr.pr_ConsoleTask, pr.pr_FileSystemTask, LTOB(pr.pr_CLI));
+    Print (pft4, pr.pr_ReturnAddr, pr.pr_PktWait);
+    Permit();
+}
+
+
+/***********************************************************************
+*
+*   Show ExecBase
+*
+***********************************************************************/
+
+#define ebf0 "SoftVer %3ld\n"
+#define ebfa "ChkSums: Library %s  SysBase %s  LowMem %s  Critical %s\n" 
+#define ebf1 "ColdCapture  %06lx  CoolCapture  %06lx  WarmCapture  %06lx\n"
+#define ebf2 "SysStkUpper  %06lx  SysStkLower  %06lx  MaxLocMem    %06lx\n"
+#define ebf3 "DebugEntry   %06lx  DebugData    %06lx  AlertData    %06lx\n"
+
+#define ebf4 "ThisTask     %06lx  SysFlags       %04lx\n"
+#define ebf5 "IdleCount  %8ld  DispCount  %8ld\n"
+#define ebf6 "Quantum       %5ld  Elapsed       %5ld\n"
+#define ebf7 "IDNestCnt      %4ld  TDNestCnt      %4ld\n"
+#define ebf8 "TrapCode     %06lx  ExceptCode   %06lx  ExitCode  %06lx\n"
+#define ebf9 "SigAlloc   %08lx  TrapAlloc      %04lx\n"
+#define ebfA "AttnFlags %s\n"
+ShowExecBase()
+{
+    struct ExecBase eb;
+    struct Node *node;
+    char   *ok1,
+           *ok2,
+           *ok3,
+           *ok4;
+    char   *cpu;
+
+    Forbid();
+    GetBlock (GetMemL (4), &eb, sizeof (eb));
+    SpareAddr = (APTR) GetMemL (4);
+    NewLine ();
+    ok1 = ok2 = ok3 = ok4 = "???";
+    if ((long)(GetMemL (4) + eb.ChkBase) == -1) ok2 = "ok ";
+    Print (ebf0, eb.SoftVer);
+    Print (ebfa, ok1, ok2, ok3, ok4);
+    Print (ebf1, eb.ColdCapture, eb.CoolCapture, eb.WarmCapture);
+    Print (ebf2, eb.SysStkUpper, eb.SysStkLower, eb.MaxLocMem);
+    Print (ebf3, eb.DebugEntry, eb.DebugData, eb.AlertData);
+    Print (ebf4, eb.ThisTask, eb.SysFlags);
+    Print (ebf5, eb.IdleCount, eb.DispCount);
+    Print (ebf6, eb.Quantum, eb.Elapsed);
+    Print (ebf7, eb.IDNestCnt, eb.TDNestCnt);
+    Print (ebf8, eb.TaskTrapCode, eb.TaskExceptCode, eb.TaskExitCode);
+    Print (ebf9, eb.TaskSigAlloc, eb.TaskTrapAlloc);
+    switch (eb.AttnFlags & 3) {
+	case 1: 			
+		cpu = "CPU=68010";
+		break;
+	case 3:
+		cpu = "CPU=68020";
+		break;
+	default:
+		cpu = "CPU=68000";
+    }
+    Print (ebfA, cpu);
+    Permit();
+}
+@
+
+
+1.4
+log
+@1.5: Forbid()/Permit() using BGACK hold; "faster" symbol loading option.
+@
+text
+@d1 1
+a1 1
+/* $Header: show.c,v 1.3 89/09/21 21:00:48 jimm Exp $	*/
+d23 1
+a23 1
+APTR GetMemL();
+d25 1
+d50 2
+a51 2
+*  Address* NT Pri Name
+*  $XXXXXXC DDDDDD SSSSSSSSSSSSSSSSS
+d53 2
+a54 2
+#define NFMT0 "\nAddress  NT Pri Name\n"
+#define NFMT1 "$%06lx%lc %2ld%4ld \"%s\"\n"
+d65 1
+a65 1
+    Print (NFMT1, n, ((APTR) n == CurrAddr) ? '*' : ' ',
+d71 1
+a71 1
+    APTR n1;
+d74 1
+a74 1
+    n1 = (APTR) CurrAddr;
+d78 1
+a78 1
+	n1 = GetMemL (n1);
+d82 1
+a82 1
+    for (n1 = GetMemL (n1 - 1); GetMemL (n1); n1 = GetMemL (n1)) {
+d94 2
+a95 2
+* Address NT Pri Stat   SigWait   SPReg Name
+* $XXXXXX DDDDDD SSSS $XXXXXXXX $XXXXXX SSSSSSSSSSSSSSSSS
+d97 2
+a98 2
+#define TFMT0 "\nAddress NT Pri Stat   SigWait   SPReg Name\n"
+#define TFMT1 "$%06lx %2ld%4ld %s $%08lx $%06lx \"%s\"\n"
+d160 2
+a161 2
+*  Address NT Pri Name
+*  $XXXXXX DDDDDD SSSSSSSSSSSSSSSSS
+d163 2
+a164 2
+#define DFMT0 "\nAddress NT Pri Ver Rev Name\n"
+#define DFMT1 "$%06lx %2ld%4ld%4ld%4ld \"%s\"\n"
+d201 2
+a202 2
+*  Address NT Pri Name
+*  $XXXXXX DDDDDD SSSSSSSSSSSSSSSSS
+d226 2
+a227 2
+*  Address NT Pri Name
+*  $XXXXXX DDDDDD SSSSSSSSSSSSSSSSS
+d251 2
+a252 2
+*  Address NT Pri Flags/Bit SigTask MsgList Name
+*  $XXXXXX DD DDD  $XX  DDD $XXXXXX $XXXXXX SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+d255 2
+a256 2
+#define PFMT0 "\nAddress NT Pri Flags SigTask/Bit MsgList Name\n"
+#define PFMT1 "$%06lx %2ld%4ld  $%02lx  $%06lx %3ld $%06lx \"%s\"\n"
+d293 2
+a294 2
+*  IV    Data    Code    Node NT Pri Name
+*  DD $XXXXXX $XXXXXX $XXXXXX DD DDD SSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+d379 1
+a379 1
+    APTR   chunk;
+d388 1
+a388 1
+    for (chunk = (APTR) mem.mh_First; chunk; chunk = (APTR) GetMemL (chunk)) {
+d425 1
+a425 1
+#define RMFMT1 "$%06lx %4ld%4ld%4ld %s"
+d542 5
+a546 5
+#define pft0 "SegList     $%06lx  StackSize   $%06lx  GlobVec $%06lx\n"
+#define pft1 "TaskNum      %6ld  StackBase   $%06lx  Result2  %6ld\n"
+#define pft2 "CurrentDir  $%06lx  CIS         $%06lx  COS     $%06lx\n"
+#define pft3 "ConsoleTask $%06lx  FileSysTask $%06lx  CLI     $%06lx\n"
+#define pft4 "ReturnAddr  $%06lx  PktWait     $%06lx\n"
+d564 6
+d587 3
+a589 3
+#define ebf1 "ColdCapture $%06lx  CoolCapture $%06lx  WarmCapture $%06lx\n"
+#define ebf2 "SysStkUpper $%06lx  SysStkLower $%06lx  MaxLocMem   $%06lx\n"
+#define ebf3 "DebugEntry  $%06lx  DebugData   $%06lx  AlertData   $%06lx\n"
+d591 1
+a591 1
+#define ebf4 "ThisTask    $%06lx  SysFlags      $%04lx\n"
+d595 2
+a596 2
+#define ebf8 "TrapCode    $%06lx  ExceptCode  $%06lx  ExitCode $%06lx\n"
+#define ebf9 "SigAlloc  $%08lx  TrapAlloc     $%04lx\n"
+d610 1
+@
+
+
+1.3
+log
+@server compile and re-checkin
+@
+text
+@d1 1
+a1 1
+/* $Header: $	*/
+d72 1
+d84 1
+d143 1
+d150 1
+d185 1
+d192 1
+d210 1
+d217 1
+d235 1
+d242 1
+d276 1
+d283 1
+d307 1
+d326 1
+d406 1
+d413 1
+d491 1
+d530 1
+d559 1
+d568 1
+d601 1
+d628 1
+@
+
+
+1.2
+log
+@kodiak's copy of jimm's version, snapshot jan 21
+@
+text
+@d1 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a17 1
+#include "wack.h"
+d22 3
+d28 2
+d39 1
+a39 1
+	nameStr[NAMESIZE - 1] = '\0';
+d63 1
+a63 1
+    Print (NFMT1, n, ((ULONG) n == CurrAddr) ? '*' : ' ',
+d69 1
+a69 1
+    ULONG n1;
+d71 1
+a71 1
+    n1 = CurrAddr;
+d79 1
+a79 1
+    for (n1 = GetMemL (n1 - 4); GetMemL (n1); n1 = GetMemL (n1)) {
+d321 1
+a321 1
+#define FMT_REGION "%06lx attr %04lx lower %06lx upper %06lx first %06lx free %ld.\n"
+d355 4
+a358 1
+#define FMT_CHUNK "   %06lx  size %06lx (%ld.)\n"
+d365 1
+a365 1
+    long    size;
+d369 1
+d371 2
+a372 2
+    for (chunk =  (APTR) mem.mh_First; chunk;
+		chunk = (APTR) GetMemL (chunk)) {
+d374 4
+a377 1
+	Print (FMT_CHUNK, chunk, size, size);
+d379 4
+a382 1
+
+@

@@ -1,0 +1,14 @@
+VERSION	EQU1
+REVISION	EQU9
+DATE	MACRO
+	dc.b	'23.6.92'
+	ENDM
+VERS	MACRO
+	dc.b	'Version 1.9'
+	ENDM
+VSTRING	MACRO
+	dc.b	'Version 1.9 (23.6.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+	dc.b	0,'$VER: Version 1.9 (23.6.92)',0
+	ENDM

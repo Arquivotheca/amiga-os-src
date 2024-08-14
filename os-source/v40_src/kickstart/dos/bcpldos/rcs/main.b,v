@@ -1,0 +1,546 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.39.22;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file system main loop
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+**              Tim King (major changes for Amiga)             Feb 1985      **
+******************************************************************************/
+
+SECTION "MAIN"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+GET     "internal/EXECLIBHDR"
+
+MANIFEST       
+$(
+   timerunit   = 1
+   tickspermin = tickspersecond * 60
+   minsperday  = 60 * 24
+   restartpri  = 1             // Restart priority
+
+   IOC.writeevent = IOC.motor + 2 
+
+   ie.Class       = 4   // Byte
+   ie.SubClass    = 5   // Byte
+   ie.Code        = 7   // Word, bottom byte
+   InputEventSize = 26
+   InputEventUpb  = InputEventSize / BytesPerWord
+
+   ieclass.diskremoved = #X0F
+   ieclass.diskinserted= #X10
+
+$)
+
+LET start ( parm.pkt ) BE
+$( LET timer.IOB = VEC IO.size
+   LET tpkt = VEC pkt.type
+   LET rpkt = VEC pkt.arg5 + msg.size
+   LET ipkt = VEC pkt.type
+   LET iIOB = VEC IO.size
+   LET InputEvent = VEC InputEventUpb
+
+   // Definitions for the interrupt handler, which is activated
+   // when the disc is changed. I pass a ptr to global 'disc.attention.flag'
+   // which is zeroed for me by the interrupt code - data ptr is in A1
+   LET intstruct = VEC 5
+   LET intcode = #X42914E75   // CLR.L (A1); RTS
+
+   LET dspace = VEC IO.size*2 + 1
+   // restart.running has three values
+   // 1) 0   - no disk or disk OK
+   // 2) >0  - disk just inserted, name etc not known yet
+   // 3) <0  - disk being validated. Do not start new validations.
+   // When nonzero the value indicates the number of outstanding validations
+   LET disc.change.inhibited, restart.running = FALSE, 0
+   LET rootnode = rootstruct()
+
+   // Initialise globals etc
+   fh3init( parm.pkt, dspace )
+
+   // If error from init, probably no disc device.
+   // Go away quietly
+   UNLESS parm.pkt!pkt.res1 
+   $(
+      // 23april86, Neil -- mark task as gone if really gone
+      LET node = parm.pkt!pkt.arg3
+
+      UNLESS node = 0 DO node!dev.task := 0
+
+      qpkt(parm.pkt)
+      RETURN
+   $)
+
+   // Start up the timer.
+   OpenDevice( timer.IOB, "timer.device*X00", timerunit, 0 )
+   SetIO( timer.IOB, IOC.addrequest, ?, 0 )
+   timer.IOB!IO.secs.p := 1
+   tpkt!pkt.type := action.timer
+   SendIO( timer.IOB, tpkt )
+
+   // Initialise event mechanism
+   ipkt!pkt.type := action.event
+   OpenDevice( iIOB, "input.device*X00", 0, 0)
+
+   // Initialise software interrupt
+   clearvec(intstruct,5)
+   putlong( intstruct, 14, (@@disc.attention.flag)<<2 ) // Address of global
+   putlong( intstruct, 18, (@@intcode)<<2 )             // Code ptr
+   disc.attention.flag := 0                            // For startup
+   testdisc( IOC.remove, intstruct )
+
+   $( LET pkt  = taskwait ()
+      LET arg1 = pkt!pkt.arg1
+
+      TEST pkt ! pkt.id = disc.dev
+      THEN
+           callco ( disc.co, pkt )
+      ELSE
+      $( // Test to see if the disc has been changed
+         IF disc.attention.flag=0 THEN
+         $( disc.attention.flag := -1
+            UNLESS disc.change.inhibited | (restart.running > 0) DO
+               TEST testdisc( IOC.changestate )=0 THEN
+               $( changedisc(rpkt,restart.running)
+                  restart.running := (ABS restart.running) + 1
+               $)
+               ELSE 
+               $( disktype := type.nodisk   // No disk present
+                  UNLESS parm.pkt=0 DO      // Started off with no disk
+		  $( qpkt(parm.pkt)
+		     parm.pkt := 0
+		  $)
+		  signal.event(iIOB, ipkt, InputEvent, ieclass.diskremoved)
+		  // If we still have any buffers in use, panic
+                  UNLESS pending.queue=0 & waiting.queue=0 DO
+		  $( result2(TRUE,Abort.busy)
+		     err.report(report.volume,current.volume)
+		     LOOP
+		  $)
+		  discard.buffers()
+              $)
+           $)
+
+           SWITCHON pkt ! pkt.type INTO
+           $(
+               CASE action.timer:
+                    IF unit.no = 0 THEN
+		    $( let v = VEC 2
+		       datstamp( v )
+                    $)
+		    timer.IOB!IO.secs.p := 1
+		    timer.IOB!IO.ticks.p := 0
+                    SendIO( timer.IOB, tpkt )
+                    // See if time motor was turned off
+                    IF motor.ticks=0 LOOP         // Off already
+                    IF motor.ticks=1 THEN         // Request turnoff
+		    $( turnoff()
+		       ENDCASE
+		    $)
+                    motor.ticks := motor.ticks-1
+                    LOOP
+               
+              CASE action.setcomment: 
+              CASE action.setprotect:
+              CASE action.setdate:
+		    startco ( comment, comm.stsize, pkt )
+                    ENDCASE
+
+              CASE action.renamedisk    : startco ( renamedisk, rd.stsize, pkt )
+                                          ENDCASE
+
+              CASE action.examineobject : startco ( exobject,
+                                                    exobj.stsize, pkt )
+                                          ENDCASE
+
+              CASE action.examinenext   : startco ( exnext,
+                                                    exnext.stsize, pkt )
+                                          ENDCASE
+
+              CASE action.locateobject  : startco ( locate, locate.stsize, pkt )
+                                          ENDCASE
+              CASE action.createdir     : startco ( create, create.stsize, pkt )
+                                          ENDCASE
+              CASE action.renameobject  : startco ( rename, rename.stsize, pkt )
+                                          ENDCASE
+              CASE action.deleteobject  : startco ( delete, delete.stsize, pkt )
+                                          ENDCASE
+	      CASE action.getblock      : startco ( getb, delete.stsize, pkt )
+					  ENDCASE
+
+              CASE action.parent        : startco( parent, parent.stsize, pkt )
+                                          ENDCASE
+
+              CASE    act.findupdate    :
+              CASE    act.findinput     :
+              CASE    act.findoutput    : startco ( access, access.stsize, pkt )
+                                          ENDCASE
+
+              CASE action.currentvol    : IF arg1=0 THEN
+					  $( returnpkt(pkt,current.volume,unit.no)
+					     ENDCASE
+					  $)
+              CASE 'W': CASE 'R'         :
+              CASE act.seek: CASE act.end:
+                                          callco ( arg1, pkt )
+                                          ENDCASE
+
+              CASE action.copydir       :
+
+		// pre neil code, 5 sep 85
+                //   $(
+		//      LET key  = arg1=0 -> rootkey, arg1!lock.key
+                //      returnpkt ( pkt, key = 0 -> FALSE,
+                //                  getlock ( key, shared.lock ), errcode )
+                //   $)
+
+                   $(
+		     LET key  = rootkey
+
+		     IF arg1 THEN
+		     $(
+			LET vol = arg1!lock.volnode
+
+			key := arg1!lock.key
+			IF key=0 THEN GOTO copydirend
+
+			IF current.volume \= vol THEN
+			$(
+			   // special case for duplock when the volume of the
+			   // lock is not the current one.
+			   LET q = lock.queue
+			   lock.queue := vol!dev.locklist
+			   key := getlock( key, shared.lock )
+
+			   // getlock doesn't correctly update the volume id
+			   IF key THEN
+			   $(
+			      key!lock.volnode := vol
+			   $)
+			   vol!dev.locklist := lock.queue
+			   lock.queue := q
+			   goto copydirend
+			$)
+		     $)
+
+		     key := getlock( key, shared.lock )
+			
+copydirend:
+                     returnpkt ( pkt, key, errcode )
+                  $)
+                  ENDCASE
+
+              CASE action.freelock      : returnpkt ( pkt,
+                                                      freelock ( arg1 ),
+                                                      errcode
+                                                    )
+                                          ENDCASE
+
+              CASE action.inhibit  : disc.change.inhibited := arg1
+                                     TEST disc.change.inhibited THEN
+				     $( turnoff()
+					discard.buffers()
+					disktype := type.busy
+				     $)
+				     ELSE   // Act as if disk reinserted
+    					disc.attention.flag := 0
+                                     returnpkt( pkt, TRUE )
+                                     ENDCASE
+
+              CASE action.flush:     // Close down; message pending..
+                   TEST closepkt=0 & motor.ticks > 1 THEN
+                   $( closepkt := pkt
+                      turnoff()
+                   $)
+	      	   ELSE   // One already pending, or off already
+                      qpkt( pkt )
+                   ENDCASE
+
+              CASE action.disktype: 
+		   disktype := pkt!pkt.res1 
+                   wrprot := testdisc( IOC.protectstate ) NE 0
+		   // Mark disk not completely validated
+		   restart.running := -restart.running
+		   // Pass back initial packet
+                   UNLESS parm.pkt=0 DO 
+		   $( qpkt(parm.pkt)
+		      parm.pkt := 0
+		   $)
+                   // Now reactivate any locks
+		   current.volume := pkt!pkt.res2
+		   UNLESS current.volume=0 DO
+                   $( LET q = current.volume!dev.locklist
+		      addlist( @@lock.queue, q )
+		      UNTIL q=0 DO
+		      $( q!lock.task := taskid()
+			 q := q!lock.link
+		      $)
+                      current.volume!dev.locklist := 0
+		   $)
+                   ENDCASE
+
+              CASE action.setmap: 
+ 		   IF motor.ticks=0 THEN
+			motor.ticks := 1  // cause motor off
+		   // If all validations complete, mark the fact
+		   restart.running := restart.running+1
+		   freevec(bitmap)        // in case already set
+                   IF pkt!pkt.res1 THEN
+                   $( bitmap := arg1
+                      bitchk := checksum ( bitmap, bitmap.upb )
+                      usedblocks := pkt ! pkt.arg2
+		      freevec(mapblocks)  // Free the old ones
+                      mapblocks := pkt ! pkt.arg3
+                      IF mapblocks=0 & NOT wrprot DO   // if validated...
+                         // start off with a valid map on disc
+                         startco( createmap.co, 100, 0)
+		   $)
+		   // Return the packet
+                   returnpkt( pkt, TRUE )
+		   // Now inform input device that this has happened.
+		   signal.event(iIOB, ipkt, InputEvent, ieclass.diskinserted)
+
+	      CASE action.event:
+                   ENDCASE
+
+              CASE action.morecache:
+                   returnpkt(pkt, getbuffers(pkt!pkt.arg1))
+                   ENDCASE
+
+	      CASE action.info:
+		   UNLESS checklock(arg1)
+		   $( returnpkt(pkt, FALSE, errcode )
+		      ENDCASE
+		   $)
+		   arg1 := pkt!pkt.arg2
+              CASE action.discinfo :
+
+                   setvec ( arg1, discinfo.size,
+
+                            soft.errors,
+                            unit.no,
+
+                            bitmap = 0 -> discstate.notvalidated  ,
+                            wrprot     -> discstate.writeprotected,
+                                          discstate.validated     ,
+
+                            n.blocks, usedblocks, byte.datasize,
+                            disktype, current.volume, lock.queue )
+
+                   returnpkt ( pkt, TRUE, 0 )
+                   ENDCASE
+
+              DEFAULT : returnpkt ( pkt, FALSE, error.actionnotknown )
+                        ENDCASE
+           $)
+       $)
+
+
+      // couple of points here:
+      // ( i) the condintion for the below callco can only occur
+      //      once as disc cannot fail as such - hence the next callco
+      //      will be for the returning driver packet
+      // (ii) there is no possibility of a buffer being freed by this
+      //      call so there is no need to loop back to the previous
+      //      WHILE loop
+
+      UNLESS disc.running | ( pending.queue = 0 ) DO callco ( disc.co )
+
+   $) REPEAT
+$)
+
+AND startco ( co, stack, pkt ) = VALOF
+$(
+   LET newco = ?
+   LET type  = pkt=0 -> 0, pkt!pkt.type
+   LET err   = 0
+
+   newco := createco( co, stack )
+
+   IF newco=0 THEN 
+   $( err := error.getvecfailure
+      UNLESS pkt=0 DO returnpkt ( pkt, FALSE, err )
+      RESULTIS FALSE
+   $)
+
+   // Startup the coroutine required
+   callco ( newco, pkt )
+   RESULTIS TRUE
+$)
+
+AND createmap.co () BE
+$(
+   createmap ()
+   resumeco ( kill.co, stackbase )
+$)
+
+and testdisc(action,data,len) = valof
+$( SetIo( Disc.extra.dev, action, data,len )
+   exec( e.DoIO, ?, ?, ?, disc.extra.dev<<2 )
+   RESULTIS disc.extra.dev!io.state.p
+$)
+
+// Start a disk change recognise sequence. vflag will be
+// zero if validation is permitted.
+AND changedisc(rpkt,vflag) be
+$( let task = ?
+   let segl = getvec(3)
+   let seg = seglist()
+   freevec(bitmap)
+   bitmap := 0
+   // Create validator task
+   segl ! 0, segl ! 1, segl ! 2 := 3, seg ! 1, seg ! 2
+   segl ! 3 := rootstruct()!rtn.restartseg
+   task := createtask ( segl, 600, restartpri,
+                        "Validator", makeglob(segl))
+   if task=0 then return
+   // Start it up
+   setvec( rpkt, pkt.arg5, (rpkt+pkt.arg6)<<2, task, action.disktype, ?, ?,
+           envec, unit.no, devicename, vflag, OpenFlags )
+   qpkt( rpkt )
+$)
+
+
+// Closedown active disc ready for possible removal
+and closedown() be
+$( // First, make sure all blocks get written to disc
+   IF filesopen THEN
+   $( addlist( @@pending.queue, waiting.queue )
+      waiting.queue := 0
+      // Now write the bitmap back
+      writemap()
+   $)
+   testdisc(IOC.update)
+   testdisc(IOC.motor, ?, 0)
+   motor.ticks := 0
+   UNLESS closepkt=0 DO
+   $( qpkt(closepkt)
+      closepkt := 0
+   $)
+   resumeco( kill.co, stackbase )
+$)
+
+// Read a block from disc direct. Arg1=key, Arg2=buffer
+and getb( pkt ) be
+$( LET buf = ?
+   IF disktype=type.nodisk THEN
+   $( errcode := error.nodisk
+      workfail(pkt)
+   $)
+   buf := readblock( pkt!pkt.arg1, grab )
+   copyvec(buf, pkt!pkt.arg2, b.file.upb )
+   freeblock(buf, buf.invalid)
+   workdone(pkt, TRUE)
+$)
+
+// Rename the volume. Arg1 is the new name required.
+and renamedisk(pkt) be
+$( LET name = pkt!pkt.arg1
+   LET len  = name%0
+   LET buf = ?
+   LET ns = ?
+   IF diskprotected() THEN workfail(pkt)
+   errcode := error.invalidcomponentname
+   UNLESS 0 < len <= 30 DO workfail(pkt)   // Name invalid
+   // Alter it in memory
+   ns := getmem((len+1)>>2,memf.pubclear)
+   IF ns=0 THEN
+   $( errcode := result2(FALSE)
+      workfail(pkt)
+   $)
+   copystring(name,ns)
+   freevec(current.volume!dev.name)
+   current.volume!dev.name := ns
+   // Alter it on disk
+   buf := readblock( rootkey, grab )       // Read root block
+   copystring(name, buf+b.file.name)
+   // Now write the block back. Wait for this to complete
+   append( @@pending.queue, setvec( buf - buf.prefix, buf.key,
+           ?, stackbase, IOC.write, buf.invalid, rootkey) )
+   buf := fetch()
+   freeblock( buf, buf.valid )
+   // Send back packet, all OK
+   workdone(pkt,TRUE)
+$)
+
+and forget.locks() be
+$(
+   // Throw away any locks - when they are removed the space will be
+   // reclaimed; they are held in the volume structure in case they
+   // are reused .
+   // Also mark the volume as not mounted now
+   // If there are no oustanding locks, remove the device
+   // entry.
+   unless current.volume=0 do test lock.queue=0 then
+      forget.volume(current.volume)
+      else
+      $( addlist( current.volume+dev.locklist, lock.queue )
+         current.volume!dev.task := 0
+      $)
+   lock.queue := 0
+   current.volume := 0       // Name of volume currently unknown
+$)
+
+and addlist( addr, l ) be
+$( UNTIL !addr=0 DO addr := !addr
+   !addr := l
+$)
+
+and signal.event(iIOB, ipkt, InputEvent, event) BE
+$( clearvec(InputEvent,InputEventUpb)
+   InputEvent%ie.Class := event
+   SetIO( iIOB, IOC.writeevent, InputEvent, InputEventSize )
+   SendIO( iIOB, ipkt )
+$)
+
+and turnoff() BE
+   startco( closedown, closedown.stsize, 0 )
+
+and discard.buffers() be
+$( // Throw away any cached buffers
+   addlist( @@free.buffer.queue, valid.buffer.queue)
+   valid.buffer.queue := 0
+   testdisc( IOC.clear )
+   forget.locks()
+$)
+
+// stub for preread routine, replaced with loaded code at runtime
+AND preread() = FALSE
+@

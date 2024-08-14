@@ -1,0 +1,274 @@
+Internal documentation for SpecialFX.library
+============================================
+
+How to Compile
+--------------
+
+The library is made with bmake, which is documented in v40:aug/src/bmake. The
+Makefile is set up, and all you need to type is bmake.
+
+Here is a list of the commands you can use:
+
+bmake		Makes the specialfx.ld file
+bmake clean	Deletes all the .obj files
+bmake depend	Makes a file called 'dependencies'. I think you need to have
+		and empty file called dependencies created first though.
+bmake doc	Makes the autodocs
+bmake headers	Releases the include files
+bmake release	General release to the server
+bmake rev	Bumps the revision number
+
+Files
+-----
+
+Each effect has an associated source file. Currently, there are five effects,
+and their files are
+ColourControl.asm
+VideoControl.asm
+LineControl.asm
+SpriteControl.asm
+InterruptControl.asm
+
+Each file contains the code for the four obligatory and two optional vectors,
+described below.
+
+specialfx.library.asm is the source code for the library RomTag, including the
+standard library functions of Init(), Open(), Close() and Expunge().
+
+AllocFX.asm, InstallFX.asm AnimateFX.asm RemoveFX.asm FreeFX.asm are the files
+associated with the functions. With the exception of FreeFX.asm, they are just
+stubs which call the appropriate vector relevant to the effect they are working
+on.
+
+MrgCop.asm and LoadView.asm contain the code for the SetFunction()ing of
+graphics.library's MrgCop() and LoadView() functions.
+
+NewMode.asm is a downcoded version of graphics.library's internal new_mode()
+function, and returns the hardware mode bits set in the ViewPort's ModeID.
+
+specialfx.[h|i] are the public include files, containing the structures the
+application programmer fills in to achieve the effects.
+
+specialfxbase.[h|i] are private files containing the library base. In fact, only
+the .i file is used; the .h file is just for completeness.
+
+specialfx_internal.i contains the definitions of the FXHandle returned by
+AllocFX(), the AnimHandle returned by InstallFX(), and all the definitions of
+the private caches used by the library for each effect.
+
+makefile is the file used by bmake.
+
+RCS_Link points to the RCS directory on the server.
+
+The MakeFile
+------------
+
+CVERSION = 6 for SAS6.
+VERSION = 40 for the library version
+SYSTEM = specialfx for the system name
+AFILES is the list of all assembly files
+INFILES is a list of all the public include files
+OTHERFILES is everything else, including private include files, .rev files, .sfd
+file etc.
+HOMEINCL = v42:include/libraries is where the public include files get released
+to.
+HOMEDIR = v42:src/other/specialfx is where the source code gets released to.
+POSTCOMPILE = copyit, which is the name of the line to execute when the make is
+finished. Currently, this is set to copy the .ld file to Pandora.
+LINKERLIBS are the libs used by the linker.
+
+SpecialFX.library.asm
+---------------------
+
+This is the file with the RomTag, and usual library functions. It initialises
+the two lists used, and the Semaphores associated with them (see specialfxbase.h
+for documentation).
+
+It also initialises the vector lists. Each effect contains four obligatory and
+two optional vectors. The obligatory ones are:
+
+Alloc... : The vector is responsible for allocating and initialising the
+FXHandle associated with it's effet type. Seeing as the FXHandle varies in size
+for each effect type, each effect provides a function to handle the FX
+allocation. Each effect has the base structure of
+    STRUCTURE FXHandle,0
+	ULONG	fxh_Type		; will be SFX_...
+	UWORD	fxh_Pad
+	UWORD	fxh_Num			; number of ...Control structures
+	ULONG	fxh_AllocSize		; total size of the FXHandle allocation
+	ULONG	fxh_First		; pointer to the first ...Control struct
+	ULONG	fxh_UCopList		; pointer to the effect's UCopList
+	ULONG	fxh_Offset		; offset from the copperlist caches to the
+					; first copper instruction of this effect.
+	ULONG	fxh_BackPointer		; points to fxh_Type
+    LABEL FxHandle_SIZEOF
+Some of the effects will have more information after fxh_Offset. For instance
+the SFX_FineVideoControl has the following extra info
+    STRUCTURE FVCHPrivate,fxh_BackPointer
+	UWORD	fvch_BPLCON0
+	UWORD	fvch_BPLCON2
+	UWORD	fvch_BPLCON3
+	UWORD	fvch_BPLCON4
+	ULONG	fvch_Valid		; = -1 if the BPLCONx values are valid
+	ULONG	fvch_BackPointer	; points to fxh_Type
+    LABEL	fvch_SIZEOF
+However, the FXHandle always ends with a BackPointer to the fxh_Type field.
+After the BackPointer is a list of pointers, each one pointing to the ...Control
+structure associated with the effect. The value returned by the Vector is the
+address of the first pointer in the list.
+
+This is all shown in this diagram:
+
+               |-------------|<--
+               |             |  |
+               | FxHandle    |  |
+               |             |  |
+               |             |  |
+               |-------------|  |
+               |             |  |
+               | Fx specific |  |
+               |  data       |  |
+               |             |  |
+               |             |  |
+               |             |  |
+               |-------------|  |
+               | BackPointer |--
+               |-------------|
+ FxHandle----->| ...Control  |--
+ passed to     |-------------|  |
+ the app.      | ...Control  |--+--
+               :             :  |  |
+               : fxh_Num of  :  |  |
+               : these       :  |  |
+               |-------------|<--  |
+               | Public part |     |
+               | of the      |     |
+               | ...Control  |     |
+               | structure   |     |
+               |-------------|     |
+               | Private part|     |
+               | of the      |     |
+               | ...Control  |     |
+               | structure   |     |
+               |-------------|<----
+               | Public part |
+               | of the      |
+               | ...Control  |
+               | structure   |
+               |-------------|
+               | Private part|
+               | of the      |
+               | ...Control  |
+               | structure   |
+               |-------------|
+               :             :
+               :  etc        :
+               ...............
+
+
+Thus, from the FxHandle returned to the application program, the start of the 
+FxHandle structure can always be found from -4(Handle).
+
+Count...: This vector is called from InstallFX(), and counts the number of
+UserCopper instructions needed for this entire effect. We want to ensure that
+there are always enough instructions allocated so tha the
+UCopList->FirstCopList->Next is always NULL, and we don't need to check for this
+in the AnimateFX() code. The number of instructions can be simple (for instance,
+FineVideoControl always writes to BPLCON0,BPLCON2,BPLCON3 and BPLCON4), or as
+complicated as the LineControl, where the number of instructions per effect
+depends on the LineControl before and after the one you are looking at.
+
+Install...: This vector is also called by InstallFX(), and builds the actual
+copperlist based on the original settings in the public part of each ...Control
+structure.
+
+Animate...: This vector is called by AnimateFX() to poke to copperlist to
+achieve the animation. It needs to be as fast as possible, so most of the
+calculations have to be pre-cached and just read out of a table.
+
+
+The optional vectors are:
+
+Remove...: This is called by RemoveFX(). Currently, only InterruptControl has a
+Remove vector which removes the ViewPort of this effect from the VPList.
+
+Rebuild...: This is called by the LoadView() stub to rebuild the copperlist and
+caches after a screen coercion. Currently, only ColourControl, LineControl and
+FineVideoControl use the Rebuild vector.
+
+
+AllocFX.asm
+-----------
+
+Just a stub to call the Alloc... vector for the effect.
+
+InstallFX.asm
+-------------
+
+Calls the Count... vector for the effect, allocates the UCopList, and then
+calls the Install... vector. It returns a pointer to an AnimHandle, which is
+privately defined as
+    STRUCTURE AnimHandle,0
+	ULONG	ah_View
+	ULONG	ah_ViewPort
+	ULONG	ah_HandleSize	; size of this handle
+	ULONG	ah_HandleCount	; number of FXHandles in the list
+	APTR	ah_Copper1L	; point to the two copperlists
+	APTR	ah_Copper1S	; to use in doublebuffering the animation
+	APTR	ah_Copper2L	; (Short and Long)
+	APTR	ah_Copper2S
+	ULONG	ah_Copper2LSize	; Size of the memory allocation for Copper2L
+	ULONG	ah_Copper2SSize	; Size of the memory allocation for Copper2S
+	UWORD	ah_CopperToUse	; 0 or 1.
+	UWORD	ah_Flags
+	; here is a list of the FxHandles.
+    LABEL AnimHandle_SIZEOF
+
+
+AnimateFX.asm
+-------------
+
+Locks the gb_ActiViewCprSemaphore, and the sfxb_AHListSemaphore. Optionally
+calculates the offset in to the copper of the first instruction associated with
+the effect, and calls the appropriate Animate... vectors. It then sets the
+gb_LOFlist and gb_SHFlist pointers to the copperlist just upated (which may not
+be the View's copperlists if copper doublebuffering is enabled).
+
+RemoveFX.asm
+------------
+
+Frees the UCopList whilst the gb_ActiViewCprSemaphore is locked, and calls the
+optional Remove... vector, and FreeMem()s the memory associated with the
+AnimHandle.
+
+FreeFX.asm
+----------
+
+FreeMem()s the memory associated with the FxHandle.
+
+MrgCop.asm
+----------
+
+This is the patch for the MrgCop() function. It calls the ROM MrgCop(), and then
+checks if the View passed to MrgCop() matches any of the ah_View values in the
+AHList. If it does, and if copper double buffering is enabled, the new copper
+list just created by MrgCop() is copied, the old copy is FreeMem()ed, and the
+new copy installed.
+
+LoadView.asm
+------------
+
+This is the patch for the LoadView() function. It calls the ROM LoadView(), and
+then calls any Rebuild... vector for the effects in any AnimHandle whose ah_View
+matches the View passed to LoadView(). This is for mode coercion. Basically, any
+effect whose copper instructions are mode dependant needs a rebuild. Currently,
+that is all of them except InterruptControl, although the SpriteControl rebuild
+is not written (VSprites never coerced properly anyway!).
+
+The ...Control.asm files are pretty well anotated.
+
+
+NB - Much of the error handling in low memory conditions has not been
+implemented.  A return of NULL from AllocMem() causes the code to branch either
+a dummy stub which is markes as NYI (Not Yet Implemented), or is commented out.
+Sorry!

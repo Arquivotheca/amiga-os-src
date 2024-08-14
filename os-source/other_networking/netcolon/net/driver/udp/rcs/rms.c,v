@@ -1,0 +1,437 @@
+head     1.2;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.2; strict;
+comment  @ * @;
+
+
+1.2
+date     91.08.02.09.12.05;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.07.25.19.21.12;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Reliable Message System process
+@
+
+
+1.2
+log
+@First Alpha?
+@
+text
+@#include "bolt-udp.h"
+
+/***** NET-UDP.library/SDNAccept ***********************************
+*
+*   NAME
+*	SDNAccept -- Get any new RPacket or connection.
+*
+*   SYNOPSIS
+*	rc = SDNAccept(drglobal, rp)
+*	D0	       A0	 A1
+*
+*	int SDNAccept(APTR, struct RPacket **);
+*
+*   FUNCTION
+*	Read next incoming RPacket and accept new connections.  If rc ==
+*	SDN_OK, the *rp will point to a new RPacket, else *rp will point to
+*	never-never land.
+*
+*   INPUTS
+*	drglobal  	- Driver-specific global data pointer obtained from
+*			  SDNSerInit()
+*	rp		- RPacket that has arrived
+*
+*   RESULTS
+*	rc		- SDN_OK, SDN_ERR == read error,
+*			  SDN_NONE == nothing to read
+*
+*   NOTES
+*	This routine is only called by the server.
+*
+*	Driver must be prepared to handle this being called when nothing is
+*	pending since multiple drivers may be sharing a signal bit.  If an
+*	RPacket did come in, but is munged, SDN_ERR is returned;  if no
+*	RPacket was available, SDN_NONE is returned.  If a pending write
+*	request has been completed, a special RPacket type is returned and
+*	a copy of the original RPacket structure's 'statedata' pointer is
+*	returned.
+*
+*	The memory pointed to by RP is owned by the NET: code until
+*	SDNFreeRPacket() is called.  SDNFreeRPacket() should be called ASAP
+*	after calling SDNAccept() to allow the driver to reuse the RPacket
+*	for the next read request.
+*
+*	When a new connection is established, this routine will return an
+*	RPacket	with an action indicating the establishment of the connection
+*	(ACTION_NETWORK_START) and Arg1 filled with a pointer to the
+*	"connection" (i.e. what you'd get from SDNGetCon()).  For connections
+*	that are broken, a phoney RPacket is returned (ACTION_NETWORK_END).
+*
+*	The driver should ensure that the first RPacket received on a
+*	new connection (or as sequence number zero) is an
+*	ACTION_NETWORK_START.
+*
+*   BUGS
+*	Returns SDN_NONE if there is an error sending the acknowledgement.
+*
+*	If an ACTION_NETWORK_START is received for a "connection" already
+*	"connected" no ACTION_NETWORK_END is received for the old
+*	"connection."  THIS IS A BIG PROBLEM.
+*
+*	Need to make sure that ACTION_NETWORK_START is not replied by server
+*	and is properly freed.
+*
+*	Do I need to Forbid more than I do?  (I forbid when I futz with
+*	the connection list, but not when I bump it's sequence numbers
+*	or anywhere else).
+*
+*	If we run out of memory when accepting a new connection, we may
+*	lose a packet?
+*
+*	if n<1, what should I do?!?
+*
+*   SEE ALSO
+*	SDNReply(), SDNFreeRPacket()
+*
+*********************************************************************************
+*
+*  Need to get tg into the new process somehow.
+*
+*/
+
+/*
+**  Copy of what's in put.c:
+*/
+
+void __asm TermCon2(register __a0 UDPGLOBAL tg, register __a1 APTR data,
+		   register __a6 struct DrLibrary *DriverBase)
+{
+struct RPacket *rp;
+struct RMSMsg *msg;
+
+	BUG(("TermCon2() called!\n"));
+	if( (rp = SDNAllocRPacket((APTR)tg, NULL, 0L)) == NULL)
+	{
+		BUG(("\nTermCon2 can't AllocRPacket!\n"));
+		return;
+	}
+	msg = AllocMem(sizeof(*msg), MEMF_PUBLIC);
+	if(msg)
+	{
+		rp->Type = ACTION_NETWORK_END;
+		rp->Arg1 = (LONG)data;
+		rp->Arg2 = 0L;
+		rp->DLen = 0L;
+
+		msg->rms_Msg.mn_Node.ln_Type = NT_MESSAGE;
+		msg->rms_Msg.mn_Length = sizeof(*msg);
+		msg->rms_Msg.mn_ReplyPort = NULL;
+		msg->rp = (struct UDPRPacket *)rp;
+
+		PutMsg(tg->rmsport, msg);
+	}else
+	{
+		BUG(("\nTermCon2 can't AllocMem!\n"));
+	}
+}
+
+#define DriverBase (tg->DriverBase)
+
+void rms(void)
+{
+UDPGLOBAL tg;			/*  how could we access anything without tg? */
+struct Task *self;
+int n,		/*  number of bytes recvfrom()ed  */
+    fromlen;	/*  number of bytes the address (from) takes up  */
+struct sockaddr_in from;  /* the address the RPacket is from  */
+struct UDPCon *i; 	  /* index for searching our list of "connections" */
+struct UDPRPacket *candidate; /* candidate for us to accept as a RPacket */
+struct RMSMsg *rmsmsg;	/*  Exec message with rpacket to give handler/server */
+struct UDPRPacket *kludge_next;
+long kludge_class;
+
+	self = FindTask(NULL);
+	tg = (UDPGLOBAL)self->tc_UserData;
+	BUGP(("\nrms: Started RMS process for tg=%lx\n",tg));
+
+	for(;;){
+/*
+**  Get an RPacket and an RMSMsg (must do both here because don't want to
+**  ack a packet but not have enough memory to tell our invoker!)
+*/
+	candidate = (struct UDPRPacket *)SDNAllocRPacket(tg, NULL, NETBUFSIZE);
+	rmsmsg = AllocMem(sizeof(*rmsmsg), MEMF_PUBLIC);
+	if( !(candidate && rmsmsg) )
+	{
+		BUG(("rms can't AllocRPacket and/or rmsmsg.\n"));
+		if(candidate)
+			SDNFreeRPacket(tg, candidate);
+	/*
+	**  I'll end up busy waiting for some memory, but what else can I do?
+	*/
+		continue;
+	}
+	kludge_next = candidate->next;
+	kludge_class = candidate->class;
+/*
+**  "goto NextPacket;" to abort a packet without accepting it and to read the
+**  next packet without have to re-allocate candidate and rmsmsg.
+*/
+NextPacket:
+	BUGP(("rms: About to recvfrom()\n"));
+	fromlen=sizeof(from);
+	n = recvfrom(tg->sock_recv, (char *)RPBASE((struct RPacket *)candidate),
+			UDPRPALLOCN, 0L, (struct sockaddr *)&from, &fromlen);
+#if BUGMSG > 0
+	if(n<1)
+	{
+		BUG(("\n\nOH SHIT!  n<1\n\n"));
+		goto NextPacket;
+	}
+#endif
+	Forbid();
+	SETRPDATA(candidate);
+	candidate->next  = kludge_next;
+	candidate->class = kludge_class;
+	candidate->con = NULL;
+
+/*
+** drop 5% of packets  (passes this test!)
+*
+	if(RangeRand(20L)==0L)
+	{
+		BUG(("rms: dropped packet #%ld, continuing...\n", candidate->sequence));
+		Permit();
+		goto NextPacket;
+	}
+*/
+	BUGP(("rms: DLen should be %ld\n", UDPRPDSIZE(n) ));
+	BUG(("\nrms: candidate packet %ld (n=%ld dlen=%ld) from %s... ",
+	     candidate->sequence, n, candidate->rp.DLen,
+	     inet_ntoa(from.sin_addr.s_addr) ));
+/*
+**  Search for a "connection" pointer to match the address of the sender
+**  of this RPacket. (We compare only the machine address, not the port
+**  number.  This would be important if there were multiple handler/servers
+**  per machine.)
+**
+**  This must be under Forbid()/Permit() to arbitrate access.
+*/
+	Forbid();
+	for(i=tg->con; i != NULL; i=i->next)
+	{
+		BUGP(("rms: Comparing %lx and %lx -- ",i->address.sin_addr.s_addr, from.sin_addr.s_addr));
+		if(i->address.sin_addr.s_addr == from.sin_addr.s_addr)
+		{
+			BUGP(("They're equal.\n"));
+			candidate->con = i;
+			break;
+		}
+		BUGP(("They weren't equal\n"));
+	}
+/*
+**  Check to see if it is an ACTION_NETWORK_START RPacket.  If it is,
+**  check the sequence number.  If the sequence number is zero, establish
+**  the "connection" (adding it to our list of "connections").  If it is
+**  non-zero, we ignore the RPacket (returning SDN_NONE) because only the
+**  first RPacket should be ACTION_NETWORK_START.  (If one side reboots,
+**  the other will eventually time-out the connection.)  Note that we
+**  don't check to make sure that nothing other than ACTION_NETWORK_START
+**  is zero -- the sequence counter may have wrapped.
+*/
+	if(candidate->rp.Type == ACTION_NETWORK_START)
+	{
+		BUG(("\nrms: ACTION_NETWORK_START... "));
+	/*
+	**  If there is an old "connection" for the address we're
+	**  establishing a new connection for, reuse the old connection.
+	**  Otherwise, add a new node to the list of "connections" (using
+	**  code copied from SDNInitNode()).
+	*/
+		if(candidate->con != NULL)
+		{
+			BUG(("rms: Zeroring sequence for existing connection\n"));
+			TermCon2(tg, candidate->con->data, DriverBase);
+			candidate->con->recv_sequence = 0;
+		}
+		else
+		{
+			if( (i = AllocMem(sizeof(*i), MEMF_CLEAR)) == NULL)
+			{
+				Permit();
+				goto NextPacket;
+			}
+			if(tg->con == NULL)
+			{
+				tg->con = i;
+				tg->con->next = NULL;
+			}else
+			{
+				i->next = tg->con;
+				tg->con = i;
+			}
+			candidate->con = i;
+			candidate->con->address.sin_addr.s_addr = from.sin_addr.s_addr;
+			candidate->con->address.sin_family = from.sin_family;
+/*
+**  If we got an ACTION_NETWORK_START, this must be the server.  If it
+**  is the server, we don't want the port sent from as the address to reply
+**  to, we want the well-known port of the handler recv socket as the address
+**  (but we still have the port sent from to acknowledge to).  (Handler well-
+**  know port #s are currently one greater than server well-known port #s.)
+*/
+			candidate->con->address.sin_port = tg->serverport+1;
+			BUG(("rms: new connection %lx  %s\n", candidate->con,
+			     inet_ntoa(candidate->con->address.sin_addr.s_addr) ));
+		}
+		candidate->rp.Arg1 = (LONG) candidate->con;
+	}
+	Permit();  /* done diddling with connections list */
+/*
+**  Remember that we started by setting candidate->con to NULL?  If we found a
+**  "connection" matching the sender or created a new "connection" to match
+**  the sender, candidate->con won't be NULL any more.  If it is still NULL,
+**  it must be from a sender who hasn't yet sent an ACTION_NETWORK_START
+**  so we'll ignore it.
+*/
+	if(candidate->con == NULL)
+	{
+		BUG(("rms giving up becase no connection.\n"));
+		Permit();
+		goto NextPacket;
+	}
+/*
+**  If the sequence number of this RPacket is greater than the sequence
+**  number we expected, the RPacket we were expected must have been lost.
+**  We'll ignore this RPacket and hope we get the RPacket we were expecting
+**  later.
+*/
+	if(candidate->sequence > candidate->con->recv_sequence)
+	{
+		BUG(("rms giving up - sequence mismatch (%ld,%ld).\n",
+		     candidate->sequence, candidate->con->recv_sequence));
+		Permit();
+		goto NextPacket;
+	}
+/*
+**  The RPacket we've received must either be one we are going to accept or
+**  one which we've already processed.  In the first case we wish to
+**  acknowledge the RPacket, in the second case we wish to re-acknowledge the
+**  RPacket (since our original acknowledgement may have been lost).
+**
+**  SHOULD I RETURN sdn_none OR sdn_err HERE?
+*/
+/*
+** don't ack 5% of packets
+*
+	if(drop++%10==0L)
+	{
+		BUG(("\nrms: DROPPED ack #%ld.\n", candidate->sequence));
+	}else
+	{
+*/		BUG(("\nrms: acking #%ld.\n", candidate->sequence));
+		if( (sendto(tg->sock_recv, (char *)&candidate->sequence,
+		     sizeof(candidate->sequence), 0L, (struct sockaddr *)&from,
+		    fromlen)) == -1)
+		{
+			BUG(("SDNAccept error in send ack -- %s.\n", strerror(errno) ));
+			Permit();
+			goto NextPacket;
+		}
+
+/*	}
+*
+**  If the sequence number is less than we expected, we can forget about this
+**  RPacket now that we have re-acknowledged it.
+*/
+	if(candidate->sequence < candidate->con->recv_sequence)
+	{
+		BUG(("Forgetting about packet #%ldnow that we've acknowledged.\n",
+		      candidate->sequence));
+		Permit();
+		goto NextPacket;
+	}
+/*
+**  This is an RPacket we're going to accept!  Bump the expected sequence
+**  number for the next RPacket on this "connection."
+**  Then accept our candidate RPacket as worthy of processing
+**  (by pointing *accepted to it and returning SDN_OK).
+*/
+	candidate->con->recv_sequence++;
+	BUG(("rms: #%ld, t=%ld ok.\n",
+	     candidate->sequence, candidate->rp.Type));
+	fromlen=sizeof(from);
+/*
+**  make up a message and send it on message port.
+*/
+	rmsmsg->rms_Msg.mn_Node.ln_Type = NT_MESSAGE;
+	rmsmsg->rms_Msg.mn_Length = sizeof(*rmsmsg);
+	rmsmsg->rms_Msg.mn_ReplyPort = NULL;
+	rmsmsg->rp = candidate;
+	PutMsg(tg->rmsport, rmsmsg);
+	Permit();
+}}
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d71 1
+a71 1
+*	Don't we lose an RPacket everytime we 'continue'?
+d82 36
+d142 1
+a142 1
+	candidate = (struct UDPRPacket *)SDNAllocRPacket(tg, NULL, UDPRPALLOCN);
+d149 4
+a152 1
+		goto NextPacket;
+d165 2
+a166 1
+	if(n==-1)
+d168 1
+a168 1
+		KPrintF("OH SHIT  n==-1\n\n");
+d171 1
+d179 1
+a179 1
+** drop 5% of packets
+d203 1
+a203 2
+		BUGP(("rms: Comparing %lx and %lx -- ",
+		i->address.sin_addr.s_addr, from.sin_addr.s_addr));
+a223 9
+/******************
+   The comment above appears wrong.  How can a server time-out a connection?
+
+		if(candidate->sequence != 0)
+		{
+			BUG(("rms returning because \n"));
+			goto NextPacket;
+		}
+*******************/
+d234 1
+a235 7
+
+/**/
+
+/*              MUST RETURN AN ACTION_NETWORK_END AT THIS POINT!!! */
+
+/**/
+
+d323 1
+a323 1
+/*
+@

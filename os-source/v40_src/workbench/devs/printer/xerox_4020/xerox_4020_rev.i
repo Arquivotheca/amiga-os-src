@@ -1,0 +1,12 @@
+VERSION		EQU	35
+REVISION	EQU	45
+DATE	MACRO
+		dc.b	'17 Dec 1989'
+	ENDM
+VERS	MACRO
+		dc.b	'xerox_4020 35.45'
+	ENDM
+VSTRING	MACRO
+		dc.b	'xerox_4020 35.45 (17 Dec 1989)',13,10,0
+		ds.w	0
+	ENDM

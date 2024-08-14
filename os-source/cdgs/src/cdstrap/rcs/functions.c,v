@@ -1,0 +1,724 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.10
+date     93.05.12.14.24.35;  author jerryh;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     93.03.12.10.22.25;  author jerryh;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     93.02.24.14.16.35;  author jerryh;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     93.02.23.11.09.52;  author jerryh;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     93.02.19.16.30.39;  author jerryh;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.12.18.11.40.24;  author jerryh;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.11.20.12.07.04;  author jerryh;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.11.17.16.50.32;  author jerryh;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.11.16.13.25.53;  author jerryh;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.08.20.14.04.57;  author jerryh;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@functions for cdstrap.
+@
+
+
+1.10
+log
+@no effective change.
+@
+text
+@
+#include <exec/types.h>
+#include <exec/execbase.h>
+#include <exec/memory.h>
+#include <exec/io.h>
+#include <exec/interrupts.h>
+#include <libraries/dos.h>
+#include <libraries/expansion.h>
+#include <libraries/expansionbase.h>
+#include <intuition/screens.h>
+#include <graphics/gfx.h>
+#include <graphics/gfxbase.h>
+#include <graphics/view.h>
+#include <hardware/intbits.h>
+#include <hardware/custom.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
+#include <devices/audio.h>
+#include <devices/trackdisk.h>
+#include <dos/filehandler.h>
+
+#define EXEC_PRIVATE_PRAGMAS
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include "pragmas/playerprefs_private_pragmas.h"
+#include "pragmas/cdfs_pragmas.h"
+#include "pragmas/debox_pragmas.h"
+
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/intuition_protos.h>
+#include "clib/playerprefs_protos.h"
+#include "clib/cdfs_protos.h"
+#include "clib/debox_protos.h"
+
+#include "cd/cd.h"
+#include <cdtv/cdtvprefs.h>
+#include <cdtv/debox.h>
+#include "cdstrap.h"
+
+#define SysBase         (*((struct ExecBase **)0x00000004L))
+#define GfxBase         V->GfxBase
+#define IntuitionBase   V->IntuitionBase
+#define PlayerPrefsBase V->PlayerPrefsBase
+
+extern int  ChkSumFD(char *);
+
+extern struct Custom __far custom;
+
+#define EMPTY(n)    ((ULONG)(n)->lh_Head == (ULONG)&n->lh_Tail)
+
+
+/*******************************************************************************
+ *                                                                             *
+ *  DoIOR - Send IORequest to a device                                         *
+ *                                                                             *
+ *    in:   IOStdReq *Req                                                      *
+ *          UWORD     Cmd                                                      *
+ *          ULONG     Offset                                                   *
+ *          ULONG     Length                                                   *
+ *          UWORD    *Data                                                     *
+ *                                                                             *
+ *   out:   int       Error                                                    *
+ *                                                                             *
+ *******************************************************************************/
+
+int DoIOR(struct IOStdReq *Req, UWORD cmd, ULONG Offset,
+              ULONG Length, UWORD *Data, struct V *V) {
+
+    if (Req->io_Device) {                                                       /* Is the request usable?               */
+
+        Req->io_Command = cmd;                                                  /* Set up request                       */
+        Req->io_Offset  = Offset;
+        Req->io_Length  = Length;
+        Req->io_Data    = (APTR)Data;
+
+        return((int)DoIO(Req));                                                 /* Do the IORequest and return error    */
+        }
+
+    return(0);                                                                  /* Could not perform request            */
+    }
+
+
+/*******************************************************************************
+ *                                                                             *
+ *  DoIOActual - Do a simple command that returns status in io_Actual          *
+ *                                                                             *
+ *    in:   IOStdReq *Req                                                      *
+ *          UWORD     Cmd                                                      *
+ *                                                                             *
+ *   out:   int       io_Actual                                                *
+ *                                                                             *
+ *******************************************************************************/
+
+int GetIOActual(register struct IOStdReq *req, LONG cmd, struct V *V) {
+
+    DoIOR(req, cmd, 0, 0, 0, V);                                                /* Do the request and return io_Actual  */
+    return((int)req->io_Actual);
+    }
+
+
+
+/*******************************************************************************
+ *                                                                             *
+ *  GetStatus - Get status word from CD_INFO command                           *
+ *                                                                             *
+ *    in:   IOStdReq *Req                                                      *
+ *                                                                             *
+ *   out:   UWORD     Status                                                   *
+ *                                                                             *
+ *******************************************************************************/
+
+UWORD GetStatus(register struct IOStdReq *req, struct V *V) {
+
+struct CDInfo CDInfo;
+
+    DoIOR(req, CD_INFO, 0, sizeof(struct CDInfo), (UWORD *)&CDInfo, V);          /* Do the request and return io_Actual  */
+    return(CDInfo.Status);
+    }
+
+
+
+/*******************************************************************************
+ *                                                                             *
+ *  Compare - Compare two buffers of data                                      *
+ *                                                                             *
+ *  in: Data1 - First buffer                                                   *
+ *      Data2 - Second buffer                                                  *
+ *      Size  - Size of buffers (must be a multiple of 4)                      *
+ *                                                                             *
+ *******************************************************************************/
+
+int Compare(ULONG *Data1, ULONG *Data2, int Size) {
+
+LONG i;
+
+    for (i=0; i<Size; i+=4) if (*Data1++ != *Data2++) return(0);                /* Compare the buffers and return result */
+
+    return(1);
+    }
+
+
+/*******************************************************************************************
+ *                                                                                         *
+ *  InitAudio - Initialize audio device for 1.3 applications                               *
+ *                                                                                         *
+ *******************************************************************************************/
+
+void InitAudio(struct V *V) {
+
+struct Resident *Res;
+struct ExecBase *EB = SysBase;
+
+    if (!FindName((struct List *)&EB->DeviceList, "audio.device")) {                        /* Find audio device in list */
+
+        if (Res = (struct Resident *)FindResident("audio.device")) InitResident(Res, 0L);   /* Initialize audio.device   */
+        }
+    }
+
+
+
+
+/*******************************************************************************************
+ *                                                                                         *
+ *  Kludges - Apply kludges to CDTV titles                                                 *
+ *                                                                                         *
+ *******************************************************************************************/
+
+void Kludges(struct V *V) {
+
+register struct MsgPort *mp;
+struct CDTVPrefs CDTVPrefs;
+
+    InitAudio(V);                                                                           /* Do standard 1.3 patches      */
+    OwnBlitter();
+    WaitBlit();
+    custom.intena = INTF_BLIT;
+    DisownBlitter();
+    FillCDTVPrefs(&CDTVPrefs);
+
+    if (mp = (struct MsgPort *)AllocMem(sizeof(struct MsgPort), MEMF_CLEAR|MEMF_PUBLIC)) {  /* Create a MsgPort for kludges */
+
+        mp->mp_Node.ln_Type = NT_MSGPORT;                                                   /* Initialize the port          */
+        mp->mp_Node.ln_Name = "CDBOOT";
+
+        AddPort(mp);                                                                        /* Add port to system list      */
+        }   
+    }
+
+
+
+
+
+
+/***********************************************************************************
+ *                                                                                 *
+ *  InitScreen - Open a fake, blank screen and close to initialize for Player      *
+ *                                                                                 *
+ ***********************************************************************************/
+
+extern LONG    __asm FakeOWB(void);
+
+void InitScreen(struct V *V) {
+
+APTR                 OWB;
+int                  i;
+
+struct NewScreen     NewScreen;
+struct Screen       *Screen;
+struct ColorSpec     ColorSpec[17];
+
+struct TagItem       TagList[] = {
+
+    { SA_Colors,     0         },
+    { TAG_END,       0         }
+    };
+
+    NewScreen.LeftEdge      = 0;                                                    /* Define screen specs        */
+    NewScreen.TopEdge       = 0;
+    NewScreen.Width         = 640;
+    NewScreen.Height        = 200;
+    NewScreen.Depth         = 1;
+    NewScreen.ViewModes     = HIRES;
+    NewScreen.Type          = CUSTOMSCREEN|SCREENQUIET;
+    NewScreen.DefaultTitle  = NULL;
+    NewScreen.Gadgets       = NULL;
+    NewScreen.CustomBitMap  = NULL;
+
+    for (i=0; i!=16; i++) {                                                         /* Build color tables         */
+
+        ColorSpec[i].ColorIndex = i;                                                /* Initial colors (all black) */
+        ColorSpec[i].Red        =
+        ColorSpec[i].Green      =
+        ColorSpec[i].Blue       = 0;
+        }
+
+    ColorSpec[i].ColorIndex = -1;                                                   /* Store color table          */
+    TagList[0].ti_Data      = (ULONG)&ColorSpec[0];
+
+    if (Screen = OpenScreenTagList(&NewScreen, &TagList[0])) {                      /* Open a screen to our specs */
+
+        OWB = SetFunction((struct Library *)IntuitionBase, -0xd2, (APTR)&FakeOWB);  /* Immediately close screen   */
+        CloseScreen(Screen);
+        SetFunction((struct Library *)IntuitionBase, -0xd2, OWB);
+        }
+    }
+@
+
+
+1.9
+log
+@ValidFloppy() code not needed anymore.
+@
+text
+@d45 1
+a45 1
+#define SysBase         V->SysBase
+@
+
+
+1.8
+log
+@Reworked for sas 6.2
+@
+text
+@a128 37
+ *  ValidFloppy - Check for a bootable floppy disk                             *
+ *                                                                             *
+ *  returns:    0   No disk in drive                                           *
+ *              1   Bootable disk                                              *
+ *              2   Data disk                                                  *
+ *                                                                             *
+ *******************************************************************************/
+
+int ValidFloppy(struct V *V) {
+
+#define BUFF_SIZE 1024
+
+UBYTE  Buff[BUFF_SIZE];
+int    err;
+
+    if (!V->TDReq.iotd_Req.io_Device) return 0;                                 /* No floppy drive attached */
+
+    DoIOR(&V->TDReq, CD_CLEAR, 0, 0, 0, V);                                     /* clear cache!             */
+
+    err = DoIOR(&V->TDReq, CD_READ, 0, BUFF_SIZE, (UWORD *)Buff, V);            /* Try to read boot message */
+
+    DoIOR(&V->TDReq, CD_MOTOR, 0, 0, 0, V);                                     /* Motor off                */
+
+    if (!err && ( ((*((LONG *)Buff)&0xFFF0) == (ID_DOS_DISK&0xFFF0))) ||        /* Is this a boot disk?     */
+            (*((LONG *)Buff) == 'BOOT')) {
+
+        if (!ChkSumFD(Buff)) return 1;                                          /* Boot disk                */
+        else                 return 2;                                          /* Data disk                */
+        }
+
+    return 0;                                                                   /* No disk                  */
+    }
+
+
+
+/*******************************************************************************
+ *                                                                             *
+@
+
+
+1.7
+log
+@removed cddev.h references.
+@
+text
+@d22 1
+a22 2
+#include "gs:cd/cd.h"
+#include "cdtv/cdtvprefs.h"
+a23 7
+#include "gs:pplibrary/playerprefsbase.h"
+#include "gs:pplibrary/playerprefs_private_pragmas.h"
+#include "cdtv:include/internal/cdfs_pragmas.h"
+
+#include <cdtv/debox.h>
+#include <cdtv/debox_protos.h>
+
+d26 1
+d28 4
+a31 1
+#include <pragmas/dos_pragmas.h>
+d33 1
+d36 3
+d40 3
+d50 2
+d236 5
+a240 5
+/*******************************************************************************
+ *                                                                             *
+ *  InitScreen - Open a fake, blank screen and close to initialize for Player  *
+ *                                                                             *
+ *******************************************************************************/
+d259 1
+a259 1
+    NewScreen.LeftEdge      = 0;                                                /* Define screen specs        */
+d270 1
+a270 1
+    for (i=0; i!=16; i++) {                                                     /* Build color tables         */
+d272 1
+a272 1
+        ColorSpec[i].ColorIndex = i;                                            /* Initial colors (all black) */
+d278 1
+a278 1
+    ColorSpec[i].ColorIndex = -1;                                               /* Store color table          */
+d281 1
+a281 1
+    if (Screen = OpenScreenTagList(&NewScreen, &TagList[0])) {                  /* Open a screen to our specs */
+d283 1
+a283 1
+        OWB = SetFunction(IntuitionBase, -0xd2, (APTR)&FakeOWB);                /* Immediately close screen   */
+d285 1
+a285 1
+        SetFunction(IntuitionBase, -0xd2, OWB);
+@
+
+
+1.6
+log
+@Added door closed messages.
+@
+text
+@a23 1
+#include "cddev.h"
+@
+
+
+1.5
+log
+@Added InitScreen function.
+@
+text
+@d46 1
+d105 20
+d209 1
+d216 1
+@
+
+
+1.4
+log
+@Commented code.
+@
+text
+@d10 1
+d22 1
+a22 1
+#include "cdtv/cdtv.h"
+d35 1
+d37 1
+d39 1
+d45 1
+d66 1
+a66 1
+DoIOR(struct IOStdReq *Req, UWORD cmd, ULONG Offset,
+d76 1
+a76 1
+        return(DoIO(Req));                                                      /* Do the IORequest and return error    */
+d125 1
+a125 1
+    DoIOR(&V->TDReq,CD_MOTOR, 0, 0, 0, V);                                      /* Motor off                */
+a180 34
+ *  BumpCIAPri - Bump CIA priority to 100 to fix 1.3 titles                                *
+ *                                                                                         *
+ *******************************************************************************************/
+
+void BumpCIAPri(struct V *V) {
+
+register struct IntVector *iv = &SysBase->IntVects[3];
+VOID                      *sc = (APTR)SysBase->IntVects[3].iv_Code;
+struct Node               *cd;
+
+    if (iv->iv_Code == sc) {                                                                /* Is the vector installed?   */
+
+        if (EMPTY(((struct List *)iv->iv_Data))) return;                                    /* Make sure the list is here */
+
+        Disable();                                                                          /* Disable interrupts         */
+
+        if (cd = (struct Node *)FindName((struct List *)iv->iv_Data, "ciaa.resource")) {
+
+            if (cd->ln_Pri <= 0) {                                                          /* Is the priority too low?   */
+
+                Remove(cd);                                                                 /* Raise the priority         */
+                cd->ln_Pri = 100;
+                Enqueue(iv->iv_Data, cd);
+                }
+            }
+
+        Enable();                                                                           /* Reenable interrupts        */
+        }
+    }
+
+
+
+/*******************************************************************************************
+ *                                                                                         *
+a193 1
+    BumpCIAPri(V);
+d208 53
+@
+
+
+1.3
+log
+@Initial clean up.
+ .
+@
+text
+@a42 1
+extern char          __far CDBOOT[];
+d134 10
+d148 1
+a148 1
+    for (i=0; i<Size; i+=4) if (*Data1++ != *Data2++) return(0);
+d154 5
+a158 5
+/***********************************************************************
+***
+***  InitAudio
+***  fires up the audio.device under 2.0 for cdtv apps
+***********************************************************************/
+d165 1
+a165 1
+    if (EB->LibNode.lib_Version < 36) return;
+d167 1
+a167 3
+    if (!FindName((struct List *)&EB->DeviceList, "audio.device")) {
+
+        if (Res = (struct Resident *)FindResident("audio.device")) InitResident(Res, 0L);
+a172 1
+/* a kludge for the 2.0 cia priority problem */
+d174 21
+a194 1
+void ChangeServer(struct List *slist, struct V *V) {
+d196 5
+a200 9
+struct Node *cd;
+
+    if (EMPTY(slist)) return;
+
+    Disable();
+
+    if (cd = (struct Node *)FindName((struct List *)slist, (UBYTE *)"ciaa.resource")) {
+
+        if(cd->ln_Pri <= 0) {                                                           /* CIA got dropped to -100 in 2.0! */
+d202 1
+a202 4
+            Remove(cd);
+            cd->ln_Pri = 100;
+            Enqueue(slist, cd);
+            }
+a203 2
+
+    Enable();
+a206 10
+void FindChain(struct V *V) {
+
+register struct IntVector   *iv = &SysBase->IntVects[3];
+VOID                        *sc = (APTR)SysBase->IntVects[3].iv_Code;
+
+    if (iv->iv_Code == sc) {
+
+        ChangeServer(iv->iv_Data, V);
+        }
+    }
+d208 5
+a213 1
+
+d218 1
+a218 1
+    InitAudio(V);                                   /* patches */
+d223 1
+a223 3
+    FindChain(V);
+
+    if (mp = (struct MsgPort *)AllocMem(sizeof(struct MsgPort),MEMF_CLEAR|MEMF_PUBLIC)) {
+d225 1
+a225 4
+        /* no signal/task stuff needed or allowed */
+
+        mp->mp_Node.ln_Type = NT_MSGPORT;
+        mp->mp_Node.ln_Name = &CDBOOT[0];
+d227 2
+a228 1
+        AddPort(mp);
+d230 1
+a230 1
+        /* let SetPatch module find it, and free it later */
+@
+
+
+1.2
+log
+@functions transported from main.c to here.
+@
+text
+@a39 3
+#define CDFSBase        V->CDFSBase
+#define PlayerPrefsBase V->PlayerPrefsBase
+#define ExpansionBase   V->ExpansionBase
+d48 16
+d65 25
+a89 5
+/***********************************************************************
+***
+***  GetIOActual -- do an I/O and return IO_ACTUAL field
+***
+***********************************************************************/
+d92 1
+a92 1
+    DoIOR(req, cmd, 0, 0, 0, V);
+d97 48
+d207 7
+a228 58
+int Compare(char *Data1, char *Data2, int size) {
+
+int i;
+
+    for (i=0; i!=size; i++) if (*Data1++ != *Data2++) return(0);
+    return(1);
+    }
+
+
+DoIOR(struct IOStdReq *Req, UWORD cmd, ULONG Offset, ULONG Length, UWORD *Data, struct V *V) {
+
+    if (Req->io_Device) {
+
+        Req->io_Command = cmd;
+        Req->io_Offset  = Offset;
+        Req->io_Length  = Length;
+        Req->io_Data    = (APTR)Data;
+
+        return(DoIO(Req));
+        }
+
+    return(0);
+    }
+
+
+/***********************************************************************
+***
+***  ValidFloppy -- check for a bootable floppy disk
+***
+***  returns:   0       no disk in drive
+***             1       bootable disk
+***             2       data disk
+***********************************************************************/
+int ValidFloppy(struct V *V) {
+
+UBYTE  Buf[BUF_SIZE];
+int    err;
+
+    if (!V->TDReq.iotd_Req.io_Device) return 0;
+
+    DoIOR(&V->TDReq, CD_CLEAR, 0, 0, 0, V); /* clear cache! */
+
+    err = DoIOR(&V->TDReq, CD_READ, 0, BUF_SIZE, (UWORD *)Buf, V);
+
+    DoIOR(&V->TDReq,CD_MOTOR, 0, 0, 0, V); /* Motor off */
+
+    if (!err && ( ((*((LONG *)Buf)&0xFFF0) == (ID_DOS_DISK&0xFFF0))) ||
+            (*((LONG *)Buf) == (('B'<<24)|('O'<<16)|('O'<<8)|'T'))) {
+        if (!ChkSumFD(Buf)) return 1;
+        else return 2;
+        }
+
+    return 0;
+    }
+
+
+
+void FixBlitInt(struct V *V) {
+a229 5
+    OwnBlitter();
+    WaitBlit();
+    custom.intena = INTF_BLIT;
+    DisownBlitter();
+    }
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 1
+d4 6
+d15 3
+d19 3
+a21 1
+#include <exec/io.h>
+d23 1
+d25 6
+a30 1
+#include "cdstrap.h"
+d35 3
+d46 64
+d111 2
+a112 1
+UBYTE readagnus() {
+d114 80
+a193 1
+    return((UBYTE)((custom.vposr>>8) & 0x7f));
+d195 1
+@

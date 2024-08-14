@@ -1,0 +1,142 @@
+The MENUVERIFY code is so horrible, since there are just too many
+paths through it.
+
+Intuition will never nest menu operations.  You won't get another
+MENUVERIFY until you've received whatever MENUPICK or
+MOUSEBUTTONS/MENUUP you're going to get from the previous menu
+session.  So basically you know you're in menu-processing from the
+receipt of a MENUVERIFY message, and you're out again as soon as you
+hear one or more MENUPICK or MOUSEBUTTONS/MENUUP events.
+
+The complexity is that the "conclusion" message you're sent is very
+inconsistent in form.  You can get a MENUPICK/MENUNULL event, or a
+MOUSEBUTTONS/MENUUP event, or both (in either order!), in response to
+a single MENUVERIFY event.  In rare cases enumerated in the bugs
+below, you might not hear any conclusion message (fixed for 3.01).
+
+I've examined the code, and now there are these known bugs in the menu
+code for 2.04 and 3.00, for a MENUVERIFY window (an asterisk denotes
+bugs fixed for 3.01):
+
+* If menu-key verify processing fails (eg. from lack of memory), no
+  conclusion message is sent.
+
+* If menu-key verify message times out waiting for app to ReplyMsg(),
+  no conclusion message is sent.
+
+* If mouse-menu processing terminates normally, then before your
+  window receives its MENUPICK message it may see an extraneous
+  MOUSEBUTTONS/MENUUP event.  (This happens if ever it has been
+  sent a MENUVERIFY/MENUWAITING message in its lifetime).
+
+* If mouse-menu verify processing for an inactive window fails (eg.
+  for lack of memory), no conclusion message is sent.
+
+
+The big complexity in the menu code is that for all intents and
+purposes, the kind of conclusion message you get is random.  Here's
+the actual pattern:
+
+(First, some definitions:
+
+  - Application cancelling = app changes MENUHOT -> MENUCANCEL
+  - User cancelling = user releases mouse button during verify-wait
+
+Note that the user can incidentally cancel a MenuKey event by tapping
+the menu button, which could cause a MENUUP to be seen during the time
+Intuition is waiting for the reply to its verify message.  (This isn't
+a designed-for-the-user feature, but it is occurs regardless).)
+
+Here is the actual behavior, as of 3.00 (should be same as 2.04), sorted
+by conclusion-message type:
+
+  - MOUSEBUTTONS/MENUUP is sent when:
+	- MenuKey cancelled by user
+	- MouseMenu cancelled by application
+
+  - MENUPICK/MENUNULL is sent when:
+	- MenuKey cancelled by application
+	- MouseMenu verify processing failed
+	  (MOUSEBUTTONS/MENUUP follows when user lets go)
+	- MouseMenu verify processing timed out
+	  (MOUSEBUTTONS/MENUUP follows when user lets go)
+
+  - MOUSEBUTTONS/MENUUP & MENUPICK/MENUNULL are both sent when:
+	- MouseMenu cancelled by user
+
+  - nothing is sent when:
+	* MenuKey verify processing failed
+	  (sends MENUPICK/MENUNULL in 3.01)
+	* MenuKey verify processing timed out
+	  (sends MENUPICK/MENUNULL in 3.01)
+	* MouseMenu verify processing for an inactive window failed
+	  (sends MENUPICK/MENUNULL in 3.01)
+
+  - MENUPICK/code is sent when:
+	- MenuKey worked
+	* MouseMenu worked
+	  (spurious MOUSEBUTTONS/MENUUP is possible in 3.00 and prior)
+
+Here is the behavior, sorted by what happened, showing what was sent
+(asterisk indicates changed behavior for 3.01)
+
+MENUKEYS:
+
+* MenuKey verify processing failed
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuKey(), case OKABORT
+  (No message sent in 3.00 and prior)
+
+- MenuKey cancelled by user
+  MOUSEBUTTONS/MENUUP sent by sverify.c/dVerify(), case itMENUUP
+
+- MenuKey cancelled by application
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuKey(), case OKCANCEL
+
+* MenuKey verify processing timed out
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuKey(), case OKABORT
+  (No message sent in 3.00 and prior)
+
+- MenuKey worked
+  MENUPICK/code sent by smenu.c/returnMenuKey(), case OKOK
+
+For MouseMenus:
+
+- MouseMenu verify processing failed
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuDMR(), case OKOK->OKABORT
+  MOUSEBUTTONS/MENUUP sent by sidlewindow.c/dIdleWindow() after state
+  change in smenu.c/returnMenuOK(), case OKCANCEL
+
+- MouseMenu cancelled by user
+  MOUSEBUTTONS/MENUUP sent by sverify.c/dVerify(), case itMENUUP
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuDMR(), case OKOK->OKABORT
+
+- MouseMenu cancelled by application
+  MOUSEBUTTONS/MENUUP sent by sidlewindow.c/dIdleWindow() after state
+  change in smenu.c/returnMenuOK(), case OKCANCEL
+
+- MouseMenu verify processing timed out
+  MENUPICK/MENUNULL sent by smenu.c/returnMenuDMR(), case OKOK->OKABORT
+  MOUSEBUTTONS/MENUUP sent by sidlewindow.c/dIdleWindow() after state
+  change in smenu.c/returnMenuDMR(), case OKOK->OKABORT
+
+* MouseMenu verify processing for an inactive window failed
+  MENUPICK/MENUNULL sent by smenu.c/returnAllButMenuOK(), case OKABORT
+  No message sent (returnAllButMenuOK( OKABORT ))
+
+* MouseMenu worked
+  MENUPICK/code sent by smenu.c/dMenu(), case itMENUUP
+  (spurious MOUSEBUTTONS/MENUUP is possible in 2.04 and 3.00, from
+  smenu.c/sendAllMenuClear())
+
+
+All of the above information assumes that the window has no
+double-menu requester.  I have no interest in tracing the code flow in
+that case.  It's at least again as complex.  The solution is either
+don't use a DMR or don't ask me any questions :-)
+
+
+If your window does not have MENUVERIFY, then first of all you can't
+require a conclusion message since you don't hear about the start of
+menu activity.  More importantly, you're immune to all the problems,
+including the spurious MENUUP message.
+

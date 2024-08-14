@@ -1,0 +1,672 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.11
+date     91.04.10.19.49.37;  author andy;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.04.06.19.01.10;  author andy;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.04.06.18.33.19;  author andy;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.25.22.32.35;  author andy;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.01.25.22.21.04;  author andy;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.01.10.20.36.04;  author andy;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.01.05.19.54.46;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.06.11.20.31.37;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.06.11.14.51.15;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.07.00.11.46;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.03.04.23.16.42;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     89.12.15.07.41.58;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Builtin path command
+@
+
+
+1.11
+log
+@uses the new universal getargs routine to save space
+@
+text
+@/*
+lc -d -j73 -O -o/obj/Path.o -i/include -v -csf Path
+blink /obj/Path.o to /bin/Path sc sd nd
+protect /bin/Path +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker   Mike Witcher */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**     (C) Copyright 1989 Commodore-Amiga, Inc.
+ **         All Rights Reserved
+**/
+
+/*---------------------------------------------------------------------------*/
+/* Command: Path                                                             */
+/* Author: James E. Cooper Jr.                                               */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 26MAR89  Jim Cooper    Initial Creation                                   */
+/* 14APR89  Jim Cooper    Cleanup & Comment                                  */
+/* 04SEP89  Jim Cooper    Conversion to 1.4 Completed (I thought!)           */
+/* 22OCT89  Jim Cooper    Conversion to 1.4 Proceeding                       */
+/* 01NOV89  Jim Cooper    Interim version                                    */
+/* 04NOV89  Jim Cooper    Comments added, code cleaned up, waiting on '/M'   */
+/* 28NOV89  Jim Cooper    Added '/M' support, FINALLY finished!              */
+/* 11MAR90  Jim Cooper    Added 'SUBTRACT' switch, fixed to prevent multiple */
+/*                        instances of a single node.                        */
+/* Notes:                                                                    */
+/*---------------------------------------------------------------------------*/
+
+#include "internal/commands.h"
+#include "global.h"
+
+/* #include "path_rev.h" */
+
+#define SMALL 1
+
+#define TEMPLATE  "PATH/M,ADD/S,SHOW/S,RESET/S,REMOVE/S,QUIET/S"
+
+#define OPT_PATH     0
+#define OPT_ADD      1
+#define OPT_SHOW     2
+#define OPT_RESET    3
+#define OPT_SUBTRACT 4
+#define OPT_QUIET    5
+#define OPT_COUNT    6
+
+/*---------------------------------------------------------------------------*/
+/* The PathNode structure is not documented anywhere I could find, but I     */
+/* have had occasion to access it in the past.  Obviously, it works!  Q.E.D. */
+/*---------------------------------------------------------------------------*/
+struct PathNode {
+  BPTR next;
+  BPTR lock;
+};
+
+int cmd_path(void)
+{
+  struct DosLibrary *DOSBase;
+  int rc = RETURN_ERROR, i;
+  BPTR tn;
+  struct PathNode *pathNode, *nextNode, *tempNode;
+  long opts[OPT_COUNT];
+  UBYTE nodeName[ENVMAX]; /* path node name storage */
+  struct RDargs *rdargs;
+  struct FileInfoBlock fi;
+  struct CommandLineInterface *cli_ptr;
+  char *curarg, **argptr;
+  struct Process *tid=THISPROC;
+  struct Window *wp;
+
+
+
+#ifndef SMALL
+    DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER);
+    memset((char *)opts, 0, sizeof(opts));
+    rdargs = ReadArgs(TEMPLATE, opts, NULL);
+    if (rdargs == NULL)PrintFault(IoErr(),NULL);
+    else {
+#else
+      if(rdargs=getargs(&DOSBase,NULL,TEMPLATE,(LONG **)&opts,sizeof(opts))) {
+#endif
+    wp=tid->pr_WindowPtr;
+    cli_ptr = Cli();   /* pointer to current CLI */
+      /*---------------------------------------------------------------------*/
+      /* Check input.  If user just typed the command name, we must show     */
+      /* the current path.  Easiest way is to set the 'SHOW' option, and     */
+      /* fall through the code.                                              */
+      /*---------------------------------------------------------------------*/
+	/* QUIET is a special case, so we leave it out */
+      for (i=0; i<OPT_QUIET; i++) if (opts[i]) break;
+
+      if (i >= OPT_QUIET) opts[OPT_SHOW] = -1;
+
+#ifdef EXTRAINFO
+      /*---------------------------------------------------------------------*/
+      /* If they told us to both ADD and SUBTRACT, tell them they made a       */
+      /* mistake in their input.                                             */
+      /*---------------------------------------------------------------------*/
+      if ((opts[OPT_ADD] != NULL) && (opts[OPT_SUBTRACT] != NULL)) {
+	PrintFault(118,NULL);
+        goto Err;
+      }
+#endif
+
+      /*---------------------------------------------------------------------*/
+      /* get the pointer to the head of the PathNode list from the CLI struct*/
+      /*---------------------------------------------------------------------*/
+      pathNode = (struct PathNode *)BADDR(cli_ptr->cli_CommandDir);
+
+      /*---------------------------------------------------------------------*/
+      /* If the 'RESET' switch was used, we have to kill the current path    */
+      /* before we do anything else.                                         */
+      /*---------------------------------------------------------------------*/
+      if (opts[OPT_RESET]) {
+
+        /*-------------------------------------------------------------------*/
+        /* Step through the list, killing each node.                         */
+        /*-------------------------------------------------------------------*/
+        while (pathNode) {
+          nextNode = (struct PathNode *)BADDR(pathNode->next);
+          UnLock(pathNode->lock);
+          FreeVec(pathNode);
+          pathNode = nextNode;
+        }
+
+        /*-------------------------------------------------------------------*/
+        /* Make sure there IS no path, so that the next routine works        */
+        /* properly.                                                         */
+        /*-------------------------------------------------------------------*/
+        cli_ptr->cli_CommandDir = NULL;
+      }
+
+      /*---------------------------------------------------------------------*/
+      /* Set up a temporary variable to save some typing and a little bit of */
+      /* code size on the output.                                            */
+      /*---------------------------------------------------------------------*/
+      argptr = (char **)opts[OPT_PATH];
+      tempNode = NULL;
+
+      /*---------------------------------------------------------------------*/
+      /* The following while loop handles the NEW MultiArgs spec.            */
+      /*---------------------------------------------------------------------*/
+      while (argptr && (curarg = *argptr++)) {
+
+        /*-------------------------------------------------------------------*/
+        /* Get a piece of memory.                                            */
+        /*-------------------------------------------------------------------*/
+        if ((tempNode = AllocVec(sizeof(struct PathNode),
+                                 MEMF_PUBLIC|MEMF_CLEAR)) == NULL) {
+          PrintFault(IoErr(),NULL);
+          goto Err;
+        }
+
+        /*-------------------------------------------------------------------*/
+        /* Try to get a lock on the specified path, and Examine() it.        */
+        /*-------------------------------------------------------------------*/
+        if (((tempNode->lock = Lock(curarg,ACCESS_READ)) == NULL) ||
+             (Examine(tempNode->lock, &fi) == NULL)) {
+          PrintFault(IoErr(),curarg);
+          goto Err;
+        }
+
+        /*-------------------------------------------------------------------*/
+        /* Now, is it a directory, or is it a file?                          */
+        /*-------------------------------------------------------------------*/
+        if (fi.fib_DirEntryType < NULL) {
+          SetIoErr(ERROR_OBJECT_WRONG_TYPE);
+          PrintFault(IoErr(),fi.fib_FileName);
+          goto Err;
+        }
+
+        /*-------------------------------------------------------------------*/
+        /* Shades of the Past!  We must convert the pointer to the new       */
+        /* node into a BPTR, for storage in the PathNode structure.          */
+        /*-------------------------------------------------------------------*/
+        tn = MKBADDR(tempNode);
+
+        /*-------------------------------------------------------------------*/
+        /* Now, add it to the end of the list.                               */
+        /*-------------------------------------------------------------------*/
+        nextNode = (struct PathNode *)BADDR(cli_ptr->cli_CommandDir);
+        if (nextNode) {
+
+#ifdef COMPAT
+          /*-----------------------------------------------------------------*/
+          /* Find the end of the list.                                       */
+          /*-----------------------------------------------------------------*/
+          while (nextNode->next) {
+            nextNode = (struct PathNode *)BADDR(nextNode->next);
+          }
+          nextNode->next = tn;                  /* link new node to list end */
+        } else {
+          cli_ptr->cli_CommandDir = tn;
+        }
+        tempNode = NULL;
+#else
+          /*-----------------------------------------------------------------*/
+          /* Search the list, checking for duplicates.  If we are adding,    */
+          /* skip if we find a duplicate.  If we are removing, delete the    */
+          /* duplicate (its the one we want!).  If we are adding and we      */
+          /* reach the end of the list, simply tack the new node on.         */
+          /*-----------------------------------------------------------------*/
+          pathNode = nextNode;
+          while (TRUE) {
+            if (SameLock(nextNode->lock, tempNode->lock) == LOCK_SAME) {
+              if (opts[OPT_SUBTRACT] == NULL) {
+#ifdef NASTY
+                SetIoErr(ERROR_LOCK_COLLISION);
+                PrintFault(IoErr(),curarg);
+                goto Err;
+#else
+                break;
+#endif
+              } else {
+
+                /*-----------------------------------------------------------*/
+                /* Ok, we found a match, and we are removing.  Take it out   */
+                /* of the path list, and free it.                            */
+                /*-----------------------------------------------------------*/
+                if (pathNode == nextNode) {
+                  cli_ptr->cli_CommandDir = nextNode->next;
+                } else {
+                  pathNode->next = nextNode->next;
+                }
+                UnLock(nextNode->lock);
+                FreeVec(nextNode);
+                break;
+              }
+            }
+            pathNode = nextNode;
+            nextNode = (struct PathNode *)BADDR(nextNode->next);
+            if (nextNode == NULL) {
+              if (opts[OPT_SUBTRACT] == NULL) {
+                pathNode->next = tn;
+                tempNode = NULL;
+              }
+              break;
+            }
+          }
+        } else {
+          if (opts[OPT_SUBTRACT] == NULL) {
+            cli_ptr->cli_CommandDir = tn;
+            tempNode = NULL;
+          }
+        }
+#endif
+      }
+
+      rc = RETURN_OK;
+
+      /*---------------------------------------------------------------------*/
+      /* If the 'SHOW' option was set, by them OR us, print each node,       */
+      /* adding the default of the current directory at the top, and 'C:' at */
+      /* the end.                                                            */
+      /*---------------------------------------------------------------------*/
+      if (opts[OPT_SHOW]) {
+	/* if quiet, turn off requesters */
+	if(opts[OPT_QUIET])tid->pr_WindowPtr = (struct Window *)(-1);
+
+	PrintFault(STR_CURRENT_DIR,NULL); /* Path ALWAYS starts in current dir */
+        nextNode = (struct PathNode *)BADDR(cli_ptr->cli_CommandDir);
+        while (nextNode) {                  /* Walk the path, printing names */
+	     if(CheckSignal(SIGBREAKF_CTRL_C)) {
+	    	PrintFault(304,0);
+		goto Err;
+	     }
+	    if(NameFromLock(nextNode->lock, nodeName, ENVMAX)) {
+                PutStr(nodeName);
+                PutStr("\n");
+	    }
+	  else PrintFault(IoErr(), NULL);
+          nextNode = (struct PathNode *)BADDR(nextNode->next);
+        }
+	PutStr("C:\n");                  /* Path ends at 'C:' assignment */
+      }
+Err:
+      /*---------------------------------------------------------------------*/
+      /* We have to clean up after ourselves, whether there was an error or  */
+      /* everything worked!                                                  */
+      /*---------------------------------------------------------------------*/
+	/* restore window pointer always */
+      tid->pr_WindowPtr = wp;
+
+      if (tempNode) {
+        if (tempNode->lock) {
+          UnLock(tempNode->lock);
+        }
+        FreeVec(tempNode);
+      }
+      FreeArgs(rdargs);
+    }
+    CloseLibrary((struct Library *)DOSBase);
+#ifdef ram
+  } 
+  else {
+    OPENFAIL;
+  }
+#endif
+  return(rc);
+}
+@
+
+
+1.10
+log
+@*** empty log message ***
+@
+text
+@d45 2
+d69 1
+a69 4
+/*
+  struct Library *SysBase = (*((struct Library **) 4));
+*/
+  int rc, i;
+d81 1
+a81 2
+  rc = RETURN_ERROR;
+  wp=tid->pr_WindowPtr;
+d83 1
+a83 1
+/*  if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER))) { */
+a84 2
+    cli_ptr = Cli();                               /* pointer to current CLI */
+
+d87 7
+a93 5
+
+    if (rdargs == NULL) {
+      PrintFault(IoErr(),NULL);
+    } else {
+
+a285 1
+
+@
+
+
+1.9
+log
+@dosbase call cleanup
+@
+text
+@d45 2
+a46 5
+#ifdef COMPAT
+#define TEMPLATE  "PATH/M,ADD/S,SHOW/S,RESET/S,QUIET/S"
+#else
+#define TEMPLATE  "PATH/M,ADD/S,SHOW/S,RESET/S,QUIET/S,REMOVE/S"
+#endif
+d51 2
+a52 5
+#define OPT_QUIET    4
+#ifdef COMPAT
+#define OPT_COUNT    5
+#else
+#define OPT_SUBTRACT 5
+a53 1
+#endif
+d74 1
+a74 1
+  UBYTE nodeName[ENVMAX];                          /* path node name storage */
+d101 2
+a102 1
+      for (i=0; i<OPT_COUNT; i++) if (opts[i]) break;
+d104 1
+a104 1
+      if (i >= OPT_COUNT) opts[OPT_SHOW] = -1;
+d271 1
+d279 4
+a282 4
+          if (NameFromLock(nextNode->lock, nodeName, ENVMAX)) {
+            PutStr(nodeName);
+            PutStr("\n");
+          } 
+@
+
+
+1.8
+log
+@error return changed to match 1.3
+@
+text
+@d86 2
+d90 1
+d274 3
+a276 1
+      if (opts[OPT_SHOW] != NULL && opts[OPT_QUIET] == NULL) {
+d287 2
+a288 4
+          } else {
+            PrintFault(IoErr(), NULL);
+            goto Err;
+          }
+d299 3
+@
+
+
+1.7
+log
+@registered parameter switch to save space
+added control C test to printing loop
+@
+text
+@d87 1
+a87 1
+  rc = RETURN_FAIL;
+@
+
+
+1.6
+log
+@moved strings into dos
+@
+text
+@d74 1
+d76 1
+d275 4
+@
+
+
+1.5
+log
+@changed error message
+@
+text
+@d41 2
+a44 2
+#define MSG_CURRENT_DIR "Current directory\n"
+
+d270 1
+a270 1
+        PutStr(MSG_CURRENT_DIR);        /* Path ALWAYS starts in current dir */
+@
+
+
+1.4
+log
+@removed ; at beginning of file
+@
+text
+@a43 2
+#define MSG_CCOLON      "C:\n"
+#define MSG_NO_ADD_SUB  "Can't use ADD and SUBTRACT together!\n"
+d113 1
+a113 2
+        PutStr(MSG_NO_ADD_SUB);
+	
+d282 1
+a282 1
+        PutStr(MSG_CCOLON);                  /* Path ends at 'C:' assignment */
+@
+
+
+1.3
+log
+@removed doslibrary open test to save space
+@
+text
+@d1 1
+a1 1
+; /*
+@
+
+
+1.2
+log
+@./
+@
+text
+@d89 2
+a90 2
+  if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER))) {
+
+d109 1
+a109 1
+#ifndef COMPAT
+d116 1
+d302 3
+a304 1
+  } else {
+d307 1
+@
+
+
+1.1
+log
+@removed CMDREV header
+@
+text
+@d1 1
+a1 1
+/*
+d15 1
+a15 1
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+d18 2
+a19 2
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+d35 2
+a41 1
+#include "global.h"
+d43 3
+a45 2
+#define MSG_CURRENT_DIR   "Current directory\n"
+#define MSG_CCOLON        "C:\n"
+d47 1
+d49 14
+a62 6
+#define OPT_PATH  0
+#define OPT_ADD   1
+#define OPT_SHOW  2
+#define OPT_RESET 3
+#define OPT_QUIET 4
+#define OPT_COUNT 5
+a63 2
+#define MAXNODE   128
+
+d76 1
+d81 1
+a81 1
+  UBYTE nodeName[MAXNODE];                         /* path node name storage */
+d109 1
+d111 10
+a148 10
+      /* We must find the end of the list, in case we have any nodes to add. */
+      /*---------------------------------------------------------------------*/
+      nextNode = pathNode;
+      if (nextNode) {
+        while (nextNode->next) {
+          nextNode = (struct PathNode *)BADDR(nextNode->next);
+        }
+      }
+
+      /*---------------------------------------------------------------------*/
+a159 1
+
+a164 1
+          SetIoErr(ERROR_NO_FREE_STORE);
+d174 1
+a174 8
+          Puts(curarg);
+
+          /*-----------------------------------------------------------------*/
+          /* We use the "" rather than NULL in the PrintFault because we     */
+          /* want PrintFault to print the ': ', since we have already        */
+          /* printed something on the screen.                                */
+          /*-----------------------------------------------------------------*/
+          PrintFault(IoErr(),"");
+a181 1
+          Puts(fi.fib_FileName);
+d183 1
+a183 1
+          PrintFault(IoErr(),"");
+d196 1
+d198 8
+a209 1
+        nextNode = tempNode;                         /* new list end pointer */
+d211 51
+d272 2
+a273 2
+        Puts(MSG_CURRENT_DIR);      /* Path ALWAYS starts in current dir */
+        nextNode = pathNode;
+d275 3
+a277 3
+          if (NameFromLock(nextNode->lock, nodeName, sizeof(nodeName))) {
+            Puts(nodeName);
+            Puts("\n");
+d284 1
+a284 1
+        Puts(MSG_CCOLON);                /* Path ends at 'C:' assignment */
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d45 1
+a45 1
+#define TEMPLATE  "PATH/M,ADD/S,SHOW/S,RESET/S,QUIET/S" CMDREV
+@

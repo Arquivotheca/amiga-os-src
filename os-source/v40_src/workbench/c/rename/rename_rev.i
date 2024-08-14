@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'30.5.91'
+	ENDM
+VERS	MACRO
+		dc.b	'rename 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'rename 37.2 (30.5.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: rename 37.2 (30.5.91)',0
+	ENDM

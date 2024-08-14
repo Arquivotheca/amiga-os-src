@@ -1,0 +1,548 @@
+head     40.2;
+branch   ;
+access   ;
+symbols  V40_35:40.2 V40_34:40.2 rel40_10:40.2 rel40_9:40.2 rel40_8:40.2 rel40_7:40.2 rel40_6:40.2 rel40_5:40.2 rel40_4:40.2 rel40_3:40.1 rel40_2:40.0 rel40_1:40.0 rel39_1:39.0;
+locks    ; strict;
+comment  @* @;
+
+
+40.2
+date     93.02.18.10.57.58;  author Jim2;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     93.02.16.13.51.15;  author Jim2;  state Exp;
+branches ;
+next     40.0;
+
+40.0
+date     93.02.09.10.24.58;  author Jim2;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     93.02.03.11.30.04;  author Jim2;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Makes a list of files/directories on the users nonvolatile device.
+@
+
+
+40.2
+log
+@Added comments.  SizeItem now returns the protection state
+in the longword after the size.
+@
+text
+@******************************************************************************
+*
+*	$Id: MakeList.asm,v 40.1 93/02/16 13:51:15 Jim2 Exp Locker: Jim2 $
+*
+******************************************************************************
+*
+*	$Log:	MakeList.asm,v $
+* Revision 40.1  93/02/16  13:51:15  Jim2
+* Replaced the two different routines for getting AppNames and
+* ItemNames with a single function.  Added call to get the
+* size required for an ItemName.
+*
+* Revision 40.0  93/02/09  10:24:58  Jim2
+* Changed the direction for writing the lists (starting at end
+* or beginning).
+*
+* Revision 39.0  93/02/03  11:30:04  Jim2
+* Initial Release - Tested.
+*
+*
+*	(C) Copyright 1992,1993 Commodore-Amiga, Inc.
+*	    All Rights Reserved
+*
+******************************************************************************
+
+		INCLUDE	'exec/macros.i'
+
+		INCLUDE	'dos/dos.i'
+
+
+		INCLUDE	'/nonvolatilebase.i'
+
+		XDEF	GetNamesFromDisk
+		XDEF	SizeItemDisk
+
+*****i* nonvolatile.library/GetNamesFromDisk *********************************
+*
+*   NAME
+*	GetNamesFromDisk - Creates a list of Names from disk.
+*
+*   SYNOPSIS
+*	FreeByte = GetNamesFromDisk (MemBlock, NVBase, AppName)
+*	a2			     a2	       a5      a4
+*
+*	char * GetNamesFromDisk (char *, struct NVBase *, char *)
+*
+*   FUNCTION
+*	Reads the users nonvolatile device and creates a list of either
+*	AppNames, if AppName is a NULL pointer, or ItemNames.  a2 points to
+*	the first byte to be used in the list.
+*
+*   INPUTS
+*	MemBlock - Pointer to memory block used for storing Names
+*	NVBase - Pointer the base of nonvolatile.library.
+*	AppName - Pointer identifying the AppName to be searched, or NULL
+*		  if the list of AppNames is to be generated.
+*
+*   RESULT
+*	FreeByte - Pointer to beyond the terminating NULL of AppNames.
+*
+*   SEE ALSO
+*	GetNamesFromNVRAM()
+*
+******************************************************************************
+GetNamesFromDisk
+		movem.l	d2-d4/a3/a6,-(sp)
+		move.l	nv_DiskLock(a5),d4
+		beq.s	Cleanup
+				;There is a user specified nonvolatile disk.
+		move.l	nv_DOSBase(a5),a6
+		moveq.l	#0,d3
+		cmp.l	a4,d3
+		beq.s	ReadyExamine
+				;We are searching for Items within an App.
+		move.l	d4,d1
+		JSRLIB	CurrentDir		;Change to the directory the user has picked for nonvolatile storage.
+		move.l	d0,-(sp)		;Remember the orginal directory.
+		move.l	#ACCESS_READ,d2
+		move.l	a4,d1
+		JSRLIB	Lock
+		move.l	d0,d4			;Ok we have the needed lock for the examine.
+		move.l	(sp)+,d1
+		JSRLIB	CurrentDir		;Return to the orginal directory.
+		tst.l	d4
+		beq.s	Cleanup
+				;Have a lock on an application directory.
+		move.l	#$7FFFFFFF,d3		;Change the sorting criteria from find dirs to find files.
+ReadyExamine:	sub.l	#fib_SIZEOF+4,sp	;Need a FIB, but must be long word aligned.
+		move.l	sp,d2
+		addq.l	#3,d2
+		and.b	#$FC,d2			;Forced long word alignment.
+		move.l	d2,a3
+		move.l	d4,d1
+		JSRLIB	Examine
+Skip:		move.l	d4,d1
+		JSRLIB	ExNext			;Move to the next directory entry.
+		tst.w	d0			;Is there another entry in this directory?
+		beq.s	Done
+				;Yep, have a new entry to check.
+		cmp.l	fib_DirEntryType(a3),d3
+		bpl.s	Skip			;Is the type what we want?
+				;Yep, so we need to add the string length.
+ScanLength:	addq.w	#1,d0
+		move.b	fib_FileName(a3,d0.w),(a2)+
+		bne.s	ScanLength		;Increment d0 until the NULL is found.
+
+		bra.s	Skip			;This is a top testing loop.
+				;All entries have been processed.
+Done:		add.l	#fib_SIZEOF+4,sp	;Don't need the FIB anymore.
+		tst.l	d3
+		beq.s	Cleanup
+				;We have a lock on the App directory that we need to release.
+		move.l	d4,d1
+		JSRLIB	UnLock
+				;The transfer is complete.  Let's clean up and go home.
+Cleanup:	movem.l	(sp)+,d2-d4/a3/a6
+		rts
+
+*****i* nonvolatile.library/SizeItemDisk *************************************
+*
+*   NAME
+*	SizeItemDisk - Determines the size of an item.
+*
+*   SYNOPSIS
+*	SizeItemDisk (SizePtr, NVBase, AppName, ItemName)
+*		      a2       a5      a4	a3
+*
+*	SizeItemDisk (ULONG *, struct NVBase *, char *, char *)
+*
+*   FUNCTION
+*	Reads the users nonvolatile device changes the reported size of the
+*	item if the device reports a larger size.  Also ORs in the protection
+*	bits for the file.
+*
+*   INPUTS
+*	SizePtr - Pointer to the current size of the Item.
+*	NVBase - Pointer the base of nonvolatile.library.
+*	AppName - Pointer identifying the AppName.
+*	ItemName - Pointer identifying the ItemName to be sized.
+*
+*   RESULT
+*	SizePtr - The value pointed to is changed if the size on the disk is
+*		  larger.
+*
+*   SEE ALSO
+*	SizeItemNVRAM()
+*
+******************************************************************************
+SizeItemDisk
+		movem.l	d2-d4/a3/a6,-(sp)
+		move.l	nv_DOSBase(a5),a6
+		move.l	nv_DiskLock(a5),d1
+		beq.s	sid_Cleanup
+
+		JSRLIB	CurrentDir		;Change to the directory the user has picked for nonvolatile storage.
+		move.l	d0,-(sp)		;Remember the orginal directory.
+		move.l	#ACCESS_READ,d2
+		move.l	a4,d1
+		JSRLIB	Lock			;Lock the App directory.
+		move.l	d0,d4
+		JSRLIB	CurrentDir		;Change to the App directory.
+		move.l	a3,d1
+		JSRLIB	Lock			;Lock the Item file.
+		move.l	d0,d3
+		move.l	(sp)+,d1
+		JSRLIB	CurrentDir		;Have the lock so the directory can be returned to the original.
+		move.l	d3,d1
+		beq.s	sid_Unlock		;Is the Item lock valid?
+				;Have a good lock on the Item file.
+		sub.l	#fib_SIZEOF+4,sp	;Need a FIB, but must be long word aligned.
+		move.l	sp,d2
+		addq.l	#3,d2
+		and.b	#$FC,d2			;Forced long word alignment.
+		move.l	d2,a3
+		JSRLIB	Examine
+		move.l	fib_Protection(a3),d0
+		or.l	d0,4(a2)		;The protection is stored the long word after size.
+		move.l	(a2),d0
+		cmp.l	fib_Size(a3),d0
+		bgt.s	sid_Done		;Only change this size if this size is larger.
+				;It is larger so store it.
+		move.l	fib_Size(a3),(a2)
+sid_Done:	add.l	#fib_SIZEOF+4,sp	;Don't need the FIB anymore.
+		move.l	d3,d1
+		JSRLIB	UnLock			;Unlock the Item file.
+
+sid_Unlock	move.l	d4,d1
+		beq.s	sid_Cleanup		;Did we lock the App directory.
+				;Yep, unlock it too.
+		JSRLIB	UnLock
+sid_Cleanup:	movem.l	(sp)+,d2-d4/a3/a6
+		rts
+
+		end
+@
+
+
+40.1
+log
+@Replaced the two different routines for getting AppNames and 
+ItemNames with a single function.  Added call to get the
+size required for an ItemName.
+@
+text
+@d3 1
+a3 1
+*	$Id: MakeList.asm,v 40.0 93/02/09 10:24:58 Jim2 Exp Locker: Jim2 $
+d8 5
+d69 1
+a69 1
+
+d74 1
+a74 1
+
+d81 1
+a81 1
+		move.l	d0,d4
+d83 1
+a83 1
+		JSRLIB	CurrentDir
+d86 2
+a87 2
+
+		move.l	#$7FFFFFFF,d3
+d101 1
+a101 2
+		bpl.s	Skip			;Is this another directory?
+		bra.s	NoUC
+d103 1
+a103 2
+ScanLength:	ori.b	#$20,-1(a2)
+NoUC:		addq.w	#1,d0
+d112 1
+d132 2
+a133 1
+*	item if the device reports a larger size.
+d159 1
+a159 1
+		JSRLIB	Lock
+d161 1
+a161 1
+		JSRLIB	CurrentDir
+d163 1
+a163 1
+		JSRLIB	Lock
+d166 1
+a166 1
+		JSRLIB	CurrentDir
+d168 2
+a169 2
+		beq.s	sid_Unlock
+
+d176 2
+d180 2
+a181 2
+		bgt.s	sid_Done
+
+d185 1
+a185 1
+		JSRLIB	UnLock
+d188 2
+a189 1
+		beq.s	sid_Cleanup
+@
+
+
+40.0
+log
+@Changed the direction for writing the lists (starting at end
+or beginning).
+@
+text
+@d3 1
+a3 1
+*	$Id: MakeList.asm,v 39.0 93/02/03 11:30:04 Jim2 Exp Locker: Jim2 $
+d8 4
+d28 2
+a29 2
+		XDEF	GetDiskApps
+		XDEF	GetDiskItems
+d31 1
+a31 1
+*****i* nonvolatile.library/GetDiskApps **************************************
+d34 1
+a34 1
+*	GetDiskApps - Creates a list of AppNames from disk.
+d37 2
+a38 2
+*	FreeByte = GetDiskApps (MemBlock, NVBase)
+*	a2			a2	  a5
+d40 1
+a40 1
+*	char * GetDiskApps (char *, struct NVBase *)
+d43 3
+a45 2
+*	Reads the users nonvolatile device and creates a list of AppName.
+*	a2 points to the first byte to be used in the list.
+d48 1
+a48 1
+*	MemBlock - Pointer to memory block used for storing AppNames
+d50 2
+d57 1
+a57 1
+*	GetNVRAMApps()
+d60 5
+a64 5
+GetDiskApps
+		move.l	nv_DiskLock(a5),d1	;Check to see if there is a nonvolatile disk out there.
+		beq.s	rada_NoDisk
+				;Yes, there is a disk.
+		movem.l	d2/a3/a6,-(sp)
+d66 5
+d73 11
+a83 3
+				;Scan the nonvolatile directory for every AppName, size each of them.
+EveryApp:	move.l	nv_DiskLock(a5),d1
+		sub.l	#fib_SIZEOF+4,sp	;Need a FIB, but must be long word aligned.
+d88 1
+d90 1
+a90 1
+Skip:		move.l	nv_DiskLock(a5),d1
+d93 1
+a93 1
+		beq.s	DoneDirs
+d95 3
+a97 2
+		tst.b	fib_DirEntryType(a3)
+		bmi.s	Skip			;Is this another directory?
+d99 2
+a100 1
+ScanLength:	addq.w	#1,d0
+d106 5
+a110 1
+DoneDirs:	add.l	#fib_SIZEOF+4,sp	;Don't need the FIB anymore.
+d112 2
+a113 5
+		move.l	(sp)+,d1
+		JSRLIB	CurrentDir		;Restore the orginal directory.
+		move.l	d7,d0			;Set up the return value.
+		movem.l	(sp)+,d2/a3/a6
+rada_NoDisk:	rts
+d115 1
+a115 1
+*****i* nonvolatile.library/GetDiskItems *************************************
+d118 1
+a118 1
+*	GetDiskItems - Creates a list of ItemNames for an AppName
+d121 2
+a122 2
+*	FreeByte = GetDiskItems (AppName, ItemList, NVBase)
+*	a2			 a0	  a2	    a5
+d124 1
+a124 1
+*	char * GetDiskItems (char *, char *, struct NVBase *)
+d127 2
+a128 3
+*	Creates a list consisting of all of the filename on the users
+*	prefered nonvolatile device under the indicated AppName directory.
+*	This list is created infront of the pointer ItemList.
+a129 1
+*
+d131 4
+a134 3
+*	AppName - Pointer to the directory to be scanned.
+*	MemBlock - Pointer to memory block used for storing the ItemNames
+*	NVBase - Pointer to the base of nonvolatile.library.
+d137 2
+a138 1
+*	FreeByte - Next free location infront of the list of Items.
+d141 1
+a141 1
+*	GetNVRAMItems()
+d144 2
+a145 5
+GetDiskItems
+		move.l	nv_DiskLock(a5),d1	;Check to see if there is a nonvolatile disk out there.
+		beq.s	gdi_NoDisk
+				;Yes, there is a disk.
+		movem.l	d2/a3/a6,-(sp)
+d147 3
+a149 1
+		movem.l	a0,-(sp)
+a150 1
+		move.l	(sp)+,d1
+a151 1
+				;Scan the nonvolatile directory for every AppName, size each of them.
+d153 12
+a164 4
+		JSRLIB	Lock			;Get a lock on the directory for the AppName.
+		move.l	d0,d1
+		beq.s	Cleanup			;Were we sucessful?
+				;Got lock now we can scan the directory.
+d170 9
+a178 14
+		move.l	d1,-(sp)		;Don't want to lose the lock.
+		JSRLIB	Examine			;Get the first entry.
+ProcessFile:	move.l	(sp),d1			;Restore the lock.
+		JSRLIB	ExNext			;Get next entry.
+		tst.w	d0
+		beq.s	Done			;Did we get a new entry?
+				;Yep, so how long is the name?
+Looping:	addq.w	#1,d0
+		tst.b	fib_FileName(a3,d0.w)
+		bne.s	Looping			;Wait for the NULL.
+
+						;Now transfer the name going from back to front.
+DirName:	move.b	fib_FileName(a3,d0.w),-(a2)
+		dbf.s	d0,DirName
+d180 2
+a181 3
+		bra.s	ProcessFile		;This is a top testing loop.
+				;All done.
+Done:		move.l	(sp)+,d1		;Get the lock off the stack.
+d183 2
+a184 6
+		add.l	#fib_SIZEOF+4,sp	;Clear the FIB off the stack.
+Cleanup:	move.l	(sp)+,d1
+		JSRLIB	CurrentDir		;Restore the orginal directory.
+		move.l	d7,d0			;Set up the return value.
+		movem.l	(sp)+,d2/a3/a6
+gdi_NoDisk:	rts
+@
+
+
+39.0
+log
+@Initial Release - Tested.
+@
+text
+@d3 1
+a3 1
+*	$Id: $
+d7 3
+a9 1
+*	$Log: $
+d11 1
+d24 1
+a24 1
+		XDEF	ReverseAddDiskApps
+d27 1
+a27 1
+*****i* nonvolatile.library/ReverseAddDiskApps *******************************
+d30 1
+a30 1
+*	ReverseAddDiskApps - Creates a list of AppName from disk.
+d33 2
+a34 2
+*	NewStart = ReverseAddDiskApps (MemBlock, NVBase)
+*	a3			       a3	 a5
+d36 1
+a36 1
+*	char * ReverseAddDiskApps (char *, struct NVBase *)
+d40 1
+a40 2
+*	a3 points to the last byte to be used in the list.  The list must
+*	be build infront of it.
+d47 1
+a47 1
+*	NewStart - Pointer to start of AppNames after prepending.
+d50 1
+a50 1
+*	PrependNVRAMApps()
+d53 1
+a53 1
+ReverseAddDiskApps
+d57 1
+a57 1
+		movem.l	d2/a2/a6,-(sp)
+d67 1
+a67 1
+		move.l	d2,a2
+a68 1
+		addq.l	#1,a3			;Since we can only do predecrement move this one back.
+d74 1
+a74 1
+		tst.b	fib_DirEntryType(a2)
+d78 1
+a78 1
+		tst.b	fib_FileName(a2,d0.w)
+a79 3
+				;Now transfer the name going from back to front.
+DirName:	move.b	fib_FileName(a2,d0.w),-(a3)
+		dbf.s	d0,DirName
+a83 1
+		subq.l	#1,a3			;Point to next available location.
+d88 1
+a88 1
+		movem.l	(sp)+,d2/a2/a6
+d105 1
+d110 1
+a110 3
+*	MemBlock - Pointer to memory block used for storing both the AppName
+*		   and the list of ItemNames.  The list of ItemNames is
+*		   terminated by an additional NULL.
+d114 1
+a114 1
+*	NONE
+d117 1
+a117 1
+*	SizeNVRAMList(), SizeDiskList(), GetDiskItems()
+d126 1
+a126 1
+		move.l	a0,-(sp)
+d149 1
+a149 1
+		move.b	fib_FileName(a3,d0.w),(a2)+
+d151 4
+@

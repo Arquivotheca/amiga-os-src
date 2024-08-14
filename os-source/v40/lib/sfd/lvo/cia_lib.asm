@@ -1,0 +1,13 @@
+*** DO NOT EDIT: FILE BUILT AUTOMATICALLY
+*** cia_lib.asm function offsets
+	IDNT	cia_LVO
+	SECTION	cia_LVO0
+	XDEF	_LVOAddICRVector
+_LVOAddICRVector EQU	-6
+	XDEF	_LVORemICRVector
+_LVORemICRVector EQU	-12
+	XDEF	_LVOAbleICR
+_LVOAbleICR EQU	-18
+	XDEF	_LVOSetICR
+_LVOSetICR EQU	-24
+	END

@@ -1,0 +1,719 @@
+head	40.9;
+access;
+symbols;
+locks; strict;
+
+
+40.9
+date	93.05.21.00.48.57;	author LPOMA;	state Exp;
+branches;
+next	40.8;
+
+40.8
+date	93.03.05.02.34.45;	author LPOMA;	state Exp;
+branches;
+next	38.7;
+
+38.7
+date	92.11.25.12.15.59;	author LPOMA;	state Exp;
+branches;
+next	38.4;
+
+38.4
+date	92.03.06.11.09.51;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.24.30;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.9
+log
+@Added better supprt for freeing track buffer during unit removal.
+@
+text
+@**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       open.a  -- device open code
+*
+**************************************************************************
+;DEBUG   set     1
+
+        include "mfm.i"
+        include "mfm_ext.i"
+        include "libraries/filehandler.i"
+
+        section ,CODE
+        XDEF    _Open
+        XDEF    Unit_Rem
+        XREF    Set_Phys_Params
+        XREF    myName
+        XREF    UnitTask_code
+        XREF    ExpungeUnit
+        XREF    AllocMem
+        XREF    devName
+
+;--------------------------------------------------------------------------
+; OpenDevice Section
+;
+; This section of code is called by the OpenDevice() function.  
+; It opens the device/library and the unit specified.
+;
+; If the device is to be opened for the first time, the 'Init' code will 
+; be executed first and then this code will be called.  Subsequent opens
+; will increment the LIB count for the device.
+;
+; This code also opens the unit.  If the unit is to be opened for the first
+; time, this code will open the unit structure and unit task and other unit
+; resources.  Subsequent opens will increment the LIB count for the unit.
+;
+; In summary, the OpenDevice code takes care of allocating the UNIT resources
+; for the device and filling the IORequest struct.  All UNIT resources must
+; be deallocated only in the CloseDevice() function when all calls to the 
+; Unit are closed.
+;
+; Inputs:
+; =======
+; d0 = unit number
+; d1 = flags
+; a1 = IORequest structure pointer
+; a6 = device pointer
+;
+; Results:
+; ========
+; d0 /= 0 = ERROR -- set IO_ERROR field in IOReq
+;     = 0 = successful open -- Exec will fill in IO_DEVICE field with devptr.
+;
+; IMPORTANT:
+; If unit opened OK, set up the IO_UNIT field with the unit pointer.
+;--------------------------------------------------------------------------
+DevFlags        equr    d3      ;= device flags
+MM_Open         reg    d2/d7/a2/a3/a5
+
+_Open:
+        movem.l MM_Open,-(sp)
+
+        move.l  a6,Device                   ; store devptr in new reg
+******** increment device open count
+        addq.w  #1,LIB_OPENCNT(Device)
+        move.l  md_AbsExecBase(Device),AbsExecBase  ; get ExecBase ptr
+        move.l  d1,DevFlags             ; save the device flags
+        move.l  IORequest,IOReq         ; save the ioReq
+        move.l  d0,UnitNum              ; save the unitnum
+
+        ;------- see if the unit number is within range
+        moveq.l #md_NUMUNITS,d2
+        cmp.l   d2,UnitNum
+        bcc.s   Open_Error_Unit_Num     ; unit number out of range
+
+******** check if the unit is already open
+        move.l  UnitNum,d2
+        lsl.l   #2,d2                   ; made longword displacement
+        move.l  md_Units(Device,d2.l),RetD0
+        bne.s   Open_UnitOK             ; unit already open
+
+******** open unit
+        bsr     InitUnit
+
+        ;------- check if unit is opened OK
+        tst.l   RetD0
+        beq.s   Open_Error
+
+        ;------- store unit ptr in device struct
+        move.l  RetD0,md_Units(Device,d2.l)    ; put unit ptr into device struct
+
+Open_UnitOK:
+        move.l  RetD0,Unit
+
+******** store unit ptr into caller's ioReq struct
+        move.l  Unit,IO_UNIT(IOReq)
+
+******** increment unit open count
+        addq.w  #1,UNIT_OPENCNT(Unit)
+
+        ;------- clear delayed expunges
+        bclr    #LIBB_DELEXP,md_Flags(Device)
+
+        CLEAR   RetD0                           ; d0 = 0
+Open_End:
+        movem.l (sp)+,MM_Open
+        rts
+
+        ;------- set error and return with d0 = 0
+Open_Error:
+        moveq   #IOERR_OPENFAIL,RetD0           ; set OPENFAIL error
+        bra.s   Open_End_1
+Open_Error_Unit_Num:
+        moveq   #TDERR_BadUnitNum,RetD0         ; set OPENFAIL error
+Open_End_1:
+        move.b  RetD0,IO_ERROR(a2)              ; set OPENFAIL error
+        move.l  #-1,IO_DEVICE(IOReq)            ; set the io_Device to not be used again
+        subq.w  #1,LIB_OPENCNT(Device)
+        bra.s   Open_End
+;
+;--------------------------------------------------------------------------
+;
+; DiskChange Interrupt Server
+;
+; The routine handles the disk change interrupt for the specified drive
+;
+; Inputs:
+; =======
+is_Data EQUR    a1      ;= is_Data ptr of Interrupt struct
+;
+;--------------------------------------------------------------------------
+
+initstruct_DCIReq:                     ; Disk change interrupt IO Request init table
+        INITWORD    IO_COMMAND,TD_ADDCHANGEINT  ; io_Command
+        INITBYTE    IOSTD_SIZE+LN_TYPE,NT_INTERRUPT ; is_Node.ln_Type
+        INITBYTE    IOSTD_SIZE+LN_PRI,32            ; is_Node.ln_Pri
+        INITLONG    IOSTD_SIZE+IS_CODE,DCInt        ; is_Code
+        dc.l        0       ; needed to terminate init table
+
+DCII_IS_DATA    set     IOSTD_SIZE+IS_DATA  ; displacement to is_Data from DCIReq
+        cnop    0,2
+;***************
+
+DCInt:
+        bset    #MDUB_DISK_CHANGED,(is_Data)  ; set Disk changed bit        
+
+        moveq.l #0,d0                   ; continue server chain
+        rts
+;
+;--------------------------------------------------------------------------
+; Initialize Unit resources (ie. struct, Unit task and Unit ports)
+;
+; Inputs:
+; =======
+; d3 = flags
+; d7 = unit number
+; a2 = IOReq pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; d0 = 0 = ERROR
+;    = unit pointer = successful
+meltemp equr    d5
+mel     equr    a1
+TrkStrt equr     a4
+;--------------------------------------------------------------------------
+    ifd     DEBUG
+UPMPname:       dc.b    'mfm_MPort',0
+UPRPname:       dc.b    'mfm_RPort',0
+    endc
+    ifnd     DEBUG
+UPMPname:
+UPRPname:       dc.b    0
+    endc
+        XDEF    tdIO
+tdIO:           TD_NAME
+
+        cnop    0,4
+
+MM_InitUnit     reg     d2/d3/d4/d5/a2/a3/a4
+
+InitUnit:
+        movem.l MM_InitUnit,-(sp)
+
+
+******** Create unit struct which includes an uninitialized msg port.  
+InitMemEnt:
+        lea.l   MemEntryList,ArgA0  ; mem entry List
+        CALLSYS AllocEntry          ; return mem entry ptr
+
+        bclr.l  #31,RetD0           ; check if msb set; if set = error
+        bne     InitUnit_Error      ; go; msb set
+
+        move.l  RetD0,mel
+        move.l  mel,meltemp                     ; temp store mel
+
+   ;******** Store unit params.  
+        move.l  mel_Unit(mel),Unit       ; get unit struct ptr
+        move.l  mel,mdu_MemEntL(Unit)    ; store MemEntryList into unit struct
+        move.b  UnitNum,mdu_UnitNum(Unit)   ; store unit num
+        move.l  Device,mdu_Device(Unit)     ; store device ptr
+
+   ;******** Store Retry Count
+        move.b  #RETRYCNT_NORM,mdu_RetryCnt(Unit)   ; set retry count
+
+   ;******** Store TrkStrt params.  
+        move.l  mel_TrkStrt(mel),TrkStrt     ; get TrkStrt struct ptr
+        move.l  TrkStrt,mdu_TrkStrt(Unit)    ; store TrkStrt ptr
+
+* ---- SPECIAL Breakpoint for "Metascope Debugger" to allow trace 
+*      ILLEGAL                  ; ILLEGAL Trap
+
+        move.l  #NOTRACK,trk_in_buf(TrkStrt)   ; store starting track #
+        bset    #MDUB_NO_TRK_MEM,UNIT_FLAGS(Unit) ; set No Track Memory bit        
+
+   ;******** Set default DosEnvec table
+InitDosEnvec:
+        move.l  mels_def_DosEnvec(mel),ArgD0    ; get default DosEnvec table size
+        move.l  mel_def_DosEnvec(mel),ArgA2     ; get default DosEnvec table
+        lea.l   IStruct_def_DosEnvec,ArgA1      ; get default DosEnvec Init struct
+        CALLSYS InitStruct                      ; set default DosEnvec table
+
+******** Set physical disk params and create sector header array 
+InitSetDiskParms:
+        moveq.l #0,ArgD0                        ; pass default pointer
+        btst    #MDB_SETPARMS,DevFlags          ;chk if params provided
+        beq.s   InitSetDiskParms_fini           ;disk params not provided
+
+        move.l  IO_DATA(IOReq),ArgD0            ; pass fssm ptr
+        bne.s   InitSetDiskParms_fini           ; IO_DATA not set to fssm_Environ
+
+        jsr     Set_Phys_Params                 ; go set physical params
+                                                ; and allocate header mem
+        tst.l   RetD0
+        bne     InitUnit_Rem                    ; go if error
+InitSetDiskParms_fini:
+
+InitUnit_TDIOReq:
+******** Initialize some values in the TD IO struct in the unit
+        lea.l   mdu_TDREQ(Unit),a0      ; point to TDRequest struct
+        move.b  #NT_MESSAGE,LN_TYPE(a0) ; put node type (Message)
+        move.b  #UNITPORTPRI,LN_PRI(a0) ; put node priority
+        lea.l   mdu_port_tr(Unit),a1    ; point to reply port struct
+        move.l  a1,MN_REPLYPORT(a0)     ; put reply port pointer
+        move.w  #IOTD_SIZE,MN_LENGTH(a0)    ; put message length
+
+
+******** Open trackdisk device.
+        move.l  #TDF_ALLOW_NON_3_5,ArgD1   ; pass flags
+        move.l  a0,ArgA1                   ; pass TD ioReq struct ptr
+        move.l  UnitNum,ArgD0              ; pass TD unit number  
+        lea.l   tdIO,ArgA0                 ; pass TD name
+        CALLSYS OpenDevice
+
+        tst.l   RetD0
+        bne     InitUnit_Rem
+
+InitUnit_DCI:
+******** Initialize disk change interrupt.
+    ;*** Initialize DCIReq struct using InitStruct() routine
+        lea.l   initstruct_DCIReq(pc),ArgA1 ; pass init table
+        lea.l   mdu_dci(Unit),ArgA2         ; pass ptr to struct memory
+        CLEAR   ArgD0                   ; pass size = 0; do not clear memory
+        CALLSYS InitStruct
+
+        lea.l   mdu_TDREQ(Unit),a0      ; point to TDRequest struct
+        lea.l   mdu_dci(Unit),ArgA1     ; point to DCI Request struct
+        move.l  IO_DEVICE(a0),IO_DEVICE(ArgA1) ; copy Device ptr.
+        move.l  IO_UNIT(a0),IO_UNIT(ArgA1) ; copy Unit ptr.
+        lea.l   UNIT_FLAGS(Unit),a0     ; point to Unit flags
+        bset    #MDUB_DISK_CHANGED,(a0) ; set Disk Change bit in Unit flags
+        move.l  a0,DCII_IS_DATA(ArgA1)  ; put ptr to Unit flags
+        lea.l   DCII(ArgA1),a0          ; get ptr to diskchange int struct 
+        move.l  a0,IO_DATA(ArgA1)       ; put ptr to diskchange int struct
+
+        CALLSYS SendIO                  ; DO NOT wait for response
+
+InitUnit_Task:
+******** Initialize ports for the unit Task
+        move.l  meltemp,mel             ; put in mel
+
+        move.l  mel_task(mel),Task      ; pass task struct ptr reg
+
+        ;----- Make unit Task Msg Port params
+        move.l  Task,ArgD4              ; pass Task struct ptr
+        move.l  Unit,ArgD3              ; pass ptr to msg port struct
+        move.b  #UNITPORTPRI,ArgD2      ; pass port priority
+        move.l  #UPMPname,ArgD1         ; pass port name
+        jsr     _MakeTaskPort           ; make task port from memory allocated
+
+        ;----- Make Reply Port params  (ArgD4 = Task struct ptr)
+        lea.l   mdu_port_tr(Unit),a0
+        move.l  a0,ArgD3                ; pass ptr to reply port struct
+        move.b  #UNITPORTPRI,ArgD2      ; pass port priority
+        move.l  #UPRPname,ArgD1         ; pass port name
+        jsr     _MakeTaskPort           ; make task port from memory allocated
+
+******** Create Unit Task.  
+        ; We must not pass control to another task at this point.
+        ; Exec does a Forbid() prior to entering the _Open call.
+
+        move.l  meltemp,mel             ; put in mel
+
+        lea.l   TC_MEMENTRY(Task),ArgA0 ; load the address of the memory entry list
+        NEWLIST ArgA0
+
+InitUnit_MEL_Task:
+* Put MemEntry list in TC_MEMENTRY of task so that when the task is RemTask() the
+* MemEntry list will be freed also
+* a0 = EA of TC_MEMENTRY(Task)  a1 = mel
+        ADDHEAD                         ; do AddHead() macro
+        
+        move.l  Unit,TC_Userdata(Task)  ; store Unit ptr in Task Userdata
+
+        move.l  mel_taskstack(mel),d0   ; get lower limit of stack
+        move.l  d0,TC_SPLOWER(Task)       ; put lower limit of stack
+        add.l   mels_taskstack(mel),d0  ; calc upper limit of stack
+        move.l  d0,TC_SPUPPER(Task)     ; put upper limit of stack
+        move.l  d0,TC_SPREG(Task)       ; put upper limit of stack
+        ;----- set task node params
+        move.b  #NT_TASK,LN_TYPE(Task)        ; put node type (task)
+        move.b  #UNITTASKPRI,LN_PRI(Task)     ; put node priority
+        move.l  #devName,LN_NAME(Task)   ; put node name
+        ;----- Add task to system
+        move.l  Task,ArgA1              ; pass task struct
+        move.l  #UnitTask_code,ArgA2    ; pass initPC
+        move.l  Unit,a4                 ; temp store Unit ptr
+        move.l  #0,ArgA3                ; pass finalPC
+        CALLSYS AddTask
+
+        move.l  a4,RetD0                ; return with Unit ptr
+
+InitUnit_End:
+        movem.l (sp)+,MM_InitUnit
+        rts
+
+InitUnit_Error:
+        moveq.l #0,RetD0                ; return with d0 = 0 = error
+        bra.s   InitUnit_End
+
+InitUnit_Rem:
+        bsr.s   Unit_Rem
+        bra.s   InitUnit_Error
+;
+;--------------------------------------------------------------------------
+; Deallocate Unit resources (ie. struct, Unit task and Unit ports)
+;
+; Inputs:
+; =======
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; d0 = 0 = ERROR
+;    = unit pointer = successful
+;
+; Registers used:
+; ===============
+TDIOReq     equr    d2  ;= TD IO Request struct
+Temp        equr    d3  ;= temp reg
+TDReq       equr    a1  ;= TD IO Request struct
+;--------------------------------------------------------------------------
+        XREF    Cmd_Flush
+        XREF    Cmd_Update
+
+MM_Unit_Rem     reg     d2/d3
+
+Unit_Rem:       ; ( a3:unitptr; a5:devptr; a6;execlib)
+
+* ---- SPECIAL Breakpoint for "Metascope Debugger" to allow trace 
+*      ILLEGAL                  ; ILLEGAL Trap
+
+        movem.l MM_Unit_Rem,-(sp)
+
+;****** Get rid of the disk change interrupt
+UDCI_Rem:
+        lea.l   mdu_dci(Unit),ArgA1    ; point to DCI Request struct
+        tst.l   LN_SUCC(ArgA1)         ; check if DCI installed
+        beq.s   UDCI_Rem_fini          ; go if DCI not installed
+
+
+;********* Check if version of trackdisk.device => 37
+        move.l  IO_DEVICE(ArgA1),a0     ; get io_Device ptr
+        cmpi.w  #37,LIB_VERSION(a0)    ; compare version # of trackdisk.device
+        bge.s   UT_dci_TD_REMCHANGEINT          ; go if >= 37
+
+;*********   Alas, TD_REMCHANGEINT has got some problems.  We need to remove
+;            the interrupt this way.  THIS MAY CHANGE IN THE FUTURE!
+;            Do not expect the TD_ADDCHANGEINT request replied back. 
+
+        CALLSYS Forbid                 ; Forbid other tasks
+        CALLSYS Remove                 ; Remove node from DCI
+        CALLSYS Permit                 ; Permit other tasks
+        bra.s   UTD_Rem
+
+;****** TD_REMCHANGEINT Fixed after KS 37.92 (37.118).  Use for KS 1.2 and 1.3
+UT_dci_TD_REMCHANGEINT:
+        move.w  #TD_REMCHANGEINT,IO_COMMAND(ArgA1)  ; load REMCHANGEINT cmd into
+                                            ; DCI Request struct
+        CALLSYS DoIO                    ; Do IO Request
+UDCI_Rem_fini:
+
+;****** Close trackdisk device.
+UTD_Rem:
+        lea.l   mdu_TDREQ(Unit),TDReq   ; pass TDRequest IO struct ptr
+        move.l  TDReq,TDIOReq           ; temp store TD IO Request
+        cmp.l   #-1,IO_DEVICE(TDReq)    ; chk if device ptr not = -1
+        beq.s   UT_Rem                  ; go if device ptr = -1
+
+        tst.l   IO_DEVICE(TDReq)        ; chk if device ptr not = 0
+        beq.s   UTD_Rem_fini            ; go if device ptr = 0
+
+        bset    #MDUB_STOPPED,UNIT_FLAGS(Unit)  ; set STOPPED flag bit
+
+    ;-- temporarily put IOReq replyport into TDReq struct
+        move.l  TDIOReq,TDReq
+        move.l  MN_REPLYPORT(TDReq),Temp
+        move.l  MN_REPLYPORT(IOReq),MN_REPLYPORT(TDReq)  ; this task replyport
+        beq.s   UTFlush_Rem             ; if no replyport then skip to Flush
+
+    ;-- Update disk
+        jsr     Cmd_Update              ; update disk with current track buffer
+
+    ;-- Turn Motor Off
+        move.l  TDIOReq,TDReq
+        move.w  #TD_MOTOR,IO_COMMAND(TDReq) ; put cmd
+        move.l  #0,IO_LENGTH(TDReq)         ; Motor off 
+
+        CALLSYS DoIO                        ; Do IO Request
+
+    ;-- put back TDReq replyport into TDReq struct
+        move.l  TDIOReq,TDReq
+        move.l  Temp,MN_REPLYPORT(TDReq) ; this task replyport
+
+UTFlush_Rem:
+    ;-- Flush I/O
+        jsr     Cmd_Flush               ; flush all pending IO
+
+        move.l  TDIOReq,TDReq
+        CALLSYS CloseDevice             ; close device
+UTD_Rem_fini:
+
+;****** Get rid of the unit's ports.
+UMP_Rem:
+    ifd     DEBUG
+;****** Get rid of the unit's msg port.
+        move.l  Unit,ArgA1                      ; pass unit msg port ptr
+        cmpi.b  #NT_MSGPORT,LN_TYPE(ArgA1)      ; chk if port
+        bne.s   UMP_Rem_fini            ; go if not
+        CALLSYS RemPort                 ; remove msg port
+UMP_Rem_fini:
+
+;****** Get rid of the unit's reply port.
+URP_Rem:
+        lea.l   mdu_port_tr(Unit),ArgA1         ; pass unit reply port ptr
+        cmpi.b  #NT_MSGPORT,LN_TYPE(ArgA1)      ; chk if port
+        bne.s   URP_Rem_fini            ; go if not
+        CALLSYS RemPort                         ; remove reply port
+URP_Rem_fini:
+    endc
+
+;****** Get rid of the unit's task
+UT_Rem:
+        move.l  mdu_MemEntL(Unit),a1    ; get MemEntryList from unit struct
+    ;**** Check if track buffer ptr = 0. If so, make sure track buffer size = 0
+        tst.l  mel_trkbuf_mem(a1)
+        bne.s  1$
+        move.l #0,mels_trkbuf_mem(a1)
+1$
+        move.l  mel_task(a1),ArgA1      ; get Unit task
+        tst.b   TC_STATE(ArgA1)         ; test Task state != 0
+        beq.s   UT_Rem_fini             ; go if Unit Task not created
+
+        CALLSYS RemTask                 ; remove task
+UT_Rem_fini:        
+
+U_Rem_end:
+        movem.l (sp)+,MM_Unit_Rem
+        rts
+
+        TTL     Exec Support Code
+
+;
+**************************************************************************
+*
+*       MakeTaskPort  Assembler version    Version 1.0    4/22/88
+*
+*       Make the general msg Port from specified task.  
+*       Allocate signal and add message Port to system.
+*
+*       Port = MakeTaskPort( name, pri, memory, task )
+*        D0                   D1   D2     D3     D4
+*
+*       Port = pointer to new port or NULL if request failed.
+**************************************************************************
+
+        XDEF    _MakeTaskPort
+
+
+MM_MakeTaskPort equr    a6
+
+_MakeTaskPort:
+        move.l  MM_MakeTaskPort,-(sp)
+
+        move.l  _AbsExecBase,a6         ; load Absolute Exec Base ptr
+        move.l  d3,a1                   ; Port struct ptr reg
+        move.l  d4,a0                   ; task ptr reg
+
+        move.b  #PA_SIGNAL,MP_FLAGS(a1) ; put signal flag
+        move.l  a0,MP_SIGTASK(a1)       ; put task to be signaled
+
+******** set Port node params
+        move.b  #NT_MSGPORT,LN_TYPE(a1) ; put node type (Port)
+        move.b  d2,LN_PRI(a1)           ; put node priority
+        move.l  d1,LN_NAME(a1)          ; put node name
+
+******** Allocate message port signal -- Next available signal (ie 16-31)
+SYS_SIG_CNT:    set     16              ; 16 system signals
+USER_SIG_CNT:   set     32-SYS_SIG_CNT  ; 32 max signals - 16 system signals
+        move.l  TC_SIGALLOC(a0),d0      ; get task signal allocated
+        move.b  #USER_SIG_CNT,d1        ; user signal number count
+1$:
+        subq.b  #1,d1                   ; dec sig counter
+        blt.s   MTPort_error            ; go if no signals left  
+
+        rol.l   #1,d0                   ; rotate signal bit into carry
+        bcs.s   1$                      ; go if signal already allocated
+
+        addi.b  #SYS_SIG_CNT,d1         ; add system signal cnt disp = sigBit
+        move.b  d1,MP_SIGBIT(a1)        ; put sig bit
+        bset    d1,TC_SIGALLOC(a0)      ; allocate bit in task
+
+******** Add Port to system
+        movea.l LN_NAME(a1),a0          ; load node name ptr
+        tst.b   (a0)                    ; test if node name = 0
+        beq.s   MTPort_private          ; go if port name = 0; private port
+MTPort_public:                          ; create public port
+        CALLSYS AddPort
+        bra.s   MTPort_ret
+
+MTPort_private:
+        adda.l  #MP_MSGLIST,a1
+        NEWLIST a1
+
+MTPort_ret:
+        move.l  a1,d0           ; pass return value back to calling routine
+        bra.s   MTPort_end      ; return
+
+MTPort_error:
+        moveq.l #0,d0
+MTPort_end:
+        move.l  (sp)+,MM_MakeTaskPort
+        rts
+
+**********************************************************************
+*   Data Section.  MemEntry List
+**********************************************************************/
+        section __MERGED,DATA
+
+MemEntryList:
+        ds.b    LN_SIZE
+        dc.w    7
+        dc.l    MEMF_PUBLIC|MEMF_CLEAR  ; Unit struct
+        dc.l    MFMDevUnit_sz
+        dc.l    MEMF_PUBLIC|MEMF_CLEAR  ; TrkStrt struct
+        dc.l    TrkStruct_sz
+        dc.l    MEMF_PUBLIC|MEMF_CLEAR  ; task struct
+        dc.l    TC_SIZE
+        dc.l    MEMF_PUBLIC|MEMF_CLEAR  ; task stack
+        dc.l    UNITTASKSTACKSIZE
+        dc.l    MEMF_PUBLIC|MEMF_CLEAR  ; Default DosEnvec struct
+        dc.l    DEF_DOSENV_SZ
+        dc.l    0   ;MEMF_PUBLIC|MEMF_CLEAR  ; sector header struct
+        dc.l    0   ;DEFSECNUM*header_sz
+        dc.l    0                       ; Raw track buffer
+        dc.l    0
+
+IStruct_def_DosEnvec:
+        INITLONG        de_TableSize,DEF_DOSENV_TBL_SZ
+        INITLONG        de_SizeBlock,(DEF_SEC_LEN)>>2
+        INITLONG        de_SecOrg,DEF_SEC_OFF
+        INITLONG        de_Surfaces,2
+        INITLONG        de_SectorPerBlock,1
+        INITLONG        de_BlocksPerTrack,DEFSECNUM
+        INITLONG        de_Reserved,1
+        INITLONG        de_LowCyl,0
+        INITLONG        de_HighCyl,(DEFTRKNUM/2)-1
+        INITLONG        de_DosType,$4D534400    ; DosType = "MSD\0"
+        dc.l            0
+        LABEL           IDD_sz
+
+            end  
+@
+
+
+40.8
+log
+@We now store the pointer to _AbsExecBase in the device structure. This allows
+us to reduce the access to chip ram for exec calls.
+@
+text
+@d21 1
+a169 1
+unitTaskname:   dc.b    'mfm_UTask',0
+a173 1
+unitTaskname:
+d216 2
+a217 1
+    
+d325 1
+a325 1
+        move.l  #unitTaskname,LN_NAME(Task)   ; put node name
+d469 5
+@
+
+
+38.7
+log
+@Corrected bug on the return from Open() when a bad unit number was
+attempted to be opened.
+@
+text
+@d65 1
+a65 1
+        move.l  _AbsExecBase,AbsExecBase    ; store AbsExecBase in reg
+@
+
+
+38.4
+log
+@Fixed unit bounds checking.
+@
+text
+@d50 2
+a51 2
+; d0 = 0 = ERROR -- set IO_ERROR field in IOReq
+;   /= 0 = successful open -- Exec will fill in IO_DEVICE field with devptr.
+d63 2
+d97 1
+a97 2
+******** increment device/lib and unit open counts
+        addq.w  #1,LIB_OPENCNT(Device)
+d103 1
+d110 2
+a111 3
+        CLEAR   RetD0                           ; d0 = 0
+        move.b  #IOERR_OPENFAIL,IO_ERROR(a2)    ; set OPENFAIL error
+        bra.s   Open_End
+d113 5
+a117 2
+        CLEAR   RetD0                           ; d0 = 0
+        move.b  #TDERR_BadUnitNum,IO_ERROR(a2)    ; set Unit num > than NUMUNITS error
+d178 1
+d384 1
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d114 1
+d493 1
+a493 1
+MM_MakeTaskPort reg a4/a5/a6
+d496 1
+a496 1
+        movem.l MM_MakeTaskPort,-(sp)
+d545 1
+a545 1
+        movem.l (sp)+,MM_MakeTaskPort
+@

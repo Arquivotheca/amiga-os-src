@@ -1,0 +1,5 @@
+LIBRARY lib:debug.lib
+WITH ex:bcl.w
+VERBOSE
+SMALLDATA
+SMALLCODE

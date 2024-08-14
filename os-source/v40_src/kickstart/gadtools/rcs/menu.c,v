@@ -1,0 +1,3189 @@
+head     39.5;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.5
+date     92.07.16.10.54.39;  author vertex;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.04.15.11.42.53;  author vertex;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.04.07.14.01.49;  author vertex;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.02.03.15.48.56;  author peter;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.01.30.19.53.23;  author peter;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.01.28.08.29.13;  author peter;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.09.24.18.11.59;  author peter;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.07.11.12.44.30;  author peter;  state Exp;
+branches ;
+next     38.0;
+
+38.0
+date     91.07.11.12.32.41;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+39.5
+log
+@Added support for BOOPSI images in menus
+@
+text
+@/*** menu.c ***************************************************************
+*
+*   menu.c	- Menu routines for gadget toolkit.
+*
+*   Copyright 1989, 1990, Commodore-Amiga, Inc.
+*
+*   $Id: menu.c,v 39.4 92/04/15 11:42:53 vertex Exp Locker: vertex $
+*
+**************************************************************************/
+
+/*------------------------------------------------------------------------*/
+
+#include "gtinclude.h"
+
+/*------------------------------------------------------------------------*/
+
+/* Function Prototypes: */
+
+/* Public: */
+struct Menu * __asm
+LIB_CreateMenusA (register __a0 struct NewMenu *newmenu,
+		 register __a1 struct TagItem *taglist);
+
+void __asm
+LIB_FreeMenus (register __a0 struct Menu *menu);
+
+LONG __asm
+LIB_LayoutMenusA (register __a0 struct Menu *firstmenu,
+		 register __a1 struct VisualInfo *vi,
+		 register __a2 struct TagItem *taglist);
+
+LONG __asm
+LIB_LayoutMenuItemsA (register __a0 struct MenuItem *firstitem,
+		     register __a1 struct VisualInfo *vi,
+		     register __a2 struct TagItem *taglist);
+
+/* Private: */
+static ULONG TallyMenuMemory (struct NewMenu *nm, BOOL fullmenu );
+static ULONG InitMenuMemory (struct NewMenu *nm, UBYTE *memory, UBYTE frontpen);
+static void DoMenuItemLayout (struct RastPort *, struct MenuItem *, struct TextAttr *,
+    WORD, WORD, ULONG, LONG, struct VisualInfo *);
+static void PlaceItems (struct RastPort *, struct MenuItem *, struct TextAttr *,
+    WORD, WORD, WORD, WORD, WORD, ULONG, struct VisualInfo *);
+static void SizeItems (struct MenuItem *, UWORD, struct TextAttr *, LONG);
+static void AboutColumn (struct ColumnInfo *, struct RastPort *, struct MenuItem *,
+    UWORD, ULONG, struct VisualInfo *);
+static ULONG MenuImageWidths(struct VisualInfo *vi, struct TagItem *ti);
+static LONG GetFrontPen(struct VisualInfo *vi, struct TagItem *ti);
+
+/*------------------------------------------------------------------------*/
+
+/* This structure contains sizing information about a column of a menu: */
+struct ColumnInfo
+{
+    UWORD width;	/* width of select area of column */
+    UWORD height;	/* height of select areas of column */
+    UWORD count;	/* number of items */
+    struct MenuItem *nextitem;	/* first item of next column */
+};
+
+/*------------------------------------------------------------------------*/
+
+/* Pixels between columns of menus */
+#define MULTICOLUMN_GAP	8
+
+#define ITEXT(foo) ((struct IntuiText *)(foo))
+#define IMAGE(fum) ((struct Image *)(fum))
+
+/*------------------------------------------------------------------------*/
+
+/****** gadtools.library/CreateMenusA ****************************************
+*
+*   NAME
+*	CreateMenusA -- allocate and fill out a menu structure. (V36)
+*	CreateMenus -- varargs stub for CreateMenus(). (V36)
+*
+*   SYNOPSIS
+*	menu = CreateMenusA(newmenu, tagList)
+*	D0                  A0       A1
+*
+*	struct Menu *CreateMenusA(struct NewMenu *, struct TagItem *);
+*
+*	menu = CreateMenus(newmenu, firsttag, ...)
+*
+*	struct Menu *CreateMenus(struct NewMenu *, Tag, ...);
+*
+*   FUNCTION
+*	CreateMenusA() allocates and initializes a complete menu
+*	structure based on the supplied array of NewMenu structures.
+*	Optionally, CreateMenusA() can allocate and initialize a complete
+*	set of menu items and sub-items for a single menu title.  This
+*	is dictated by the contents of the array of NewMenus.
+*
+*   INPUTS
+*	newmenu - pointer to an array of initialized struct NewMenus.
+*	tagList - pointer to an array of tags providing optional extra
+*		  parameters, or NULL.
+*
+*   TAGS
+*	GTMN_FrontPen (UBYTE) - Pen number to be used for menu text.
+*	    (Under V39 and higher, this tag also exists for LayoutMenusA()
+*	    and LayoutMenuItemsA()).  (defaults to zero).
+*	GTMN_FullMenu (BOOL) - Requires that the NewMenu specification
+*	    describes a complete menu strip, not a fragment.  If a fragment
+*	    is found, CreateMenusA() will fail with a secondary error of
+*	    GTMENU_INVALID.  (defaults to FALSE). (V37)
+*	GTMN_SecondaryError (ULONG *) - Supply a pointer to a NULL-initialized
+*	    ULONG to receive a descriptive error code.  Possible values:
+*	    GTMENU_INVALID - NewMenu structure describes an illegal
+*	        menu.  (CreateMenusA() will fail with a NULL result).
+*	    GTMENU_TRIMMED - NewMenu structure has too many menus, items,
+*	        or subitems (CreateMenusA() will succeed, returning a
+*	        trimmed-down menu structure).
+*	    GTMENU_NOMEM - CreateMenusA() ran out of memory.
+*	    (V37)
+*
+*   RESULT
+*	menu - pointer to the resulting initialized menu structure (or
+*              the resulting FirstItem), with all the links for menu items
+*              and subitems in place.
+*              The result will be NULL if CreateMenusA() could not allocate
+*              memory for the menus, or if the NewMenu array had an
+*              illegal arrangement (eg. NM_SUB following NM_TITLE).
+*              (see also the GTMN_SecondaryError tag above).
+*
+*   NOTES
+*	The strings you supply for menu text are not copied, and must
+*	be preserved for the life of the menu.
+*	The resulting menus have no positional information.  You will
+*	want to call LayoutMenusA() (or LayoutMenuItemsA()) to supply that.
+*	CreateMenusA() automatically provides you with a UserData field
+*	for each menu, menu-item or sub-item.  Use the GTMENU_USERDATA(menu)
+*	or GTMENUITEM_USERDATA(menuitem) macro to access it.
+*
+*   BUGS
+*	Prior to V39, if you put images into menus using IM_ITEM
+*	or IM_SUB for a NewMenu->nm_Type, the image supplied had to
+*	be an ordinary struct Image.  Starting with V39, you can use
+*	boopsi images.
+*
+*   SEE ALSO
+*	LayoutMenusA(), FreeMenus(), gadtools.h/GTMENU_USERDATA(),
+*	gadtools.h/GTMENUITEM_USERDATA()
+*
+******************************************************************************
+*
+* Created:  21-Nov-89, Peter Cherna
+* Modified: 30-Apr-90, Peter Cherna
+*
+*/
+
+struct Menu * __asm
+LIB_CreateMenusA( register __a0 struct NewMenu *newmenu,
+		  register __a1 struct TagItem *taglist )
+{
+    ULONG size;
+    ULONG *errorstore;
+    /* First thing that can fail is TallyMenuMemory().  That would
+     * indicate an invalid NewMenu arrangement.
+     */
+    ULONG errorcode = GTMENU_INVALID;
+
+    UBYTE *alloc = NULL;
+
+    MP(("CM:  Enter\n"));
+    if (size = TallyMenuMemory( newmenu, getGTTagData(GTMN_FullMenu, FALSE, taglist)))
+    {
+	/* If allocation fails, we want to return "no memory" */
+	errorcode = GTMENU_NOMEM;
+	if (alloc = AllocVec(size, MEMF_CLEAR))
+	{
+	    MP(("CM:  Alloc'd at $%lx\n", alloc));
+	    /* errorcode will be NULL or GTMENU_TRIMMED */
+	    errorcode = InitMenuMemory(newmenu, alloc,
+		(UBYTE) getGTTagData(GTMN_FrontPen, 0, taglist) );
+	}
+    }
+
+    /* Stuff the errorcode if a place was provided: */
+    if ( errorstore = (ULONG *)getGTTagData(GTMN_SecondaryError, NULL, taglist ) )
+    {
+	*errorstore = errorcode;
+    }
+
+    MP(("CM:  Returning menu at $%lx with errorcode\n", alloc, errorcode));
+    return((struct Menu *)alloc);
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/*/ TallyMenuMemory()
+ *
+ * Figure out how much memory this menu strip would require.
+ * Returns NULL if an illegal NewMenu sequence is encountered.
+ * If fullmenu is TRUE, requires that this be a complete menu
+ * specification (i.e. not an otherwise valid menu fragment).
+ *
+ * Created:  30-Apr-90, Peter Cherna (from CreateMenusA())
+ * Modified: 23-Oct-90, Peter Cherna
+ *
+ */
+
+static ULONG TallyMenuMemory( struct NewMenu *nm, BOOL fullmenu )
+{
+    ULONG size;
+    UBYTE prevtype = 0;
+
+    /* Tally up the amount of memory needed for the whole menu. */
+    size = 0;
+    if ( ( fullmenu ) && ( nm->nm_Type != NM_TITLE ) )
+    {
+	DP(("TMM: Failing because fullmenu doesn't begin with a title\n"));
+	return(0);
+    }
+
+    while (nm->nm_Type)
+    {
+	if ( !( nm->nm_Type & NM_IGNORE ) )
+	{
+	    if (nm->nm_Type == NM_TITLE)
+	    {
+		/* Titles need a struct Menu and a pointer */
+		size += sizeof(struct Menu) + sizeof(void *);
+	    }
+	    else
+	    {
+		if (nm->nm_Label == NM_BARLABEL)
+		{
+		    /* Separator bars need a MenuItem, an Image, and a pointer */
+		    size += sizeof(struct MenuItem) + sizeof(struct Image) +
+			sizeof(void *);
+		}
+		else if (nm->nm_Type & MENU_IMAGE)
+		{
+		    /* Custom imagery needs a MenuItem, an Image structure,
+		     * and a pointer, as well as a WORD to stash the original
+		     * image->LeftEdge for use in re-layout:
+		     */
+		    size += sizeof(struct MenuItem) + sizeof(struct Image) +
+			sizeof(void *) + sizeof(WORD);
+
+		    /* This Image structure will not be used for custom images
+		     * but we still allocate it cause it makes things simpler
+		     */
+		}
+		else
+		{
+		    /* Text menuitems and subitems need a MenuItem, an IntuiText,
+		     * and a pointer:
+		     */
+		    size += sizeof(struct MenuItem) + sizeof(struct IntuiText) +
+			sizeof(void *);
+		    /* New for V39: NM_COMMANDSTRING gives an arbitrary string
+		     * right-justified in the menu.  This requires another
+		     * IntuiText.
+		     */
+		    if ( nm->nm_Flags & NM_COMMANDSTRING )
+		    {
+			size += sizeof( struct IntuiText );
+		    }
+		}
+
+		/* Let's handle a few things about subitems */
+		if ( NM_TRUETYPE(nm->nm_Type) == NM_SUB )
+		{
+		    if ( prevtype == NM_TITLE )
+		    {
+			/* Sub-items can only follow sub-items or items! */
+			return(0);
+		    }
+		    else if ( prevtype == NM_ITEM )
+		    {
+			/* This is the first submenu.  We'll need a spare IntuiText
+			 * for the parent MenuItem's '>>' indicator, if the parent
+			 * was a text-menuitem:
+			 */
+			size += sizeof(struct IntuiText);
+		    }
+		}
+	    }
+	    prevtype = nm->nm_Type;
+	}
+	nm++;
+    }
+    MP(("TMM:  Total alloc size: $%lx\n", size));
+    return(size);
+}
+
+/*------------------------------------------------------------------------*/
+
+/*/ InitMenuMemory()
+ *
+ * Fill the supplied memory with all the layout-insensitive information
+ * from the supplied NewMenu array.
+ * Returns FALSE if there were too many menus, items, or subitems
+ * still initializes a valid structure, tho.
+ *
+ * Created:  30-Apr-90, Peter Cherna (from CreateMenusA())
+ * Modified: 23-Oct-90, Peter Cherna
+ *
+ */
+
+static ULONG InitMenuMemory( struct NewMenu *nm, UBYTE *memory, UBYTE frontpen )
+{
+    struct Menu *menu = NULL;
+    struct MenuItem *item = NULL;
+    struct MenuItem *sub = NULL;
+    struct MenuItem *thisitem;
+    void *itemfill;
+    WORD menucount = -1;
+    WORD itemcount = -1;
+    WORD subcount= -1;
+    ULONG error = 0; /* Innocent until proven guilty */
+    BOOL commandstring;
+
+    while ( ( nm->nm_Type ) && ( menucount < NOMENU ) )
+    {
+	if ( !( nm->nm_Type & NM_IGNORE ) )
+	{
+	    commandstring = FALSE;
+
+	    if (nm->nm_Type == NM_TITLE)
+	    {
+		if ( ++menucount < NOMENU )
+		{
+		    MP(("CM:  Creating Menu '%s' at $%lx\n", nm->nm_Label, memory));
+		    if (menu)
+		    {
+			/* Link it to previous menu, if any */
+			MP(("CM:  Linking to previous Menu ($%lx)\n", menu));
+			menu->NextMenu = (struct Menu *)memory;
+		    }
+		    menu = (struct Menu *)memory;
+		    memory += sizeof(struct Menu) + sizeof(void *);
+		    menu->MenuName = nm->nm_Label;
+		    /* We invert the sense of Menu->Flags MENUENABLED field,
+		     * so that they're enabled by default:
+		     */
+		    menu->Flags = nm->nm_Flags ^ NM_MENUDISABLED;
+		    GTMENU_USERDATA(menu) = nm->nm_UserData;
+		    item = NULL;
+		    itemcount = -1;
+		}
+		else
+		{
+		    error = GTMENU_TRIMMED;
+		}
+	    }
+	    else
+	    {
+		/* It's an item or subitem */
+		thisitem = (struct MenuItem *)memory;
+		memory += sizeof(struct MenuItem) + sizeof(void *);
+
+		if (NM_TRUETYPE(nm->nm_Type) == NM_ITEM)
+		{
+		    if ( ++itemcount < NOITEM )
+		    {
+			/* This is a MenuItem: */
+			MP(("CM:  Creating MenuItem '%s' at $%lx\n", nm->nm_Label,
+			    thisitem));
+			if (item)
+			{
+			    /* Another item, so link it in to previous */
+			    MP(("CM:  Linking into previous MenuItem ($%lx)\n", item));
+			    item->NextItem = thisitem;
+			}
+			else
+			{
+			    /* The first item, so link it in to the menu itself,
+			     * if there is one
+			     */
+			    MP(("CM:  First MenuItem of Menu at $%lx\n", menu));
+			    if (menu)
+			    {
+				menu->FirstItem = thisitem;
+			    }
+			}
+			item = thisitem;
+			sub = NULL;
+			subcount = -1;
+		    }
+		    else
+		    {
+			error = GTMENU_TRIMMED;
+			subcount = NOSUB;
+		    }
+		}
+		else /* if (NM_TRUETYPE(nm->nm_Type) == NM_SUB) */
+		{
+		    if ( ++subcount < NOSUB )
+		    {
+			MP(("CM:  Creating SubItem '%s' at $%lx\n", nm->nm_Label,
+			    thisitem));
+			if (sub)
+			{
+			    /* Another subitem, so link it into the previous */
+			    MP(("CM:  Linking into previous SubItem ($%lx)\n", sub));
+			    sub->NextItem = thisitem;
+			}
+			else
+			{
+			    /* The first subitem, so link it in to the
+			     * menuitem itself, if there is one
+			     */
+			    MP(("CM:  First SubItem of MenuItem at $%lx\n", item));
+			    if (item)
+			    {
+				item->SubItem = thisitem;
+				/* Also, arrange for the item to have a second
+				 * IntuiText, consisting of the '>>' symbol,
+				 * provided it is a text-item:
+				 */
+				if (item->Flags & ITEMTEXT)
+				{
+				    itemfill = ITEXT(item->ItemFill)->NextText =
+					ITEXT(memory);
+				    memory += sizeof(struct IntuiText);
+				    ITEXT(itemfill)->FrontPen = frontpen;
+				    ITEXT(itemfill)->DrawMode = JAM1;
+				    ITEXT(itemfill)->TopEdge = 1;
+				    ITEXT(itemfill)->IText = "»";
+				}
+			    }
+			}
+			sub = thisitem;
+		    }
+		    else
+		    {
+			error = GTMENU_TRIMMED;
+		    }
+		}
+
+		if ( subcount < NOSUB )
+		{
+		    /* We invert the sense of the MenuItem->Flags ITEMENABLED
+		     * field, so that they're enabled by default:
+		     */
+		    thisitem->Flags = (nm->nm_Flags & NM_FLAGMASK_V39) ^ NM_ITEMDISABLED;
+		    if (nm->nm_CommKey)
+		    {
+			/* Under V37, a non-NULL nm_CommKey implies that there's
+			 * a command-key sequence, so we should set that, and set
+			 * this item's COMMSEQ flag.  Starting with V39, we allow
+			 * arbitrary strings stored in the nm_CommKey field to
+			 * be displayed along the right-hand side of the menu.
+			 * The programmer should specify the nm_Flags bit
+			 * NM_COMMANDSTRING, which is numerically equal to COMMSEQ.
+			 * Effectively, then, its sense is toggled.
+			 */
+			thisitem->Flags ^= NM_COMMANDSTRING;
+			if ( thisitem->Flags & COMMSEQ )
+			{
+			    /* Amiga-key equivalent */
+			    thisitem->Command = *nm->nm_CommKey;
+			}
+			else
+			{
+			    /* We'll need an independent IntuiText for
+			     * proper right-justification
+			     */
+			    commandstring = TRUE;
+			}
+		    }
+		    thisitem->MutualExclude = nm->nm_MutualExclude;
+		    GTMENUITEM_USERDATA(thisitem) = nm->nm_UserData;
+		    /* Whether image or text, the ItemFill follows: */
+		    itemfill = thisitem->ItemFill = (APTR) memory;
+		    if (nm->nm_Label == NM_BARLABEL)
+		    {
+			/* A separator bar: */
+			memory += sizeof(struct Image);
+			/* We want the Depth, ImageData, and PlanePick to be
+			 * zero, which is how the memory was initialized
+			 */
+			IMAGE(itemfill)->LeftEdge = 2;
+			IMAGE(itemfill)->TopEdge = 2;
+			IMAGE(itemfill)->Height = 2;
+			IMAGE(itemfill)->PlaneOnOff = frontpen;
+			/* Separator bars are disabled, and don't highlight: */
+			thisitem->Flags |= HIGHNONE;
+			thisitem->Flags &= ~ITEMENABLED;
+		    }
+		    else if (nm->nm_Type & MENU_IMAGE)
+		    {
+                        memory += sizeof(struct Image) + sizeof(WORD);
+    		        if (IMAGE(itemfill)->Depth == CUSTOMIMAGEDEPTH)
+		        {
+		            /* for boopsi images, point the item fill to the
+                             * image itself, and don't copy it
+                             */
+                            itemfill = thisitem->ItemFill = (APTR)nm->nm_Label;
+                            SetAttrs(itemfill,IA_Top,IMAGE(itemfill)->TopEdge + 1,
+                                              TAG_DONE);
+		        }
+		        else
+		        {
+                            /* A custom image: */
+                            *IMAGE(itemfill) = *IMAGE(nm->nm_Label);
+                            IMAGE(itemfill)->TopEdge += 1;
+                            thisitem->Flags |= HIGHCOMP;
+                        }
+                        ((struct ImageMenuItem *)thisitem)->imi_OrigLeft =
+                                IMAGE(itemfill)->LeftEdge;
+		    }
+		    else
+		    {
+			/* A regular text item: */
+			memory += sizeof(struct IntuiText);
+			MP(("CM:  IntuiText at $%lx\n", itemfill.itext));
+			ITEXT(itemfill)->FrontPen = frontpen;
+			ITEXT(itemfill)->DrawMode = JAM1;
+			ITEXT(itemfill)->TopEdge = 1;
+			ITEXT(itemfill)->IText = nm->nm_Label;
+			thisitem->Flags |= ITEMTEXT | HIGHCOMP;
+			if ( commandstring )
+			{
+			    /* Connect up a second IntuiText, and start it
+			     * a copy of the first.
+			     */
+			    *ITEXT(memory) = *ITEXT(itemfill);
+			    ITEXT(itemfill)->NextText = ITEXT(memory);
+			    ITEXT(memory)->IText = nm->nm_CommKey;
+			    memory += sizeof(struct IntuiText);
+			}
+		    }
+		}
+	    }
+	}
+	nm++;
+    }
+    return( error );
+}
+
+/*------------------------------------------------------------------------*/
+
+/****** gadtools.library/FreeMenus *******************************************
+*
+*   NAME
+*	FreeMenus -- frees memory allocated by CreateMenusA(). (V36)
+*
+*   SYNOPSIS
+*	FreeMenus(menu)
+*	          A0
+*
+*	VOID FreeMenus(struct Menu *);
+*
+*   FUNCTION
+*	Frees the menus allocated by CreateMenusA().  It is safe to
+*	call this function with a NULL parameter.
+*
+*   INPUTS
+*	menu - pointer to menu structure (or first MenuItem) obtained
+*	       from CreateMenusA().
+*
+*   SEE ALSO
+*	CreateMenusA()
+*
+******************************************************************************
+*
+* Created:  21-Nov-89, Peter Cherna
+* Modified: 26-Nov-89, Peter Cherna
+*
+*/
+
+void __asm
+LIB_FreeMenus( register __a0 struct Menu *menu )
+{
+    FreeVec(menu);
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/****** gadtools.library/LayoutMenusA ****************************************
+*
+*   NAME
+*	LayoutMenusA -- position all the menus and menu items. (V36)
+*	LayoutMenus -- varargs stub for LayoutMenusA(). (V36)
+*
+*   SYNOPSIS
+*	success = LayoutMenusA(menu, vi, tagList)
+*	D0                     A0    A1  A2
+*
+*	BOOL LayoutMenusA(struct Menu *, APTR, struct TagItem *);
+*
+*	success = LayoutMenus(menu, vi, firsttag, ...)
+*
+*	BOOL LayoutMenus(struct Menu *, APTR, Tag, ...);
+*
+*   FUNCTION
+*	Lays out all the menus, menu items and sub-items in the supplied
+*	menu according to the supplied visual information and tag parameters.
+*	This routine attempts to columnize and/or shift the MenuItems in
+*	the event that a menu would be too tall or too wide.
+*
+*   INPUTS
+*	menu - pointer to menu obtained from CreateMenusA().
+*	vi - pointer returned by GetVisualInfoA().
+*	tagList - pointer to an array of tags providing optional extra
+*		  parameters, or NULL.
+*
+*   TAGS
+*	GTMN_TextAttr (struct TextAttr *) - Text Attribute to use for
+*	    menu-items and sub-items.  If not supplied, the screen's
+*	    font will be used.  This font must be openable via OpenFont()
+*	    when this function is called. (V36)
+*	GTMN_NewLookMenus (BOOL) - If you ask for WA_NewLookMenus for your
+*	    window, you should ask for this tag as well.  This informs GadTools
+*	    to use the appropriate checkmark, Amiga-key, and colors. (V39)
+*	GTMN_Checkmark (struct Image *) - If you are using a custom image for a
+*	    checkmark (WA_Checkmark), also pass it to GadTools, so it can lay
+*	    the menus out accordingly. (V39)
+*	GTMN_AmigaKey (struct Image *) - If you are using a custom image for
+*	    the Amiga-key in menus (WA_AmigaKey), also pass it to GadTools, so
+*	    it can lay the menus out accordingly. (V39)
+*	GTMN_FrontPen (ULONG) - This tag has existed for CreateMenus(), but now
+*	    LayoutMenusA() has it too.  If a legitimate pen number is supplied,
+*	    it is used for coloring the menu items (in preference to
+*	    anything passed to CreateMenus()).  If GTMN_NewLookMenus
+*	    has been specified, this tag defaults to using the
+*	    screen's BARDETAILPEN, else it defaults to "do nothing".
+*	    For visual consistency, we recommend you omit this tag in all
+*	    functions, and let the defaults be used. (V39)
+*
+*   RESULT
+*	success - TRUE if successful, FALSE otherwise (signifies that
+*	          the TextAttr wasn't openable).
+*
+*   NOTES
+*	When using this function, there is no need to also call
+*	LayoutMenuItemsA().
+*
+*   BUGS
+*	If a menu ends up being wider than the whole screen, it will
+*	run off the right-hand side.
+*
+*   SEE ALSO
+*	CreateMenusA(), GetVisualInfoA()
+*
+******************************************************************************
+*
+*   NOTES
+*	The vi parameter is internally declared as a struct VisualInfo *
+*
+* Created:  21-Nov-89, Peter Cherna (from David Junod's menus.c)
+* Modified: 16-May-90, Peter Cherna
+*
+*/
+
+/* This function is declared here as long, but publicly it is known
+ * as a BOOL.  This way we guarantee that the high-word of d0 is clear.
+ */
+
+LONG __asm
+LIB_LayoutMenusA( register __a0 struct Menu *firstmenu,
+		  register __a1 struct VisualInfo *vi,
+		  register __a2 struct TagItem *taglist )
+{
+    struct RastPort textrp;		/* Temporary RastPort */
+    struct Menu *menu;			/* Menu to adjust */
+    struct TextFont *font;		/* Font to use */
+    UWORD start;			/* Horiz start pixel */
+    LONG retval = FALSE;
+    struct TextAttr *tattr = (struct TextAttr *) getGTTagData(GTMN_TextAttr,
+	(ULONG) vi->vi_Screen->Font, taglist);
+    ULONG imagewidths = MenuImageWidths(vi, taglist);
+    LONG frontpen = GetFrontPen(vi, taglist);
+
+    /* open the font */
+    InitRastPort(&textrp);
+    DP(("LM:  About to OpenFont\n"));
+    if((font = OpenFont(tattr)))
+    {
+	DP(("LM:  OpenFont succeeded\n"));
+
+	/* Set the starting edge of the menu titles */
+	start = 2;
+
+	/* Step thru the menu structure and adjust it */
+	menu = firstmenu;
+	while (menu)
+	{
+	    /* Use the screen font for the menu titles, and the user's
+	     * supplied font for the MenuItems:
+	     */
+	    SetFont(&textrp, vi->vi_ScreenFont);
+	    menu->LeftEdge = start;
+	    /* Intuition starts the text at BarHBorder-BarVBorder
+	     * into the highlighting (believe it or not)!  So we
+	     * make the extra width twice that:
+	     */
+	    menu->Width = TextLength(&textrp, menu->MenuName,
+		    (UWORD)strlen(menu->MenuName)) +
+		    2 * (vi->vi_Screen->BarHBorder - vi->vi_Screen->BarVBorder);
+	    SetFont(&textrp, font);
+	    /* The real left value seems to be five pixels over from the
+	     * Menu->LeftEdge value, and the real top value is one
+	     * greater than the BarHeight
+	     */
+	    DoMenuItemLayout(&textrp, menu->FirstItem, tattr,
+		(WORD)(menu->LeftEdge+5), menu->Width,
+		imagewidths, frontpen, vi);
+	    start += (menu->Width + vi->vi_ScreenFont->tf_XSize);
+	    menu = menu->NextMenu;
+	}
+	/* Close the font */
+	closeFont(font);
+	retval = TRUE;
+    }
+#ifdef DEBUGGING
+    else
+    {
+	DP(("LM:  OpenFont of tattr $%lx failed\n", tattr));
+	DP(("LM:  ta_Name: '%s'\n", tattr->ta_Name));
+	DP(("LM:  ta_YSize: %ld\n", tattr->ta_YSize));
+	DP(("LM:  ta_Style: $%lx\n", tattr->ta_Style));
+	DP(("LM:  ta_Flags: $%lx\n\n", tattr->ta_Flags));
+
+	DP(("LM:  VisualInfo at $%lx\n", vi));
+	DP(("LM:  vi_Screen: $%lx\n", vi->vi_Screen));
+	DP(("LM:  vi->vi_Screen->Font: $%lx\n", vi->vi_Screen->Font));
+	DP(("LM:  vi->vi_Screen->Font->ta_Name: '%s'\n", vi->vi_Screen->Font->ta_Name));
+	DP(("LM:  vi->vi_Screen->Font->ta_YSize: %ld\n", (LONG)vi->vi_Screen->Font->ta_YSize));
+	DP(("LM:  vi->vi_Screen->Font->ta_Style: $%lx\n", (LONG)vi->vi_Screen->Font->ta_Style));
+	DP(("LM:  vi->vi_Screen->Font->ta_Flags: $%lx\n", (LONG)vi->vi_Screen->Font->ta_Flags));
+    }
+#endif
+    DP(("LM:  Exit\n"));
+    return(retval);
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/****** gadtools.library/LayoutMenuItemsA ************************************
+*
+*   NAME
+*	LayoutMenuItemsA -- position all the menu items. (V36)
+*	LayoutMenuItems -- varargs stub for LayoutMenuItemsA(). (V36)
+*
+*   SYNOPSIS
+*	success = LayoutMenuItemsA(menuitem, vi, tagList)
+*	D0                         A0        A1  A2
+*
+*	BOOL LayoutMenuItemsA(struct MenuItem *, APTR, struct TagItem *);
+*
+*	success = LayoutMenuItems(menuitem, vi, firsttag, ...)
+*
+*	BOOL LayoutMenuItemsA(struct MenuItem *, APTR, Tag, ...);
+*
+*   FUNCTION
+*	Lays out all the menu items and sub-items according to
+*	the supplied visual information and tag parameters.  You would use this
+*	if you used CreateMenusA() to make a single menu-pane (with sub-items,
+*	if any), instead of a whole menu strip.
+*	This routine attempts to columnize and/or shift the MenuItems in
+*	the event that a menu would be too tall or too wide.
+*
+*   INPUTS
+*	menuitem - pointer to first MenuItem in a linked list of
+*	           items.
+*	vi - pointer returned by GetVisualInfoA().
+*	tagList - pointer to an array of tags providing optional extra
+*		  parameters, or NULL.
+*
+*   TAGS
+*	GTMN_Menu (struct Menu *) - Pointer to the Menu structure whose
+*	    FirstItem is the MenuItem supplied above.  If the menu items are
+*	    such that they need to be columnized or shifted, the Menu
+*	    structure is needed to perform the complete calculation.
+*	    It is suggested you always provide this information. (V36)
+*
+*	For the following tags, please see the description under
+*	LayoutMenusA().  Their behavior is identical when used in
+*	LayoutMenuItemsA().
+*
+*	    GTMN_TextAttr
+*	    GTMN_NewLookMenus
+*	    GTMN_Checkmark
+*	    GTMN_AmigaKey
+*	    GTMN_FrontPen
+*
+*   RESULT
+*	success - TRUE if successful, FALSE otherwise (signifies that
+*	          the TextAttr wasn't openable).
+*
+*   BUGS
+*	If a menu ends up being wider than the whole screen, it will
+*	run off the right-hand side.
+*
+*   SEE ALSO
+*	CreateMenusA(), GetVisualInfoA()
+*
+******************************************************************************
+*
+*   NOTES
+*	The vi parameter is internally declared as a struct VisualInfo *
+*
+* Created:  22-Nov-89, Peter Cherna
+* Modified: 22-Mar-90, Peter Cherna
+*
+*/
+
+/* This function is declared here as long, but publicly it is known
+ * as a BOOL.  This way we guarantee that the high-word of d0 is clear.
+ */
+
+LONG __asm
+LIB_LayoutMenuItemsA( register __a0 struct MenuItem *firstitem,
+		      register __a1 struct VisualInfo *vi,
+		      register __a2 struct TagItem *taglist )
+{
+    struct RastPort textrp;		/* Temporary RastPort */
+    struct TextFont *font;		/* Font to use */
+    LONG retval = FALSE;
+    WORD realleft;
+    WORD menuwidth;
+    struct Menu *menu;
+    struct TextAttr *tattr = (struct TextAttr *)getGTTagData(GTMN_TextAttr,
+	(ULONG)vi->vi_Screen->Font, taglist);
+    ULONG imagewidths = MenuImageWidths(vi, taglist);
+    LONG frontpen = GetFrontPen(vi, taglist);
+
+    DP(("LMIA:  firstitem: $%lx, vi: $%lx\n", firstitem, vi));
+    InitRastPort(&textrp);
+    /* open the font */
+    if((font = OpenFont(tattr)))
+    {
+	/* Install the font: */
+	SetFont(&textrp, font);
+	DP(("LMIA:  vi->vi_Screen: $%lx\n", vi->vi_Screen));
+
+	/* Let realleft default to 5 plus the 2 that we normally have */
+	realleft = 7;
+	/* Let menuwidth sets a minimum, so if we don't know the menu,
+	 * it can be zero
+	 */
+	menuwidth = 0;
+
+	if (menu = (struct Menu *)getGTTagData(GTMN_Menu, NULL, taglist))
+	{
+	    DP(("LMIA:  menu: $%lx, menu->FirstItem: $%lx\n",
+		menu, menu->FirstItem));
+	    realleft = menu->LeftEdge+5;
+	    menuwidth = menu->Width;
+	}
+	/* Step thru the menu structure and adjust it */
+	DoMenuItemLayout(&textrp, firstitem, tattr,
+		realleft, menuwidth, imagewidths, frontpen, vi);
+	/* Close the font */
+	closeFont(font);
+	retval = TRUE;
+    }
+    return(retval);
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/*/ DoMenuItemLayout()
+ *
+ * Function to adjust the size/placement of all the MenuItems in a
+ * menu plane (menu or sub-menu).
+ *
+ * Created:  21-Nov-89, Peter Cherna (from David Junod's menus.c)
+ * Modified: 22-Mar-90, Peter Cherna
+ *
+ */
+
+static void DoMenuItemLayout( struct RastPort *txtrp, struct MenuItem *fi,
+    struct TextAttr *tattr, WORD realleft, WORD menuwidth, ULONG imagewidths,
+    LONG frontpen, struct VisualInfo *vi )
+{
+    UWORD itemheight;
+
+    if (fi)
+    {
+        /* To prevent crowding of the Amiga key when using COMMSEQ,
+         * don't allow the items to be less than 8 pixels high.
+         */
+        itemheight = max(txtrp->Font->tf_YSize, 8) + 1;
+
+        /* Set all the heights and fonts for the menu items */
+        SizeItems(fi, itemheight, tattr, frontpen);
+
+        /* Do the actual placement */
+        PlaceItems(txtrp, fi, tattr, 0, 0, realleft, vi->vi_Screen->BarHeight+1,
+            menuwidth, imagewidths, vi);
+    }
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/*/ SizeItems()
+ *
+ * Sets the fields all items and sub items in this pane that are
+ * independent of the actual placement, namely font and item height.
+ *
+ * Created:  20-Mar-90, Peter Cherna
+ * Modified: 30-Apr-90, Peter Cherna
+ *
+ */
+
+static void SizeItems( struct MenuItem *item, UWORD itemheight,
+    struct TextAttr *tattr, LONG frontpen )
+{
+    struct IntuiText *itext;
+
+    /* Go through the menuitems, filling in item height, and text
+     * or graphics
+     */
+
+    while (item)
+    {
+	if (item->Flags & ITEMTEXT)
+	{
+	    /* We have a text item.  Set its height and font accordingly */
+	    item->Height = itemheight;
+	    itext = ITEXT(item->ItemFill);
+	    /* Set font in IntuiText */
+	    itext->ITextFont = tattr;
+	    if (frontpen != -1)
+	    {
+		itext->FrontPen = frontpen;
+	    }
+	    /* If there's a chained text, then it's the '>>' sub-menu
+	     * indicator, or a command-string.  Set its font too:
+	     */
+	    if (itext = itext->NextText)
+	    {
+		itext->ITextFont = tattr;
+		if (frontpen != -1)
+		{
+		    itext->FrontPen = frontpen;
+		}
+	    }
+	}
+	else if ((item->Flags & HIGHFLAGS) == HIGHNONE)
+	{
+	    /* We have a separator bar.  Set its height and width
+	     * accordingly:
+	     */
+	    item->Height = 6;
+	    if (frontpen != -1)
+	    {
+		IMAGE(item->ItemFill)->PlaneOnOff = frontpen;
+	    }
+	}
+	else
+	{
+	    /* A custom image. */
+	    item->Height = IMAGE(item->ItemFill)->Height + 1;
+	}
+
+	/* Do for submenus too */
+	SizeItems(item->SubItem, itemheight, tattr, frontpen);
+	item = item->NextItem;
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+/*/ PlaceItems()
+ *
+ * Function to position all the MenuItems in a  menu plane (menu or sub-menu).
+ *
+ * Created:  21-Nov-89, Peter Cherna (from David Junod's menus.c)
+ * Modified:  8-May-90, Peter Cherna
+ *
+ */
+
+static void PlaceItems( struct RastPort *txtrp, struct MenuItem *fi,
+    struct TextAttr *tattr, WORD leftoffset, WORD topoffset,
+    WORD realleft, WORD realtop, WORD minwidth, ULONG imagewidths,
+    struct VisualInfo *vi )
+{
+    struct IntuiText *itext;
+    struct MenuItem *item = fi;
+    UWORD itemtop;
+    WORD sub_leftoffset;		/* offset for submenus */
+    struct ColumnInfo column;
+    WORD extra, panelwidth, panelheight;
+    WORD maxheight;
+    WORD extrawidth;
+    WORD numcolumns = 0;
+
+    if (fi)
+    {
+        /* !!! I think the best strategy here would be to note down the
+         * desired left edge of things, but then set the left edge of the
+         * menu to the extreme left, and proceed with the layout.  Then,
+         * looking at widths, we try to move the menu over as far right
+         * as we can, but not exceeding the desired left edge nor exceeding
+         * the right of the screen, if possible !!!
+         */
+        /* The maximum allowable height for this column is the screen height
+         * less two (for the two pixel bottom trim Intuition supplies for
+         * menus) less the real top coordinate of this menu:
+         */
+        maxheight = vi->vi_Screen->Height - 2 - (topoffset + realtop);
+        /* Figure out the total width of this group of menu items by
+         * summing the width for each column
+         */
+        panelwidth = -MULTICOLUMN_GAP;
+        panelheight = 0;
+        column.nextitem = item;
+        while (column.nextitem)
+        {
+            numcolumns++;
+            AboutColumn(&column, txtrp, column.nextitem,
+                maxheight, imagewidths, vi);
+            panelwidth += column.width + MULTICOLUMN_GAP;
+            panelheight = max(panelheight, column.height);
+            DP(("PI:  panelwidth is %ld\n", panelwidth));
+        }
+
+        /* To ensure that narrow submenus are stretched to cover at least
+         * the whole menu panel:
+         */
+        extrawidth = (max(minwidth - panelwidth, 0) / numcolumns) + 1;
+        panelwidth += extrawidth * numcolumns;
+
+        if (topoffset)
+        {
+            /* Only submenus have topoffset != 0.
+             * If the submenu would fit without difficulty, we would like to
+             * have a topoffset of -1, but we're willing to shift it up to fit
+             * more subitems to avoid columnization.
+             * Hence we calculate the offset needed to have the submenu panel
+             * just hit the very bottom, but never let it exceed -1:
+             */
+            topoffset = min(-1, vi->vi_Screen->Height - 2 - realtop - panelheight);
+        }
+
+        /* There are four pixels on the right edge of the menu, past
+         * the select box:
+         */
+        extra = (realleft + panelwidth - vi->vi_Screen->Width + 4);
+        DP(("PI:  realleft %ld, extra: %ld\n", (LONG)realleft, (LONG)extra));
+        if (extra > 0)
+        {
+            DP(("PI:  extra of %ld, leftoffset reduced from %ld", extra, leftoffset));
+            /* Too wide!  Do the best we can by moving the left over.  We
+             * should never reduce realleft to less than four, which is the
+             * amount of left-side menu trim Intuition supplies.
+             * If the menu is wider than the screen, then we say too
+             * bad and you extend off the right side... (may fix later
+             * by causing some menu items to be dropped)
+             */
+            leftoffset -= min(extra, realleft-4);
+            DP((" to %ld\n", leftoffset));
+        }
+
+        /* By setting column.count to zero, we'll call AboutColumn()
+         * as soon as we get into in the loop
+         */
+        column.count = 0;
+        column.width = 0;
+        leftoffset -= MULTICOLUMN_GAP;
+        while (item)
+        {
+            /* Would this item go off the bottom of the screen? */
+            if (column.count-- == 0)
+            {
+                itemtop = topoffset;
+                leftoffset += column.width + MULTICOLUMN_GAP;
+                AboutColumn(&column, txtrp, item, maxheight, imagewidths, vi);
+                column.width += extrawidth;
+                /* Restart loop in the new column: */
+                continue;
+            }
+
+            item->TopEdge = itemtop;
+            item->LeftEdge = leftoffset;
+            item->Width = column.width;
+            /* Do the part that depends on the strip-width */
+            if (item->Flags & ITEMTEXT)
+            {
+                itext = ITEXT(item->ItemFill);
+                DP(("PI:  Menu item '%s', LeftEdge %ld\n", itext->IText,
+                    item->LeftEdge));
+                /* If there's a chained text, then it's the '>>' sub-menu
+                 * indicator or a command string.
+                 * Position that off to the right edge:
+                 */
+                if (itext = itext->NextText)
+                {
+                    itext->LeftEdge = column.width - 2 - IntuiTextLength( itext );
+                }
+            }
+            else if ((item->Flags & HIGHFLAGS) == HIGHNONE)
+            {
+                /* Only separator bars have HIGHNONE */
+                DP(("PI:  Menu item Separator Bar\n"));
+                /* We have a separator bar.  Set its width accordingly: */
+                /* Set width of separator bar  */
+                IMAGE(item->ItemFill)->Width = column.width-4;
+            }
+            /* else (we have a custom image), but nothing needs to be done here */
+
+            /* Submenus begin 3/4 of the way over: */
+            minwidth = column.width >> 2;
+            sub_leftoffset = column.width - minwidth;
+            DP(("PI:  sub_leftoffset: %ld\n", (LONG)sub_leftoffset));
+            /* Layout the submenus (if any) */
+            PlaceItems(txtrp, item->SubItem, tattr,
+                sub_leftoffset, (WORD)(-1-itemtop),
+                (WORD)(realleft+leftoffset+sub_leftoffset), (WORD)(itemtop + realtop),
+                minwidth, imagewidths, vi);
+            itemtop += item->Height;
+            item = item->NextItem;
+        }
+    }
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/*/ AboutColumn()
+ *
+ * Function to determine the width of the select box for a single
+ * column of a menu pane based on the longest menuitem.  Also determines
+ * The number of items that will fit in this column.
+ * This routine adds a little trim, and takes into account any item with
+ * key equivalents.
+ *
+ * Created:  21-Nov-89, Peter Cherna (from David Junod's menus.c)
+ * Modified: 30-Apr-90, Peter Cherna
+ *
+ */
+
+static void AboutColumn( struct ColumnInfo *col, struct RastPort *txtrp,
+    struct MenuItem *fi, UWORD maxheight, ULONG imagewidths,
+    struct VisualInfo *vi )
+{
+    UWORD maxlen = 0;
+    struct MenuItem *item = fi;
+    struct IntuiText *itext;
+    struct Image *im;
+    ULONG righttrim;
+    UWORD count;
+    WORD checkwidth = imagewidths & 0x0000FFFF;
+    WORD left;
+
+    /* We have a default extra width (on the right) of 2 */
+    righttrim = 2;
+
+    /* Count up how many items fit in this column */
+    col->count = 0;
+    col->height = 0;
+    col->nextitem = NULL;
+    while (item)
+    {
+	col->height += item->Height;
+	MP(("AC:  Item of height %ld would make col->height %ld\n", item->Height,
+	    col->height));
+	/* Two pixels for the bottom trim of the menu that Intuition
+	 * supplies:
+	 */
+	if (col->height > maxheight)
+	{
+	    MP(("AC:  Cannot fit\n"));
+	    /* This one would not fit, so stop */
+	    col->nextitem = item;
+	    col->height -= item->Height;
+	    item = NULL;
+	}
+	else
+	{
+	    /* It fits, so count it and proceed to the next */
+	    col->count++;
+	    item = item->NextItem;
+	}
+    }
+
+    /* Figure out how much room we need along the right-hand side of
+     * the menu.  We need enough room for the widest of the Amiga-key
+     * equivalents, command strings, or the ">>" submenu indicator.
+     */
+    item = fi;
+    count = col->count;
+    while (count--)
+    {
+	ULONG thisrighttrim = 0;
+
+	/* If this item has an Amiga-key equivalent, account for that. */
+	if (item->Flags & COMMSEQ)
+	{
+	    /* righttrim would be width of the chosen key, plus the
+	     * correct amount for the command-key logo.  We also
+	     * add tf_XSize as a gutter width.
+	     * (commwidth is imagewidths >> 16).
+	     */
+	    thisrighttrim = TextLength(txtrp, &item->Command, 1) +
+		(imagewidths >> 16) + txtrp->Font->tf_XSize;
+	}
+	/* If this item has a submenu or has an arbitrary command
+	 * string, then we can detect that by discovering that
+	 * the IntuiText has a NextText pointer.  In that case,
+	 * the right-side width needs to account for that second
+	 * text, which will either be the ">>" or else the
+	 * command string.
+	 */
+	else if ( ( item->Flags & ITEMTEXT ) &&
+	    ( itext = ITEXT(item->ItemFill)->NextText ) )
+	{
+	    /* righttrim would be width of the command string.
+	     * We also add tf_XSize as a gutter width.
+	     */
+	    thisrighttrim = IntuiTextLength( itext ) + txtrp->Font->tf_XSize;
+	}
+	righttrim = max( righttrim, thisrighttrim );
+
+	item = item->NextItem;
+    }
+
+    /* Find the longest item, based on TextLength() of the IntuiText
+     * and its LeftEdge:
+     */
+    item = fi;
+    count = col->count;
+    while (count--)
+    {
+	if (item->Flags & ITEMTEXT)
+	{
+	    itext = ITEXT(item->ItemFill);
+	    itext->LeftEdge = 2;
+	    if (item->Flags & CHECKIT)
+		itext->LeftEdge += checkwidth;
+
+	    maxlen = max(maxlen, itext->LeftEdge + IntuiTextLength( itext ) );
+	}
+	else if ((item->Flags & HIGHFLAGS) != HIGHNONE)
+	{
+	    /* Custom menu imagery is not ITEMTEXT but is HIGHCOMP. */
+	    im = IMAGE(item->ItemFill);
+	    left = ((struct ImageMenuItem *)item)->imi_OrigLeft +
+                    ((item->Flags & CHECKIT) ? (2 + checkwidth) : 2);
+
+	    if (im->Depth == CUSTOMIMAGEDEPTH)
+	    {
+	        SetAttrs(im,IA_Left,left,
+	                    TAG_DONE);
+	    }
+	    else
+	    {
+	        im->LeftEdge = left;
+            }
+	    maxlen = max(maxlen, im->LeftEdge + im->Width);
+	}
+	item = item->NextItem;
+    }
+    col->width = maxlen + righttrim;
+    DP(("AC:  column width: %ld, column count: %ld\n", col->width, col->count));
+}
+
+
+/*------------------------------------------------------------------------*/
+
+/*/ MenuImageWidths
+ *
+ * Returns the width of the command key and the checkmark for this
+ * window.  The two are packed into a single ULONG, with the
+ * commandkey-width in the MSW and the checkmark-width in the LSW.
+ */
+
+static ULONG MenuImageWidths( struct VisualInfo *vi, struct TagItem *taglist )
+{
+    ULONG commwidth, checkwidth;
+    struct Image *im;
+
+    /* For old menus, default to the old images */
+    checkwidth = LOWCHECKWIDTH;
+    commwidth = LOWCOMMWIDTH;
+
+    /* This flag is marked Intuition-private, but hey, that's how
+     * Intuition does it!
+     */
+    if (vi->vi_Screen->Flags & SCREENHIRES )
+    {
+	checkwidth = CHECKWIDTH;
+	commwidth = COMMWIDTH;
+    }
+
+    /* If GTMN_NewLookMenus is specified, default to the images
+     * in the screen.
+     */
+    if ( getGTTagData(GTMN_NewLookMenus, FALSE, taglist ) )
+    {
+	checkwidth = vi->vi_DrawInfo->dri_CheckMark->Width;
+	commwidth = vi->vi_DrawInfo->dri_AmigaKey->Width;
+    }
+
+    /* Override with specifics */
+    if ( im = (struct Image *)getGTTagData(GTMN_Checkmark, NULL, taglist) )
+    {
+	checkwidth = im->Width;
+    }
+
+    if ( im = (struct Image *)getGTTagData(GTMN_AmigaKey, NULL, taglist) )
+    {
+	commwidth = im->Width;
+    }
+
+    return( ( commwidth << 16 ) + checkwidth );
+}
+
+/*------------------------------------------------------------------------*/
+
+/*/ GetFrontPen()
+ *
+ * Returns the correct FrontPen based on whether the caller is
+ * requesting GTMN_NewLookMenus or supplying an explicit GTMN_FrontPen.
+ * Defaults to dri_Pens[ BARDETAILPEN ] if GTMN_NewLookMenus is specified,
+ * defaults to "do nothing" ((LONG) -1) if new-look is not specified.
+ */
+
+static LONG GetFrontPen( struct VisualInfo *vi, struct TagItem *taglist )
+{
+    /* GTMN_FrontPen defaults to "no effect", for compatibility */
+    LONG frontpen = -1;
+
+    if ( getGTTagData(GTMN_NewLookMenus, FALSE, taglist) )
+    {
+	/* If you specify GTMN_NewLookMenus, then GTMN_FrontPen
+	 * defaults to the BARDETAILPEN, which is the "right thing"
+	 */
+	frontpen = vi->vi_DrawInfo->dri_Pens[BARDETAILPEN];
+    }
+
+    return ( (LONG)getGTTagData(GTMN_FrontPen, frontpen, taglist) );
+}
+
+/*------------------------------------------------------------------------*/
+@
+
+
+39.4
+log
+@Optimized code for space
+@
+text
+@d7 1
+a7 1
+*   $Id: menu.c,v 39.3 92/04/07 14:01:49 vertex Exp Locker: vertex $
+d136 4
+a139 4
+*	At present, if you put images into menus using IM_ITEM
+*	or IM_SUB for a NewMenu->Type, the image you supply must
+*	be an ordinary struct Image.  You may not use a 'custom
+*	image' (eg. one obtained from a boopsi image-class).
+d242 4
+d445 1
+a445 1
+			 * thisitem's COMMSEQ flag.  Starting with V39, we allow
+d487 19
+a505 7
+			/* A custom image: */
+			memory += sizeof(struct Image) + sizeof(WORD);
+			*IMAGE(itemfill) = *IMAGE(nm->nm_Label);
+			IMAGE(itemfill)->TopEdge += 1;
+			thisitem->Flags |= HIGHCOMP;
+			((struct ImageMenuItem *)thisitem)->imi_OrigLeft =
+			    IMAGE(itemfill)->LeftEdge;
+d1146 1
+d1240 12
+a1251 2
+	    im->LeftEdge = ((struct ImageMenuItem *)item)->imi_OrigLeft +
+		((item->Flags & CHECKIT) ? (2 + checkwidth) : 2);
+@
+
+
+39.3
+log
+@*** empty log message ***
+@
+text
+@d7 1
+a7 1
+*   $Id: menu.c,v 39.2 92/02/03 15:48:56 peter Exp Locker: vertex $
+d103 6
+a108 8
+*	GTMN_FullMenu (BOOL) - (GadTools V37 and higher only)
+*	    Requires that the NewMenu specification describes a complete
+*	    menu strip, not a fragment.  If a fragment is found,
+*	    CreateMenusA() will fail with a secondary error of
+*	    GTMENU_INVALID.  (defaults to FALSE).
+*	GTMN_SecondaryError (ULONG *) - (GadTools V37 and higher only)
+*	    Supply a pointer to a NULL-initialized ULONG to receive a
+*	    descriptive error code.  Possible values:
+d115 1
+d118 1
+a118 1
+*	menu - Pointer to the resulting initialized menu structure (or
+d166 1
+a166 2
+    size = TallyMenuMemory( newmenu, getGTTagData(GTMN_FullMenu, FALSE, taglist ) );
+    if (size)
+d592 13
+a604 18
+*	    when this function is called.
+*	GTMN_NewLookMenus (BOOL) - (GadTools V39 and higher only).  If
+*	    you ask for WA_NewLookMenus for your window, you should
+*	    ask for this tag as well.  This informs GadTools to use
+*	    the appropriate checkmark, Amiga-key, and colors.  Ignored
+*	    by V36/V37.
+*	GTMN_Checkmark (struct Image *) - (GadTools V39 and higher
+*	    only).  If you are using a custom image for a checkmark
+*	    (WA_Checkmark), also pass it to GadTools, so it can lay
+*	    the menus out accordingly.  Ignored by V36/V37.
+*	GTMN_AmigaKey (struct Image *) - (GadTools V39 and higher
+*	    only).  If you are using a custom image for the Amiga-key
+*	    in menus (WA_AmigaKey), also pass it to GadTools, so it
+*	    can lay the menus out accordingly.  Ignored by V36/V37.
+*	GTMN_FrontPen (ULONG) - (GadTools V39 and higher only).  This
+*	    tag has existed for CreateMenus(), but now LayoutMenusA()
+*	    has it too.  If a legitimate pen number is supplied, it is
+*	    used for coloring the menu items (in preference to
+d608 2
+a609 3
+*	    Ignored by V36/V37.  For visual consistency, we recommend
+*	    you omit this tag in all functions, and let the defaults
+*	    be used.
+d612 1
+a612 1
+*	success - TRUE if successful, false otherwise (signifies that
+d757 1
+a757 1
+*	    It is suggested you always provide this information.
+d770 2
+a771 2
+*	success - TRUE if successful, false otherwise (signifies that
+*	    the TextAttr wasn't openable).
+d862 14
+a875 14
+    if (!fi)
+	return;
+
+    /* To prevent crowding of the Amiga key when using COMMSEQ,
+     * don't allow the items to be less than 8 pixels high.
+     */
+    itemheight = max(txtrp->Font->tf_YSize, 8) + 1;
+
+    /* Set all the heights and fonts for the menu items */
+    SizeItems(fi, itemheight, tattr, frontpen);
+
+    /* Do the actual placement */
+    PlaceItems(txtrp, fi, tattr, 0, 0, realleft, vi->vi_Screen->BarHeight+1,
+	menuwidth, imagewidths, vi);
+a894 4
+    if (!item)
+    {
+	return;
+    }
+d974 1
+a974 75
+    if (!fi)
+	return;
+
+    /* !!! I think the best strategy here would be to note down the
+     * desired left edge of things, but then set the left edge of the
+     * menu to the extreme left, and proceed with the layout.  Then,
+     * looking at widths, we try to move the menu over as far right
+     * as we can, but not exceeding the desired left edge nor exceeding
+     * the right of the screen, if possible !!!
+     */
+    /* The maximum allowable height for this column is the screen height
+     * less two (for the two pixel bottom trim Intuition supplies for
+     * menus) less the real top coordinate of this menu:
+     */
+    maxheight = vi->vi_Screen->Height - 2 - (topoffset + realtop);
+    /* Figure out the total width of this group of menu items by
+     * summing the width for each column
+     */
+    panelwidth = -MULTICOLUMN_GAP;
+    panelheight = 0;
+    column.nextitem = item;
+    while (column.nextitem)
+    {
+	numcolumns++;
+	AboutColumn(&column, txtrp, column.nextitem,
+	    maxheight, imagewidths, vi);
+	panelwidth += column.width + MULTICOLUMN_GAP;
+	panelheight = max(panelheight, column.height);
+	DP(("PI:  panelwidth is %ld\n", panelwidth));
+    }
+
+    /* To ensure that narrow submenus are stretched to cover at least
+     * the whole menu panel:
+     */
+    extrawidth = (max(minwidth - panelwidth, 0) / numcolumns) + 1;
+    panelwidth += extrawidth * numcolumns;
+
+    if (topoffset)
+    {
+	/* Only submenus have topoffset != 0.
+	 * If the submenu would fit without difficulty, we would like to
+	 * have a topoffset of -1, but we're willing to shift it up to fit
+	 * more subitems to avoid columnization.
+	 * Hence we calculate the offset needed to have the submenu panel
+	 * just hit the very bottom, but never let it exceed -1:
+	 */
+	topoffset = min(-1, vi->vi_Screen->Height - 2 - realtop - panelheight);
+    }
+
+    /* There are four pixels on the right edge of the menu, past
+     * the select box:
+     */
+    extra = (realleft + panelwidth - vi->vi_Screen->Width + 4);
+    DP(("PI:  realleft %ld, extra: %ld\n", (LONG)realleft, (LONG)extra));
+    if (extra > 0)
+    {
+	DP(("PI:  extra of %ld, leftoffset reduced from %ld", extra, leftoffset));
+	/* Too wide!  Do the best we can by moving the left over.  We
+	 * should never reduce realleft to less than four, which is the
+	 * amount of left-side menu trim Intuition supplies.
+	 * If the menu is wider than the screen, then we say too
+	 * bad and you extend off the right side... (may fix later
+	 * by causing some menu items to be dropped)
+	 */
+	leftoffset -= min(extra, realleft-4);
+	DP((" to %ld\n", leftoffset));
+    }
+
+    /* By setting column.count to zero, we'll call AboutColumn()
+     * as soon as we get into in the loop
+     */
+    column.count = 0;
+    column.width = 0;
+    leftoffset -= MULTICOLUMN_GAP;
+    while (item)
+d976 125
+a1100 51
+	/* Would this item go off the bottom of the screen? */
+	if (column.count-- == 0)
+	{
+	    itemtop = topoffset;
+	    leftoffset += column.width + MULTICOLUMN_GAP;
+	    AboutColumn(&column, txtrp, item, maxheight, imagewidths, vi);
+	    column.width += extrawidth;
+	    /* Restart loop in the new column: */
+	    continue;
+	}
+
+	item->TopEdge = itemtop;
+	item->LeftEdge = leftoffset;
+	item->Width = column.width;
+	/* Do the part that depends on the strip-width */
+	if (item->Flags & ITEMTEXT)
+	{
+	    itext = ITEXT(item->ItemFill);
+	    DP(("PI:  Menu item '%s', LeftEdge %ld\n", itext->IText,
+		item->LeftEdge));
+	    /* If there's a chained text, then it's the '>>' sub-menu
+	     * indicator or a command string.
+	     * Position that off to the right edge:
+	     */
+	    if (itext = itext->NextText)
+	    {
+		itext->LeftEdge = column.width - 2 - IntuiTextLength( itext );
+	    }
+	}
+	else if ((item->Flags & HIGHFLAGS) == HIGHNONE)
+	{
+	    /* Only separator bars have HIGHNONE */
+	    DP(("PI:  Menu item Separator Bar\n"));
+	    /* We have a separator bar.  Set its width accordingly: */
+	    /* Set width of separator bar  */
+	    IMAGE(item->ItemFill)->Width = column.width-4;
+	}
+        /* else (we have a custom image), but nothing needs to be done here */
+
+	/* Submenus begin 3/4 of the way over: */
+	minwidth = column.width >> 2;
+	sub_leftoffset = column.width - minwidth;
+	DP(("PI:  sub_leftoffset: %ld\n", (LONG)sub_leftoffset));
+	/* Layout the submenus (if any) */
+	PlaceItems(txtrp, item->SubItem, tattr,
+	    sub_leftoffset, (WORD)(-1-itemtop),
+	    (WORD)(realleft+leftoffset+sub_leftoffset), (WORD)(itemtop + realtop),
+	    minwidth, imagewidths, vi);
+	itemtop += item->Height;
+	item = item->NextItem;
+    }
+d1251 5
+a1255 1
+    if ( vi->vi_Flags & VI_SCREENHIRES )
+@
+
+
+39.2
+log
+@Added support for string command keys, through the NM_COMMANDSTRING
+flag and the nm_CommKey field.  Also used IntuiTextLength() in place
+of TextLength(), to save space.  Added NM_IGNORE support.
+@
+text
+@d7 1
+a7 1
+*   $Id: menu.c,v 39.1 92/01/30 19:53:23 peter Exp Locker: peter $
+d22 1
+a22 1
+		 register __a1 struct TagItem *taglist);		
+d38 3
+a40 3
+ULONG TallyMenuMemory (struct NewMenu *nm, BOOL fullmenu );
+ULONG InitMenuMemory (struct NewMenu *nm, UBYTE *memory, UBYTE frontpen);
+void DoMenuItemLayout (struct RastPort *, struct MenuItem *, struct TextAttr *,
+d42 1
+a42 1
+void PlaceItems (struct RastPort *, struct MenuItem *, struct TextAttr *,
+d44 2
+a45 2
+void SizeItems (struct MenuItem *, UWORD, struct TextAttr *, LONG);
+void AboutColumn (struct ColumnInfo *, struct RastPort *, struct MenuItem *,
+d47 2
+a48 2
+ULONG MenuImageWidths(struct VisualInfo *vi, struct TagItem *ti);
+LONG GetFrontPen(struct VisualInfo *vi, struct TagItem *ti);
+d74 2
+a75 2
+*	CreateMenusA -- Allocate and fill out a menu structure. (V36)
+*	CreateMenus -- Varargs stub for CreateMenus(). (V36)
+d78 1
+a78 1
+*	menu = CreateMenusA(newmenu, taglist)
+d95 3
+a97 2
+*	newmenu - Pointer to an array of initialized struct NewMenus.
+*	taglist - Pointer to a TagItem list.
+d120 6
+a125 6
+*	    the resulting FirstItem), with all the links for menu items
+*	    and subitems in place.
+*	    The result will be NULL if CreateMenusA() could not allocate
+*	    memory for the menus, or if the NewMenu array had an
+*	    illegal arrangement (eg. NM_SUB following NM_TITLE).
+*	    (see also the GTMN_SecondaryError tag above).
+a126 2
+*   EXAMPLE
+*
+d191 1
+a191 1
+   
+d206 1
+a206 1
+ULONG TallyMenuMemory( struct NewMenu *nm, BOOL fullmenu )
+d245 1
+a245 1
+		else 
+d302 1
+a302 1
+ULONG InitMenuMemory( struct NewMenu *nm, UBYTE *memory, UBYTE frontpen )
+d407 1
+a407 1
+			    {				
+d527 1
+a527 1
+*	FreeMenus -- Frees memory allocated by CreateMenusA(). (V36)
+d540 2
+a541 11
+*	menu - Pointer to menu structure (or first MenuItem) obtained
+*	from CreateMenusA().
+*
+*   RESULT
+*	None.
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+d565 2
+a566 2
+*	LayoutMenusA -- Position all the menus and menu items. (V36)
+*	LayoutMenus -- Varargs stub for LayoutMenusA(). (V36)
+d569 1
+a569 1
+*	success = LayoutMenusA(menu, vi, taglist)
+d585 4
+a588 3
+*	menu - Pointer to menu obtained from CreateMenusA().
+*	vi - Pointer returned by GetVisualInfoA().
+*	taglist - Pointer to a TagItem list.
+d621 1
+a621 1
+*	    the TextAttr wasn't openable).
+a622 2
+*   EXAMPLE
+*
+d659 1
+a659 1
+	(ULONG) vi->vi_ScreenTAttr, taglist);
+d701 1
+a701 1
+	CloseFont(font);
+d715 5
+a719 5
+	DP(("LM:  vi->vi_ScreenTAttr: $%lx\n", vi->vi_ScreenTAttr));
+	DP(("LM:  vi->vi_ScreenTAttr->ta_Name: '%s'\n", vi->vi_ScreenTAttr->ta_Name));
+	DP(("LM:  vi->vi_ScreenTAttr->ta_YSize: %ld\n", (LONG)vi->vi_ScreenTAttr->ta_YSize));
+	DP(("LM:  vi->vi_ScreenTAttr->ta_Style: $%lx\n", (LONG)vi->vi_ScreenTAttr->ta_Style));
+	DP(("LM:  vi->vi_ScreenTAttr->ta_Flags: $%lx\n", (LONG)vi->vi_ScreenTAttr->ta_Flags));
+d732 2
+a733 2
+*	LayoutMenuItemsA -- Position all the menu items. (V36)
+*	LayoutMenuItems -- Varargs stub for LayoutMenuItemsA(). (V36)
+d736 1
+a736 1
+*	success = LayoutMenuItemsA(menuitem, vi, taglist)
+d754 5
+a758 4
+*	menuitem - Pointer to first MenuItem in a linked list of
+*	    items.
+*	vi - Pointer returned by GetVisualInfoA().
+*	taglist - Pointer to a TagItem list.
+a780 4
+*   EXAMPLE
+*
+*   NOTES
+*
+d814 1
+a814 1
+	(ULONG)vi->vi_ScreenTAttr, taglist);
+d845 1
+a845 1
+	CloseFont(font);
+d864 1
+a864 1
+void DoMenuItemLayout( struct RastPort *txtrp, struct MenuItem *fi,
+d899 1
+a899 1
+void SizeItems( struct MenuItem *item, UWORD itemheight,
+d971 1
+a971 1
+void PlaceItems( struct RastPort *txtrp, struct MenuItem *fi,
+d1131 1
+a1131 1
+void AboutColumn( struct ColumnInfo *col, struct RastPort *txtrp,
+d1255 1
+a1255 1
+ULONG MenuImageWidths( struct VisualInfo *vi, struct TagItem *taglist )
+d1302 1
+a1302 1
+LONG GetFrontPen( struct VisualInfo *vi, struct TagItem *taglist )
+@
+
+
+39.1
+log
+@Removed RCS log.  Re-did braces, comments, and function headers.
+Bumped to V39.
+@
+text
+@a0 1
+#define INDENTCHECKMARKONLY
+d7 1
+a7 1
+*   $Id: menu.c,v 38.3 92/01/28 08:29:13 peter Exp Locker: peter $
+d66 3
+d100 2
+a101 2
+*	    (Under V38 and higher, this tag also exists for LayoutMenusA()
+*	    and LayoutMenuItemsA().  (defaults to zero).
+d222 1
+a222 1
+	if (nm->nm_Type == NM_TITLE)
+d224 6
+a229 6
+	    /* Titles need a struct Menu and a pointer */
+	    size += sizeof(struct Menu) + sizeof(void *);
+	}
+	else
+	{
+	    if (nm->nm_Label == NM_BARLABEL)
+d231 49
+a279 35
+		/* Separator bars need a MenuItem, an Image, and a pointer */
+		size += sizeof(struct MenuItem) + sizeof(struct Image) +
+		    sizeof(void *);
+	    }
+	    else if (nm->nm_Type & MENU_IMAGE)
+	    {
+		/* Custom imagery needs a MenuItem, an Image structure,
+		 * and a pointer, as well as a WORD to stash the original
+		 * image->LeftEdge for use in re-layout:
+		 */
+		size += sizeof(struct MenuItem) + sizeof(struct Image) +
+		    sizeof(void *) + sizeof(WORD);
+	    }
+	    else 
+	    {
+		/* Text menuitems and subitems need a MenuItem, an IntuiText,
+		 * and a pointer:
+		 */
+		size += sizeof(struct MenuItem) + sizeof(struct IntuiText) +
+		    sizeof(void *);
+	    }
+
+	    if ((NM_TRUETYPE(nm->nm_Type) == NM_SUB) && (prevtype == NM_TITLE))
+	    {
+		/* Sub-items can only follow sub-items or items! */
+		return(0);
+	    }
+
+	    if ((NM_TRUETYPE(nm->nm_Type) == NM_SUB) && (prevtype == NM_ITEM))
+	    {
+		/* This is the first submenu.  We'll need a spare IntuiText
+		 * for the parent MenuItem's '>>' indicator, if the parent
+		 * was a text-menuitem:
+		 */
+		size += sizeof(struct IntuiText);
+d281 1
+a282 1
+	prevtype = nm->nm_Type;
+d313 2
+a314 1
+    ULONG error = NULL;
+d318 1
+a318 1
+	if (nm->nm_Type == NM_TITLE)
+d320 3
+a322 1
+	    if ( ++menucount < NOMENU )
+d324 4
+a327 37
+		MP(("CM:  Creating Menu '%s' at $%lx\n", nm->nm_Label, memory));
+		if (menu)
+		{
+		    /* Link it to previous menu, if any */
+		    MP(("CM:  Linking to previous Menu ($%lx)\n", menu));
+		    menu->NextMenu = (struct Menu *)memory;
+		}
+		menu = (struct Menu *)memory;
+		memory += sizeof(struct Menu) + sizeof(void *);
+		menu->MenuName = nm->nm_Label;
+		/* We invert the sense of Menu->Flags MENUENABLED field,
+		 * so that they're enabled by default:
+		 */
+		menu->Flags = nm->nm_Flags ^ NM_MENUDISABLED;
+		GTMENU_USERDATA(menu) = nm->nm_UserData;
+		item = NULL;
+		itemcount = -1;
+	    }
+	    else
+	    {
+		error = GTMENU_TRIMMED;
+	    }
+	}
+	else
+	{
+	    /* It's an item or subitem */
+	    thisitem = (struct MenuItem *)memory;
+	    memory += sizeof(struct MenuItem) + sizeof(void *);
+
+	    if (NM_TRUETYPE(nm->nm_Type) == NM_ITEM)
+	    {
+		if ( ++itemcount < NOITEM )
+		{
+		    /* This is a MenuItem: */
+		    MP(("CM:  Creating MenuItem '%s' at $%lx\n", nm->nm_Label,
+			thisitem));
+		    if (item)
+d329 3
+a331 3
+			/* Another item, so link it in to previous */
+			MP(("CM:  Linking into previous MenuItem ($%lx)\n", item));
+			item->NextItem = thisitem;
+d333 10
+a342 14
+		    else
+		    {
+			/* The first item, so link it in to the menu itself,
+			 * if there is one
+			 */
+			MP(("CM:  First MenuItem of Menu at $%lx\n", menu));
+			if (menu)
+			{
+			    menu->FirstItem = thisitem;
+			}
+		    }
+		    item = thisitem;
+		    sub = NULL;
+		    subcount = -1;
+a346 1
+		    subcount = NOSUB;
+d349 1
+a349 1
+	    else /* if (NM_TRUETYPE(nm->nm_Type) == NM_SUB) */
+d351 7
+a357 11
+		if ( ++subcount < NOSUB )
+		{
+		    MP(("CM:  Creating SubItem '%s' at $%lx\n", nm->nm_Label,
+			thisitem));
+		    if (sub)
+		    {
+			/* Another subitem, so link it into the previous */
+			MP(("CM:  Linking into previous SubItem ($%lx)\n", sub));
+			sub->NextItem = thisitem;
+		    }
+		    else
+d359 3
+a361 4
+			/* The first subitem, so link it in to the
+			 * menuitem itself, if there is one
+			 */
+			MP(("CM:  First SubItem of MenuItem at $%lx\n", item));
+d363 9
+a371 5
+			{				
+			    item->SubItem = thisitem;
+			    /* Also, arrange for the item to have a second
+			     * IntuiText, consisting of the '>>' symbol,
+			     * provided it is a text-item:
+d373 2
+a374 1
+			    if (item->Flags & ITEMTEXT)
+d376 1
+a376 7
+				itemfill = ((struct IntuiText *)item->ItemFill)->NextText =
+				    (struct IntuiText *)memory;
+				memory += sizeof(struct IntuiText);
+				((struct IntuiText *)itemfill)->FrontPen = frontpen;
+				((struct IntuiText *)itemfill)->DrawMode = JAM1;
+				((struct IntuiText *)itemfill)->TopEdge = 1;
+				((struct IntuiText *)itemfill)->IText = "»";
+d379 8
+a387 1
+		    sub = thisitem;
+d389 1
+a389 1
+		else
+d391 41
+a431 1
+		    error = GTMENU_TRIMMED;
+a432 1
+	    }
+d434 1
+a434 16
+	    if ( subcount < NOSUB )
+	    {
+		/* We invert the sense of the MenuItem->Flags ITEMENABLED
+		 * field, so that they're enabled by default:
+		 */
+		thisitem->Flags = (nm->nm_Flags & NM_FLAGMASK) ^ NM_ITEMDISABLED;
+		if (nm->nm_CommKey)
+		{
+		    thisitem->Flags |= COMMSEQ;
+		    thisitem->Command = *nm->nm_CommKey;
+		}
+		thisitem->MutualExclude = nm->nm_MutualExclude;
+		GTMENUITEM_USERDATA(thisitem) = nm->nm_UserData;
+		/* Whether image or text, the ItemFill follows: */
+		itemfill = thisitem->ItemFill = (APTR) memory;
+		if (nm->nm_Label == NM_BARLABEL)
+d436 2
+a437 4
+		    /* A separator bar: */
+		    memory += sizeof(struct Image);
+		    /* We want the Depth, ImageData, and PlanePick to be
+		     * zero, which is how the memory was initialized
+d439 76
+a514 17
+		    ((struct Image *)itemfill)->LeftEdge = 2;
+		    ((struct Image *)itemfill)->TopEdge = 2;
+		    ((struct Image *)itemfill)->Height = 2;
+		    ((struct Image *)itemfill)->PlaneOnOff = frontpen;
+		    /* Separator bars are disabled, and don't highlight: */
+		    thisitem->Flags |= HIGHNONE;
+		    thisitem->Flags &= ~ITEMENABLED;
+		}
+		else if (nm->nm_Type & MENU_IMAGE)
+		{
+		    /* A custom image: */
+		    memory += sizeof(struct Image) + sizeof(WORD);
+		    *((struct Image *)itemfill) = *(struct Image *)nm->nm_Label;
+		    ((struct Image *)itemfill)->TopEdge += 1;
+		    thisitem->Flags |= HIGHCOMP;
+		    ((struct ImageMenuItem *)thisitem)->imi_OrigLeft =
+			((struct Image *)itemfill)->LeftEdge;
+a515 11
+		else
+		{
+		    /* A regular text item: */
+		    memory += sizeof(struct IntuiText);
+		    MP(("CM:  IntuiText at $%lx\n", itemfill.itext));
+		    ((struct IntuiText *)itemfill)->FrontPen = frontpen;
+		    ((struct IntuiText *)itemfill)->DrawMode = JAM1;
+		    ((struct IntuiText *)itemfill)->TopEdge = 1;
+		    ((struct IntuiText *)itemfill)->IText = nm->nm_Label;
+		    thisitem->Flags |= ITEMTEXT | HIGHCOMP;
+		}
+d604 1
+a604 1
+*	GTMN_NewLookMenus (BOOL) - (GadTools V38 and higher only).  If
+d609 1
+a609 1
+*	GTMN_Checkmark (struct Image *) - (GadTools V38 and higher
+d613 1
+a613 1
+*	GTMN_AmigaKey (struct Image *) - (GadTools V38 and higher
+d617 1
+a617 1
+*	GTMN_FrontPen (ULONG) - (GadTools V38 and higher only).  This
+d932 1
+a932 1
+	    itext = (struct IntuiText *)item->ItemFill;
+d940 1
+a940 1
+	     * indicator.  Set its font too:
+d959 1
+a959 1
+		((struct Image *)item->ItemFill)->PlaneOnOff = frontpen;
+d965 1
+a965 1
+	    item->Height = ((struct Image *)item->ItemFill)->Height + 1;
+d1093 1
+a1093 1
+	    itext = (struct IntuiText *)item->ItemFill;
+d1097 2
+a1098 1
+	     * indicator.  Position that off to the right edge:
+d1102 1
+a1102 2
+		itext->LeftEdge = column.width - 2 - TextLength(txtrp,
+		    itext->IText, (UWORD)strlen(itext->IText));
+d1111 1
+a1111 1
+	    ((struct Image *)item->ItemFill)->Width = column.width-4;
+d1153 1
+a1153 5
+    UWORD righttrim;
+#ifdef INDENTCHECKMARKONLY
+#else
+    BOOL havechecked = FALSE;
+#endif
+d1188 3
+a1190 2
+    /* If any of the menus have Command Equivalents or sub-menus,
+     * make enough room:
+d1196 3
+d1201 3
+a1203 2
+	    /* righttrim would be width of the command key plus a nominal
+	     * space, plus the correct amount for the command-key logo:
+d1206 2
+a1207 3
+	    righttrim = max(righttrim, txtrp->Font->tf_XSize +
+		TextLength(txtrp, &item->Command, 1) +
+		(imagewidths >> 16));
+d1209 9
+a1217 1
+	else if (item->SubItem)
+d1219 4
+a1222 2
+	    /* righttrim would be width of the glyph plus a nominal space: */
+	    righttrim = max(righttrim, txtrp->Font->tf_XSize + TextLength(txtrp, "»", 1));
+d1224 1
+a1224 2
+	item = item->NextItem;
+    }
+a1225 14
+#ifdef INDENTCHECKMARKONLY
+#else
+    /* Find out if they're any checkmarks in this menu.  If so, we'll
+     * later shift the IntuiText LeftEdge to make room:
+     */
+    item = fi;
+    count = col->count;
+    while (count--)
+    {
+	if(item->Flags & CHECKIT)
+	{
+	    havechecked = TRUE;
+	    break;
+	}
+a1227 1
+#endif
+d1238 1
+a1238 1
+	    itext = (struct IntuiText *)item->ItemFill;
+a1239 1
+#ifdef INDENTCHECKMARKONLY
+a1241 4
+#else
+	    if (havechecked)
+		itext->LeftEdge += checkwidth;
+#endif
+d1243 1
+a1243 2
+	    maxlen = max(maxlen, itext->LeftEdge + TextLength(txtrp, itext->IText,
+		(UWORD)strlen(itext->IText)));
+d1248 1
+a1248 2
+	    im = (struct Image *)item->ItemFill;
+#ifdef INDENTCHECKMARKONLY
+a1250 4
+#else
+	    im->LeftEdge = ((struct ImageMenuItem *)item)->imi_OrigLeft +
+		((havechecked) ? (2 + checkwidth) : 2);
+#endif
+@
+
+
+38.3
+log
+@Removed __saveds.
+@
+text
+@d8 1
+a8 1
+*   $Id: menu.c,v 38.2 91/09/24 18:11:59 peter Exp Locker: peter $
+a9 96
+*   $Log:	menu.c,v $
+ * Revision 38.2  91/09/24  18:11:59  peter
+ * Updated autodocs for LayoutMenusA() and LayoutMenuItemsA() to include
+ * new tags.
+ * 
+ * Revision 38.1  91/07/11  12:44:30  peter
+ * PrePlaceItems() is now called SizeItem()s.
+ * Now listens for GTMN_Checkmark, GTMN_AmigaKey, and GTMN_NewLookMenus,
+ * and lays out accordingly.
+ * LayoutMenu{Item}sA() now recognizes GTMN_FrontPen.
+ * 
+*   Revision 36.19  91/05/02  18:59:58  peter
+*   Noted that you can't put custom images in menus, just boring old ones.
+*   
+*   Revision 36.18  91/04/08  13:27:24  peter
+*   Where appropriate uses getGTTagData(), getSTRINGTagData(),
+*   findGTTagItem(), and findGATagItem() macros/stubs to save space.
+*   
+*   Revision 36.17  91/03/28  13:30:55  peter
+*   The minimum width for the menuitem panel now includes the width of the
+*   menu title.
+*   
+*   Revision 36.16  91/02/12  19:35:04  peter
+*   Minor autodoc adjustment.
+*   
+*   Revision 36.15  90/11/19  12:56:24  peter
+*   Autodocs now refer to GadTools V37 when necessary.
+*   
+*   Revision 36.14  90/11/06  21:28:21  peter
+*   Put in support to trim menus that have too many menu-headers, items, or
+*   subitems.  Put in support to validate that a menu is a full menu structure.
+*   CreateMenus() now optionally returns a descriptive secondary error code.
+*   Tweaked submenu layout.
+*   Non-checkmarked menu items are not indented.
+*   There is now a small gap between columns in a multi-column menu.
+*   
+*   Revision 36.13  90/10/12  19:42:27  peter
+*   Now use InitRastPort() instead of an initializer of {0} to save space.
+*   Calls internal findTagItem() and getTagData() to save space.
+*   
+*   Revision 36.12  90/06/11  17:33:50  peter
+*   Added some debugging to OpenFont failure in LayoutMenus.
+*   
+*   Revision 36.11  90/05/30  13:51:26  peter
+*   Now use AllocVec/FreeVec instead of SmartAllocMem/SmartFreeMem.
+*   
+*   Revision 36.10  90/05/18  18:31:12  peter
+*   Put space immediately before '(' in prototypes to avoid confusing ctags.
+*   
+*   Revision 36.9  90/05/17  17:36:16  peter
+*   LayoutMenusA() and LayoutMenuItemsA() are now guaranteed to return
+*   zero in the high-word of D0.
+*   Coded but compiled out:  non-checkmarked items are no longer indented if
+*   they're in a menu panel with checkmarks.
+*   
+*   Revision 36.8  90/05/15  14:18:07  peter
+*   Reduced spacing between menu headers.
+*   
+*   Revision 36.7  90/05/08  15:43:18  peter
+*   No longer makes menus too wide if a panel has submenus but no keyboard
+*   equivalents.
+*   Submenus are now "stretched" to reach the right extreme of their parent menu.
+*   Submenus now overlap 25% (instead of 20%) of their parent menu.
+*   
+*   Revision 36.6  90/05/04  11:22:24  peter
+*   Stopped disallowing a menustrip to end with NM_TITLE.
+*   
+*   Revision 36.5  90/05/03  16:31:20  peter
+*   Fixed bug when using fonts with very tiny XSize (eg. Times, Helvetica)
+*   in which the text in the menu bar exceeded the highlighted area.
+*   CreateMenus() now fails if you end with a NM_TITLE (it must have
+*   items) or if you place a sub-item immediately after a title.
+*   Put in support for custom imagery in menus.
+*   Split CreateMenusA() for management and CXERR-prevention.
+*   
+*   Revision 36.4  90/04/12  16:18:23  peter
+*   Put register and varargs information into autodocs.
+*   
+*   Revision 36.3  90/04/02  16:10:01  peter
+*   Now correctly counts command-key space and submenu indicator space
+*   Warnings due to new clib/#?_protos.h eliminated.
+*   Now refers to builtin max.
+*   
+*   Revision 36.2  90/03/31  00:46:32  peter
+*   Menus now columnize themselves instead of running off the bottom
+*   of the screen.  Menu panels are moved left if it helps them fit
+*   on the screen.
+*   Fixed a bug which would have prevented relaying out existing
+*   menus with a new font.
+*   Submenus are now positioned closer to the menu item they spring from.
+*   The submenu panel is now pushed upwards if it would be too tall.
+*   
+*   Revision 36.1  90/03/16  14:00:40  peter
+*   RCS Clean up.
+*   
+*
+d18 1
+a18 1
+/*  Function Prototypes: */
+d20 1
+a20 1
+/*  Public: */
+d38 1
+a38 1
+/*  Private: */
+d53 1
+a53 2
+/*  This structure contains sizing information about a column of
+    a menu: */
+d55 6
+a60 6
+    {
+    UWORD width;	/*  width of select area of column */
+    UWORD height;	/*  height of select areas of column */
+    UWORD count;	/*  number of items */
+    struct MenuItem *nextitem;	/*  first item of next column */
+    };
+d153 3
+a155 4
+LIB_CreateMenusA(register __a0 struct NewMenu *newmenu,
+		 register __a1 struct TagItem *taglist)
+
+    {
+d168 1
+a168 1
+	{
+d172 1
+a172 1
+	    {
+a176 1
+	    }
+d178 1
+d180 1
+a180 1
+    /*  Stuff the errorcode if a place was provided: */
+d182 1
+a182 1
+	{
+d184 1
+a184 1
+	}
+d188 1
+a188 1
+    }
+d205 2
+a206 6
+ULONG TallyMenuMemory( nm, fullmenu )
+
+    struct NewMenu *nm;
+    BOOL fullmenu;
+
+    {
+d210 1
+a210 1
+    /*  Tally up the amount of memory needed for the whole menu. */
+d213 1
+a213 1
+	{
+d216 1
+a216 1
+	}
+d219 2
+d222 1
+a222 3
+	if (nm->nm_Type == NM_TITLE)
+	    {
+	    /*  Titles need a struct Menu and a pointer */
+d224 1
+a224 1
+	    }
+d226 2
+d229 1
+a229 3
+	    if (nm->nm_Label == NM_BARLABEL)
+		{
+		/*  Separator bars need a MenuItem, an Image, and a pointer */
+d232 1
+a232 1
+		}
+d234 5
+a238 4
+		{
+		/*  Custom imagery needs a MenuItem, an Image structure,
+		    and a pointer, as well as a WORD to stash the original
+		    image->LeftEdge for use in re-layout: */
+d241 1
+a241 1
+		}
+d243 4
+a246 3
+		{
+		/*  Text menuitems and subitems need a MenuItem, an IntuiText,
+		    and a pointer: */
+d249 1
+a249 1
+		}
+d252 2
+a253 2
+		{
+		/*  Sub-items can only follow sub-items or items! */
+d255 1
+a255 1
+		}
+d258 5
+a262 4
+		{
+		/*  This is the first submenu.  We'll need a spare IntuiText
+		    for the parent MenuItem's '>>' indicator, if the parent
+		    was a text-menuitem: */
+a263 1
+		}
+d265 1
+d268 1
+a268 1
+	}
+d271 1
+a271 1
+    }
+d287 2
+a288 7
+ULONG InitMenuMemory(nm, memory, frontpen)
+
+    struct NewMenu *nm;
+    UBYTE *memory;
+    UBYTE frontpen;
+
+    {
+d300 2
+d303 1
+a303 1
+	if (nm->nm_Type == NM_TITLE)
+a304 2
+	    if ( ++menucount < NOMENU )
+		{
+d307 2
+a308 2
+		    {
+		    /*  Link it to previous menu, if any */
+d311 1
+a311 1
+		    }
+d315 3
+a317 2
+		/*  We invert the sense of Menu->Flags MENUENABLED field,
+		    so that they're enabled by default: */
+d322 1
+a322 1
+		}
+d324 1
+a324 1
+		{
+a325 1
+		}
+d327 1
+d329 2
+a330 2
+	    {
+	    /*  It's an item or subitem */
+d335 2
+d338 1
+a338 3
+		if ( ++itemcount < NOITEM )
+		    {
+		    /*  This is a MenuItem: */
+d342 2
+a343 2
+			{
+			/*  Another item, so link it in to previous */
+d346 1
+a346 1
+			}
+d348 4
+a351 3
+			{
+			/*  The first item, so link it in to the menu itself,
+			    if there is one */
+d354 1
+a354 1
+			    {
+a355 1
+			    }
+d357 1
+d361 1
+a361 1
+		    }
+d363 1
+a363 1
+		    {
+a365 1
+		    }
+d367 1
+d369 2
+a371 2
+		if ( ++subcount < NOSUB )
+		    {
+d375 2
+a376 2
+			{
+			/*  Another subitem, so link it into the previous */
+d379 1
+a379 1
+			}
+d381 4
+a384 3
+			{
+			/*  The first subitem, so link it in to the
+			    menuitem itself, if there is one */
+d387 1
+a387 1
+			    {				
+d389 4
+a392 3
+			    /*  Also, arrange for the item to have a second
+				IntuiText, consisting of the '>>' symbol,
+				provided it is a text-item: */
+d394 1
+a394 1
+				{
+a401 1
+				}
+d404 1
+d406 1
+a406 1
+		    }
+d408 1
+a408 1
+		    {
+a409 1
+		    }
+d411 1
+d414 4
+a417 3
+		{
+		/*  We invert the sense of the MenuItem->Flags ITEMENABLED
+		    field, so that they're enabled by default: */
+d420 1
+a420 1
+		    {
+d423 1
+a423 1
+		    }
+d426 1
+a426 1
+		/*  Whether image or text, the ItemFill follows: */
+d429 2
+a430 2
+		    {
+		    /*  A separator bar: */
+d432 3
+a434 2
+		    /*  We want the Depth, ImageData, and PlanePick to be
+			zero, which is how the memory was initialized */
+d439 1
+a439 1
+		    /*  Separator bars are disabled, and don't highlight: */
+d442 1
+a442 1
+		    }
+d444 2
+a445 2
+		    {
+		    /*  A custom image: */
+d452 1
+a452 1
+		    }
+d454 2
+a455 2
+		    {
+		    /*  A regular text item: */
+a462 1
+		    }
+d465 1
+d467 1
+a467 1
+	}
+d469 1
+a469 1
+    }
+d512 2
+a513 3
+LIB_FreeMenus(register __a0 struct Menu *menu)
+
+    {
+d515 1
+a515 1
+    }
+d603 3
+a605 2
+/*  This function is declared here as long, but publicly it is known
+    as a BOOL.  This way we guarantee that the high-word of d0 is clear. */
+d608 8
+a615 9
+LIB_LayoutMenusA(register __a0 struct Menu *firstmenu,
+		 register __a1 struct VisualInfo *vi,
+		 register __a2 struct TagItem *taglist)
+
+    {
+    struct RastPort textrp;		/*  Temporary RastPort */
+    struct Menu *menu;			/*  Menu to adjust */
+    struct TextFont *font;		/*  Font to use */
+    UWORD start;			/*  Horiz start pixel */
+d626 1
+a626 1
+	{
+d629 1
+a629 1
+	/*  Set the starting edge of the menu titles */
+d635 4
+a638 3
+	    {
+	    /*  Use the screen font for the menu titles, and the user's
+		supplied font for the MenuItems: */
+d641 4
+a644 3
+	    /*  Intuition starts the text at BarHBorder-BarVBorder
+		into the highlighting (believe it or not)!  So we
+		make the extra width twice that: */
+d649 4
+a652 3
+	    /*  The real left value seems to be five pixels over from the
+		Menu->LeftEdge value, and the real top value is one
+		greater than the BarHeight */
+d658 2
+a659 2
+	    }
+	/*  Close the font */
+d662 1
+a662 1
+	}
+d665 1
+a665 1
+	{
+d679 1
+a679 1
+	}
+d683 1
+a683 1
+    }
+d760 3
+a762 2
+/*  This function is declared here as long, but publicly it is known
+    as a BOOL.  This way we guarantee that the high-word of d0 is clear. */
+d765 6
+a770 7
+LIB_LayoutMenuItemsA(register __a0 struct MenuItem *firstitem,
+		     register __a1 struct VisualInfo *vi,
+		     register __a2 struct TagItem *taglist)
+
+    {
+    struct RastPort textrp;		/*  Temporary RastPort */
+    struct TextFont *font;		/*  Font to use */
+d784 2
+a785 2
+	{
+	/*  Install the font: */
+d789 1
+a789 1
+	/*  Let realleft default to 5 plus the 2 that we normally have */
+d791 3
+a793 2
+	/*  Let menuwidth sets a minimum, so if we don't know the menu,
+	    it can be zero */
+d797 1
+a797 1
+	    {
+d802 1
+a802 1
+	    }
+d806 1
+a806 1
+	/*  Close the font */
+d809 1
+a809 1
+	}
+d811 1
+a811 1
+    }
+d826 4
+a829 12
+void DoMenuItemLayout(txtrp, fi, tattr, realleft, menuwidth, imagewidths, frontpen, vi)
+
+    struct RastPort *txtrp;
+    struct MenuItem *fi;
+    struct TextAttr *tattr;
+    WORD realleft;
+    WORD menuwidth;
+    ULONG imagewidths;
+    LONG frontpen;
+    struct VisualInfo *vi;
+
+    {
+d835 3
+a837 2
+    /*  To prevent crowding of the Amiga key when using COMMSEQ,
+	don't allow the items to be less than 8 pixels high. */
+d840 1
+a840 1
+    /*  Set all the heights and fonts for the menu items */
+d843 1
+a843 1
+    /*  Do the actual placement */
+d846 1
+a846 1
+    }
+d861 3
+a863 8
+void SizeItems(item, itemheight, tattr, frontpen)
+
+    struct MenuItem *item;
+    UWORD itemheight;
+    struct TextAttr *tattr;
+    LONG frontpen;
+
+    {
+d866 1
+a866 1
+	{
+d868 1
+a868 1
+	}
+d870 3
+a872 2
+    /*  Go through the menuitems, filling in item height, and text
+	or graphics */
+d875 2
+d878 1
+a878 3
+	if (item->Flags & ITEMTEXT)
+	    {
+	    /*  We have a text item.  Set its height and font accordingly */
+d881 1
+a881 1
+	    /*  Set font in IntuiText */
+d884 1
+a884 1
+		{
+d886 4
+a889 3
+		}
+	    /*  If there's a chained text, then it's the '>>' sub-menu
+		indicator.  Set its font too: */
+d891 1
+a891 1
+		{
+d894 1
+a894 1
+		    {
+a895 1
+		    }
+d898 1
+d900 4
+a903 3
+	    {
+	    /*  We have a separator bar.  Set its height and width
+		accordingly: */
+d906 1
+a906 1
+		{
+a907 1
+		}
+d909 1
+d911 2
+a912 2
+	    {
+	    /*  A custom image. */
+d914 1
+a914 1
+	    }
+d916 1
+a916 1
+	/*  Do for submenus too */
+a918 1
+	}
+d920 1
+d933 5
+a937 15
+void PlaceItems(txtrp, fi, tattr, leftoffset, topoffset,
+    realleft, realtop, minwidth, imagewidths, vi)
+
+    struct RastPort *txtrp;
+    struct MenuItem *fi;
+    struct TextAttr *tattr;
+    WORD leftoffset;
+    WORD topoffset;
+    WORD realleft;
+    WORD realtop;
+    WORD minwidth;
+    ULONG imagewidths;
+    struct VisualInfo *vi;
+
+    {
+d941 1
+a941 1
+    WORD sub_leftoffset;		/*  offset for submenus */
+d951 11
+a961 9
+    /*  !!! I think the best strategy here would be to note down the
+	desired left edge of things, but then set the left edge of the
+	menu to the extreme left, and proceed with the layout.  Then,
+	looking at widths, we try to move the menu over as far right
+	as we can, but not exceeding the desired left edge nor exceeding
+	the right of the screen, if possible !!! */
+    /*  The maximum allowable height for this column is the screen height
+	less two (for the two pixel bottom trim Intuition supplies for
+	menus) less the real top coordinate of this menu: */
+d963 3
+a965 2
+    /*  Figure out the total width of this group of menu items by
+	summing the width for each column */
+d970 1
+a970 1
+	{
+d977 1
+a977 1
+	}
+d979 3
+a981 2
+    /*  To ensure that narrow submenus are stretched to cover at least
+	the whole menu panel: */
+d986 8
+a993 7
+	{
+	/*  Only submenus have topoffset != 0.
+	    If the submenu would fit without difficulty, we would like to
+	    have a topoffset of -1, but we're willing to shift it up to fit
+	    more subitems to avoid columnization.
+	    Hence we calculate the offset needed to have the submenu panel
+	    just hit the very bottom, but never let it exceed -1: */
+d995 1
+a995 1
+	}
+d997 3
+a999 2
+    /*  There are four pixels on the right edge of the menu, past
+	the select box: */
+d1003 1
+a1003 1
+	{
+d1005 7
+a1011 6
+	/*  Too wide!  Do the best we can by moving the left over.  We
+	    should never reduce realleft to less than four, which is the
+	    amount of left-side menu trim Intuition supplies.
+	    If the menu is wider than the screen, then we say too
+	    bad and you extend off the right side... (may fix later
+	    by causing some menu items to be dropped) */
+d1014 1
+a1014 1
+	}
+d1016 3
+a1018 2
+    /*  By setting column.count to zero, we'll call AboutColumn()
+	as soon as we get into in the loop */
+d1023 3
+a1026 3
+	/*  Would this item go off the bottom of the screen? */
+	if (column.count-- == 0)
+	    {
+d1031 1
+a1031 1
+	    /*  Restart loop in the new column: */
+d1033 1
+a1033 1
+	    }
+d1038 1
+a1038 1
+	/*  Do the part that depends on the strip-width */
+d1040 1
+a1040 1
+	    {
+d1044 3
+a1046 2
+	    /*  If there's a chained text, then it's the '>>' sub-menu
+		indicator.  Position that off to the right edge: */
+d1048 1
+a1048 1
+		{
+a1050 1
+		}
+d1052 1
+d1054 2
+a1055 2
+	    {
+	    /*  Only separator bars have HIGHNONE */
+d1057 2
+a1058 2
+	    /*  We have a separator bar.  Set its width accordingly: */
+	    /*  Set width of separator bar  */
+d1060 1
+a1060 1
+	    }
+d1063 1
+a1063 1
+	/*  Submenus begin 3/4 of the way over: */
+d1067 1
+a1067 1
+	/*  Layout the submenus (if any) */
+a1073 1
+	}
+d1075 1
+d1093 4
+a1096 10
+void AboutColumn(col, txtrp, fi, maxheight, imagewidths, vi)
+
+    struct ColumnInfo *col;
+    struct RastPort *txtrp;
+    struct MenuItem *fi;
+    UWORD maxheight;
+    ULONG imagewidths;
+    struct VisualInfo *vi;
+
+    {
+d1109 1
+a1109 1
+    /*  We have a default extra width (on the right) of 2 */
+d1112 1
+a1112 1
+    /*  Count up how many items fit in this column */
+d1117 1
+a1117 1
+	{
+d1121 3
+a1123 2
+	/*  Two pixels for the bottom trim of the menu that Intuition
+	    supplies: */
+d1125 1
+a1125 1
+	    {
+d1127 1
+a1127 1
+	    /*  This one would not fit, so stop */
+d1131 1
+a1131 1
+	    }
+d1133 2
+a1134 2
+	    {
+	    /*  It fits, so count it and proceed to the next */
+a1136 1
+	    }
+d1138 1
+d1140 3
+a1142 2
+    /*  If any of the menus have Command Equivalents or sub-menus,
+	make enough room: */
+d1146 2
+a1148 2
+	if (item->Flags & COMMSEQ)
+	    {
+d1156 1
+a1156 1
+	    }
+d1158 2
+a1159 2
+	    {
+	    /*  righttrim would be width of the glyph plus a nominal space: */
+d1161 1
+a1161 1
+	    }
+d1163 1
+a1163 1
+	}
+d1167 3
+a1169 2
+    /*  Find out if they're any checkmarks in this menu.  If so, we'll
+	later shift the IntuiText LeftEdge to make room: */
+d1173 2
+a1175 2
+	if(item->Flags & CHECKIT)
+	    {
+d1178 1
+a1178 1
+	    }
+d1180 1
+a1180 1
+	}
+d1183 3
+a1185 2
+    /*  Find the longest item, based on TextLength() of the IntuiText
+	and its LeftEdge: */
+d1189 2
+a1191 2
+	if (item->Flags & ITEMTEXT)
+	    {
+d1204 1
+a1204 1
+	    }
+d1206 2
+a1207 2
+	    {
+	    /*  Custom menu imagery is not ITEMTEXT but is HIGHCOMP. */
+d1217 1
+a1217 1
+	    }
+d1219 1
+a1219 1
+	}
+d1222 1
+a1222 1
+    }
+d1234 2
+a1235 6
+ULONG MenuImageWidths(vi, taglist)
+
+struct VisualInfo *vi;
+struct TagItem *taglist;
+
+    {
+d1243 1
+a1243 1
+	{
+d1246 1
+a1246 1
+	}
+d1252 1
+a1252 1
+	{
+d1255 1
+a1255 1
+	}
+d1259 1
+a1259 1
+	{
+d1261 1
+a1261 1
+	}
+d1264 1
+a1264 1
+	{
+d1266 1
+a1266 1
+	}
+d1269 1
+a1269 1
+    }
+d1281 2
+a1282 6
+LONG GetFrontPen( vi, taglist )
+
+    struct VisualInfo *vi;
+    struct TagItem *taglist;
+
+    {
+d1287 1
+a1287 1
+	{
+d1292 1
+a1292 1
+	}
+d1295 1
+a1295 1
+    }
+@
+
+
+38.2
+log
+@Updated autodocs for LayoutMenusA() and LayoutMenuItemsA() to include
+new tags.
+@
+text
+@d8 1
+a8 1
+*   $Id: menu.c,v 38.1 91/07/11 12:44:30 peter Exp Locker: peter $
+d11 4
+d117 1
+a117 1
+struct Menu * __saveds __asm
+d121 1
+a121 1
+void __saveds __asm
+d124 1
+a124 1
+LONG __saveds __asm
+d129 1
+a129 1
+LONG __saveds __asm
+d249 1
+a249 1
+struct Menu * __saveds __asm
+d609 1
+a609 1
+void __saveds __asm
+d705 1
+a705 1
+LONG __saveds __asm
+d859 1
+a859 1
+LONG __saveds __asm
+@
+
+
+38.1
+log
+@PrePlaceItems() is now called SizeItem()s.
+Now listens for GTMN_Checkmark, GTMN_AmigaKey, and GTMN_NewLookMenus,
+and lays out accordingly.
+LayoutMenu{Item}sA() now recognizes GTMN_FrontPen.
+@
+text
+@d8 1
+a8 1
+*   $Id: menu.c,v 36.19 91/05/02 18:59:58 peter Exp $
+d11 6
+d191 2
+a192 1
+*	    (defaults to zero).
+d647 23
+a810 4
+*	GTMN_TextAttr (struct TextAttr *) - Text Attribute to use for
+*	    menu-items and sub-items.  If not supplied, the screen's
+*	    font will be used.  This font must be openable via OpenFont()
+*	    when this function is called.
+d816 10
+@
+
+
+38.0
+log
+@ Initial V38 check-in (matches V37 release).
+@
+text
+@d128 1
+a128 1
+    WORD, WORD, struct VisualInfo *);
+d130 2
+a131 2
+    WORD, WORD, WORD, WORD, WORD, struct VisualInfo *);
+void PrePlaceItems (struct MenuItem *, UWORD, struct TextAttr *);
+d133 3
+a135 1
+    UWORD, struct VisualInfo *);
+d684 3
+d717 1
+a717 1
+		vi);
+d833 2
+d860 1
+a860 1
+		realleft, menuwidth, vi);
+d881 1
+a881 1
+void DoMenuItemLayout(txtrp, fi, tattr, realleft, menuwidth, vi)
+d888 2
+d903 1
+a903 1
+    PrePlaceItems(fi, itemheight, tattr);
+d906 2
+a907 1
+    PlaceItems(txtrp, fi, tattr, 0, 0, realleft, vi->vi_Screen->BarHeight+1, menuwidth, vi);
+d913 1
+a913 1
+/*/ PrePlaceItems()
+d923 1
+a923 1
+void PrePlaceItems(item, itemheight, tattr)
+d928 1
+d949 4
+d958 4
+d969 4
+d981 1
+a981 1
+	PrePlaceItems(item->SubItem, itemheight, tattr);
+d998 1
+a998 1
+    realleft, realtop, minwidth, vi)
+d1008 1
+d1044 1
+a1044 1
+	    maxheight, vi);
+d1095 1
+a1095 1
+	    AboutColumn(&column, txtrp, item, maxheight, vi);
+d1136 1
+a1136 1
+	    minwidth, vi);
+d1158 1
+a1158 1
+void AboutColumn(col, txtrp, fi, maxheight, vi)
+d1164 1
+d1178 1
+d1218 4
+a1221 2
+	    /*  righttrim would be width of the command key plus a nominal
+		space, plus the correct amount for the command-key logo: */
+d1224 1
+a1224 1
+		((vi->vi_Flags & VI_SCREENHIRES) ? COMMWIDTH : LOWCOMMWIDTH));
+d1260 1
+d1262 2
+a1263 3
+	    itext->LeftEdge = (item->Flags & CHECKIT) ?
+		2 + ((vi->vi_Flags & VI_SCREENHIRES) ? CHECKWIDTH : LOWCHECKWIDTH) :
+		2;
+d1265 2
+a1266 3
+	    itext->LeftEdge = (havechecked) ?
+		2 + ((vi->vi_Flags & VI_SCREENHIRES) ? CHECKWIDTH : LOWCHECKWIDTH) :
+		2;
+d1278 1
+a1278 2
+		((item->Flags & CHECKIT) ? (2 + ((vi->vi_Flags & VI_SCREENHIRES) ?
+		CHECKWIDTH : LOWCHECKWIDTH)) : 2);
+d1281 1
+a1281 2
+		((havechecked) ? (2 + ((vi->vi_Flags & VI_SCREENHIRES) ?
+		CHECKWIDTH : LOWCHECKWIDTH)) : 2);
+d1291 80
+@

@@ -1,0 +1,531 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  V36_3:1.10;
+locks    ; strict;
+comment  @@;
+
+
+1.10
+date     89.07.10.17.04.12;  author steveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     89.07.07.10.34.00;  author steveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     89.07.07.10.11.13;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     89.06.26.16.53.00;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     89.05.16.14.35.57;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     89.04.17.15.10.59;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.04.17.10.18.42;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.04.14.15.22.24;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.04.10.17.13.40;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.22.11.38.12;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@DOS initialisation
+@
+
+
+1.10
+log
+@changed mount procedure for prefs:
+@
+text
+@SECTION "CLI-INIT"
+// CLI-INIT for CAPC
+
+// TJK Feb - Mar 85
+
+// (C) Metacomco 1985 All rights reserved.
+// (C) Metacomco 1986 All rights reserved.
+
+// This version of CLI-INIT takes an optional boot device
+// from the expansion library, enabling boots to take place from
+// other devices.
+
+GET "LIBHDR"
+GET "SYSHDR"
+GET "MANHDR"
+GET "IOHDR"
+GET "FH3MANIFESTS"
+GET "internal/EXECLIBHDR"
+GET "internal/INTUITIONLIBHDR"
+GET "ALERTHDR"
+
+
+MANIFEST $(
+// Stack sizes (in long words)
+fh.stack      = 210     // File system
+con.stack     = 700     // CON: and RAW:
+ram.stack     = 300     // RAM:
+prefs.stack   = 1250    // PREFS:
+speak.stack   = 1250    // SPEAK:
+pipe.stack    = 1250    // PIPE:
+ser.stack     = 800     // SER:
+par.stack     = 800     // PAR:
+prt.stack     = 1000    // PRT:
+
+// Other constants
+tasktablesize = 20      // Maximum CLI tasks
+maxunits      = 3       // Maximum # disk drives checked
+
+
+// Preferences values
+PrefSize      = 232
+PrefFlag      = 1
+$)
+
+
+LET cli.init(parm.pkt) = VALOF
+ $( LET trackname = "trackdisk.device*X00"
+    LET prompt = "%N> "
+    LET syssegl = seglist()
+    LET segl = getmem(4,memf.pubclear)
+    LET tid  = taskid()
+    LET clip = cli()
+	LET task = ?
+    LET rootnode = rootstruct()
+
+
+    // Create rootnode and cli structure where required
+    // bootnode has been stashed in rootnode at startup
+    LET info = getmem(info.segments,memf.pubclear)
+    LET tasktab = getmem(tasktablesize,memf.pubclear)
+
+	// The boot node comes over in the fhseg slot
+	LET bootnode = (rootnode!rtn.fhseg) >> 2
+
+    rootnode!rtn.info := info
+    rootnode!rtn.tasktab := tasktab
+    rootnode!rtn.days := 0
+    rootnode!rtn.mins := 0
+    rootnode!rtn.ticks:= 0
+    tasktab!0 := tasktablesize
+
+    // Setup my taskid and global task table entry
+    putlong( tinfo.tasknum, tid, 1 )
+    rootnode!rtn.cliseg    := syssegl!4    // Remember the CLI segment
+    rootnode!rtn.fhseg     := syssegl!6    // Remember file handler code
+    rootnode!rtn.tasktab!1 := tid
+
+    // Give myself a new segment list which can be FREEVECed
+    for i=0 to 3 do segl!i := syssegl!i
+    putlong( tinfo.seglist, tid, segl )
+
+	// If the boot device is not specified, use DF0
+	// If it is specified, add it to the device chain
+
+	IF bootnode=0 THEN
+	   bootnode := createnode(0, trackname)
+
+	// Put bootnode on the devicelist, even if we created it above -- bart
+	info!info.devicelist := bootnode
+
+    // Make inactive device node entries
+    make.node.entries(syssegl)
+
+    // Wake up intuition
+    intuition := exec( e.OpenLibrary, 0, 0, 0, ("intuition.library*X00"<<2)+1 )
+
+    // Start up the filesystem tasks.
+    rootnode!rtn.restartseg := syssegl!7 
+
+    // Start the boot device
+	task := startup( bootnode, segl, syssegl )
+    putlong( tinfo.filesystemtask, tid, task )
+    make.task.assignment( "SYS", task, dt.dir, ":" )
+    make.assign.entry("LIBS")
+    make.assign.entry("DEVS")
+    make.assign.entry("FONTS")
+    make.assign.entry("C")
+    make.assign.entry("L")
+    make.assign.entry("S")
+
+	// At this point the rest of the boot list should be startup'ed
+	$(	LET nextnode = bootnode!dev.next
+		WHILE nextnode DO
+		$(	 
+			 task := startup( nextnode, segl, syssegl )
+			 nextnode := nextnode!dev.next
+		$)
+	$)
+
+	// Start up the standard floppy handlers.
+    FOR unit = 0 TO maxunits DO
+    $( LET task, node = ?, ?
+	   LET bootstartup = bootnode!dev.startup
+	   IF unit=bootstartup!fs.unit &
+		  compstring( trackname, bootstartup!fs.device)=0 LOOP
+	   node := createnode( unit, trackname )
+       task := startup( node, segl, syssegl )
+	   UNLESS task=0 LOOP
+	   // No disk unit ... remove structure
+	   UNLESS node=0 DO
+	   $( 
+		   info!info.devicelist := node!dev.next
+		   freevec( node!dev.startup )
+		   freevec( node )
+	   $)
+    $)
+
+    // Read the preferences
+    readprefs()
+
+	// build the segment list
+	makeseg( "CLI", rootnode!rtn.cliseg )
+	makeseg( "Restart", rootnode!rtn.restartseg )
+	makeseg( "FileHandler", syssegl!6)
+
+    // Sign on message
+    $( LET outs = findoutput("CON:0/0/640/200/AmigaDOS")
+       putlong( tinfo.consoletask, tid, outs!scb.type )
+       selectoutput(outs)
+       selectinput(findinput("**"))
+
+       writef("Copyright *XA91989 Commodore-Amiga, Inc.*N*
+       *All rights reserved.*NAlpha 1.4*N" )
+    $)
+
+    clip!cli.standardinput := input()
+    clip!cli.currentinput := findinput(":S/STARTUP-SEQUENCE")
+    IF clip!cli.currentinput=0 DO
+       clip!cli.currentinput := clip!cli.standardinput
+
+    clip!cli.standardoutput := output()
+    clip!cli.currentoutput  := clip!cli.currentoutput
+    clip!cli.faillevel      := cli.initialfaillevel
+    clip!cli.commandfile%0  := 0
+    clip!cli.defaultstack   := cli.initialstack
+    copystring(prompt,clip!cli.prompt)
+    copystring("",clip!cli.setname)
+
+    RESULTIS 0
+ $)
+
+// Create a file system node for unit DFn
+AND createnode( unit, devname ) = VALOF
+$(  LET disc.envec = TABLE
+        14,                  // Length of table
+        Disc.sector.size>>2, // Block size
+        0,                   // Sector origin (not used)
+        2,                   // Number of surfaces
+        1,                   // Sectors per block (not used)
+        11,                  // Blocks per track
+        2,                   // Number of reserved blocks
+        0,                  // Preallocation factor (blocks read in 1 go)
+        0,                   // Interleave factor
+        0,                   // Lower cylinder
+        79,                  // Upper cylinder
+        5,                   // Cache slots
+     	memf.public|memf.chip,// buffer memory type
+	#X200000,	     // MaxTransfer
+	#X1ffffe		     // AddressMask
+       LET arg = getmem(fs.upb,memf.pubclear)
+	   LET node = adddevice( "DFX" )
+       arg!fs.unit, arg!fs.device := unit, devname
+       arg!fs.envec := disc.envec
+	   UNLESS node=0 DO
+	   $(
+		  node!dev.startup := arg
+		 (node!dev.name)%3 := unit+'0'
+	   $)
+	   RESULTIS node
+$)
+
+// Create a new file system task instance, or return zero
+AND startup( node, segl, syssegl ) = VALOF
+$( LET v = getvec(4)          // Segment vector
+   LET task = 0
+
+//   LET gv = node!dev.globvec
+// there are no more BCPL file systems in DOS, always create a 'C' file system
+   LET gv = -1
+   LET name,pri,ss = node!dev.name,node!dev.priority,node!dev.stacksize
+
+   v!0 := 3
+   v!1 := segl!1 		  // Klib
+   v!2 := segl!2		  // Mlib
+   v!3 := syssegl!6		  // FileSys
+
+   $(
+	   TEST node!dev.seglist = 0 THEN
+	   $(
+		   // use default file system seglist...
+		   task := createtask( v, fh.stack, 10, "File System", makeglob(v) )
+	   $)
+	   ELSE
+	   $( 
+		   UNLESS ss > 0 DO 
+		   $(
+				ss := fh.stack
+		   $)
+
+		   TEST gv = -1 THEN
+		   $(  
+			   // c code file system seglist supplied
+
+			   task := i.createproc( (name<<2)+1, pri, node!dev.seglist, ss )
+		   $)
+		   	ELSE
+		   	$(	
+				// bcpl file system seglist supplied
+			    v!3 := node!dev.seglist
+				IF gv = 0 THEN gv := makeglob(v)
+			    UNLESS gv = 0 DO
+				   task := createtask( v, ss, pri, name, gv )
+		   	$)
+	   $)
+   $)
+
+   IF task=0 THEN RESULTIS 0
+   UNLESS sendpkt( ?, task, ?, ?, ?, ?, node!dev.startup, 0) DO 
+	  RESULTIS 0
+   settask( node, dt.device, task )
+   RESULTIS task
+$)
+
+// Set fields in devinfo node
+AND settask( node, type, task, dir ) = VALOF
+$( node!dev.type, node!dev.task := type, task
+   node!dev.lock    := type=dt.dir -> locateobj(dir), 0
+   RESULTIS node
+$)
+
+// Make device list entry
+AND make.task.assignment(name, task, type, dir ) = 
+    settask( adddevice(name), type, task, dir )
+
+AND make.assign.entry(name) = 
+   make.task.assignment(name,filesystemtask(),dt.dir,name)
+
+// Make node entry for inactive device
+AND make.node.entry( name, startup, seglist, handler, stksize, pri, gv ) BE
+$( LET node = make.task.assignment(name, 0, dt.device)
+   node ! dev.handler   := handler
+   node ! dev.stacksize := stksize
+   node ! dev.priority  := pri
+   node ! dev.seglist   := seglist
+   node ! dev.startup   := startup
+   node ! dev.globvec   := gv
+$) 
+
+// Make all the node entries
+AND make.node.entries(syssegl) BE
+$( LET make1(name, startup, hname, stacksize, gv ) =
+       make.node.entry(name, startup, 0, hname, stacksize, 0, gv )
+   LET makec(name, startup, segl) BE  // CON, RAW
+       make.node.entry(name, startup, segl, 0, con.stack, 5, @@globsize )
+   LET makes(name, startup, stacksize ) BE       // SER/PAR/PRT
+       make1(name, startup, "L:PORT-HANDLER", stacksize, @@globsize )
+
+   make1("RAM", 0, "L:RAM-HANDLER", ram.stack, 0)
+//   make1("SPEAK",0,"L:SPEAK-HANDLER",speak.stack, 0)
+//   make1("PIPE",0,"L:PIPE-HANDLER",pipe.stack, 0)
+   make.node.entry("PREFS",0,0,"L:PREF-HANDLER",prefs.stack,3,-1)
+   // 'C' process
+// PREFS-HANDLER changed to PREF-HANDLER to ensure null termination
+
+   makec("CON", 0, syssegl!5)
+   makec("RAW", 1, syssegl!5)
+   makes("SER", 0, ser.stack )
+   makes("PAR", 1, par.stack )
+   makes("PRT", 2, prt.stack )
+$)
+
+AND makeseg( name, seg ) BE
+$(
+	LET upb = segment.name + (name%0+bytesperword-1)/bytesperword
+	LET segment = getmem(upb, memf.pubclear )
+	LET lv.list = rootstruct()!rtn.info+info.segments
+	IF segment=0 THEN abort(AN.StartMem)   // Failed to startup
+	segment ! segment.uc   := -1
+	segment ! segment.seg  := seg
+	FOR i = 0 TO name%0 DO (segment+segment.name)%i := name%i
+	segment ! segment.next := !lv.list
+	!lv.list := segment
+$)
+
+AND readprefs() BE
+$( LET defsize = (PrefSize>>2)
+   LET v = VEC (PrefSize>>2)
+   LET buff = v << 2
+   LET file = "devs:system-configuration"
+   LET stream = findinput(file)
+   IF stream = 0 then RETURN
+
+   // bart - 08.05.87 try scheme for extensible prefs
+
+   IF i.read(stream,buff,PrefSize)=PrefSize THEN
+      $( // test for extended preferences structure
+	     LET extsize = v%(PrefSize-1)
+		 TEST extsize = 0 THEN 
+		 $( // set old preferences
+		    CallRes(intuition,e.SetPrefs,PrefSize,PrefFlag,buff)
+		 $)
+		 ELSE
+		 $( // extension size comes as blocks of 16 longwords
+			LET p = getvec(defsize+((extsize<<4)))
+			LET newbuff = p << 2 LET extbuff = p+defsize << 2
+			LET morebytes = i.read(stream,extbuff,(extsize<<6))
+		    FOR i = 0 TO PrefSize-1 DO p%i := v%i // copy to extended prefs
+			TEST morebytes = 0 THEN // set old preferences
+			CallRes(intuition,e.SetPrefs,PrefSize,PrefFlag,buff)
+			ELSE // set extended preferences
+			IF morebytes = (extsize<<6) THEN
+			CallRes(intuition,e.SetPrefs,PrefSize+(extsize<<6),PrefFlag,newbuff)
+			freevec(p)
+		 $)
+	  $)
+
+   endstream(stream)
+$)
+@
+
+
+1.9
+log
+@more PREFS didling
+@
+text
+@@
+
+
+1.8
+log
+@changed PREFS-HANDLER to PREF-HANDLER to ensure null termination of string
+@
+text
+@d153 1
+a153 1
+       *All rights reserved.*NExperimental 1.4*N" )
+d291 2
+a292 1
+   make1("PREFS",0,"L:PREF-HANDLER",prefs.stack,-1)   // 'C' process
+@
+
+
+1.7
+log
+@null terminated PREFS: (null is included in the BCPL string length).
+@
+text
+@d291 2
+a292 1
+   make1("PREFS*X00",0,"L:PREFS-HANDLER",prefs.stack,-1)   // 'C' process
+@
+
+
+1.6
+log
+@PREFS: gv changed to -1 for a 'C' process
+@
+text
+@d291 1
+a291 1
+   make1("PREFS",0,"L:PREFS-HANDLER",prefs.stack,-1)   // 'C' process
+@
+
+
+1.5
+log
+@removed devicenode entries for SPEAK: and PIPE: (ROM space too tight)
+@
+text
+@d291 1
+a291 1
+   make1("PREFS",0,"L:PREFS-HANDLER",prefs.stack,0)
+@
+
+
+1.4
+log
+@added prefs: speak: and pipe: to entries created at boot time
+@
+text
+@d289 2
+a290 2
+   make1("SPEAK",0,"L:SPEAK-HANDLER",speak.stack, 0)
+   make1("PIPE",0,"L:PIPE-HANDLER",pipe.stack, 0)
+@
+
+
+1.3
+log
+@Fixed default floppy envec (no prealloc) changed MaxTransfer and AddressMask
+@
+text
+@d28 3
+d287 1
+d289 4
+@
+
+
+1.2
+log
+@Start up non BCPL file system (unconditionally)
+@
+text
+@d179 1
+a179 1
+        11,                  // Preallocation factor (blocks read in 1 go)
+d185 2
+a186 2
+	#Xffffff,	     // MaxTransfer
+	#X7fffe		     // AddressMask
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d149 1
+a149 1
+       writef("Copyright *XA91987 Commodore-Amiga, Inc.*N*
+d172 1
+a172 1
+        12,                  // Length of table
+d184 3
+a186 1
+     	memf.public|memf.chip// buffer memory type
+d203 4
+a206 1
+   LET gv = node!dev.globvec
+@

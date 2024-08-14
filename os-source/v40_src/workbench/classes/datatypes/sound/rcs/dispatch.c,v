@@ -1,0 +1,2759 @@
+head     39.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.11
+date     93.05.21.10.44.42;  author davidj;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     93.04.26.14.32.29;  author davidj;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     93.04.19.15.16.07;  author davidj;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     93.04.13.17.17.27;  author davidj;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     93.02.24.15.20.11;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.01.25.12.57.51;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.12.02.14.19.01;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.07.30.00.41.03;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.23.16.47.33;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.24.00.58.25;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.10.14.30.53;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.03.01.46.13;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.11
+log
+@wasn't cleaning msgport properly
+changed from AbortIO() to CMD_FLUSH
+@
+text
+@/* dispatch.c
+ *
+ */
+
+#include "classbase.h"
+
+/*****************************************************************************/
+
+#define	private	static
+
+/*****************************************************************************/
+
+#define	G(o)		((struct Gadget *)o)
+#define	PROC_NAME	"Sound_ObjectHandler"
+
+/*****************************************************************************/
+
+/* Max playable sample in one IO request is 128K */
+#define MAXSAMPLE	131072
+
+#define	CHIPSPLIT	8192
+
+/*****************************************************************************/
+
+#define	MAX_IOS		2
+
+/*****************************************************************************/
+
+struct StartupMsg
+{
+    struct Message	 sm_Message;		/* Embedded message */
+    struct ClassBase	*sm_CB;			/* Pointer to the library base */
+    Class		*sm_Class;		/* Pointer to the class */
+    Object		*sm_Object;		/* Pointer to the object */
+    ULONG		 sm_Return;		/* Return value */
+};
+
+/*****************************************************************************/
+
+struct localData
+{
+    struct MsgPort	*lod_MP;
+    struct IOAudio	*lod_IO;
+    struct IOAudio	*lod_IOC[MAX_IOS];
+    struct IOAudio	*lod_IOVolume;
+
+    /* Application Controller */
+    struct Process	*lod_Process;		/* Player process */
+    struct Task		*lod_SignalTask;	/* Task to signal */
+    ULONG		 lod_SignalBit;		/* Signal bit */
+
+    struct VoiceHeader	 lod_VHDR;		/* This is longword aligned */
+    struct StartupMsg	 lod_Message;		/* So is this */
+    ULONG		 lod_Flags;
+
+    UBYTE		*lod_Sample;
+    ULONG		 lod_SampleLength;
+
+    UBYTE		*lod_Buffer;
+    UBYTE		*lod_Buffer1;
+    UBYTE		*lod_Buffer2;
+    UBYTE		*lod_Buffer3;
+    ULONG		 lod_BufferLen;
+
+    UBYTE		*lod_CBuffer;
+    UBYTE		*lod_ChipBuff[2];
+
+    UWORD		 lod_Period;
+    UWORD		 lod_Volume;
+    UWORD		 lod_Cycles;
+    UWORD		 lod_Going;
+
+    struct BitMap	 lod_BMap;
+};
+
+/*****************************************************************************/
+
+#define	LODF_RUNNING	(1L<<0)
+#define	LODF_CONTINUOUS	(1L<<1)
+#define	LODF_PLAYING	(1L<<2)
+#define	LODF_PLAYED1	(1L<<3)
+#define	LODF_PLAYED2	(1L<<4)
+#define	LODF_NEWSAMPLE	(1L<<5)
+#define	LODF_NOTCHIP	(1L<<6)
+#define	LODF_IMMEDIATE	(1L<<7)
+#define	LODF_LOOP	(1L<<8)
+
+/*****************************************************************************/
+
+private UWORD chip ImageData[] =
+{
+/* Plane 0 */
+    0x0000, 0x0010, 0x0200, 0x0000, 0x0000, 0x0028, 0x0400, 0x0000,
+    0x0000, 0x0068, 0x0800, 0x0400, 0x0000, 0x00A8, 0x1000, 0x0C00,
+    0x0000, 0x0128, 0x2000, 0x0C00, 0x0000, 0xF228, 0x00C0, 0x0C00,
+    0x0001, 0x0E28, 0x0300, 0x0C00, 0x0001, 0x0A28, 0x0C00, 0x0C00,
+    0x0001, 0x0A28, 0x0000, 0x0C00, 0x0001, 0x0A28, 0x0000, 0x0C00,
+    0x0001, 0x0A28, 0x07E0, 0x0C00, 0x0001, 0x0A28, 0x0000, 0x0C00,
+    0x0001, 0x0A28, 0x0000, 0x0C00, 0x0001, 0x0A28, 0x0C00, 0x0C00,
+    0x0001, 0x0E28, 0x0300, 0x0C00, 0x0000, 0xF228, 0x00C0, 0x0C00,
+    0x0000, 0x0128, 0x2000, 0x0C00, 0x0000, 0x00A8, 0x1000, 0x0C00,
+    0x0000, 0x0068, 0x0800, 0x0C00, 0x0000, 0x0028, 0x0400, 0x0C00,
+    0x0000, 0x0010, 0x0200, 0x0C00, 0x0000, 0x0000, 0x0000, 0x0C00,
+    0x0000, 0x0000, 0x0000, 0x0C00, 0x7FFF, 0xFFFF, 0xFFFF, 0xFC00,
+/* Plane 1 */
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0010, 0x0000, 0x0000,
+    0xFFFF, 0xFF93, 0xF77F, 0xF800, 0xD555, 0x5551, 0x4455, 0x5000,
+    0xD555, 0x54D1, 0x5555, 0x5000, 0xD555, 0x05D1, 0x5115, 0x5000,
+    0xD554, 0xF1D1, 0x5455, 0x5000, 0xD554, 0xF5D1, 0x5145, 0x5000,
+    0xD554, 0xF5D1, 0x5515, 0x5000, 0xD554, 0xF5D1, 0x5455, 0x5000,
+    0xD554, 0xF5D1, 0x5015, 0x5000, 0xD554, 0xF5D1, 0x5555, 0x5000,
+    0xD554, 0xF5D1, 0x5405, 0x5000, 0xD554, 0xF5D1, 0x5155, 0x5000,
+    0xD554, 0xF1D1, 0x5455, 0x5000, 0xD555, 0x01D1, 0x5415, 0x5000,
+    0xD555, 0x00D1, 0x5515, 0x5000, 0xD555, 0x4151, 0x4545, 0x5000,
+    0xD555, 0x5511, 0x5555, 0x5000, 0xD555, 0x5551, 0x5155, 0x5000,
+    0xD555, 0x5541, 0x5555, 0x5000, 0xD555, 0x5551, 0x5455, 0x5000,
+    0xD555, 0x5551, 0x5555, 0x5000, 0x8000, 0x0000, 0x0000, 0x0000,
+};
+
+#define	DEPTH	2
+#define	WIDTH	54
+#define	HEIGHT	24
+
+/*****************************************************************************/
+
+private ULONG setdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+{
+    return (SetDTAttrsA (o, NULL, NULL, (struct TagItem *) & data));
+}
+
+/*****************************************************************************/
+
+private ULONG notifyAttrChanges (struct ClassBase * cb, Object * o, VOID * ginfo, ULONG flags, ULONG tag1,...)
+{
+    return DoMethod (o, OM_NOTIFY, &tag1, ginfo, flags);
+}
+
+/*****************************************************************************/
+
+private struct Process *createnewproc (struct ClassBase * cb, Tag tag1,...)
+{
+    return (CreateNewProc ((struct TagItem *) & tag1));
+}
+
+/*****************************************************************************/
+
+private ULONG triggerMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtTrigger * dtt)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register ULONG retval = 0;
+
+    switch (dtt->dtt_Function)
+    {
+	case STM_PLAY:
+	    if (lod->lod_Sample)
+	    {
+		Signal (lod->lod_Process, SIGBREAKF_CTRL_D);
+		retval = 1;
+	    }
+	    break;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+private struct TagItem bools[] =
+{
+    {SDTA_Continuous, LODF_CONTINUOUS},
+    {TAG_END}
+};
+
+/*****************************************************************************/
+
+/* Set attributes of an object */
+private ULONG setAttrsMethod (struct ClassBase * cb, Class * cl, Object * o, struct opSet * msg)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct TagItem *tag;
+    register ULONG tidata;
+
+    struct TagItem *tags = msg->ops_AttrList;
+    UWORD oldPeriod = lod->lod_Period;
+    UWORD oldVolume = lod->lod_Volume;
+    struct TagItem *tstate;
+    ULONG refresh = 0L;
+
+    /* Handle boolean tags */
+    lod->lod_Flags = PackBoolTags (lod->lod_Flags, tags, bools);
+
+    /* process rest */
+    tstate = tags;
+    while (tag = NextTagItem (&tstate))
+    {
+	tidata = tag->ti_Data;
+	switch (tag->ti_Tag)
+	{
+	    case SDTA_Sample:
+		lod->lod_Sample = lod->lod_Buffer3 = (UBYTE *) tidata;
+		lod->lod_Flags |= LODF_NEWSAMPLE;
+		if (tidata)
+		{
+		    /* If we are playing continuous sound then start doing this sound */
+		    if (lod->lod_Flags & LODF_CONTINUOUS)
+		    {
+			if (lod->lod_Flags & LODF_PLAYING)
+			{
+			    lod->lod_Buffer3 = (UBYTE *) tidata;
+			}
+			else if (lod->lod_Buffer)
+			{
+			    CopyMem (lod->lod_Sample, lod->lod_Buffer, lod->lod_BufferLen);
+			    if (lod->lod_Buffer == lod->lod_Buffer1)
+				lod->lod_Buffer = lod->lod_Buffer2;
+			    else
+				lod->lod_Buffer = lod->lod_Buffer1;
+			}
+		    }
+		}
+		break;
+
+	    case SDTA_SampleLength:
+		lod->lod_SampleLength = lod->lod_BufferLen = (ULONG) tidata;
+
+		/* Allocate buffers for the continuous sounds */
+		if (lod->lod_Flags & LODF_CONTINUOUS)
+		{
+		    FreeVec (lod->lod_Buffer1);
+		    FreeVec (lod->lod_Buffer2);
+		    lod->lod_Buffer1 = AllocVec (tidata, MEMF_CHIP);
+		    lod->lod_Buffer2 = AllocVec (tidata, MEMF_CHIP);
+		    lod->lod_Buffer = lod->lod_Buffer1;
+		}
+		break;
+
+	    case SDTA_Period:
+		lod->lod_Period = (UWORD) tidata;
+		break;
+
+	    case SDTA_Volume:
+		lod->lod_Volume = (UWORD) tidata;
+		break;
+
+	    case SDTA_Cycles:
+		lod->lod_Cycles = (UWORD) tidata;
+		break;
+
+	    case SDTA_SignalTask:
+		lod->lod_SignalTask = (struct Task *) tidata;
+		break;
+
+	    case SDTA_SignalBit:
+		lod->lod_SignalBit = (ULONG) tidata;
+		break;
+	}
+    }
+
+    if (lod->lod_Process && lod->lod_Sample &&
+	((oldPeriod != lod->lod_Period) || (oldVolume != lod->lod_Volume)))
+	Signal (lod->lod_Process, SIGBREAKF_CTRL_F);
+
+    return (refresh);
+}
+
+/*****************************************************************************/
+
+/* Trigger methods we support */
+struct DTMethod tm[] =
+{
+    {"Play", "PLAY", STM_PLAY},
+    {NULL,},
+};
+
+/*****************************************************************************/
+
+/* Methods we support */
+ULONG m[] =
+{
+    OM_NEW,
+    OM_GET,
+    OM_SET,
+    OM_UPDATE,
+    OM_DISPOSE,
+    GM_LAYOUT,
+    GM_HITTEST,
+    GM_GOACTIVE,
+    GM_HANDLEINPUT,
+    GM_RENDER,
+    DTM_TRIGGER,
+    DTM_COPY,
+    DTM_WRITE,
+    ~0,
+};
+
+/*****************************************************************************/
+
+/* Inquire attribute of an object */
+private ULONG getAttrMethod (Class * cl, Object * o, struct opGet * msg)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+
+    switch (msg->opg_AttrID)
+    {
+	case DTA_TriggerMethods:
+	    *msg->opg_Storage = (ULONG) tm;
+	    break;
+
+	case DTA_Methods:
+	    *msg->opg_Storage = (ULONG) m;
+	    break;
+
+	case DTA_NominalVert:
+	    *msg->opg_Storage = (ULONG) HEIGHT;
+	    break;
+
+	case DTA_NominalHoriz:
+	    *msg->opg_Storage = (ULONG) WIDTH;
+	    break;
+
+	case SDTA_VoiceHeader:
+	    *msg->opg_Storage = (ULONG) & lod->lod_VHDR;
+	    break;
+
+	case SDTA_Sample:
+	    *msg->opg_Storage = (ULONG) lod->lod_Sample;
+	    break;
+
+	case SDTA_SampleLength:
+	    *msg->opg_Storage = (ULONG) lod->lod_SampleLength;
+	    break;
+
+	case SDTA_Period:
+	    *msg->opg_Storage = (ULONG) lod->lod_Period;
+	    break;
+
+	case SDTA_Volume:
+	    *msg->opg_Storage = (ULONG) lod->lod_Volume;
+	    break;
+
+	case SDTA_Cycles:
+	    *msg->opg_Storage = (ULONG) lod->lod_Cycles;
+	    break;
+
+	default:
+	    return (DoSuperMethodA (cl, o, msg));
+    }
+
+    return (1L);
+}
+
+/*****************************************************************************/
+
+private BOOL WriteBody (struct ClassBase * cb, struct IFFHandle * iff, APTR sample, ULONG len)
+{
+    if (PushChunk (iff, 0, ID_BODY, len) == 0)
+	if (WriteChunkBytes (iff, sample, len) == len)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+private BOOL WriteVHDR (struct ClassBase * cb, struct IFFHandle * iff, struct VoiceHeader * vhdr)
+{
+    register ULONG msize = sizeof (struct VoiceHeader);
+
+    if (PushChunk (iff, 0, ID_VHDR, msize) == 0)
+	if (WriteChunkBytes (iff, vhdr, msize) == msize)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+private BOOL WriteNAME (struct ClassBase * cb, struct IFFHandle * iff, STRPTR name)
+{
+    register ULONG msize;
+
+    if (!name)
+	return (TRUE);
+    msize = strlen (name) + 1;
+
+    if (PushChunk (iff, 0, ID_NAME, msize) == 0)
+	if (WriteChunkBytes (iff, name, msize) == msize)
+	    if (PopChunk (iff) == 0)
+		return (TRUE);
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+private BOOL writeObject (struct ClassBase * cb, struct IFFHandle * iff, Object * o, struct localData * lod)
+{
+    struct VoiceHeader vhdr;
+    BOOL success = FALSE;
+    STRPTR title = NULL;
+
+    /* Get the title */
+    GetAttr (DTA_ObjName, o, (ULONG *) & title);
+
+    /* Copy the voice header */
+    vhdr = *(&lod->lod_VHDR);
+    vhdr.vh_Compression = CMP_NONE;
+
+    if (OpenIFF	(iff, IFFF_WRITE) == 0)
+    {
+	if (PushChunk (iff, ID_8SVX, ID_FORM, IFFSIZE_UNKNOWN) == 0)
+	{
+	    /* Write the title of the object */
+	    WriteNAME (cb, iff,	title);
+
+	    if (WriteVHDR (cb, iff, &vhdr))
+		success	= WriteBody (cb, iff, lod->lod_Sample, lod->lod_SampleLength);
+	    PopChunk (iff);
+	}
+	CloseIFF (iff);
+    }
+
+    return (success);
+}
+
+/*****************************************************************************/
+
+private ULONG copyMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtGeneral * msg)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct IFFHandle *iff;
+    BOOL success = FALSE;
+
+    if (iff = AllocIFF ())
+    {
+	if (iff->iff_Stream = (ULONG) OpenClipboard (0L))
+	{
+	    InitIFFasClip (iff);
+	    success = writeObject (cb, iff, o, lod);
+	    CloseClipboard ((struct ClipboardHandle *) iff->iff_Stream);
+	}
+	FreeIFF (iff);
+    }
+
+    if (!success)
+	DisplayBeep (NULL);
+
+    return ((ULONG) success);
+}
+
+/*****************************************************************************/
+
+private ULONG writeMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtWrite * msg)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct IFFHandle *iff;
+    BOOL success = FALSE;
+
+    if (iff = AllocIFF ())
+    {
+	if (iff->iff_Stream = msg->dtw_FileHandle)
+	{
+	    InitIFFasDOS (iff);
+	    success = writeObject (cb, iff, o, lod);
+	}
+	FreeIFF (iff);
+    }
+
+    if (!success)
+	DisplayBeep (NULL);
+    return ((ULONG) success);
+}
+
+/*****************************************************************************/
+
+private ULONG renderMethod (struct ClassBase * cb, Class * cl, Object * o, struct gpRender * msg)
+{
+    register struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct RastPort *rp;
+    struct IBox *domain;
+    LONG width, height;
+
+    GetAttr (DTA_Domain, o, (ULONG *) & domain);
+
+    width = (ULONG) MIN (WIDTH, domain->Width);
+    height = (ULONG) MIN (HEIGHT, domain->Height);
+
+    /* Get a pointer to the rastport */
+    if (rp = msg->gpr_RPort)
+    {
+	if ((msg->MethodID == GM_RENDER) && (msg->gpr_Redraw == GREDRAW_REDRAW) &&
+	    (si->si_OTopVert != si->si_TopVert) && (si->si_OTopVert != si->si_TopVert))
+	{
+	    EraseRect (rp,
+		       domain->Left, domain->Top,
+		       domain->Left + domain->Width - 1,
+		       domain->Top + domain->Height - 1);
+	}
+
+	BltBitMapRastPort (&lod->lod_BMap, (ULONG) si->si_TopHoriz, (ULONG) si->si_TopVert,
+			   rp, domain->Left, domain->Top, width, height, 0xC0);
+
+	si->si_OTopVert  = si->si_TopVert;
+	si->si_OTopHoriz = si->si_TopHoriz;
+    }
+
+    return (1L);
+}
+
+/*****************************************************************************/
+
+private UBYTE audioChannels[] = {1, 2, 4, 8};
+
+/*****************************************************************************/
+
+/* This inits the handler for playing double-buffered continuous sounds */
+private ULONG InitObjectHandler (struct ClassBase * cb, struct localData * lod)
+{
+    register WORD i;
+
+    if ((lod->lod_MP = CreateMsgPort ()) == NULL)
+	return ERROR_NO_FREE_STORE;
+
+    for (i = 0; i < MAX_IOS; i++)
+	if (!(lod->lod_IOC[i] = (struct IOAudio *) CreateIORequest (lod->lod_MP, sizeof (struct IOAudio))))
+	    return ERROR_NO_FREE_STORE;
+
+    if (!(lod->lod_IOVolume = (struct IOAudio *) CreateIORequest (lod->lod_MP, sizeof (struct IOAudio))))
+	return ERROR_NO_FREE_STORE;
+
+    lod->lod_IO = lod->lod_IOC[0];
+
+    /* Are we going to be doing a double-buffered continuous sound (like for a movie) */
+    if (lod->lod_Flags & LODF_CONTINUOUS)
+    {
+	/* Initialize the rest of the Audio structure */
+	lod->lod_IO->ioa_Request.io_Command = ADCMD_ALLOCATE;
+	lod->lod_IO->ioa_Request.io_Flags   = ADIOF_NOWAIT;
+	lod->lod_IOC[0]->ioa_Data   = audioChannels;
+	lod->lod_IOC[0]->ioa_Length = sizeof (audioChannels);
+
+	/* Open the audio device */
+	if (OpenDevice ("audio.device", 0, lod->lod_IOC[0], 0) != 0)
+	    return ERROR_NO_FREE_STORE;
+
+	/* Copy the IO request */
+	for (i = 1; i < MAX_IOS; i++)
+	    CopyMem (lod->lod_IOC[0], lod->lod_IOC[i], sizeof (struct IOAudio));
+
+	CopyMem (lod->lod_IOC[0], lod->lod_IOVolume, sizeof (struct IOAudio));
+    }
+
+    return 0;
+}
+
+/*****************************************************************************/
+
+private void PlayAudio (struct ClassBase * cb, struct localData * lod, UBYTE * buffer)
+{
+    lod->lod_IO->ioa_Request.io_Command = CMD_WRITE;
+    lod->lod_IO->ioa_Request.io_Flags = ADIOF_PERVOL;
+    lod->lod_IO->ioa_Data = buffer;
+    lod->lod_IO->ioa_Length = lod->lod_BufferLen;
+    lod->lod_IO->ioa_Period = lod->lod_Period;
+    lod->lod_IO->ioa_Volume = lod->lod_Volume;
+    lod->lod_IO->ioa_Cycles = lod->lod_Cycles;
+    BeginIO (lod->lod_IO);
+}
+
+/*****************************************************************************/
+
+private void WaitForEndAndCleanup (struct ClassBase *cb, struct localData *lod, ULONG sigs, BOOL abort, BOOL sig)
+{
+    /* Make sure the device is open */
+    if (lod->lod_IOC[0]->ioa_Request.io_Device)
+    {
+	/* Are we supposed to abort */
+	if (abort)
+	{
+#if 1
+	    lod->lod_IOVolume->ioa_Request.io_Command = CMD_FLUSH;
+	    lod->lod_IOVolume->ioa_Request.io_Flags   = IOF_QUICK;
+	    BeginIO ((struct IORequest *) lod->lod_IOVolume);
+#else
+	    /* Abort any existing sounds */
+	    if (lod->lod_Flags & LODF_PLAYED2)
+		AbortIO (lod->lod_IOC[1]);
+
+	    if (lod->lod_Flags & LODF_PLAYED1)
+		AbortIO (lod->lod_IOC[0]);
+#endif
+	}
+
+	/* Wait for completion */
+	if (lod->lod_Flags & LODF_PLAYED1)
+	    WaitIO (lod->lod_IOC[0]);
+	if (lod->lod_Flags & LODF_PLAYED2)
+	    WaitIO (lod->lod_IOC[1]);
+
+	/* Close the device */
+	CloseDevice (lod->lod_IOC[0]);
+	lod->lod_IOC[0]->ioa_Request.io_Device = NULL;
+
+	/* Clear the signals */
+	if (sigs)
+	    SetSignal (0L, sigs);
+    }
+
+    /* Free the extra chip buffers */
+    FreeVec (lod->lod_ChipBuff[0]);
+    FreeVec (lod->lod_ChipBuff[1]);
+    lod->lod_CBuffer = lod->lod_ChipBuff[0] = lod->lod_ChipBuff[1] = NULL;
+
+    /* Signal the parent that a sound has ended */
+    if (sig && (lod->lod_Flags & LODF_PLAYING) && lod->lod_SignalTask)
+	Signal (lod->lod_SignalTask, lod->lod_SignalBit);
+
+    /* Show that we aren't playing anymore */
+    lod->lod_Flags &= ~(LODF_PLAYING | LODF_PLAYED1 | LODF_PLAYED2);
+}
+
+/*****************************************************************************/
+
+private void ShutdownObjectHandler (struct ClassBase * cb, struct localData * lod)
+{
+    register WORD i;
+
+    if (lod->lod_IO)
+	WaitForEndAndCleanup (cb, lod, NULL, TRUE, TRUE);
+
+    DeleteIORequest ((struct IORequest *) lod->lod_IOVolume);
+    for (i = 0; i < MAX_IOS; i++)
+	DeleteIORequest ((struct IORequest *) lod->lod_IOC[i]);
+
+    DeleteMsgPort (lod->lod_MP);
+}
+
+/*****************************************************************************/
+
+#undef	SysBase
+
+/*****************************************************************************/
+
+private void ObjectHandler (void)
+{
+    struct ExecBase *SysBase = (*((struct ExecBase **) 4));
+    register struct localData *lod;
+    struct StartupMsg *sm;
+    struct ClassBase *cb;
+    struct IOAudio *msg;
+    struct Process *pr;
+    ULONG ssize;
+    ULONG sigs;
+    ULONG psig;
+    ULONG sigr;
+    Class *cl;
+    Object *o;
+
+    /* Double buffering */
+    struct IOAudio *iod = NULL;
+    BYTE *samptr = NULL;
+    ULONG dBuffLen = 0;
+    LONG size = 0;
+    LONG len;
+
+    /* Find out who we are */
+    pr = (struct Process *) FindTask (NULL);
+
+    /* Get the startup message */
+    WaitPort (&pr->pr_MsgPort);
+    sm = (struct StartupMsg *) GetMsg (&pr->pr_MsgPort);
+
+    /* Pull all the information from the startup message */
+    cb  = sm->sm_CB;
+    cl  = sm->sm_Class;
+    o   = sm->sm_Object;
+    lod = INST_DATA (cl, o);
+
+    /* Show that we are running (so that OM_DISPOSE doesn't fall out from under us) */
+    lod->lod_Flags |= LODF_RUNNING;
+
+    /* Initialize the object handler */
+    sm->sm_Return = InitObjectHandler (cb, lod);
+
+    /* Reply to the message */
+    ReplyMsg ((struct Message *) sm);
+
+    /* Are we supposed to run? */
+    if (sm->sm_Return == 0)
+    {
+	psig = 1L << lod->lod_MP->mp_SigBit;
+
+	/* All the signals that we're waiting on */
+	sigs = psig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E | SIGBREAKF_CTRL_F;
+
+	/* Keep going until we are told to stop */
+	while (lod->lod_Going)
+	{
+	    if (size > 0)
+	    {
+		len = (size > dBuffLen) ? dBuffLen : size;
+		lod->lod_IO->ioa_Request.io_Command = CMD_WRITE;
+		lod->lod_IO->ioa_Request.io_Flags = ADIOF_PERVOL;
+
+		if (lod->lod_Flags & LODF_NOTCHIP)
+		{
+		    CopyMem (samptr, lod->lod_CBuffer, len);
+		    lod->lod_IO->ioa_Data = lod->lod_CBuffer;
+		}
+		else
+		    lod->lod_IO->ioa_Data = samptr;
+		lod->lod_IO->ioa_Length = len;
+		lod->lod_IO->ioa_Period = lod->lod_Period;
+		lod->lod_IO->ioa_Volume = lod->lod_Volume;
+		lod->lod_IO->ioa_Cycles = 1;
+		iod = lod->lod_IO;
+		BeginIO (lod->lod_IO);
+		if (!(lod->lod_IO->ioa_Request.io_Flags & IOF_QUICK))
+		{
+		    if (lod->lod_IO == lod->lod_IOC[0])
+			lod->lod_Flags |= LODF_PLAYED1;
+		    else
+			lod->lod_Flags |= LODF_PLAYED2;
+		}
+
+		size = (size > dBuffLen) ? size - dBuffLen : 0;
+		samptr += dBuffLen;
+	    }
+
+	    /* Wait for something to happen */
+	    sigr = Wait (sigs);
+
+	    /* Sample ended */
+	    if (sigr & psig)
+	    {
+		if (lod->lod_Flags & LODF_CONTINUOUS)
+		{
+		    if (msg = (struct IOAudio *) GetMsg (lod->lod_MP))
+		    {
+			if (msg == lod->lod_IOC[0])
+			{
+			    lod->lod_Flags &= ~LODF_PLAYED1;
+			    lod->lod_Buffer = lod->lod_Buffer1;
+			    lod->lod_IO = lod->lod_IOC[0];
+			}
+			else if (msg == lod->lod_IOC[1])
+			{
+			    lod->lod_Flags &= ~LODF_PLAYED2;
+			    lod->lod_Buffer = lod->lod_Buffer2;
+			    lod->lod_IO = lod->lod_IOC[1];
+			}
+
+			if (lod->lod_Buffer3 && lod->lod_Buffer)
+			{
+			    if (lod->lod_Flags & LODF_NEWSAMPLE)
+			    {
+				lod->lod_Flags &= ~LODF_NEWSAMPLE;
+				CopyMem (lod->lod_Buffer3, lod->lod_Buffer, lod->lod_BufferLen);
+			    }
+			    else
+			    {
+				memset (lod->lod_Buffer, 0, lod->lod_BufferLen);
+			    }
+			    PlayAudio (cb, lod, lod->lod_Buffer);
+			}
+			else if ((lod->lod_Sample == NULL) && (lod->lod_Buffer3 == NULL))
+			    lod->lod_Flags &= ~LODF_PLAYING;
+		    }
+		}
+		else if (iod)
+		{
+		    if (msg = (struct IOAudio *) GetMsg (lod->lod_MP))
+		    {
+			if (msg == lod->lod_IOC[0])
+			{
+			    lod->lod_Flags &= ~LODF_PLAYED1;
+			    lod->lod_CBuffer = lod->lod_ChipBuff[0];
+			    lod->lod_IO = lod->lod_IOC[0];
+			}
+			else if (msg == lod->lod_IOC[1])
+			{
+			    lod->lod_Flags &= ~LODF_PLAYED2;
+			    lod->lod_CBuffer = lod->lod_ChipBuff[1];
+			    lod->lod_IO = lod->lod_IOC[1];
+			}
+		    }
+
+		    if ((size == 0) && (lod->lod_IO == iod))
+		    {
+			/* Perform cleanup of sound */
+			WaitForEndAndCleanup (cb, lod, sigs, TRUE, TRUE);
+			size = 0;
+		    }
+		}
+		else if (lod->lod_IOC[0]->ioa_Request.io_Device)
+		{
+		    /* Perform cleanup of sound */
+		    WaitForEndAndCleanup (cb, lod, sigs, TRUE, TRUE);
+		    size = 0;
+		}
+	    }
+
+	    /* Time to dispose of the object */
+	    if (sigr & SIGBREAKF_CTRL_C)
+	    {
+		lod->lod_Going = FALSE;
+		size = 0;
+	    }
+
+	    /* Start playing sample */
+	    if (sigr & SIGBREAKF_CTRL_D)
+	    {
+		/* Are we doing a continuous sound? */
+		if (lod->lod_Flags & LODF_CONTINUOUS)
+		{
+		    if (!(lod->lod_Flags & LODF_PLAYING))
+		    {
+			/* Start playing */
+			lod->lod_IO = lod->lod_IOC[0];
+			PlayAudio (cb, lod, lod->lod_Buffer1);
+
+			lod->lod_IO = lod->lod_IOC[1];
+			PlayAudio (cb, lod, lod->lod_Buffer2);
+
+			/* Set up the swap pointers */
+			lod->lod_IO = lod->lod_IOC[0];
+			lod->lod_Buffer = lod->lod_Buffer1;
+
+			/* Show that we are playing */
+			lod->lod_Flags |= LODF_PLAYING | LODF_PLAYED1 | LODF_PLAYED2;
+		    }
+		}
+		else
+		{
+		    /* Abort any playing sound */
+		    WaitForEndAndCleanup (cb, lod, sigs, TRUE, FALSE);
+		    size = 0;
+
+		    /* Reset this pointer */
+		    lod->lod_IO = lod->lod_IOC[0];
+
+		    /* Clear the chip flag */
+		    lod->lod_Flags &= ~LODF_NOTCHIP;
+
+		    /* Open the audio device */
+		    lod->lod_IOC[0]->ioa_Request.io_Command = ADCMD_ALLOCATE;
+		    lod->lod_IOC[0]->ioa_Request.io_Flags = ADIOF_NOWAIT;
+		    lod->lod_IOC[0]->ioa_Data   = audioChannels;
+		    lod->lod_IOC[0]->ioa_Length = sizeof (audioChannels);
+		    if (OpenDevice ("audio.device", 0, lod->lod_IOC[0], 0) == 0)
+		    {
+			lod->lod_IOC[0]->ioa_Request.io_Command = CMD_WRITE;
+			lod->lod_IOC[0]->ioa_Request.io_Flags = ADIOF_PERVOL;
+			lod->lod_IOC[0]->ioa_Cycles = lod->lod_Cycles;
+			lod->lod_IOC[0]->ioa_Length = lod->lod_BufferLen;
+			lod->lod_IOC[0]->ioa_Data   = lod->lod_Sample;
+			lod->lod_IOC[0]->ioa_Period = lod->lod_Period;
+			lod->lod_IOC[0]->ioa_Volume = lod->lod_Volume;
+
+			CopyMem (lod->lod_IOC[0], lod->lod_IOVolume, sizeof (struct IOAudio));
+			CopyMem (lod->lod_IOC[0], lod->lod_IOC[1], sizeof (struct IOAudio));
+
+			/* If we weren't in chip, then let's put it there */
+			dBuffLen = MAXSAMPLE;
+			if (!(TypeOfMem (lod->lod_Sample) & MEMF_CHIP))
+			{
+			    /* New double buffer size */
+			    dBuffLen = CHIPSPLIT;
+
+			    /* Show that the original wasn't in chip memory */
+			    lod->lod_Flags |= LODF_NOTCHIP;
+
+			    /* Get the size of the first buffer */
+			    ssize = (lod->lod_SampleLength > dBuffLen) ? dBuffLen : lod->lod_SampleLength;
+			    if (lod->lod_ChipBuff[0] = AllocVec (ssize, MEMF_CHIP))
+			    {
+				CopyMem (lod->lod_Sample, lod->lod_ChipBuff[0], ssize);
+				lod->lod_IOC[0]->ioa_Data = lod->lod_ChipBuff[0];
+			    }
+			}
+
+			if (lod->lod_SampleLength <= dBuffLen)
+			{
+			    iod = NULL;
+			    BeginIO (lod->lod_IOC[0]);
+			    if (!(lod->lod_IOC[0]->ioa_Request.io_Flags & IOF_QUICK))
+				lod->lod_Flags |= LODF_PLAYED1;
+			}
+			else
+			{
+			    /* See if we need to prepare the second buffer */
+			    if (lod->lod_Flags & LODF_NOTCHIP)
+			    {
+				ssize = lod->lod_SampleLength - dBuffLen;
+				if (ssize > dBuffLen)
+				    ssize = dBuffLen;
+
+				if (lod->lod_ChipBuff[1] = AllocVec (ssize, MEMF_CHIP))
+				{
+				    lod->lod_CBuffer = lod->lod_ChipBuff[1];
+				}
+				else
+				{
+				    lod->lod_IOC[0]->ioa_Data = lod->lod_Sample;
+				    FreeVec (lod->lod_ChipBuff[0]);
+				    lod->lod_ChipBuff[0] = NULL;
+				}
+			    }
+
+			    iod = lod->lod_IOC[0];
+			    lod->lod_IOC[0]->ioa_Length = dBuffLen;
+			    lod->lod_IOC[0]->ioa_Cycles = 1;
+			    BeginIO (lod->lod_IOC[0]);
+			    if (!(lod->lod_IOC[0]->ioa_Request.io_Flags & IOF_QUICK))
+				lod->lod_Flags |= LODF_PLAYED1;
+
+			    samptr = lod->lod_Sample + dBuffLen;
+			    size = (LONG)(lod->lod_SampleLength - dBuffLen);
+			    lod->lod_IO = lod->lod_IOC[1];
+			}
+
+			/* Show that we are playing */
+			lod->lod_Flags |= LODF_PLAYING;
+		    }
+		}
+	    }
+
+	    /* Time to remove the object */
+	    if (sigr & SIGBREAKF_CTRL_E)
+		lod->lod_Going = FALSE;
+
+	    /* Change in period, volume or state */
+	    if (sigr & SIGBREAKF_CTRL_F)
+	    {
+		/* Are we doing a continuous sound? */
+		if (lod->lod_Flags & LODF_CONTINUOUS)
+		{
+		}
+		/* If we have a sample going, the update it */
+		else if (lod->lod_IOC[0]->ioa_Request.io_Device)
+		{
+		    /* They want to change the volume or period */
+		    lod->lod_IOVolume->ioa_Request.io_Command = ADCMD_PERVOL;
+		    lod->lod_IOVolume->ioa_Request.io_Flags   = ADIOF_PERVOL | ADIOF_SYNCCYCLE;
+		    lod->lod_IOVolume->ioa_Volume = lod->lod_Volume;
+		    lod->lod_IOVolume->ioa_Period = lod->lod_Period;
+		    lod->lod_IOVolume->ioa_Cycles = lod->lod_Cycles;
+		    lod->lod_IOVolume->ioa_Length = lod->lod_BufferLen;
+		    lod->lod_IOVolume->ioa_Data = lod->lod_Sample;
+		    DoIO (lod->lod_IOVolume);
+		}
+	    }
+	}
+    }
+
+    /* Time to shutdown the handler */
+    ShutdownObjectHandler (cb, lod);
+
+    /* Exit now */
+    Forbid ();
+
+    /* Show that we aren't running anymore */
+    lod->lod_Flags &= ~LODF_RUNNING;
+}
+
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+
+#define SysBase			cb->cb_SysBase
+
+/*****************************************************************************/
+
+private ULONG ASM Dispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+{
+    register struct ClassBase *cb = (struct ClassBase *) cl->cl_UserData;
+    register struct localData *lod = INST_DATA (cl, o);
+    ULONG retval;
+
+    switch (msg->MethodID)
+    {
+	case OM_NEW:
+	    /* Create the new object */
+	    if (retval = DoSuperMethodA (cl, o, msg))
+	    {
+		ULONG i, planes, data;
+
+		/* Set reasonable defaults */
+		lod = INST_DATA (cl, (Object *) retval);
+		lod->lod_Cycles = 1;
+		lod->lod_Volume = 64;
+		lod->lod_Period = 394;
+
+		/* Initialize the default imagry */
+		InitBitMap (&lod->lod_BMap, DEPTH, WIDTH, HEIGHT);
+		planes = RASSIZE (WIDTH, HEIGHT);
+		data = (ULONG) ImageData;
+		for (i = 0; i < DEPTH; i++)
+		    lod->lod_BMap.Planes[i] = (PLANEPTR) (data + i * planes);
+
+		/* Set the size */
+		setdtattrs (cb, (Object *) retval,
+			    DTA_NominalHoriz, WIDTH,
+			    DTA_NominalVert, HEIGHT,
+			    TAG_DONE);
+
+		/* Set the attributes */
+		setAttrsMethod (cb, cl, (Object *) retval, (struct opSet *) msg);
+
+		/* Create a process to monitor this object */
+		if (lod->lod_Process = createnewproc (cb,
+						      NP_Output, Output (),
+						      NP_CloseOutput, FALSE,
+						      NP_Input, Input (),
+						      NP_CloseInput, FALSE,
+						      NP_Name, PROC_NAME,
+						      NP_StackSize, 4096L,
+						      NP_Entry, ObjectHandler,
+						      NP_Priority, 0L,
+						      TAG_DONE))
+		{
+		    /* Initialize the message */
+		    lod->lod_Message.sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+		    lod->lod_Message.sm_Message.mn_Length       = sizeof (struct StartupMsg);
+		    lod->lod_Message.sm_Message.mn_ReplyPort    = &((struct Process *)FindTask(NULL))->pr_MsgPort;
+		    lod->lod_Message.sm_CB     = cb;
+		    lod->lod_Message.sm_Class  = cl;
+		    lod->lod_Message.sm_Object = (Object *) retval;
+
+		    /* Show that we are operational */
+		    lod->lod_Going = TRUE;
+
+		    /* Send the information to the process */
+		    PutMsg (&(lod->lod_Process->pr_MsgPort), &lod->lod_Message);
+
+		    /* Wait until the new process starts */
+		    WaitPort (lod->lod_Message.sm_Message.mn_ReplyPort);
+
+		    /* Get the reply message */
+		    GetMsg (lod->lod_Message.sm_Message.mn_ReplyPort);
+
+		    /* No error return value */
+		    if (lod->lod_Message.sm_Return == 0)
+			return (retval);
+
+		    /* Set the error return value */
+		    SetIoErr (lod->lod_Message.sm_Return);
+		}
+
+		/* Force disposal */
+		CoerceMethod (cl, (Object *) retval, OM_DISPOSE);
+	    }
+	    return (NULL);
+	    break;
+
+	case OM_GET:
+	    return getAttrMethod (cl, o, (struct opGet *) msg);
+
+	case DTM_COPY:
+	    return copyMethod (cb, cl, o, (struct dtGeneral *) msg);
+
+	case DTM_WRITE:
+	    return writeMethod (cb, cl, o, (struct dtWrite *) msg);
+
+	case OM_UPDATE:
+	case OM_SET:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    retval += setAttrsMethod (cb, cl, o, (struct opSet *) msg);
+	    if (retval)
+	    {
+		struct RastPort *rp;
+		struct gpRender gpr;
+
+		/* Get a pointer to the rastport */
+		if (rp = ObtainGIRPort (((struct opSet *) msg)->ops_GInfo))
+		{
+		    /* Force a redraw */
+		    gpr.MethodID   = GM_RENDER;
+		    gpr.gpr_GInfo  = ((struct opSet *) msg)->ops_GInfo;
+		    gpr.gpr_RPort  = rp;
+		    gpr.gpr_Redraw = GREDRAW_UPDATE;
+		    DoMethodA (o, &gpr);
+
+		    /* Release the temporary rastport */
+		    ReleaseGIRPort (rp);
+		}
+
+		/* Clear the return value */
+		retval = 0L;
+	    }
+	    break;
+
+	case GM_LAYOUT:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    {
+		struct IBox *domain;
+		STRPTR title;
+
+		GetAttr (DTA_Domain, o, (ULONG *) & domain);
+		GetAttr (DTA_ObjName, o, (ULONG *) & title);
+
+		notifyAttrChanges (cb, o, ((struct gpLayout *) msg)->gpl_GInfo, NULL,
+				   GA_ID, G (o)->GadgetID,
+				   DTA_Busy, FALSE,
+				   DTA_Title, title,
+				   DTA_TotalHoriz, WIDTH,
+				   DTA_HorizUnit, 1L,
+				   DTA_VisibleHoriz, MIN (WIDTH, domain->Width),
+				   DTA_TotalVert, HEIGHT,
+				   DTA_VertUnit, 1L,
+				   DTA_VisibleVert, MIN (HEIGHT, domain->Height),
+				   DTA_Sync, TRUE,
+				   TAG_DONE);
+	    }
+	    break;
+
+	case GM_HITTEST:
+	    return (GMR_GADGETHIT);
+	    break;
+
+	case GM_GOACTIVE:
+	case GM_HANDLEINPUT:
+	    {
+		register struct gpInput *gpi = (struct gpInput *) msg;
+		register struct InputEvent *ie = gpi->gpi_IEvent;
+
+		if (ie->ie_Code == SELECTUP)
+		{
+		    if (lod->lod_Sample)
+			Signal (lod->lod_Process, SIGBREAKF_CTRL_D);
+		    retval = (GMR_NOREUSE | GMR_VERIFY);
+		}
+		else if (ie->ie_Code == MENUDOWN)
+		{
+		    retval = GMR_NOREUSE;
+		}
+		else
+		{
+		    retval = GMR_MEACTIVE;
+		}
+	    }
+	    break;
+
+	case GM_RENDER:
+	    return renderMethod (cb, cl, o, (struct gpRender *) msg);
+
+	case DTM_TRIGGER:
+	    return triggerMethod (cb, cl, o, (struct dtTrigger *) msg);
+
+	case OM_DISPOSE:
+	    /* Do we have a control process running */
+	    if ((lod->lod_Flags & LODF_RUNNING) && lod->lod_Process)
+	    {
+		/* Tell the control process to go away */
+		Signal (lod->lod_Process, SIGBREAKF_CTRL_C);
+
+		/* Wait until they go away */
+		while (lod->lod_Flags & LODF_RUNNING)
+		    Delay (2);
+	    }
+
+	    if (!(lod->lod_Flags & LODF_CONTINUOUS))
+		/* THIS WAS A FUCKING STUPID IDEA!!! */
+		FreeVec (lod->lod_Sample);
+
+	    FreeVec (lod->lod_Buffer1);
+	    lod->lod_Buffer1 = NULL;
+	    FreeVec (lod->lod_Buffer2);
+	    lod->lod_Buffer2 = NULL;
+
+	    /* Let the superclass handle everything else */
+	default:
+	    return (ULONG) DoSuperMethodA (cl, o, msg);
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+Class *initClass (struct ClassBase * cb)
+{
+    register Class *cl;
+
+    if (cl = MakeClass (SOUNDDTCLASS, DATATYPESCLASS, NULL, sizeof (struct localData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = (ULONG (*)()) Dispatch;
+	cl->cl_UserData = (ULONG) cb;
+	AddClass (cl);
+    }
+
+    return (cl);
+}
+@
+
+
+39.10
+log
+@handles initialization properly now
+@
+text
+@d9 1
+a9 1
+#define	DB(x)	;
+d90 1
+a90 1
+UWORD chip ImageData[] =
+d126 1
+a126 1
+ULONG setdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+d133 1
+a133 1
+ULONG notifyAttrChanges (struct ClassBase * cb, Object * o, VOID * ginfo, ULONG flags, ULONG tag1,...)
+d140 1
+a140 1
+struct Process *createnewproc (struct ClassBase * cb, Tag tag1,...)
+d147 1
+a147 228
+Class *initClass (struct ClassBase * cb)
+{
+    Class *cl;
+
+    if (cl = MakeClass (SOUNDDTCLASS, DATATYPESCLASS, NULL, sizeof (struct localData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = (ULONG (*)()) Dispatch;
+	cl->cl_UserData = (ULONG) cb;
+	AddClass (cl);
+    }
+
+    return (cl);
+}
+
+/*****************************************************************************/
+
+ULONG ASM Dispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+{
+    struct ClassBase *cb = (struct ClassBase *) cl->cl_UserData;
+    struct localData *lod = INST_DATA (cl, o);
+    ULONG retval;
+
+    switch (msg->MethodID)
+    {
+	case OM_NEW:
+	    /* Create the new object */
+	    if (retval = DoSuperMethodA (cl, o, msg))
+	    {
+		ULONG i, planes, data;
+
+		/* Set reasonable defaults */
+		lod = INST_DATA (cl, (Object *) retval);
+		lod->lod_Cycles = 1;
+		lod->lod_Volume = 64;
+		lod->lod_Period = 394;
+
+		/* Initialize the default imagry */
+		InitBitMap (&lod->lod_BMap, DEPTH, WIDTH, HEIGHT);
+		planes = RASSIZE (WIDTH, HEIGHT);
+		data = (ULONG) ImageData;
+		for (i = 0; i < DEPTH; i++)
+		    lod->lod_BMap.Planes[i] = (PLANEPTR) (data + i * planes);
+
+		/* Set the size */
+		setdtattrs (cb, (Object *) retval,
+			    DTA_NominalHoriz, WIDTH,
+			    DTA_NominalVert, HEIGHT,
+			    TAG_DONE);
+
+		/* Set the attributes */
+		setAttrsMethod (cb, cl, (Object *) retval, (struct opSet *) msg);
+
+		/* Create a process to monitor this object */
+		if (lod->lod_Process = createnewproc (cb,
+						      NP_Output, Output (),
+						      NP_CloseOutput, FALSE,
+						      NP_Input, Input (),
+						      NP_CloseInput, FALSE,
+						      NP_Name, PROC_NAME,
+						      NP_StackSize, 4096L,
+						      NP_Entry, ObjectHandler,
+						      NP_Priority, 0L,
+						      TAG_DONE))
+		{
+		    /* Initialize the message */
+		    lod->lod_Message.sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+		    lod->lod_Message.sm_Message.mn_Length       = sizeof (struct StartupMsg);
+		    lod->lod_Message.sm_Message.mn_ReplyPort    = &((struct Process *)FindTask(NULL))->pr_MsgPort;
+		    lod->lod_Message.sm_CB     = cb;
+		    lod->lod_Message.sm_Class  = cl;
+		    lod->lod_Message.sm_Object = (Object *) retval;
+
+		    /* Show that we are operational */
+		    lod->lod_Going = TRUE;
+
+		    /* Send the information to the process */
+		    PutMsg (&(lod->lod_Process->pr_MsgPort), &lod->lod_Message);
+
+		    /* Wait until the new process starts */
+		    WaitPort (lod->lod_Message.sm_Message.mn_ReplyPort);
+
+		    /* Get the reply message */
+		    GetMsg (lod->lod_Message.sm_Message.mn_ReplyPort);
+
+		    /* No error return value */
+		    if (lod->lod_Message.sm_Return == 0)
+			return (retval);
+
+		    /* Set the error return value */
+		    SetIoErr (lod->lod_Message.sm_Return);
+		}
+
+		/* Force disposal */
+		CoerceMethod (cl, (Object *) retval, OM_DISPOSE);
+	    }
+	    return (NULL);
+	    break;
+
+	case OM_GET:
+	    retval = getAttrMethod (cb, cl, o, (struct opGet *) msg);
+	    break;
+
+	case DTM_COPY:
+	    retval = copyMethod (cb, cl, o, (struct dtGeneral *) msg);
+	    break;
+
+	case DTM_WRITE:
+	    retval = writeMethod (cb, cl, o, (struct dtWrite *) msg);
+	    break;
+
+	case OM_UPDATE:
+	case OM_SET:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    retval += setAttrsMethod (cb, cl, o, (struct opSet *) msg);
+	    if (retval)
+	    {
+		struct RastPort *rp;
+		struct gpRender gpr;
+
+		/* Get a pointer to the rastport */
+		if (rp = ObtainGIRPort (((struct opSet *) msg)->ops_GInfo))
+		{
+		    /* Force a redraw */
+		    gpr.MethodID   = GM_RENDER;
+		    gpr.gpr_GInfo  = ((struct opSet *) msg)->ops_GInfo;
+		    gpr.gpr_RPort  = rp;
+		    gpr.gpr_Redraw = GREDRAW_UPDATE;
+		    DoMethodA (o, &gpr);
+
+		    /* Release the temporary rastport */
+		    ReleaseGIRPort (rp);
+		}
+
+		/* Clear the return value */
+		retval = 0L;
+	    }
+	    break;
+
+	case GM_LAYOUT:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    {
+		struct IBox *domain;
+		STRPTR title;
+
+		GetAttr (DTA_Domain, o, (ULONG *) & domain);
+		GetAttr (DTA_ObjName, o, (ULONG *) & title);
+
+		notifyAttrChanges (cb, o, ((struct gpLayout *) msg)->gpl_GInfo, NULL,
+				   GA_ID, G (o)->GadgetID,
+				   DTA_Busy, FALSE,
+				   DTA_Title, title,
+				   DTA_TotalHoriz, WIDTH,
+				   DTA_HorizUnit, 1L,
+				   DTA_VisibleHoriz, MIN (WIDTH, domain->Width),
+				   DTA_TotalVert, HEIGHT,
+				   DTA_VertUnit, 1L,
+				   DTA_VisibleVert, MIN (HEIGHT, domain->Height),
+				   DTA_Sync, TRUE,
+				   TAG_DONE);
+	    }
+	    break;
+
+	case GM_HITTEST:
+	    retval = GMR_GADGETHIT;
+	    break;
+
+	case GM_GOACTIVE:
+	case GM_HANDLEINPUT:
+	    {
+		struct gpInput *gpi = (struct gpInput *) msg;
+		struct InputEvent *ie = gpi->gpi_IEvent;
+
+		if (ie->ie_Code == SELECTUP)
+		{
+		    if (lod->lod_Sample)
+			Signal (lod->lod_Process, SIGBREAKF_CTRL_D);
+		    retval = (GMR_NOREUSE | GMR_VERIFY);
+		}
+		else if (ie->ie_Code == MENUDOWN)
+		{
+		    retval = GMR_NOREUSE;
+		}
+		else
+		{
+		    retval = GMR_MEACTIVE;
+		}
+	    }
+	    break;
+
+	case GM_RENDER:
+	    retval = renderMethod (cb, cl, o, (struct gpRender *) msg);
+	    break;
+
+	case DTM_TRIGGER:
+	    retval = triggerMethod (cb, cl, o, (struct dtTrigger *) msg);
+	    break;
+
+	case OM_DISPOSE:
+	    /* Do we have a control process running */
+	    if ((lod->lod_Flags & LODF_RUNNING) && lod->lod_Process)
+	    {
+		/* Tell the control process to go away */
+		Signal (lod->lod_Process, SIGBREAKF_CTRL_C);
+
+		/* Wait until they go away */
+		while (lod->lod_Flags & LODF_RUNNING)
+		    Delay (2);
+	    }
+
+	    if (!(lod->lod_Flags & LODF_CONTINUOUS))
+		/* THIS WAS A FUCKING STUPID IDEA!!! */
+		FreeVec (lod->lod_Sample);
+
+	    FreeVec (lod->lod_Buffer1);
+	    FreeVec (lod->lod_Buffer2);
+
+	    /* Let the superclass handle everything else */
+	default:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    break;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+ULONG triggerMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtTrigger * dtt)
+d149 2
+a150 2
+    struct localData *lod = INST_DATA (cl, o);
+    ULONG retval = 0;
+d168 1
+a168 1
+static struct TagItem bools[] =
+d177 1
+a177 1
+ULONG setAttrsMethod (struct ClassBase * cb, Class * cl, Object * o, struct opSet * msg)
+d179 4
+a182 1
+    struct localData *lod = INST_DATA (cl, o);
+a186 1
+    struct TagItem *tag;
+a187 1
+    ULONG tidata;
+d299 1
+a299 1
+ULONG getAttrMethod (struct ClassBase * cb, Class * cl, Object * o, struct opGet * msg)
+d301 1
+a301 1
+    struct localData *lod = INST_DATA (cl, o);
+d354 1
+a354 1
+BOOL WriteBody (struct ClassBase * cb, struct IFFHandle * iff, APTR sample, ULONG len)
+d365 1
+a365 1
+BOOL WriteVHDR (struct ClassBase * cb, struct IFFHandle * iff, struct VoiceHeader * vhdr)
+d367 1
+a367 1
+    ULONG msize = sizeof (struct VoiceHeader);
+d378 1
+a378 1
+BOOL WriteNAME (struct ClassBase * cb, struct IFFHandle * iff, STRPTR name)
+d380 1
+a380 1
+    ULONG msize;
+d395 1
+a395 1
+BOOL writeObject (struct ClassBase * cb, struct IFFHandle * iff, Object * o, struct localData * lod)
+d427 1
+a427 1
+ULONG copyMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtGeneral * msg)
+d429 2
+a430 2
+    struct localData *lod = INST_DATA (cl, o);
+    struct IFFHandle *iff;
+d452 1
+a452 1
+ULONG writeMethod (struct ClassBase * cb, Class * cl, Object * o, struct dtWrite * msg)
+d454 2
+a455 2
+    struct localData *lod = INST_DATA (cl, o);
+    struct IFFHandle *iff;
+d475 1
+a475 1
+ULONG renderMethod (struct ClassBase * cb, Class * cl, Object * o, struct gpRender * msg)
+d477 3
+a479 2
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    struct localData *lod = INST_DATA (cl, o);
+a480 1
+    struct RastPort *rp;
+d503 1
+a503 1
+	si->si_OTopVert = si->si_TopVert;
+d512 1
+a512 5
+#if 1
+static UBYTE audioChannels[] = {1, 2, 4, 8};
+#else
+static UBYTE audioChannels[] = {3, 5, 10, 12, 1, 2, 4, 8};
+#endif
+d517 1
+a517 1
+ULONG InitObjectHandler (struct ClassBase * cb, struct localData * lod)
+d519 1
+a519 1
+    WORD i;
+d521 1
+a521 4
+#if 1
+    lod->lod_MP = &((struct Process *)FindTask(NULL))->pr_MsgPort;
+#else
+    if (!(lod->lod_MP = CreateMsgPort ()))
+a522 1
+#endif
+d558 1
+a558 1
+void PlayAudio (struct ClassBase * cb, struct localData * lod, UBYTE * buffer)
+d572 1
+a572 1
+static void WaitForEndAndCleanup (struct ClassBase *cb, struct localData *lod, ULONG sigs, BOOL abort, BOOL sig)
+d580 5
+d588 1
+d591 1
+d624 1
+a624 1
+void ShutdownObjectHandler (struct ClassBase * cb, struct localData * lod)
+d626 1
+a626 1
+    WORD i;
+d634 1
+a634 1
+#if 0
+a635 1
+#endif
+d644 1
+a644 1
+void ObjectHandler (void)
+d647 1
+a647 1
+    struct localData *lod;
+a942 1
+		    lod->lod_IOVolume->ioa_Request.io_Flags = ADIOF_PERVOL | ADIOF_SYNCCYCLE;
+d944 1
+d964 229
+@
+
+
+39.9
+log
+@now correctly double-buffers the sound
+@
+text
+@d18 11
+d35 1
+a39 4
+#define	MAX_IOS		2
+
+/*****************************************************************************/
+
+d52 2
+a53 2
+    struct VoiceHeader	 lod_VHDR;
+    struct StartupMsg	 lod_Message;
+d55 1
+d57 2
+d64 4
+a67 1
+    ULONG		 lod_SampleLength;
+d81 6
+a86 2
+#define	LODF_PLAYED	(1L<<3)
+#define	LODF_NEWSAMPLE	(1L<<4)
+d153 1
+a153 1
+	cl->cl_Dispatcher.h_Entry = Dispatch;
+d213 4
+a216 3
+		    lod->lod_Message.sm_Message.mn_Length = sizeof (struct StartupMsg);
+		    lod->lod_Message.sm_CB = cb;
+		    lod->lod_Message.sm_Class = cl;
+d226 11
+a236 3
+		    while (!(lod->lod_Flags & LODF_RUNNING))
+			Delay (2);
+		    return (retval);
+a626 1
+#if 1
+a646 30
+#else
+    ULONG length = lod->lod_SampleLength;
+    APTR sample;
+
+    /* Get the title */
+    GetAttr (DTA_ObjName, o, (ULONG *) & title);
+
+    /* Copy the voice header */
+    vhdr = *(&lod->lod_VHDR);
+    vhdr.vh_Compression = CMP_NONE;
+
+    if (sample = AllocVec (length, MEMF_PUBLIC))
+    {
+	CopyMem (lod->lod_Sample, sample, length);
+	if (OpenIFF (iff, IFFF_WRITE) == 0)
+	{
+	    if (PushChunk (iff, ID_8SVX, ID_FORM, IFFSIZE_UNKNOWN) == 0)
+	    {
+		/* Write the title of the object */
+		WriteNAME (cb, iff, title);
+
+		if (WriteVHDR (cb, iff, &vhdr))
+		    success = WriteBody (cb, iff, sample, length);
+		PopChunk (iff);
+	    }
+	    CloseIFF (iff);
+	}
+	FreeVec (sample);
+    }
+#endif
+a743 3
+/* Max playable sample in one IO request is 128K */
+#define MAXSAMPLE 131072
+
+d747 1
+a747 1
+BOOL InitObjectHandler (struct ClassBase * cb, struct localData * lod)
+d751 3
+d755 2
+a756 1
+	return FALSE;
+d760 1
+a760 1
+	    return FALSE;
+d763 1
+a763 1
+	return FALSE;
+d778 1
+a778 1
+	    return FALSE;
+d787 1
+a787 1
+    return TRUE;
+d806 45
+d856 1
+a856 20
+    {
+	if (lod->lod_IO->ioa_Request.io_Device)
+	{
+	    if ((lod->lod_Flags & LODF_PLAYED) && (((struct IORequest *) lod->lod_IO)->io_Flags == 0))
+	    {
+		AbortIO (lod->lod_IO);
+		WaitIO (lod->lod_IO);
+	    }
+
+	    CloseDevice (lod->lod_IO);
+	    lod->lod_IO->ioa_Request.io_Device = NULL;
+	}
+
+	if (lod->lod_Flags & LODF_PLAYING)
+	{
+	    /* Signal the parent that a sound has ended */
+	    if (lod->lod_SignalTask)
+		Signal (lod->lod_SignalTask, lod->lod_SignalBit);
+	}
+    }
+a858 1
+
+d861 1
+a861 1
+
+d863 1
+d880 1
+d890 1
+d902 3
+a904 3
+    cb = sm->sm_CB;
+    cl = sm->sm_Class;
+    o = sm->sm_Object;
+d907 3
+d911 7
+a917 1
+    if (InitObjectHandler (cb, lod))
+a923 3
+	/* Show that we are running */
+	lod->lod_Flags |= LODF_RUNNING;
+
+d929 1
+a929 1
+		len = (size > MAXSAMPLE) ? MAXSAMPLE : size;
+d932 8
+a939 1
+		lod->lod_IO->ioa_Data   = samptr;
+d946 7
+d954 2
+a955 2
+		size = (size > MAXSAMPLE) ? size - MAXSAMPLE : 0;
+		samptr += MAXSAMPLE;
+d970 1
+d976 1
+d1003 3
+d1007 1
+d1009 3
+d1013 1
+d1018 3
+a1020 9
+			WaitIO (lod->lod_IOC[0]);
+			SetSignal (0L, sigs);
+			CloseDevice (lod->lod_IOC[0]);
+			lod->lod_IOC[0]->ioa_Request.io_Device = NULL;
+			lod->lod_Flags &= ~LODF_PLAYING;
+
+			/* Signal the parent that a sound has ended */
+			if (lod->lod_SignalTask)
+			    Signal (lod->lod_SignalTask, lod->lod_SignalBit);
+d1025 2
+a1026 5
+		    WaitIO (lod->lod_IOC[0]);
+		    SetSignal (0L, sigs);
+		    CloseDevice (lod->lod_IOC[0]);
+		    lod->lod_IOC[0]->ioa_Request.io_Device = NULL;
+		    lod->lod_Flags &= ~LODF_PLAYING;
+a1027 4
+
+		    /* Signal the parent that a sound has ended */
+		    if (lod->lod_SignalTask)
+			Signal (lod->lod_SignalTask, lod->lod_SignalBit);
+d1058 1
+a1058 1
+			lod->lod_Flags |= LODF_PLAYING | LODF_PLAYED;
+d1063 9
+a1071 10
+		    /* Abort the request */
+		    if (lod->lod_IOC[0]->ioa_Request.io_Device)
+		    {
+			AbortIO (lod->lod_IOC[0]);
+			WaitIO (lod->lod_IOC[0]);
+			SetSignal (0L, sigs);
+			CloseDevice (lod->lod_IOC[0]);
+			lod->lod_IOC[0]->ioa_Request.io_Device = NULL;
+			size = 0;
+		    }
+d1091 20
+a1110 1
+			if (lod->lod_SampleLength < MAXSAMPLE)
+d1114 2
+d1119 19
+d1139 1
+a1139 1
+			    lod->lod_IOC[0]->ioa_Length = MAXSAMPLE;
+d1142 2
+d1145 2
+a1146 2
+			    samptr = lod->lod_Sample + MAXSAMPLE;
+			    size = (LONG)(lod->lod_SampleLength - MAXSAMPLE);
+d1151 1
+a1151 1
+			lod->lod_Flags |= LODF_PLAYING | LODF_PLAYED;
+d1167 1
+d1182 1
+d1184 2
+a1185 3
+	/* Time to shutdown the handler */
+	ShutdownObjectHandler (cb, lod);
+    }
+@
+
+
+39.8
+log
+@doesn't open realtime anymore
+@
+text
+@d28 4
+d36 1
+a36 2
+    struct IOAudio	*lod_IO1;
+    struct IOAudio	*lod_IO2;
+a37 1
+    struct IOAudio	*lod_IOControl;
+a58 6
+    /* Instrument information */
+    BYTE		*lod_OSamps[12];
+    LONG		 lod_OSizes[12];
+    BYTE		*lod_RSamps[12];
+    LONG		 lod_RSizes[12];
+
+d742 3
+d746 1
+d756 2
+d761 3
+a763 5
+    if (!(lod->lod_IO1 = (struct IOAudio *) CreateIORequest (lod->lod_MP, sizeof (struct IOAudio))))
+	return FALSE;
+
+    if (!(lod->lod_IO2 = (struct IOAudio *) CreateIORequest (lod->lod_MP, sizeof (struct IOAudio))))
+	return FALSE;
+d768 1
+a768 4
+    if (!(lod->lod_IOControl = (struct IOAudio *) CreateIORequest (lod->lod_MP, sizeof (struct IOAudio))))
+	return FALSE;
+
+    lod->lod_IO = lod->lod_IO1;
+d776 2
+a777 2
+	lod->lod_IO1->ioa_Data   = audioChannels;
+	lod->lod_IO1->ioa_Length = sizeof (audioChannels);
+d780 1
+a780 1
+	if (OpenDevice ("audio.device", 0, lod->lod_IO1, 0) != 0)
+d784 4
+a787 3
+	CopyMem (lod->lod_IO1, lod->lod_IO2, sizeof (struct IOAudio));
+	CopyMem (lod->lod_IO1, lod->lod_IOVolume, sizeof (struct IOAudio));
+	CopyMem (lod->lod_IO1, lod->lod_IOControl, sizeof (struct IOAudio));
+d811 2
+a834 1
+    DeleteIORequest ((struct IORequest *) lod->lod_IOControl);
+d836 4
+a839 2
+    DeleteIORequest ((struct IORequest *) lod->lod_IO2);
+    DeleteIORequest ((struct IORequest *) lod->lod_IO1);
+a851 1
+    struct DTSpecialInfo *si;
+d864 1
+d867 1
+a880 1
+    si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+d898 1
+d902 1
+a902 1
+		lod->lod_IO->ioa_Length = (size > MAXSAMPLE) ? MAXSAMPLE : size;
+d906 1
+d923 1
+a923 1
+			if (msg == lod->lod_IO1)
+d926 1
+a926 1
+			    lod->lod_IO = lod->lod_IO1;
+d928 1
+a928 1
+			else if (msg == lod->lod_IO2)
+d931 1
+a931 1
+			    lod->lod_IO = lod->lod_IO2;
+d951 1
+a951 1
+		else if (size > 0)
+d955 4
+a958 4
+			if (msg == lod->lod_IO1)
+			    lod->lod_IO = lod->lod_IO1;
+			else if (msg == lod->lod_IO2)
+			    lod->lod_IO = lod->lod_IO2;
+d960 13
+d974 1
+a974 1
+		else if (lod->lod_IO1->ioa_Request.io_Device)
+d976 1
+a976 1
+		    WaitIO (lod->lod_IO1);
+d978 2
+a979 2
+		    CloseDevice (lod->lod_IO1);
+		    lod->lod_IO1->ioa_Request.io_Device = NULL;
+d1005 1
+a1005 1
+			lod->lod_IO = lod->lod_IO1;
+d1008 1
+a1008 1
+			lod->lod_IO = lod->lod_IO2;
+d1012 1
+a1012 1
+			lod->lod_IO = lod->lod_IO1;
+d1022 1
+a1022 1
+		    if (lod->lod_IO1->ioa_Request.io_Device)
+d1024 2
+a1025 2
+			AbortIO (lod->lod_IO1);
+			WaitIO (lod->lod_IO1);
+d1027 2
+a1028 2
+			CloseDevice (lod->lod_IO1);
+			lod->lod_IO1->ioa_Request.io_Device = NULL;
+d1033 18
+a1050 18
+		    lod->lod_IO1->ioa_Request.io_Command = ADCMD_ALLOCATE;
+		    lod->lod_IO1->ioa_Request.io_Flags = ADIOF_NOWAIT;
+		    lod->lod_IO1->ioa_Data   = audioChannels;
+		    lod->lod_IO1->ioa_Length = sizeof (audioChannels);
+		    if (OpenDevice ("audio.device", 0, lod->lod_IO1, 0) == 0)
+		    {
+			lod->lod_IO1->ioa_Request.io_Command = CMD_WRITE;
+			lod->lod_IO1->ioa_Request.io_Flags = ADIOF_PERVOL;
+			lod->lod_IO1->ioa_Cycles = lod->lod_Cycles;
+			lod->lod_IO1->ioa_Length = lod->lod_BufferLen;
+			lod->lod_IO1->ioa_Data   = lod->lod_Sample;
+			lod->lod_IO1->ioa_Period = lod->lod_Period;
+			lod->lod_IO1->ioa_Volume = lod->lod_Volume;
+
+			CopyMem (lod->lod_IO1, lod->lod_IOVolume, sizeof (struct IOAudio));
+			CopyMem (lod->lod_IO1, lod->lod_IO2, sizeof (struct IOAudio));
+
+			if (lod->lod_SampleLength <= MAXSAMPLE)
+d1052 2
+a1053 1
+			    BeginIO (lod->lod_IO1);
+d1057 4
+a1060 3
+			    lod->lod_IO1->ioa_Length = MAXSAMPLE;
+			    lod->lod_IO1->ioa_Cycles = 1;
+			    BeginIO (lod->lod_IO1);
+d1064 1
+a1064 1
+			    lod->lod_IO = lod->lod_IO2;
+d1084 1
+a1084 1
+		else if (lod->lod_IO1->ioa_Request.io_Device)
+@
+
+
+39.7
+log
+@now double-buffers sounds greater than 128K
+@
+text
+@d673 1
+a673 1
+	    CloseClipboard ((struct ClipboardHandler *) iff->iff_Stream);
+d811 37
+d850 1
+a1089 33
+}
+
+/*****************************************************************************/
+
+void ShutdownObjectHandler (struct ClassBase * cb, struct localData * lod)
+{
+    if (lod->lod_IO)
+    {
+	if (lod->lod_IO->ioa_Request.io_Device)
+	{
+	    if ((lod->lod_Flags & LODF_PLAYED) && (((struct IORequest *) lod->lod_IO)->io_Flags == 0))
+	    {
+		AbortIO (lod->lod_IO);
+		WaitIO (lod->lod_IO);
+	    }
+
+	    CloseDevice (lod->lod_IO);
+	    lod->lod_IO->ioa_Request.io_Device = NULL;
+	}
+
+	if (lod->lod_Flags & LODF_PLAYING)
+	{
+	    /* Signal the parent that a sound has ended */
+	    if (lod->lod_SignalTask)
+		Signal (lod->lod_SignalTask, lod->lod_SignalBit);
+	}
+    }
+
+    DeleteIORequest ((struct IORequest *) lod->lod_IOControl);
+    DeleteIORequest ((struct IORequest *) lod->lod_IOVolume);
+    DeleteIORequest ((struct IORequest *) lod->lod_IO2);
+    DeleteIORequest ((struct IORequest *) lod->lod_IO1);
+    DeleteMsgPort (lod->lod_MP);
+@
+
+
+39.6
+log
+@removed Enforcer hit
+@
+text
+@a9 1
+#define	DE(x)	;
+a12 30
+/* Data for DTM_PLAY */
+struct Note
+{
+    LONG n_Octave;
+    LONG n_Note;
+    LONG n_Duration;
+};
+
+#if 0
+/*****************************************************************************/
+
+#define	SDTM_Dummy		(0x800)
+
+#define	SDTM_LOADCHUNK		(0x801)
+
+/*****************************************************************************/
+
+// SDTM_LOADCHUNK
+struct sdtLoadChunk
+{
+    ULONG		 MethodID;
+    UBYTE		*slc_Sample;
+    ULONG		 scl_SampleLength;
+    UWORD		 scl_Period;
+    UWORD		 scl_Volume;
+};
+#endif
+
+/*****************************************************************************/
+
+a35 1
+    struct Note		 lod_Note;
+a297 1
+		    memset (&lod->lod_Note, 0, sizeof (struct Note));
+a360 6
+#if 0
+		if (dtt->dtt_Data)
+		    lod->lod_Note = *((struct Note *) dtt->dtt_Data);
+		else
+		    memset (&lod->lod_Note, 0, sizeof (struct Note));
+#endif
+a599 1
+    ULONG length = lod->lod_SampleLength;
+d603 24
+d629 1
+d654 1
+a818 1
+    struct Note *n;
+d825 4
+a841 1
+    n = &lod->lod_Note;
+d857 15
+a873 1
+	    DB (kprintf ("sigr=%08lx\n", sigr));
+a877 1
+		DB (kprintf ("audio message\n"));
+a883 1
+			    DB (kprintf ("snd 1 end\n"));
+a888 1
+			    DB (kprintf ("snd 2 end\n"));
+a891 4
+			else
+			{
+			    DB (kprintf ("!!! unknown message !!!\n"));
+			}
+a894 1
+			    DB (kprintf ("play %08lx\n", lod->lod_Buffer));
+d906 2
+a907 9
+			else
+			{
+			    DB (kprintf ("S=%08lx B3=%08lx\n", lod->lod_Sample, lod->lod_Buffer3));
+			    if ((lod->lod_Sample == NULL) && (lod->lod_Buffer3 == NULL))
+			    {
+				lod->lod_Flags &= ~LODF_PLAYING;
+				DE (kprintf ("end of audio\n"));
+			    }
+			}
+d909 4
+a912 1
+		    else
+d914 4
+a917 1
+			DB (kprintf ("!!! no message !!!\n"));
+d927 1
+a937 1
+		DE (kprintf ("^C received\n"));
+d939 1
+a944 2
+		DB (kprintf ("start playing\n"));
+
+a950 1
+			DB (kprintf ("start playing 1\n"));
+a953 2
+#if 1
+			DB (kprintf ("start playing 2\n"));
+a959 5
+#else
+			/* Set up the swap pointers */
+			lod->lod_IO = lod->lod_IO2;
+			lod->lod_Buffer = lod->lod_Buffer2;
+#endif
+a969 1
+			DB (kprintf ("abort previous\n"));
+d975 1
+a978 1
+		    DB (kprintf ("open device\n"));
+d981 1
+a981 1
+		    lod->lod_IO1->ioa_Data = audioChannels;
+a984 1
+			DB (kprintf ("start sound\n"));
+d989 1
+a989 1
+			lod->lod_IO1->ioa_Data = lod->lod_Sample;
+d993 4
+a996 1
+			if (n->n_Duration)
+d998 1
+a998 3
+			    lod->lod_IO1->ioa_Period = cb->cb_Period[n->n_Note];
+			    if (n->n_Octave > lod->lod_VHDR.vh_Octaves)
+				n->n_Octave = lod->lod_VHDR.vh_Octaves;
+d1000 5
+d1006 4
+a1009 3
+			CopyMem (lod->lod_IO1, lod->lod_IOVolume, sizeof (struct IOAudio));
+			CopyMem (lod->lod_IO1, lod->lod_IO2, sizeof (struct IOAudio));
+			BeginIO (lod->lod_IO1);
+a1012 1
+			DB (kprintf ("playing\n"));
+a1018 2
+	    {
+		DE (kprintf ("^E received\n"));
+a1019 1
+	    }
+a1043 1
+	DE (kprintf ("shutdown sound\n"));
+a1047 1
+    DE (kprintf ("exit sound process\n"));
+a1059 1
+	DE (kprintf ("io_Device\n"));
+a1063 1
+		DE (kprintf ("AbortIO\n"));
+a1064 1
+		DE (kprintf ("WaitIO\n"));
+a1067 1
+	    DE (kprintf ("CloseDevice\n"));
+a1079 1
+    DE (kprintf ("Delete everything\n"));
+@
+
+
+39.5
+log
+@added task signalling and double-buffering.
+@
+text
+@d9 5
+a13 1
+#if 0
+d22 1
+a43 5
+#define	DB(x)	;
+#define	DE(x)	;
+
+/*****************************************************************************/
+
+d394 1
+d399 1
+d951 2
+d986 1
+d995 1
+d1002 1
+d1024 1
+d1091 7
+@
+
+
+39.4
+log
+@supports DTST_RAM.
+period & volume changes can be made while sound is playing
+@
+text
+@d9 35
+d51 4
+a54 4
+    struct Message sm_Message;	/* Embedded message */
+    struct ClassBase *sm_CB;	/* Pointer to the library base */
+    Class *sm_Class;		/* Pointer to the class */
+    Object *sm_Object;		/* Pointer to the object */
+d61 1
+d63 2
+d66 8
+a73 1
+    struct Process	*lod_Process;
+d77 6
+a82 1
+    APTR		 lod_Sample;
+d88 7
+d98 2
+d101 4
+d190 1
+d195 1
+a196 1
+
+d201 1
+d214 1
+d245 1
+d247 3
+d251 1
+d279 3
+a281 3
+		    gpr.MethodID = GM_RENDER;
+		    gpr.gpr_GInfo = ((struct opSet *) msg)->ops_GInfo;
+		    gpr.gpr_RPort = rp;
+d330 3
+a332 1
+		    Signal (lod->lod_Process, SIGBREAKF_CTRL_D);
+d351 1
+a351 6
+	    switch (((struct dtTrigger *) msg)->dtt_Function)
+	    {
+		case STM_PLAY:
+		    Signal (lod->lod_Process, SIGBREAKF_CTRL_D);
+		    break;
+	    }
+d366 3
+a368 1
+	    FreeVec (lod->lod_Sample);
+d370 3
+d384 33
+d429 3
+d440 21
+a460 1
+		lod->lod_Sample = (APTR) tidata;
+d464 11
+a474 1
+		lod->lod_SampleLength = (ULONG) tidata;
+d488 8
+d499 3
+a501 2
+    if (lod->lod_Process && ((oldPeriod != lod->lod_Period) || (oldVolume != lod->lod_Volume)))
+	Signal (lod->lod_Process, SIGBREAKF_CTRL_E);
+d605 1
+a605 1
+BOOL WriteVHDR (struct ClassBase * cb, struct IFFHandle * iff, struct VoiceHeader *vhdr)
+d758 65
+a824 1
+    UBYTE audioChannels[] = {3, 6, 1, 2, 4, 8};
+d829 1
+a829 1
+    struct MsgPort *mp;
+d831 1
+d851 1
+d853 2
+a854 2
+    /* Create the message port */
+    if (mp = CreateMsgPort ())
+d856 1
+a856 1
+	psig = 1L << mp->mp_SigBit;
+d859 1
+a859 1
+	sigs = psig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E;
+d861 17
+a877 20
+	/* Create the IO request */
+	if (lod->lod_IO = (struct IOAudio *) CreateIORequest (mp, sizeof (struct IOAudio)))
+	{
+	    if (lod->lod_IOVolume = (struct IOAudio *) CreateIORequest (mp, sizeof (struct IOAudio)))
+	    {
+		/* Show that we are running */
+		lod->lod_Flags |= LODF_RUNNING;
+
+		/* Keep going until we are told to stop */
+		while (lod->lod_Going)
+		{
+		    /* Wait for something to happen */
+		    sigr = Wait (sigs);
+
+		    /* Dispose of the object */
+		    if (sigr & SIGBREAKF_CTRL_C)
+			lod->lod_Going = FALSE;
+
+		    /* Start playing sample */
+		    if (sigr & SIGBREAKF_CTRL_D)
+d879 32
+a910 1
+			if (lod->lod_Sample)
+d912 2
+a913 2
+			    /* Abort the request */
+			    if (lod->lod_IO->ioa_Request.io_Device)
+d915 2
+a916 5
+				AbortIO (lod->lod_IO);
+				WaitIO (lod->lod_IO);
+				SetSignal (0L, sigs);
+				CloseDevice (lod->lod_IO);
+				lod->lod_IO->ioa_Request.io_Device = NULL;
+d918 40
+d959 13
+a971 3
+			    /* Initialize the rest of the Audio structure */
+			    lod->lod_IO->ioa_Data = audioChannels;
+			    lod->lod_IO->ioa_Length = sizeof (audioChannels);
+d973 15
+a987 9
+			    if (OpenDevice ("audio.device", 0, lod->lod_IO, 0) == 0)
+			    {
+				lod->lod_IO->ioa_Request.io_Flags = ADIOF_PERVOL;
+				lod->lod_IO->ioa_Request.io_Command = CMD_WRITE;
+				lod->lod_IO->ioa_Cycles = lod->lod_Cycles;
+				lod->lod_IO->ioa_Length = lod->lod_SampleLength;
+				lod->lod_IO->ioa_Data = lod->lod_Sample;
+				lod->lod_IO->ioa_Period = lod->lod_Period;
+				lod->lod_IO->ioa_Volume = lod->lod_Volume;
+d989 14
+a1002 1
+				CopyMem (lod->lod_IO, lod->lod_IOVolume, sizeof (struct IOAudio));
+d1004 5
+a1008 2
+				BeginIO (lod->lod_IO);
+			    }
+d1010 7
+d1018 2
+d1021 32
+a1052 43
+		    /* Change in period or volume */
+		    if (sigr & SIGBREAKF_CTRL_E)
+		    {
+			if ((lod->lod_Sample) && (lod->lod_IO->ioa_Request.io_Device))
+			{
+			    /* They want to change the volume or period */
+			    lod->lod_IOVolume->ioa_Request.io_Flags   = ADIOF_PERVOL | ADIOF_SYNCCYCLE;
+			    lod->lod_IOVolume->ioa_Request.io_Command = ADCMD_PERVOL;
+			    lod->lod_IOVolume->ioa_Volume = lod->lod_Volume;
+			    lod->lod_IOVolume->ioa_Period = lod->lod_Period;
+			    lod->lod_IOVolume->ioa_Cycles = lod->lod_Cycles;
+			    lod->lod_IOVolume->ioa_Length = lod->lod_SampleLength;
+			    lod->lod_IOVolume->ioa_Data   = lod->lod_Sample;
+			    DoIO (lod->lod_IOVolume);
+			}
+		    }
+
+		    /* Sample ended */
+		    if (sigr & psig)
+		    {
+			/* Did a sound just end? */
+			if (lod->lod_IO->ioa_Request.io_Device)
+			{
+			    WaitIO (lod->lod_IO);
+			    SetSignal (0L, sigs);
+			    CloseDevice (lod->lod_IO);
+			    lod->lod_IO->ioa_Request.io_Device = NULL;
+			}
+		    }
+		}
+
+		if (lod->lod_IO->ioa_Request.io_Device)
+		{
+		    AbortIO (lod->lod_IO);
+		    WaitIO (lod->lod_IO);
+		    CloseDevice (lod->lod_IO);
+		    lod->lod_IO->ioa_Request.io_Device = NULL;
+		}
+		DeleteIORequest ((struct IORequest *) lod->lod_IOVolume);
+	    }
+	    DeleteIORequest ((struct IORequest *) lod->lod_IO);
+	}
+	DeleteMsgPort (mp);
+d1056 1
+d1061 31
+@
+
+
+39.3
+log
+@wasn't closing device when done playing sound
+@
+text
+@d16 4
+a19 4
+    struct Message		 sm_Message;		/* Embedded message */
+    struct ClassBase		*sm_CB;			/* Pointer to the library base */
+    Class			*sm_Class;		/* Pointer to the class */
+    Object			*sm_Object;		/* Pointer to the object */
+d27 1
+d34 1
+a34 1
+    ULONG		 lod_Period;
+d37 1
+a38 1
+    BOOL		 lod_Going;
+d48 12
+a59 12
+    0x0000,0x0010,0x0200,0x0000,0x0000,0x0028,0x0400,0x0000,
+    0x0000,0x0068,0x0800,0x0400,0x0000,0x00A8,0x1000,0x0C00,
+    0x0000,0x0128,0x2000,0x0C00,0x0000,0xF228,0x00C0,0x0C00,
+    0x0001,0x0E28,0x0300,0x0C00,0x0001,0x0A28,0x0C00,0x0C00,
+    0x0001,0x0A28,0x0000,0x0C00,0x0001,0x0A28,0x0000,0x0C00,
+    0x0001,0x0A28,0x07E0,0x0C00,0x0001,0x0A28,0x0000,0x0C00,
+    0x0001,0x0A28,0x0000,0x0C00,0x0001,0x0A28,0x0C00,0x0C00,
+    0x0001,0x0E28,0x0300,0x0C00,0x0000,0xF228,0x00C0,0x0C00,
+    0x0000,0x0128,0x2000,0x0C00,0x0000,0x00A8,0x1000,0x0C00,
+    0x0000,0x0068,0x0800,0x0C00,0x0000,0x0028,0x0400,0x0C00,
+    0x0000,0x0010,0x0200,0x0C00,0x0000,0x0000,0x0000,0x0C00,
+    0x0000,0x0000,0x0000,0x0C00,0x7FFF,0xFFFF,0xFFFF,0xFC00,
+d61 12
+a72 12
+    0x0000,0x0000,0x0000,0x0000,0x0000,0x0010,0x0000,0x0000,
+    0xFFFF,0xFF93,0xF77F,0xF800,0xD555,0x5551,0x4455,0x5000,
+    0xD555,0x54D1,0x5555,0x5000,0xD555,0x05D1,0x5115,0x5000,
+    0xD554,0xF1D1,0x5455,0x5000,0xD554,0xF5D1,0x5145,0x5000,
+    0xD554,0xF5D1,0x5515,0x5000,0xD554,0xF5D1,0x5455,0x5000,
+    0xD554,0xF5D1,0x5015,0x5000,0xD554,0xF5D1,0x5555,0x5000,
+    0xD554,0xF5D1,0x5405,0x5000,0xD554,0xF5D1,0x5155,0x5000,
+    0xD554,0xF1D1,0x5455,0x5000,0xD555,0x01D1,0x5415,0x5000,
+    0xD555,0x00D1,0x5515,0x5000,0xD555,0x4151,0x4545,0x5000,
+    0xD555,0x5511,0x5555,0x5000,0xD555,0x5551,0x5155,0x5000,
+    0xD555,0x5541,0x5555,0x5000,0xD555,0x5551,0x5455,0x5000,
+    0xD555,0x5551,0x5555,0x5000,0x8000,0x0000,0x0000,0x0000,
+d81 1
+a81 1
+ULONG setdtattrs (struct ClassBase *cb, Object * o, ULONG data,...)
+d88 1
+a88 1
+ULONG notifyAttrChanges (struct ClassBase *cb, Object * o, VOID * ginfo, ULONG flags, ULONG tag1,...)
+d95 1
+a95 1
+struct Process *createnewproc (struct ClassBase *cb, Tag tag1,...)
+d97 1
+a97 1
+    return (CreateNewProc ((struct TagItem *)&tag1));
+d109 1
+a109 1
+	cl->cl_UserData           = (ULONG) cb;
+d131 1
+a131 1
+		lod = INST_DATA (cl, (Object *)retval);
+d133 1
+d139 1
+a139 1
+		data   = (ULONG)ImageData;
+d141 1
+a141 1
+		    lod->lod_BMap.Planes[i] = (PLANEPTR)(data + i * planes);
+d144 3
+a146 3
+		setdtattrs (cb, o,
+			    DTA_NominalHoriz,	WIDTH,
+			    DTA_NominalVert,	HEIGHT,
+d149 2
+d153 9
+a161 9
+							NP_Output,	Output(),
+							NP_CloseOutput,	FALSE,
+							NP_Input,	Input(),
+							NP_CloseInput,	FALSE,
+							NP_Name,	PROC_NAME,
+							NP_StackSize,	4096L,
+							NP_Entry,	ObjectHandler,
+							NP_Priority,	0L,
+							TAG_DONE))
+d166 2
+a167 2
+		    lod->lod_Message.sm_CB     = cb;
+		    lod->lod_Message.sm_Class  = cl;
+d184 9
+a192 1
+	    retval = getAttrMethod (cb, cl, o, (struct opGet *)msg);
+d208 3
+a210 3
+		    gpr.MethodID   = GM_RENDER;
+		    gpr.gpr_GInfo  = ((struct opSet *) msg)->ops_GInfo;
+		    gpr.gpr_RPort  = rp;
+d229 2
+a230 2
+		GetAttr (DTA_Domain,  o, (ULONG *) &domain);
+		GetAttr (DTA_ObjName, o, (ULONG *) &title);
+d232 11
+a242 11
+		notifyAttrChanges (cb, o, ((struct gpLayout *)msg)->gpl_GInfo, NULL,
+				   GA_ID,		G (o)->GadgetID,
+				   DTA_Busy,		FALSE,
+				   DTA_Title,		title,
+			 	   DTA_TotalHoriz,	WIDTH,
+			 	   DTA_HorizUnit,	1L,
+				   DTA_VisibleHoriz,	MIN (WIDTH,  domain->Width),
+				   DTA_TotalVert,	HEIGHT,
+				   DTA_VertUnit,	1L,
+				   DTA_VisibleVert,	MIN (HEIGHT, domain->Height),
+				   DTA_Sync,		TRUE,
+d259 1
+a259 1
+		    Signal (lod->lod_Process, SIGBREAKF_CTRL_E);
+d278 1
+a278 1
+	    switch (((struct dtTrigger *)msg)->dtt_Function)
+d281 1
+a281 1
+		    Signal (lod->lod_Process, SIGBREAKF_CTRL_E);
+d312 1
+a312 1
+ULONG setAttrsMethod (struct ClassBase *cb, Class * cl, Object * o, struct opSet * msg)
+d316 2
+d331 1
+a331 1
+		lod->lod_Sample = (APTR)tidata;
+d339 1
+a339 1
+		lod->lod_Period = tidata;
+d351 4
+d383 2
+d391 1
+a391 1
+ULONG getAttrMethod (struct ClassBase *cb, Class * cl, Object * o, struct opGet * msg)
+d414 1
+a414 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_VHDR;
+d418 1
+a418 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_Sample;
+d422 1
+a422 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_SampleLength;
+d426 1
+a426 1
+	    *msg->opg_Storage = lod->lod_Period;
+d430 1
+a430 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_Volume;
+d434 1
+a434 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_Cycles;
+d446 128
+a573 1
+ULONG renderMethod (struct ClassBase *cb, Class * cl, Object * o, struct gpRender * msg)
+d581 1
+a581 1
+    GetAttr (DTA_Domain, o, (ULONG *)&domain);
+d583 1
+a583 1
+    width  = (ULONG) MIN (WIDTH,  domain->Width);
+d598 1
+a598 1
+	BltBitMapRastPort (&lod->lod_BMap, (ULONG)si->si_TopHoriz, (ULONG)si->si_TopVert,
+d619 1
+d635 1
+a635 1
+    o  = sm->sm_Object;
+d639 7
+a645 2
+    mp = &((struct Process *) (SysBase->ThisTask))->pr_MsgPort;
+    psig = 1L << mp->mp_SigBit;
+d647 4
+a650 52
+    /* Create the IO request */
+    if (lod->lod_IO = (struct IOAudio *) CreateIORequest (mp, sizeof (struct IOAudio)))
+    {
+        /* Show that we are running */
+        lod->lod_Flags |= LODF_RUNNING;
+
+        /* Keep going until we are told to stop */
+        while (lod->lod_Going)
+        {
+            /* Wait for something to happen */
+            sigr = Wait (psig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+
+            /* Was that something a ^C */
+            if (sigr & SIGBREAKF_CTRL_C)
+            {
+                lod->lod_Going = FALSE;
+            }
+            else if (sigr & SIGBREAKF_CTRL_E)
+            {
+                if (lod->lod_Sample)
+                {
+		    /* Abort the request */
+                    if (lod->lod_IO->ioa_Request.io_Device)
+                    {
+                        AbortIO(lod->lod_IO);
+                        WaitIO(lod->lod_IO);
+			SetSignal (0L, psig | SIGBREAKF_CTRL_E);
+                        CloseDevice(lod->lod_IO);
+                        lod->lod_IO->ioa_Request.io_Device = NULL;
+                    }
+
+                    /* Initialize the rest of the Audio structure */
+                    lod->lod_IO->ioa_Data   = audioChannels;
+                    lod->lod_IO->ioa_Length = sizeof (audioChannels);
+
+                    if (OpenDevice ("audio.device", 0, lod->lod_IO, 0) == 0)
+                    {
+                        lod->lod_IO->ioa_Request.io_Flags   = ADIOF_PERVOL;
+                        lod->lod_IO->ioa_Request.io_Command = CMD_WRITE;
+
+                        lod->lod_IO->ioa_Volume = lod->lod_Volume;
+                        lod->lod_IO->ioa_Period = lod->lod_Period;
+                        lod->lod_IO->ioa_Cycles = 1;
+                        lod->lod_IO->ioa_Length = lod->lod_SampleLength;
+                        lod->lod_IO->ioa_Data   = lod->lod_Sample;
+
+                        BeginIO (lod->lod_IO);
+                    }
+                }
+            }
+	    /* Did something come in on the IO message port? */
+	    else if (sigr & psig)
+d652 80
+a731 1
+		/* Did a sound just end? */
+d734 3
+a736 3
+		    WaitIO(lod->lod_IO);
+		    SetSignal (0L, psig | SIGBREAKF_CTRL_E);
+		    CloseDevice(lod->lod_IO);
+d739 1
+d741 1
+a741 9
+
+        }
+
+	if (lod->lod_IO->ioa_Request.io_Device)
+	{
+	    AbortIO(lod->lod_IO);
+	    WaitIO(lod->lod_IO);
+	    CloseDevice(lod->lod_IO);
+	    lod->lod_IO->ioa_Request.io_Device = NULL;
+d743 1
+a743 1
+	DeleteIORequest ((struct IORequest *) lod->lod_IO);
+@
+
+
+39.2
+log
+@changed AddClass name
+@
+text
+@d470 1
+d472 1
+d491 3
+d495 1
+a495 1
+    if (lod->lod_IO = (struct IOAudio *) CreateIORequest (&((struct Process *) (SysBase->ThisTask))->pr_MsgPort, sizeof (struct IOAudio)))
+d504 1
+a504 1
+            sigr = Wait (SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+d520 1
+d544 13
+@
+
+
+39.1
+log
+@changed get &period to period
+@
+text
+@d215 1
+d218 2
+d223 1
+d230 1
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d33 1
+a33 2
+    UWORD		 lod_SamplePeriod;
+    UWORD		 lod_Period;
+d320 1
+a320 1
+		lod->lod_Period = (UWORD) tidata;
+d401 1
+a401 1
+	    *msg->opg_Storage = (ULONG) &lod->lod_Period;
+@

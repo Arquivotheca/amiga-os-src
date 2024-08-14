@@ -1,0 +1,13 @@
+€ˆWORKBENCH_STARTUP_H€WORKBENCH_STARTUP_HˆEXEC_TYPES_HŒ"exec/types.h"‡ˆ¸Œ"exec/ports.h"‡ˆLIBRARIES_DOS_HŒ"libraries/dos.h"‡
+ƒWBStartup{
+ƒ¯sm_Message;
+ƒ©*sm_Process;
+¡sm_Segment;
+’sm_NumArgs;
+„*sm_ToolWindow;
+ƒWBArg*sm_ArgList;
+};
+ƒWBArg{
+¡wa_Lock;
+š*wa_Name;
+};‡

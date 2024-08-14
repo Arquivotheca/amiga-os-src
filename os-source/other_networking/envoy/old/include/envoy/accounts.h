@@ -1,0 +1,32 @@
+#ifndef	ENVOY_ACCOUNTS_H
+#define ENVOY_ACCOUNTS_H
+
+struct UserInfo
+{
+	UBYTE	ui_UserName[32];
+	UWORD	ui_UserID;
+	UWORD	ui_PrimaryGroupID;
+	ULONG   ui_Flags;
+};
+
+struct GroupInfo
+{
+	UBYTE	gi_GroupName[32];
+	UWORD	gi_GroupID;
+};
+
+/* Error codes for the security server */
+
+#define	ACCERROR_NORESOURCES	100
+#define ACCERROR_NOPRIVS	101
+#define ACCERROR_NOAUTHORITY	102
+#define ACCERROR_UNKNOWNUSER	103
+#define ACCERROR_UNKNOWNGROUP	104
+#define ACCERROR_LASTUSER	105
+#define ACCERROR_LASTGROUP	106
+#define ACCERROR_LASTMEMBER	107
+#define ACCERROR_GROUPEXISTS	108
+#define ACCERROR_NOFREEGROUPS	109
+#define ACCERROR_UNKNOWNMEMBER	110
+
+#endif	/* ENVOY_ACCOUNTS_H */

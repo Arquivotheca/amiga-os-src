@@ -1,0 +1,6 @@
+
+	XDEF ENDCODE
+
+ENDCODE:	ds.w	0
+
+	END

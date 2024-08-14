@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'30.3.92'
+	ENDM
+VERS	MACRO
+		dc.b	'loadwb 38.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'loadwb 38.9 (30.3.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: loadwb 38.9 (30.3.92)',0
+	ENDM

@@ -1,0 +1,893 @@
+head     1.3;
+branch   ;
+access   ;
+symbols  Release1:1.1 C_1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.3
+date     93.01.29.21.16.34;  author kcd;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     93.01.29.21.08.30;  author kcd;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.12.15.18.29;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.3
+log
+@The Unknown host error message was not getting printed.  I had removed the
+calls to herror that were doing this.  Fixed.
+@
+text
+@/* -----------------------------------------------------------------------
+ * ARP.C
+ *
+ * $Locker: kcd $
+ *
+ * $Id: arp.c,v 1.2 93/01/29 21:08:30 kcd Exp Locker: kcd $
+ *
+ * $Revision: 1.2 $
+ *
+ * $Header: AS225:src/c/arp/RCS/arp.c,v 1.2 93/01/29 21:08:30 kcd Exp Locker: kcd $
+ *
+ *------------------------------------------------------------------------
+ */
+
+
+
+/*
+ * Copyright (c) 1984 Regents of the University of California.
+ * All rights reserved.
+ *
+ * This code is derived from software contributed to Berkeley by
+ * Sun Microsystems, Inc.
+ *
+ * Redistribution and use in source and binary forms are permitted
+ * provided that the above copyright notice and this paragraph are
+ * duplicated in all such forms and that any documentation,
+ * advertising materials, and other materials related to such
+ * distribution and use acknowledge that the software was developed
+ * by the University of California, Berkeley.  The name of the
+ * University may not be used to endorse or promote products derived
+ * from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
+ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*
+ * arp - display, set, and delete arp table entries
+ */
+
+#include <exec/types.h>
+
+#include <ss/socket.h>
+#include <ss/socket_pragmas.h>
+#include <dos/dos.h>
+#include <dos/dostags.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+
+#include <sys/param.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+
+#include <netdb.h>
+#include <net/if.h>
+#include <netinet/if_ether.h>
+
+#include <errno.h>
+#include <nlist.h>
+#include <stdio.h>
+
+#include "arp_rev.h"
+
+#define TEMPLATE "Name,Ether_Addr,-A=All/S,-D=Del/S,-S=Set/S,Temp/S,Pub/S,Trail/S,-F=File/S"
+#define TEMPLATE_FILE "Name,Ether_Addr,Temp/S,Pub/S,Trail/S"
+
+#define ARG_NAME	0
+#define ARG_ETHER	1
+#define ARG_ALL		2
+#define ARG_DEL		3
+#define ARG_SET		4
+#define ARG_TEMP	5
+#define ARG_PUB		6
+#define ARG_TRAIL	7
+#define ARG_FILE	8
+
+static char *vers = VERSTAG ;
+
+struct Library *SockBase;
+extern struct Library *SysBase;
+extern struct Library *DOSBase;
+
+char UsageStr[]="Usage: arp Hostname\n       arp -a/ALL\n       arp -d/DEL Hostname\n       arp -s/SET Hostname Ether_Addr [TEMP] [PUB] [TRAIL]\n       arp -f/FILE Filename\n";
+
+struct RDArgs *rdargs;
+LONG args[9];
+BOOL freeargs=FALSE;
+LONG myTags[1]={TAG_DONE};
+
+void myexit(int rc);
+int file(char *name);
+void get(char *host);
+void delete(char *host);
+void dump(char *kernel, char *mem);
+int kread(int fd, void *buf, int size);
+void klseek(int fd, long off, int how);
+void ether_print(u_char *cp);
+
+int errno;
+int rc;
+static int kflag;
+
+main(argc, argv)
+	int argc;
+	char **argv;
+{
+
+	if(SockBase = OpenLibrary("socket.library",0L))
+	{
+	    setup_sockets(10, &errno);
+
+	    if(rdargs=AllocDosObject(DOS_RDARGS,(struct TagItem *)myTags))
+	    {
+		rdargs->RDA_DAList = NULL;
+		rdargs->RDA_Source.CS_Buffer = NULL;
+		rdargs->RDA_Source.CS_Length = 0;
+		rdargs->RDA_Source.CS_CurChr = 0;
+		rdargs->RDA_ExtHelp = UsageStr;
+
+		if(ReadArgs(TEMPLATE,args,rdargs))
+		{
+		    freeargs=TRUE;
+
+		    if(args[ARG_ALL])
+		    {
+			    int res=0;
+
+                            if (argc > 2)
+                            {
+                            	PutStr("wrong number of arguments\n");
+                            	res = 1;
+                            }
+                            else
+                                dump("foo","foo");
+
+                            myexit(res);
+                    }
+                    if(args[ARG_DEL])
+                    {
+                    	    int res=0;
+
+                            if (!args[ARG_NAME])
+                            {
+                            	PutStr("Hostname required with -d or DEL.\n");
+                            	res = 1;
+                            }
+                            else
+                                delete((char *)args[ARG_NAME]);
+
+                            myexit(res);
+                    }
+                    if(args[ARG_SET])
+                    {
+                    	    int res;
+
+                            if (argc < 4 || argc > 7)
+                            {
+                            	PutStr("wrong number of arguments\n");
+                            	res=1;
+                            }
+                            else
+                               res = set(args[ARG_NAME],args[ARG_ETHER],args[ARG_TEMP],args[ARG_PUB],args[ARG_TRAIL]);
+                            myexit(res);
+
+                    }
+                    if(args[ARG_FILE])
+                    {
+			int res;
+
+                        if (!args[ARG_NAME])
+                        {
+                            PutStr("Filename required with -f or FILE.\n");
+                            res = 1;
+                        }
+                        else
+                            res = file(args[ARG_NAME]);
+
+                        myexit(res);
+                    }
+                    if(args[ARG_NAME])
+                    {
+                    	get(args[ARG_NAME]);
+                    	myexit(0);
+                    }
+                    PutStr("arp: required argument missing\n");
+                }
+            }
+        }
+        else
+            PutStr("Couldn't open socket.library");
+
+        myexit(1);
+}
+
+void myexit(rc)
+	int rc;
+{
+	if(SockBase)
+	{
+	    cleanup_sockets();
+	    CloseLibrary(SockBase);
+	}
+	if(freeargs)
+	    FreeArgs(rdargs);
+
+	if(rdargs)
+	    FreeDosObject(DOS_RDARGS,rdargs);
+
+	exit(rc);
+}
+
+/*
+ * Process a file to set standard arp entries
+ */
+int file(name)
+	char *name;
+{
+	BPTR file;
+	UBYTE line[256];
+	int i, retval;
+
+	LONG args[5];
+	struct RDArgs *loc_rdargs;
+
+	retval = 0;
+
+        if(loc_rdargs=AllocDosObject(DOS_RDARGS,(struct TagItem *)myTags))
+        {
+            if(file = Open(name,MODE_OLDFILE))
+            {
+                while(FGets(file,line,255))
+                {
+                    for(i=0;(i<256 && line[i]);i++);
+                    line[i]='\n';
+
+                    for(i=0;i<5;i++)
+                    	args[i]=0;
+
+                    loc_rdargs->RDA_DAList = NULL;
+                    loc_rdargs->RDA_Source.CS_Buffer = line;
+                    loc_rdargs->RDA_Source.CS_Length = 255;
+                    loc_rdargs->RDA_Source.CS_CurChr = 0;
+
+                    if(ReadArgs(TEMPLATE_FILE,args,loc_rdargs))
+                    {
+                        if(set(args[0],args[1],args[2],args[3],args[4]))
+                            retval = 1;
+
+                        FreeArgs(loc_rdargs);
+                    }
+                    else
+                    {
+                    	Printf("arp: bad line: %s\n",line);
+                    	retval = 1;
+                    }
+                }
+                Close(file);
+            }
+            else
+            {
+            	Printf("arp: cannot open %s\n",name);
+            }
+            FreeDosObject(DOS_RDARGS,loc_rdargs);
+        }
+        return(retval);
+}
+
+/*
+ * Set an individual arp entry
+ */
+int set(char *host, char *eaddr, LONG temp, LONG pub, LONG trail)
+{
+	struct arpreq ar;
+	struct hostent *hp;
+	struct sockaddr_in *sin;
+	u_char *ea;
+	int s;
+
+	bzero((caddr_t)&ar, sizeof ar);
+	sin = (struct sockaddr_in *)&ar.arp_pa;
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = inet_addr(host);
+	if (sin->sin_addr.s_addr == -1) {
+		if (!(hp = gethostbyname(host))) {
+			Printf("arp: %s: Unknown host\n", host);
+			return (1);
+		}
+		bcopy((char *)hp->h_addr, (char *)&sin->sin_addr,
+		    sizeof sin->sin_addr);
+	}
+	ea = (u_char *)ar.arp_ha.sa_data;
+	if (ether_aton(eaddr, ea))
+		return (1);
+	ar.arp_flags = ATF_PERM;
+
+	if(temp)
+	    ar.arp_flags &= ~ATF_PERM;
+
+	if(pub)
+	    ar.arp_flags |= ATF_PUBL;
+
+	if(trail)
+	    ar.arp_flags |= ATF_USETRAILERS;
+
+	s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) {
+		PutStr("arp: socket");
+		return(1);
+	}
+	if (s_ioctl(s, SIOCSARP, (caddr_t)&ar) < 0) {
+		PutStr(host);
+		return(1);
+	}
+	s_close(s);
+	return (0);
+}
+
+/*
+ * Display an individual arp entry
+ */
+void get(host)
+	char *host;
+{
+	struct arpreq ar;
+	struct hostent *hp;
+	struct sockaddr_in *sin;
+	u_char *ea;
+	int s;
+	char *inet_ntoa();
+
+	bzero((caddr_t)&ar, sizeof ar);
+	ar.arp_pa.sa_family = AF_INET;
+	sin = (struct sockaddr_in *)&ar.arp_pa;
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = inet_addr(host);
+	if (sin->sin_addr.s_addr == -1) {
+		if (!(hp = gethostbyname(host))) {
+			Printf("arp: %s: Unknown host\n", host);
+			myexit(1);
+		}
+		bcopy((char *)hp->h_addr, (char *)&sin->sin_addr,
+		    sizeof sin->sin_addr);
+	}
+	s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) {
+		PutStr("arp: socket");
+		myexit(1);
+	}
+	if (s_ioctl(s, SIOCGARP, (caddr_t)&ar) < 0) {
+		if (errno == ENXIO)
+			Printf("%s (%s) -- no entry\n",
+			    host, inet_ntoa(sin->sin_addr.s_addr));
+		else
+			PutStr("SIOCGARP");
+		myexit(1);
+	}
+	s_close(s);
+	ea = (u_char *)ar.arp_ha.sa_data;
+	Printf("%s (%s) at ", host, inet_ntoa(sin->sin_addr.s_addr));
+	if (ar.arp_flags & ATF_COM)
+		ether_print(ea);
+	else
+		PutStr("(incomplete)");
+	if (ar.arp_flags & ATF_PERM)
+		PutStr(" permanent");
+	if (ar.arp_flags & ATF_PUBL)
+		PutStr(" published");
+	if (ar.arp_flags & ATF_USETRAILERS)
+		PutStr(" trailers");
+	PutStr("\n");
+}
+
+/*
+ * Delete an arp entry
+ */
+void delete(host)
+	char *host;
+{
+	struct arpreq ar;
+	struct hostent *hp;
+	struct sockaddr_in *sin;
+	int s;
+
+	bzero((caddr_t)&ar, sizeof ar);
+	ar.arp_pa.sa_family = AF_INET;
+	sin = (struct sockaddr_in *)&ar.arp_pa;
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = inet_addr(host);
+	if (sin->sin_addr.s_addr == -1) {
+		if (!(hp = gethostbyname(host))) {
+			Printf("arp: %s: Unknown host\n", host);
+			myexit(1);
+		}
+		bcopy((char *)hp->h_addr, (char *)&sin->sin_addr,
+		    sizeof sin->sin_addr);
+	}
+	s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) {
+		PutStr("arp: socket");
+		myexit(1);
+	}
+	if (s_ioctl(s, SIOCDARP, (caddr_t)&ar) < 0) {
+		if (errno == ENXIO)
+			Printf("%s (%s) -- no entry\n",
+			    host, inet_ntoa(sin->sin_addr.s_addr));
+		else
+			PutStr("SIOCDARP");
+		myexit(1);
+	}
+	s_close(s);
+	Printf("%s (%s) deleted\n", host, inet_ntoa(sin->sin_addr.s_addr));
+}
+
+struct nlist nl[] = {
+#define	X_ARPTAB	0
+	{ "_arptab" },
+#define	X_ARPTAB_SIZE	1
+	{ "_arptab_size" },
+	{ "" },
+};
+
+
+/*
+ * Dump the entire arp table
+ */
+void dump(kernel, mem)
+	char *kernel, *mem;
+{
+	extern int h_errno;
+	struct arptab *at;
+	struct hostent *hp;
+	int bynumber, mf, sz;
+	short arptab_size;
+	char *host, *malloc();
+	off_t lseek();
+	int num_printed;
+	mf=0;
+
+	if (nlist(kernel, nl) < 0 || nl[X_ARPTAB_SIZE].n_type == 0) {
+		PutStr("arp: network is not running\n");
+		myexit(1);
+	}
+	klseek(mf, (long)nl[X_ARPTAB_SIZE].n_value, L_SET);
+	kread(mf, &arptab_size, sizeof arptab_size);
+	if (arptab_size <= 0 || arptab_size > 1000) {
+		Printf("arp: %s: namelist wrong\n", kernel);
+		myexit(1);
+	}
+	sz = arptab_size * sizeof (struct arptab);
+	at = (struct arptab *)malloc((u_int)sz);
+	if (at == NULL) {
+		PutStr("arp: can't get memory for arptab.\n");
+		myexit(1);
+	}
+	klseek(mf, (long)nl[X_ARPTAB].n_value, L_SET);
+	if (kread(mf, (char *)at, sz) != sz) {
+		PutStr("arp: error reading arptab");
+		myexit(1);
+	}
+	num_printed = 0;
+	for (bynumber = 0; arptab_size-- > 0; at++) {
+		if (at->at_iaddr.s_addr == 0 || at->at_flags == 0)
+			continue;
+		if (bynumber == 0)
+			hp = gethostbyaddr((caddr_t)&at->at_iaddr,
+			    sizeof at->at_iaddr, AF_INET);
+		else
+			hp = 0;
+		if (hp)
+			host = hp->h_name;
+		else {
+			host = "?";
+		}
+		Printf("%s (%s) at ", host, inet_ntoa(at->at_iaddr.s_addr));
+		num_printed++;
+		if (at->at_flags & ATF_COM)
+			ether_print(at->at_enaddr);
+		else
+			PutStr("(incomplete)");
+		if (at->at_flags & ATF_PERM)
+			PutStr(" permanent");
+		if (at->at_flags & ATF_PUBL)
+			PutStr(" published");
+		if (at->at_flags & ATF_USETRAILERS)
+			PutStr(" trailers");
+		PutStr("\n");
+	}
+	if(num_printed == 0){
+		PutStr("arp table has no entries\n");
+	}
+}
+
+/*
+ * Seek into the kernel for a value.
+ */
+
+static long addr;
+
+int kread(fd, buf, size)
+	int fd;
+	void *buf;
+	int size;
+{
+	bcopy((caddr_t)addr, buf, size);
+	addr += size;
+	return(size);
+}
+
+void klseek(fd, off, how)
+	int	fd;
+	long	off;
+	int	how;
+{
+	addr = off;
+}
+
+void ether_print(cp)
+	u_char *cp;
+{
+	Printf("%lx:%lx:%lx:%lx:%lx:%lx", cp[0], cp[1], cp[2], cp[3], cp[4], cp[5]);
+}
+
+int ether_aton(a, n)
+	char *a;
+	u_char *n;
+{
+	int i, o[6];
+
+	i = sscanf(a, "%x:%x:%x:%x:%x:%x", &o[0], &o[1], &o[2],
+					   &o[3], &o[4], &o[5]);
+	if (i != 6) {
+		Printf("arp: invalid Ethernet address '%s'\n", a);
+		return (1);
+	}
+	for (i=0; i<6; i++)
+		n[i] = o[i];
+	return (0);
+}
+
+@
+
+
+1.2
+log
+@Major Changes.  Updated for socket.library.  Added ReadArgs() argument parsing.  Totally rewrote the file parsing routine.  Removed stdio wherever possible.
+@
+text
+@d6 1
+a6 1
+ * $Id: arp.c,v 1.1 90/11/12 15:18:29 bj Exp Locker: kcd $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: Stuff:as225/arp/RCS/arp.c,v 1.1 90/11/12 15:18:29 bj Exp Locker: kcd $
+d287 1
+a287 1
+			Printf("arp: %s: ", host);
+d340 1
+a340 1
+			Printf("arp: %s: ", host);
+d393 1
+a393 1
+			Printf("arp: %s: ", host);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d41 1
+d43 9
+a53 1
+#include <sys/socket.h>
+a56 1
+#include <netinet/in.h>
+d65 14
+a78 1
+static char *compiler = "MANX36 MANX36" ;
+d81 19
+d101 2
+a102 1
+extern int errno;
+d109 4
+a112 1
+	int ch;
+d114 98
+a211 37
+	while ((ch = getopt(argc, argv, "adsf")) != EOF)
+		switch((char)ch) {
+		case 'a': {
+			char *mem;
+
+			if (argc > 4)
+				usage();
+			if (argc == 4) {
+				kflag = 1;
+				mem = argv[3];
+			}
+			else
+				mem = "/dev/kmem";
+			dump((argc >= 3) ? argv[2] : "/vmunix", mem);
+			exit(0);
+		}
+		case 'd':
+			if (argc != 3)
+				usage();
+			delete(argv[2]);
+			exit(0);
+		case 's':
+			if (argc < 4 || argc > 7)
+				usage();
+			exit(set(argc-2, &argv[2]) ? 1 : 0);
+		case 'f':
+			if (argc != 3)
+				usage();
+			exit (file(argv[2]) ? 1 : 0);
+		case '?':
+		default:
+			usage();
+		}
+	if (argc != 2)
+		usage();
+	get(argv[1]);
+	exit(0);
+d217 1
+a217 1
+file(name)
+d220 2
+a221 1
+	FILE *fp;
+a222 1
+	char line[100], arg[5][50], *args[5];
+d224 3
+a226 9
+	if ((fp = fopen(name, "r")) == NULL) {
+		fprintf(stderr, "arp: cannot open %s\n", name);
+		exit(1);
+	}
+	args[0] = &arg[0][0];
+	args[1] = &arg[1][0];
+	args[2] = &arg[2][0];
+	args[3] = &arg[3][0];
+	args[4] = &arg[4][0];
+a227 14
+	while(fgets(line, 100, fp) != NULL) {
+		i = sscanf(line, "%s %s %s %s %s", arg[0], arg[1], arg[2],
+		    arg[3], arg[4]);
+		if (i < 2) {
+			fprintf(stderr, "arp: bad line: %s\n", line);
+			retval = 1;
+			continue;
+		}
+		if (set(i, args))
+			retval = 1;
+	}
+	fclose(fp);
+	return (retval);
+}
+d229 41
+d271 1
+a271 1
+ * Set an individual arp entry 
+d273 1
+a273 3
+set(argc, argv)
+	int argc;
+	char **argv;
+a279 1
+	char *host = argv[0], *eaddr = argv[1];
+a280 2
+	argc -= 2;
+	argv += 2;
+d287 1
+a287 2
+			fprintf(stderr, "arp: %s: ", host);
+			herror((char *)NULL);
+d297 10
+a306 10
+	while (argc-- > 0) {
+		if (strncmp(argv[0], "temp", 4) == 0)
+			ar.arp_flags &= ~ATF_PERM;
+		else if (strncmp(argv[0], "pub", 3) == 0)
+			ar.arp_flags |= ATF_PUBL;
+		else if (strncmp(argv[0], "trail", 5) == 0)
+			ar.arp_flags |= ATF_USETRAILERS;
+		argv++;
+	}
+	
+d309 2
+a310 2
+		perror("arp: socket");
+		exit(1);
+d312 3
+a314 3
+	if (ioctl(s, SIOCSARP, (caddr_t)&ar) < 0) {
+		perror(host);
+		exit(1);
+d316 1
+a316 1
+	close(s);
+d323 1
+a323 1
+get(host)
+d340 2
+a341 3
+			fprintf(stderr, "arp: %s: ", host);
+			herror((char *)NULL);
+			exit(1);
+d348 2
+a349 2
+		perror("arp: socket");
+		exit(1);
+d351 1
+a351 1
+	if (ioctl(s, SIOCGARP, (caddr_t)&ar) < 0) {
+d353 2
+a354 2
+			printf("%s (%s) -- no entry\n",
+			    host, inet_ntoa(sin->sin_addr));
+d356 2
+a357 2
+			perror("SIOCGARP");
+		exit(1);
+d359 1
+a359 1
+	close(s);
+d361 1
+a361 1
+	printf("%s (%s) at ", host, inet_ntoa(sin->sin_addr));
+d365 1
+a365 1
+		printf("(incomplete)");
+d367 1
+a367 1
+		printf(" permanent");
+d369 1
+a369 1
+		printf(" published");
+d371 2
+a372 2
+		printf(" trailers");
+	printf("\n");
+d376 1
+a376 1
+ * Delete an arp entry 
+d378 1
+a378 1
+delete(host)
+d393 2
+a394 3
+			fprintf(stderr, "arp: %s: ", host);
+			herror((char *)NULL);
+			exit(1);
+d401 2
+a402 2
+		perror("arp: socket");
+		exit(1);
+d404 1
+a404 1
+	if (ioctl(s, SIOCDARP, (caddr_t)&ar) < 0) {
+d406 2
+a407 2
+			printf("%s (%s) -- no entry\n",
+			    host, inet_ntoa(sin->sin_addr));
+d409 2
+a410 2
+			perror("SIOCDARP");
+		exit(1);
+d412 2
+a413 2
+	close(s);
+	printf("%s (%s) deleted\n", host, inet_ntoa(sin->sin_addr));
+d428 1
+a428 1
+dump(kernel, mem)
+d439 1
+d442 2
+a443 2
+		fprintf(stderr, "arp: network is not running\n");
+		exit(1);
+d448 2
+a449 2
+		fprintf(stderr, "arp: %s: namelist wrong\n", kernel);
+		exit(1);
+d454 2
+a455 2
+		fputs("arp: can't get memory for arptab.\n", stderr);
+		exit(1);
+d459 2
+a460 2
+		perror("arp: error reading arptab");
+		exit(1);
+d476 1
+a476 1
+		printf("%s (%s) at ", host, inet_ntoa(at->at_iaddr));
+d481 1
+a481 1
+			printf("(incomplete)");
+d483 1
+a483 1
+			printf(" permanent");
+d485 1
+a485 1
+			printf(" published");
+d487 2
+a488 2
+			printf(" trailers");
+		printf("\n");
+d491 1
+a491 1
+		printf("arp table has no entries\n");
+d501 4
+a504 1
+kread(fd, buf, size)
+d508 1
+d511 1
+a511 1
+klseek(fd, off, how)
+d519 1
+a519 1
+ether_print(cp)
+d522 1
+a522 1
+	printf("%x:%x:%x:%x:%x:%x", cp[0], cp[1], cp[2], cp[3], cp[4], cp[5]);
+d525 1
+a525 1
+ether_aton(a, n)
+d534 1
+a534 1
+		fprintf(stderr, "arp: invalid Ethernet address '%s'\n", a);
+a541 9
+usage()
+{
+	printf("usage: arp hostname\n");
+	printf("       arp -a\n");
+	printf("       arp -d hostname\n");
+	printf("       arp -s hostname ether_addr [temp] [pub] [trail]\n");
+	printf("       arp -f filename\n");
+	exit(1);
+}
+@

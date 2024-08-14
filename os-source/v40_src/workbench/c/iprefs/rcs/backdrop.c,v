@@ -1,0 +1,715 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.7
+date     93.01.13.10.35.59;  author vertex;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.08.10.16.40.28;  author vertex;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.07.29.14.38.53;  author vertex;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.07.21.17.42.33;  author vertex;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.07.16.16.21;  author vertex;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.07.02.18.11.24;  author vertex;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.07.01.18.51.25;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Handle patterns and pictures for the WB
+@
+
+
+39.7
+log
+@Doesn't open a backdrop window if WB is already in backdrop mode
+@
+text
+@
+/* includes */
+#include <exec/devices.h>
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/ports.h>
+#include <exec/execbase.h>
+#include <dos/dos.h>
+#include <devices/audio.h>
+#include <prefs/sound.h>
+#include <graphics/layers.h>
+#include <intuition/gadgetclass.h>
+#include <datatypes/datatypes.h>
+#include <datatypes/datatypesclass.h>
+#include <datatypes/pictureclass.h>
+#include <prefs/wbpattern.h>
+#include <dos.h>
+
+/* prototypes */
+#include <clib/exec_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/layers_protos.h>
+#include <clib/datatypes_protos.h>
+#include <clib/graphics_protos.h>
+
+/* direct ROM interface */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/layers_pragmas.h>
+#include <pragmas/datatypes_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+
+/* application includes */
+#include "backdrop.h"
+#include "iprefs.h"
+#include "pread.h"
+#include "resetwb.h"
+
+
+/*****************************************************************************/
+
+
+extern struct ExecBase *SysBase;
+extern struct Library  *IntuitionBase;
+extern struct Library  *LayersBase;
+extern struct Library  *GfxBase;
+extern struct Library  *DataTypesBase;
+extern struct Task     *iprefsTask;
+extern Object          *soundObj;
+
+
+/*****************************************************************************/
+
+
+struct BackdropLock
+{
+    struct SignalSemaphore  bl_Semaphore;
+    struct BitMap          *bl_BitMap;
+    UWORD		    bl_Width;
+    UWORD		    bl_Height;
+};
+
+struct BackdropLock    bl;
+struct Hook            render;
+APTR                   oldOpenScreen;
+APTR                   oldCloseWorkBench;
+struct IPatternBitMap *backdrops[3];
+BOOL                   newScreenBackdrop;
+
+ULONG __stdargs DoMethodA (Object *obj, Msg message);
+
+
+/*****************************************************************************/
+
+
+static VOID FlashWindow(VOID)
+{
+struct Screen *wb;
+struct Window *wp;
+BOOL           gotBackdrop;
+
+    if (wb = LockWB())
+    {
+        gotBackdrop = FALSE;
+
+        wp = wb->FirstWindow;
+        while (wp)
+        {
+            if ((wp->Flags & WFLG_BACKDROP) && (wp->Flags & WFLG_WBENCHWINDOW))
+            {
+                gotBackdrop = TRUE;
+            }
+
+            wp = wp->NextWindow;
+        }
+
+        if (!gotBackdrop)
+        {
+            if (wp = OpenWindowTags(NULL,WA_Flags,     WFLG_BACKDROP | WFLG_SIMPLE_REFRESH | WFLG_BORDERLESS,
+                                         WA_PubScreen, wb,
+                                         WA_Height,    wb->Height - wb->BarHeight,
+                                         TAG_DONE))
+            {
+                CloseWindow(wp);
+            }
+        }
+
+        UnlockPubScreen(NULL,wb);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+BOOL AttemptOpenDT(VOID)
+{
+    if (!DataTypesBase)
+    {
+        if (!(DataTypesBase = OpenLibrary("datatypes.library",0)))
+        {
+            UserProblems(MSG_IP_ERROR_NO_DATATYPES_LIB,NULL);
+            return(FALSE);
+        }
+    }
+
+    return(TRUE);
+}
+
+
+/*****************************************************************************/
+
+
+VOID AttemptCloseDT(VOID)
+{
+UWORD i;
+
+    if (!soundObj)
+    {
+        i = 0;
+        while (i < 3)
+        {
+            if (backdrops[i] && (!backdrops[i]->pbm_BitMap || backdrops[i]->pbm_Object))
+                return;
+
+            i++;
+        }
+
+        CloseLibrary(DataTypesBase);
+        DataTypesBase = NULL;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID IWBConfig(ULONG type, APTR data)
+{
+struct Library *WorkbenchBase;
+
+    if (WorkbenchBase = OpenLibrary("workbench.library",39))
+    {
+        WBConfig(type,(ULONG)data);
+        CloseLibrary(WorkbenchBase);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID BackdropConfig(UWORD backdropType, struct IPatternBitMap *pbm)
+{
+struct IPatternBitMap *old;
+BOOL                   flashWindow = FALSE;
+
+    ObtainSemaphore(&bl);
+
+    if (backdropType < WBP_SCREEN)
+    {
+        if (pbm && pbm->pbm_BitMap)
+        {
+            IWBConfig(1 + backdropType,pbm);
+        }
+        else
+        {
+            IWBConfig(1 + backdropType,NULL);
+        }
+    }
+    else
+    {
+        bl.bl_BitMap = NULL;
+        if (pbm)
+        {
+            bl.bl_BitMap = pbm->pbm_BitMap;
+            bl.bl_Width  = pbm->pbm_Width;
+            bl.bl_Height = pbm->pbm_Height;
+        }
+        newScreenBackdrop = TRUE;
+    }
+
+    old = backdrops[backdropType];
+    backdrops[backdropType] = pbm;
+
+    if (old)
+    {
+        if (old->pbm_Object)
+        {
+            DisposeDTObject(old->pbm_Object);
+
+            flashWindow = (backdropType == WBP_SCREEN);
+        }
+        else if (old->pbm_BitMap)
+        {
+            WaitBlit();
+            old->pbm_BitMap->Depth = 3;
+            FreeBitMap(old->pbm_BitMap);
+        }
+
+        FreeVec(old);
+    }
+
+    AttemptCloseDT();
+
+    ReleaseSemaphore(&bl);
+
+    if (flashWindow)
+        FlashWindow();
+
+    Signal(iprefsTask,SIGBREAKF_CTRL_E);
+}
+
+
+/*****************************************************************************/
+
+
+VOID RemoveDTBackdrops(VOID)
+{
+UWORD i;
+
+    geta4();     /* since we're called from CloseWorkBench() */
+
+    ObtainSemaphore(&bl);
+
+    i = 0;
+    while (i < 3)
+    {
+        if (backdrops[i] && backdrops[i]->pbm_Object)
+        {
+            if (i < WBP_SCREEN)
+            {
+                IWBConfig(1 + i,NULL);
+            }
+            else
+            {
+                bl.bl_BitMap = NULL;
+            }
+
+            DisposeDTObject(backdrops[i]->pbm_Object);
+            backdrops[i]->pbm_Object = NULL;
+            backdrops[i]->pbm_BitMap = NULL;
+        }
+
+        i++;
+    }
+
+    AttemptCloseDT();
+
+    newScreenBackdrop = TRUE;
+
+    ReleaseSemaphore(&bl);
+}
+
+
+/*****************************************************************************/
+
+
+VOID UpdateDTBackdrops(VOID)
+{
+struct Screen       *wb;
+struct gpLayout      gpl;
+struct BitMapHeader *bmhd;
+struct BitMap       *bm;
+UWORD                i;
+BOOL                 flashWindow;
+Object              *obj;
+
+    if (wb = LockWB())
+    {
+        flashWindow       = newScreenBackdrop;
+        newScreenBackdrop = FALSE;
+
+        InstallLayerInfoHook(&wb->LayerInfo,LAYERS_BACKFILL);
+
+        i = 0;
+        while (i < 3)
+        {
+            if (backdrops[i] && !backdrops[i]->pbm_BitMap && backdrops[i]->pbm_Name)
+            {
+                ObtainSemaphore(&bl);
+
+                if (AttemptOpenDT())
+                {
+                    if (obj = NewDTObject(&backdrops[i]->pbm_Name,
+                                          DTA_SourceType,        DTST_FILE,
+                                          PDTA_Remap,            backdrops[i]->pbm_DoRemap,
+                                          PDTA_Screen,           wb,
+                                          PDTA_FreeSourceBitMap, TRUE,
+                                          TAG_DONE))
+                    {
+                        gpl.MethodID    = DTM_PROCLAYOUT;
+                        gpl.gpl_GInfo   = NULL;
+                        gpl.gpl_Initial = 1;
+
+                        SetTaskPri(iprefsTask,-1);
+
+                        if (DoMethodA(obj,&gpl))
+                        {
+                            GetDTAttrs(obj,PDTA_BitMapHeader, &bmhd,
+                                           PDTA_BitMap,       &bm,
+                                           TAG_DONE);
+
+                            if (bm)
+                            {
+                                backdrops[i]->pbm_Width  = bmhd->bmh_Width;
+                                backdrops[i]->pbm_Height = bmhd->bmh_Height;
+                                backdrops[i]->pbm_Object = obj;
+                                backdrops[i]->pbm_BitMap = bm;
+
+                                if (i < WBP_SCREEN)
+                                {
+                                    IWBConfig(i+1,backdrops[i]);
+                                }
+                                else
+                                {
+                                    bl.bl_BitMap = bm;
+                                    bl.bl_Width  = bmhd->bmh_Width;
+                                    bl.bl_Height = bmhd->bmh_Height;
+
+                                    flashWindow = TRUE;
+                                }
+                            }
+                            else
+                            {
+                                DisposeDTObject(obj);
+                            }
+                        }
+                        else
+                        {
+                            DisposeDTObject(obj);
+                        }
+
+                        SetTaskPri(iprefsTask,0);
+                    }
+                    else
+                    {
+                        UserProblems(MSG_IP_ERROR_NO_PICTURE,&backdrops[i]->pbm_Name);
+                    }
+                }
+                ReleaseSemaphore(&bl);
+            }
+            i++;
+        }
+
+        AttemptCloseDT();
+
+        InstallLayerInfoHook(&wb->LayerInfo,&render);
+
+        if (flashWindow)
+            FlashWindow();
+
+        UnlockPubScreen(NULL,wb);
+    }
+}
+@
+
+
+39.6
+log
+@Changes to support the new "split the seglist in half" trick.
+@
+text
+@d80 1
+d84 14
+a97 4
+        if (wp = OpenWindowTags(NULL,WA_Flags,     WFLG_BACKDROP | WFLG_SIMPLE_REFRESH | WFLG_BORDERLESS,
+                                     WA_PubScreen, wb,
+                                     WA_Height,    wb->Height - wb->BarHeight,
+                                     TAG_DONE))
+d99 7
+a105 1
+            CloseWindow(wp);
+@
+
+
+39.5
+log
+@Now checks for NULL bitmaps when mapping a backdrop
+@
+text
+@a54 4
+VOID OpenScreenPatch(VOID);
+VOID CloseWorkBenchPatch(VOID);
+VOID BackdropRender(VOID);
+
+d76 1
+a76 1
+VOID FlashWindow(VOID)
+d141 15
+a356 31
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID InstallBackdropPatch(VOID)
+{
+    render.h_Entry = (APTR)BackdropRender;
+
+    InitSemaphore(&bl);
+
+    Forbid();
+    oldOpenScreen     = (APTR)SetFunction(IntuitionBase,-612,(VOID *)OpenScreenPatch);
+    oldCloseWorkBench = (APTR)SetFunction(IntuitionBase,-78,(VOID *)CloseWorkBenchPatch);
+    Permit();
+}
+
+
+/*****************************************************************************/
+
+
+VOID IWBConfig(ULONG type, APTR data)
+{
+struct Library *WorkbenchBase;
+
+    if (WorkbenchBase = OpenLibrary("workbench.library",39))
+    {
+        WBConfig(type,(ULONG)data);
+        CloseLibrary(WorkbenchBase);
+@
+
+
+39.4
+log
+@Correctly updates screen backdrop when WB screen is reset
+@
+text
+@d266 1
+a266 1
+        InstallLayerInfoHook(&wb->LayerInfo,LAYERS_NOBACKFILL);
+d296 16
+a311 4
+                            backdrops[i]->pbm_Width  = bmhd->bmh_Width;
+                            backdrops[i]->pbm_Height = bmhd->bmh_Height;
+                            backdrops[i]->pbm_Object = obj;
+                            backdrops[i]->pbm_BitMap = bm;
+d313 2
+a314 3
+                            if (i < WBP_SCREEN)
+                            {
+                                IWBConfig(i+1,backdrops[i]);
+d318 1
+a318 5
+                                bl.bl_BitMap = bm;
+                                bl.bl_Width  = bmhd->bmh_Width;
+                                bl.bl_Height = bmhd->bmh_Height;
+
+                                flashWindow = TRUE;
+@
+
+
+39.3
+log
+@Moves things around to allow sound.c to call AttemptOpenDT and AttemptCloseDT
+@
+text
+@a1 6
+/* WARNING: This module SetFunction()s OpenScreenTagList() even though all
+ *          the names refer to OpenWorkBench(). It used to patch OpenWorkBench()
+ *          but we changed that, and I was too lazy to rename everything
+ */
+
+
+d55 1
+a55 1
+VOID OpenWorkBenchPatch(VOID);
+d59 1
+a59 1
+struct OpenWBLock
+d61 4
+a64 4
+    struct SignalSemaphore  ow_Semaphore;
+    struct BitMap          *ow_BitMap;
+    UWORD		    ow_Width;
+    UWORD		    ow_Height;
+d67 1
+a67 1
+struct OpenWBLock      owl;
+d69 1
+a69 1
+APTR                   oldOpenWorkBench;
+d80 23
+d125 1
+a125 2
+    i = 0;
+    while (i < 3)
+d127 5
+a131 2
+        if (backdrops[i] && (!backdrops[i]->pbm_BitMap || backdrops[i]->pbm_Object))
+            break;
+d133 2
+a134 2
+        i++;
+    }
+a135 2
+    if ((i == 3) && (!soundObj))
+    {
+d148 1
+d150 1
+a150 1
+    ObtainSemaphore(&owl);
+d165 1
+a165 1
+        owl.ow_BitMap = NULL;
+d168 3
+a170 3
+            owl.ow_BitMap = pbm->pbm_BitMap;
+            owl.ow_Width  = pbm->pbm_Width;
+            owl.ow_Height = pbm->pbm_Height;
+d183 2
+d198 1
+a198 1
+    ReleaseSemaphore(&owl);
+d200 3
+d214 1
+a214 1
+    geta4();
+d216 1
+a216 1
+    ObtainSemaphore(&owl);
+d229 1
+a229 1
+               owl.ow_BitMap = NULL;
+d242 3
+a244 1
+    ReleaseSemaphore(&owl);
+a253 1
+struct Window       *wp;
+d266 1
+a266 1
+        InstallLayerInfoHook(&wb->LayerInfo,LAYERS_BACKFILL);
+d273 1
+a273 1
+                ObtainSemaphore(&owl);
+d307 3
+a309 3
+                                owl.ow_BitMap = bm;
+                                owl.ow_Width  = bmhd->bmh_Width;
+                                owl.ow_Height = bmhd->bmh_Height;
+d326 1
+a326 1
+                ReleaseSemaphore(&owl);
+d336 1
+a336 9
+        {
+            if (wp = OpenWindowTags(NULL,WA_Flags,     WFLG_BACKDROP | WFLG_SIMPLE_REFRESH | WFLG_BORDERLESS,
+                                         WA_PubScreen, wb,
+                                         WA_Height,    wb->Height - wb->BarHeight,
+                                         TAG_DONE))
+            {
+                CloseWindow(wp);
+            }
+        }
+d350 1
+a350 1
+    InitSemaphore(&owl);
+d353 1
+a353 1
+    oldOpenWorkBench  = (APTR)SetFunction(IntuitionBase,-612,(VOID *)OpenWorkBenchPatch);
+@
+
+
+39.2
+log
+@Temporary window no longer covers screen title bar, to reduce flicker
+Now closes datatypes.library as much as possible, but not *too much*
+Forces a redraw of the screen when the screen pattern changes
+@
+text
+@d2 6
+d52 1
+a53 1
+extern struct Library  *GfxBase;
+d55 1
+d86 18
+d117 1
+a117 1
+    if (i == 3)
+a130 1
+UWORD                  i;
+d137 1
+d139 1
+d141 1
+d143 1
+d251 1
+a251 4
+                if (!DataTypesBase)
+                    DataTypesBase = OpenLibrary("datatypes.library",39);
+
+                if (DataTypesBase)
+d255 1
+a255 1
+                                          PDTA_Remap,            TRUE,
+a301 4
+                else
+                {
+                    UserProblems(MSG_IP_ERROR_NO_DATATYPES_LIB,NULL);
+                }
+d337 1
+a337 1
+    oldOpenWorkBench  = (APTR)SetFunction(IntuitionBase,-210,(VOID *)OpenWorkBenchPatch);
+@
+
+
+39.1
+log
+@Initial V39 RCS checkin
+@
+text
+@d71 1
+d79 24
+d126 1
+d148 1
+a148 14
+    i = 0;
+    while (i < 3)
+    {
+        if (backdrops[i] && !backdrops[i]->pbm_BitMap)
+            break;
+
+        i++;
+    }
+
+    if (i == 3)
+    {
+        CloseLibrary(DataTypesBase);
+        DataTypesBase = NULL;
+    }
+d189 1
+a189 2
+    CloseLibrary(DataTypesBase);
+    DataTypesBase = NULL;
+d211 2
+a212 1
+        flashWindow = FALSE;
+d286 2
+d294 1
+@

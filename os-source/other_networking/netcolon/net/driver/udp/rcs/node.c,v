@@ -1,0 +1,519 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.5; strict;
+comment  @ * @;
+
+
+1.5
+date     91.08.02.09.11.56;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.07.25.19.21.05;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.07.08.10.05.56;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.06.21.11.53.35;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.06.05.12.51.14;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@**  Bolt NET-UDP.library:
+**  node.c -- Initialize, terminate and query "connections" to nodes.
+@
+
+
+1.5
+log
+@First Alpha?
+@
+text
+@/*
+**  Bolt NET-UDP.library:
+**  node.c -- Initialize, terminate and query "connections" to nodes.
+**
+**		$Log:	node.c,v $
+ * Revision 1.4  91/07/25  19:21:05  dlarson
+ * working!
+ *
+ * Revision 1.3  91/07/08  10:05:56  dlarson
+ * continuing development...
+ *
+ * Revision 1.2  91/06/21  11:53:35  dlarson
+ * work in progress...
+ *
+ * Revision 1.1  91/06/05  12:51:14  dlarson
+ * Initial revision
+ *
+*/
+
+
+#include "bolt-udp.h"
+
+/****** NET-UDP.library/SDNInitNode **********************************
+*
+*   NAME
+*	SDNInitNode -- Establish a new node connection.
+*
+*   SYNOPSIS
+*	rc = SDNInitNode(drglobal, name, con)
+*	D0		 A0	   A1	 A2
+*
+*	int SDNInitNode(APTR, char *, APTR *)
+*
+*   FUNCTION
+*	When the handler wishes to talk to a node for which it has not
+*	established a connection, it calls this entry point with the name of
+*	the node that it is attempting to access.  If a particular driver
+*	does not support multiple connetions then it should just return a
+*	failure after the first connection is set up.
+*
+*	The con pointer must be unique, and a node must not be re-
+*	SDNInitNode()'d unless it has been SDNTermNode'd.  The validity
+*	of these assumtions is not checked by SDNInitNode().
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer
+*	name		- Name of node is set to connect to.  Must be
+*			  shorter than MAXNAME (or SDN_ERR returned).
+*	con		- If rc is SDN_OK, con is filled in with a unique
+*			  pointer used as node ID for future communications
+*			  with the driver about this node.
+*														  and 'ioptr' fields.
+*   RESULT
+*	rc		- SDN_ERR, SDN_OK or SDN_DOWN.
+*
+*   NOTES
+*	This function is called only by the handler.
+*
+*	Name must be treated as non-case-sensitive.
+*
+*	Called by the handler to establish communications with a specific
+*	remote node.
+*
+*
+*	For drivers built on connectionless protocols, SDNInitNode isn't
+*	so much to intialize a node or establish a connection as it is to
+*	say whether we know of some node X, can get a reply to a packet
+*	sent to node X and to return a node ID (con) if we can.
+*
+*   BUGS
+*	Doesn't check to see if it already has a connection for 'name' before
+*	adding one.
+*
+*	Do I need to do any additional initialization of the con struct?
+*
+*   SEE ALSO
+*	SDNAllocRPacket(), SDNTermNode()
+*
+***************************************/
+int LIBENT UDPSDNInitNode (register __a0 UDPGLOBAL tg,
+			     register __a1 char *name,
+			     register __a2 APTR *con,
+			     register __a6 struct DrLibrary *DriverBase)
+{
+int rc;			/*  result code from SDN_Send()  */
+UDPCon *i;		/*  index for searching our list of "connections"  */
+struct RPacket *rp;	/*  to send ACTION_NETWORK_ESTABLISH  */
+struct hostent *hostent;  /* for host 'name' */
+
+/*
+**  Is the name non-null and shorter than MAXNAME?
+*/
+	BUG(("SDNInitNode()... "));
+	if (strlen(name) > MAXNAME || name == NULL)
+	{
+		BUG(("Host name '%s' too long.\n",name));
+		return(SDN_ERR);
+	}
+/*
+**  Add a new node to the head of the tg->con list (to tell the handler
+**  how to identify this node in future conversations (con)).
+**  (There is a copy of this code in SDNAccept().)
+**
+**  We enter a Forbid() to arbitrate access (with rms process) to the
+**  connection list.
+*/
+	if( (i = AllocMem(sizeof(*i), MEMF_CLEAR)) == NULL)
+	{
+		BUG(("InitNode can't AllocMem().\n"));
+		return(SDN_ERR);
+	}
+	Forbid();
+	if(tg->con == NULL)
+	{
+		tg->con = i;
+		tg->con->next = NULL;
+	}else
+	{
+		i->next = tg->con;
+		tg->con = i;
+	}
+/*
+**  Translate the 'name' into an address. (try to get it by number, then name)
+**
+**  Once we've gotten the address, we Permit() since we aren't playing with
+**  the con list anymore.
+*/
+	if( (i->address.sin_addr.s_addr = inet_addr(name)) == INADDR_NONE)
+	{
+		if( (hostent=gethostbyname(name)) == NULL)
+		{
+			BUG(("Can't find a host named '%s'.\n", name));
+			Permit();
+			return(SDN_ERR);
+		}
+		/*  Found it by name, copy hp into server. */
+		memcpy( (char *)&i->address.sin_addr, (char *)hostent->h_addr,
+			hostent->h_length);
+	}
+	i->address.sin_family = AF_INET;
+	i->address.sin_port = htons(tg->serverport);
+	Permit();
+	BUG(("name='%s' server='%s' port=%ld\n", name,
+		inet_ntoa(i->address.sin_addr.s_addr), tg->serverport ));
+/*
+**  Now we need to send the initial connection packet to the other side so
+**  that we know whether we can succesfully get packets there and so the
+**  server knows to keep track of us.
+**  We do not need to wait for the reply packet because it will never come.
+**  We might find that the send failed, indicating that the remote node isn't
+**  up or isn't running the server.  If so, status will != SDN_OK.
+*/
+	if( (rp = SDNAllocRPacket((APTR)tg, i, 0)) == NULL)
+	{
+		SDNTermNode((APTR)tg, i);
+		return(SDN_ERR);
+	}
+	rp->Type = ACTION_NETWORK_START;
+	rp->DLen = 0;
+	rc = SDNSend((APTR)tg, rp);
+	if(rc == SDN_OK)
+	{
+		*con = (APTR)i;
+		BUG(("InitNode() succesful (con=%lx).\n", *con));
+		return(SDN_OK);
+	}
+	BUG(("InitNode failed.\n"));
+	SDNTermNode((APTR)tg, *con);
+	return(SDN_ERR);
+}
+
+
+/****** NET-UDP.library/SDNTermNode **********************************
+*
+*   NAME
+*	SDNTermNode -- Free Up all Driver resources associated with a Node.
+*
+*   SYNOPSIS
+*	SDNTermNode(drglobal, con)
+*		    A0	      A1
+*
+*	void SDNTerm(APTR, APTR);
+*
+*   FUNCTION
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer.
+*	con	  	- Connection pointer obtained from SDNInitNode() to
+*			  terminate.
+*
+*   RESULTS
+*	None.
+*
+*   NOTES
+*	This function is called only by the handler.
+*
+*	NULL con pointers will be ignored.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	SDNInitNode()
+*
+****************************************/
+void LIBENT UDPSDNTermNode (register __a0 UDPGLOBAL tg,
+			      register __a1 APTR con,
+			      register __a6 struct DrLibrary *DriverBase)
+{
+UDPCon *i;  /*  index to loop through "connection" list  */
+
+	if(con == NULL)
+		return;
+
+/*
+**  We'll check each entry and remove it if it's con pointer matches.
+**  If we somehow got extras, we'll get them, too, and we won't do anything
+**  if the con pointer doesn't match anything.
+**
+**  First we check the head.  If it matches, we change the head and
+**  free the old head's resources.
+**
+**  Once we've gotten past the head, we loop through the rest of the list.
+**
+**  We must be in Forbid() to arbitrate access to the con list with the rms
+**  proc.
+*/
+
+	 Forbid();
+HEAD:
+	if(tg->con == con)
+	{
+		i=tg->con;
+		tg->con = i->next;
+		FreeMem(i, (int)sizeof(*i));
+		goto HEAD;
+	}
+	for(i=tg->con; i != NULL; i=i->next)
+		if(i->next == con)
+		{
+			FreeMem(i->next, (int)sizeof(*i->next));
+			i->next = i->next->next;
+		}
+	Permit();
+}
+
+
+
+/****************************************
+*
+*   NAME
+*	SDNGetConData -- Get data associated with a connection for a RPacket.
+*
+*   SYNOPSIS
+*	data = SDNGetConData(drglobal, RP)
+*	D0		     A0	       A1
+*
+*	void *SDNGetConData(APTR, struct RPacket *);
+*
+*   FUNCTION
+*	Get data associated with a connection for a RPacket.
+*
+*	This function is the only way to obtain a connection specific pointer
+*	for any given RPacket.  With this the server or hanler can store a
+*	pointer to a global data item associated with an open connection.
+*	When the connection closes, an ACTION_NETWORK_END packet ARG1
+*	containing the data value set for the connection will be sent to
+*	the server.
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer
+*	RP		- RPacket struct returned from
+*			  SDNReceive() or SDNAccept()
+*   RESULT
+*	data		- Data for given connection
+*
+*   NOTES
+*	The data for a connection is NULL unless set with SDNSetConData()
+*	or SDNInitNode().
+*
+*	Drivers aren't required to actually maintain connections -- they
+*	can make the data pointer correspond to a node rather than a
+*	connection.  Thus, to deal with the case of a handler node which
+*	reboots, a server must start resources and start from scratch for
+*	a node for which a second ACTION_NETWORK_START is received.  The
+*	case in which a server node reboots is not problematic if connections
+*	are maintained (they'll break when the server reboots) or if a
+*	reliable message service is used (any packets with a non-zero
+*	sequence number would be rejected by the server and timed out on the
+*	handler side).
+*
+*   BUGS
+*	The server doesn't currently forget about ever having talked to a
+*	node if it gets a new ACTION_NETWORK_START!!!
+*
+*   SEE ALSO
+*	SDNSetConData()
+*
+****************************************/
+void *LIBENT UDPSDNGetConData (register __a0 UDPGLOBAL tg,
+				  register __a1 struct RPacket *rp,
+				  register __a6 struct DrLibrary *DriverBase)
+{
+	return(UDPRP->con->data);
+}
+
+/****************************************
+*
+*   NAME
+*	SDNSetConData -- Set data associated with a connection for a RPacket.
+*
+*   SYNOPSIS
+*	SDNSetConData(drglobal, RP, data)
+*
+*	void SDNSetConData(APTR, struct RPacket *, void *);
+*
+*   FUNCTION
+*	Set data associated with a connection for an RPacket.
+*
+*	This function sets the connection specific pointer for any given
+*	RPacket.  With this the server or hanlder can store a pointer to a
+*	global data item associated with an open connection.  When the
+*	connection closes, an ACTION_NETWORK_END packet with ARG1 containing
+*	the data value set for the connection.
+*
+*	Typically this pointer will point to a handler or server specific
+*	data structure that indicates access or state information.
+*
+*   INPUTS
+*	drglobal  	- Driver-specific global data pointer.
+*	RP		- RPacket struct returned from
+*			  SDNReceive() or SDNAccept().
+*	data		- Data for given connection.
+*
+*   RESULT
+*	None.
+*
+*   NOTES
+*	This is the only way for the server to track the connection a
+*	particular packet is associated.
+*
+*	The driver must make SDNGetConData() return the same value for
+*	any packets from the same connection/node as for SDNSetConData().
+*
+*   BUGS
+*	I don't understand what the hell this is for.  The handler doesn't
+*	use it and the server uses it exacly once (in RmtNetStart).
+*
+*
+*   SEE ALSO
+*	SDNGetConData()
+*
+****************************************/
+void LIBENT UDPSDNSetConData  (register __a0 UDPGLOBAL tg,
+				  register __a1 struct RPacket *rp,
+				  register __a2 void *data,
+				  register __a6 struct DrLibrary *DriverBase)
+{
+	BUG(("SDNSetConData()\n"));
+	Forbid();
+	if(UDPRP->con)
+	{
+		UDPRP->con->data = data;
+	}
+	Permit();
+}
+
+int UDPprivate()
+{
+	return(0);
+}
+
+@
+
+
+1.4
+log
+@working!
+@
+text
+@d6 3
+d228 1
+a228 1
+	/* Forbid(); */
+d243 1
+a243 1
+/*	Permit();*/
+@
+
+
+1.3
+log
+@continuing development...
+@
+text
+@d6 3
+d90 1
+a90 1
+	BUG(("Entered InitNode()... "));
+d100 3
+d109 1
+d121 3
+d130 1
+d139 1
+a149 1
+	BUG(("InitNode about to AllocRPacket... "));
+d156 1
+a159 1
+		BUG(("InitNode succesful\n"));
+d161 1
+a161 1
+		BUG(("con=%lx ", i));
+d220 3
+d225 1
+d240 1
+d300 1
+a300 1
+	return( ((struct UDPRPacket *)rp)->con->data );
+d355 7
+a361 1
+	((struct UDPRPacket *)rp)->con->data = data;
+@
+
+
+1.2
+log
+@work in progress...
+@
+text
+@d6 3
+d15 1
+a15 1
+#include "net-udp.h"
+d65 4
+a68 2
+*	Doesn't check to see if it already has a connection before adding
+*	one.
+d82 2
+d87 1
+d89 2
+d92 1
+a92 1
+
+d94 2
+a95 2
+**  Add a new node to the head of the tg->con list and tell the handler
+**  how to identify this node in future conversations (con).
+d99 2
+d102 1
+d112 18
+a129 2
+	*con = (APTR)tg->con;
+
+d138 2
+a139 1
+	if( (rp = SDNAllocRPacket((APTR)tg, *con, 0)) == NULL)
+d141 1
+a141 1
+		SDNTermNode((APTR)tg, *con);
+d147 4
+d152 2
+d155 1
+a155 1
+	return(rc);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d6 3
+d62 2
+@

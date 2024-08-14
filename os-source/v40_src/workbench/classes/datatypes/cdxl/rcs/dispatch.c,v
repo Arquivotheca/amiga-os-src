@@ -1,0 +1,779 @@
+head     40.3;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+40.3
+date     93.09.23.10.55.43;  author davidj;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     93.05.24.14.14.52;  author davidj;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     93.03.24.11.38.35;  author davidj;  state Exp;
+branches ;
+next     40.0;
+
+40.0
+date     93.03.12.15.56.32;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+40.3
+log
+@restores the bitmap pointer.
+@
+text
+@/* dispatch.c
+ * main DataTypes class for XL files
+ *
+ */
+
+#include "classbase.h"
+
+/*****************************************************************************/
+
+#include "cdxl.h"
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+#define	DI(x)	;
+
+/*****************************************************************************/
+
+struct localData
+{
+    struct FileInfoBlock lod_FIB;
+    BPTR		 lod_FH;		/* File handle */
+
+    UBYTE		*lod_Buffer;		/* Frame buffer */
+    ULONG		 lod_BufferSize;	/* Size of buffer */
+
+    ULONG		 lod_FrameSize;		/* Frame size */
+
+    struct BitMap	*lod_KeyFrame;		/* Key frame */
+
+    UBYTE		*lod_Sample;
+    ULONG		 lod_SampleLength;
+    ULONG		 lod_Period;
+
+    struct PanFrame	 lod_Header;		/* Descriptor */
+    struct BitMap	 lod_Frame;		/* Current frame bitmap */
+};
+
+/*****************************************************************************/
+
+#define	G(o)			((struct Gadget *)o)
+
+#define INTDIV(a, b)		(((a) + ((b) / 2)) / (b))
+#define	CDXL_SPEED_BPS		153600
+#define	CDTV_SEEK		10
+#define	CDTV_READXL		42
+#define	DEFAULT_XLSPEED		75
+#define	DEFAULT_SECTOR_SIZE	2048
+
+#define	NTSC_RATE		60
+#define	NTSC_FREQ		3579545
+#define	PAL_FREQ		3546895
+
+/*****************************************************************************/
+
+static void ASM CopyBitMap (
+    REG (a6) struct ClassBase *cb,
+    REG (a2) struct BitMap *bm1, REG (a3) struct BitMap *bm2, REG (d2) ULONG width)
+{
+    ULONG bpr1 = bm1->BytesPerRow;
+    ULONG bpr2 = bm2->BytesPerRow;
+    register UBYTE *src;
+    register UBYTE *dst;
+    register LONG r;
+    register LONG p;
+
+    for (p = bm1->Depth - 1; p >= 0; p--)
+    {
+	src = (BYTE *) bm1->Planes[p];
+	dst = (BYTE *) bm2->Planes[p];
+
+	for (r = bm1->Rows - 1; r >= 0; r--)
+	{
+	    CopyMem (src, dst, width);
+	    src += bpr1;
+	    dst += bpr2;
+	}
+    }
+}
+
+/*****************************************************************************/
+
+static ULONG ASM GetCDXL (REG (a6) struct ClassBase * cb, REG (a0) Class * cl, REG (a2) Object * o, REG (a1) struct TagItem * attrs)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct PanFrame *pf = &lod->lod_Header;
+
+    struct ColorRegister rgb, *cmap, *ccmap;
+    BOOL success = TRUE;
+    register ULONG i;
+    ULONG mult = 1L;
+    ULONG secs, fps;
+    UWORD *colors;
+    UBYTE *buffer;
+    ULONG modeid;
+    STRPTR title;
+    WORD ncolors;
+    ULONG frames;
+    ULONG fsize;
+    ULONG psize;
+    LONG *cregs;
+    ULONG speed;
+    BPTR fh;
+
+    title = (STRPTR) GetTagData (DTA_Name, NULL, attrs);
+
+    GetDTAttrs (o, DTA_Handle, &fh, TAG_DONE);
+
+    if (lod->lod_FH = fh)
+    {
+	/* Read the animation header */
+	if (Read (fh, pf, PAN_SIZE) == PAN_SIZE)
+	{
+	    /* Get the file size */
+	    if (ExamineFH (lod->lod_FH, &lod->lod_FIB))
+	    {
+		fsize = (ULONG)lod->lod_FIB.fib_Size;
+		Seek (fh, 0L, OFFSET_BEGINNING);
+	    }
+	    else
+	    {
+		/* Get the file size */
+		Seek (fh, 0L, OFFSET_END);
+		fsize = (ULONG) Seek (fh, 0L, OFFSET_BEGINNING);
+	    }
+
+	    /* Compute the number of frames */
+	    lod->lod_FrameSize = (LONG) FRAME_SIZE (pf);
+	    frames = fsize / lod->lod_FrameSize;
+
+	    /* Get the speed */
+	    speed = (pf->Reserved + 1) * DEFAULT_XLSPEED * DEFAULT_SECTOR_SIZE;
+
+	    /* Compute the frames per second */
+	    if (secs = INTDIV ((fsize * 100), speed))
+		fps  = INTDIV ((frames * 10000), secs) / 100;
+	    else
+		fps  = 10;
+
+#if 0
+	    if (fps < 4)
+		mult = 4;
+	    else if (fps < 10)
+		mult = 2;
+	    fps *= mult;
+#endif
+
+	    /* Allocate the frame buffer */
+	    if ((lod->lod_Buffer = AllocVec (lod->lod_FrameSize, NULL)) == NULL)
+		return FALSE;
+
+	    /* Allocate the bitmap for the key frame */
+	    if ((lod->lod_KeyFrame = AllocBitMap ((ULONG)pf->XSize, (ULONG)pf->YSize, (ULONG)pf->PixelSize,
+						  BMF_INTERLEAVED, NULL)) == NULL)
+		return FALSE;
+
+	    /* Read the first frame of the animation */
+	    if (Read (fh, lod->lod_Buffer, lod->lod_FrameSize) == lod->lod_FrameSize)
+	    {
+		/* Convert it to a bitmap */
+		InitBitMap (&lod->lod_Frame, pf->PixelSize, pf->XSize, pf->YSize);
+		buffer = (UBYTE *) ((ULONG) lod->lod_Buffer + PAN_SIZE + CMAP_SIZE (pf));
+		psize = lod->lod_Frame.BytesPerRow * pf->YSize;
+		for (i = 0; i < (ULONG)pf->PixelSize; i++)
+		    lod->lod_Frame.Planes[i] = &buffer[(i * psize)];
+
+		/* Blit the frame to the keyframe */
+		CopyBitMap (cb, &lod->lod_Frame, lod->lod_KeyFrame, (GetBitMapAttr (&lod->lod_Frame, BMA_WIDTH) / 8));
+
+		/* Come up with the mode id */
+		ncolors = 1 << pf->PixelSize;
+		modeid = LORES_KEY;
+		if (pf->XSize >= 640)
+		    modeid = HIRES;
+		if (pf->YSize >= 400)
+		    modeid |= LACE;
+
+		switch (PI_VIDEO(pf))
+		{
+		    case PIV_STANDARD:
+			break;
+
+		    case PIV_HAM:
+			modeid |= HAM_KEY;
+			if (pf->PixelSize == 6)
+			{
+			    ncolors = 32;
+			}
+			else if (pf->PixelSize == 8)
+			{
+			    ncolors = 64;
+			}
+			else
+			{
+			    SetIoErr (ERROR_ACTION_NOT_KNOWN);
+			    success = FALSE;
+			}
+			break;
+
+		    default:
+			SetIoErr (ERROR_ACTION_NOT_KNOWN);
+			success = FALSE;
+			break;
+		}
+
+		/* Should we continue on */
+		if (success)
+		{
+		    /* Compute audio information */
+		    if (secs = INTDIV ((speed * pf->AudioSize), lod->lod_FrameSize))
+			lod->lod_Period = INTDIV (NTSC_FREQ, secs) / mult;
+		    lod->lod_Sample = (UBYTE *)	((ULONG) lod->lod_Buffer + PAN_SIZE + CMAP_SIZE	(pf) + IMAGE_SIZE(pf));
+		    if ((lod->lod_SampleLength = pf->AudioSize) == 0)
+			lod->lod_Sample = NULL;
+
+		    /* Tell the	super class about our attributes */
+		    SetDTAttrs (o, NULL, NULL,
+				DTA_ObjName,	    title,
+				DTA_NominalHoriz,   (ULONG) pf->XSize,
+				DTA_NominalVert,    (ULONG) pf->YSize,
+				ADTA_Width,	    (ULONG) pf->XSize,
+				ADTA_Height,	    (ULONG) pf->YSize,
+				ADTA_Depth,	    (ULONG) pf->PixelSize,
+				ADTA_Frames,	    frames,
+				ADTA_KeyFrame,	    lod->lod_KeyFrame,
+				ADTA_ModeID,	    modeid,
+				ADTA_NumColors,	    (ULONG) ncolors,
+				ADTA_FramesPerSecond,fps,
+
+				ADTA_Sample,	    lod->lod_Sample,
+				ADTA_SampleLength,  lod->lod_SampleLength,
+				ADTA_Period,	    lod->lod_Period,
+
+				TAG_DONE);
+
+		    GetDTAttrs (o,
+				ADTA_ColorRegisters,(ULONG)&cmap,
+				ADTA_CRegs,	    (ULONG)&cregs,  /* For screen */
+				TAG_DONE);
+
+		    colors = (UWORD *) ((ULONG)	lod->lod_Buffer	+ PAN_SIZE);
+
+		    ccmap = cmap;
+		    i =	ncolors;
+		    while (i--)
+		    {
+			rgb.red	  = (UBYTE) ((0xF00 & *colors) >> 4);
+			rgb.green = (UBYTE) ((0x0F0 & *colors));
+			rgb.blue  = (UBYTE) ((0x00F & *colors) << 4);
+			*cmap =	*(&rgb);
+			colors++;
+			cmap++;
+		    }
+
+		    cmap = ccmap;
+		    for	(i = 0;	i < ncolors; i++)
+		    {
+			cregs[i	* 3 + 0] = (LONG)cmap[i].red   << 24;
+			cregs[i	* 3 + 1] = (LONG)cmap[i].green << 24;
+			cregs[i	* 3 + 2] = (LONG)cmap[i].blue  << 24;
+		    }
+
+		    return (TRUE);
+		}
+	    }
+	}
+    }
+    else
+	SetIoErr (ERROR_REQUIRED_ARG_MISSING);
+
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+static struct BitMap *loadframe (struct ClassBase *cb, Class *cl, Object *o, struct adtFrame *msg)
+{
+    register struct localData *lod = INST_DATA (cl, o);
+    register struct BitMap *bm;
+    UBYTE *sample;
+    UBYTE *buffer;
+
+    /* See if there is a frame already allocated */
+    if (buffer = (UBYTE *)msg->alf_UserData)
+    {
+	bm     = msg->alf_BitMap;
+	sample = msg->alf_Sample;
+
+	if (bm == NULL)
+	{
+	    bm = (struct BitMap *)((ULONG)buffer + lod->lod_FrameSize);
+	    DB (kprintf ("bm was NULL again\n"));
+	}
+    }
+    /* No, there wasn't so allocate a new frame */
+    else if (buffer = AllocVec (lod->lod_FrameSize + sizeof (struct BitMap), NULL))
+    {
+	register struct PanFrame *pf = &lod->lod_Header;
+	register ULONG i, psize;
+	register char *buff;
+
+	bm = (struct BitMap *)((ULONG)buffer + lod->lod_FrameSize);
+	InitBitMap (bm, pf->PixelSize, pf->XSize, pf->YSize);
+	buff = (UBYTE *)((ULONG)buffer + PAN_SIZE + CMAP_SIZE (pf));
+	psize = bm->BytesPerRow * pf->YSize;
+	for (i = 0; i < (ULONG)pf->PixelSize; i++)
+	    bm->Planes[i] = &buff[(i * psize)];
+
+	if (lod->lod_SampleLength)
+	    sample = (UBYTE *) ((ULONG)buffer + PAN_SIZE + CMAP_SIZE (pf) + IMAGE_SIZE(pf));
+	else
+	    sample = NULL;
+    }
+    else
+	SetIoErr (ERROR_NO_FREE_STORE);
+
+    /* Clear the return value */
+    msg->alf_BitMap = NULL;
+
+    /* Make sure we have a buffer */
+    if (buffer)
+    {
+	/* Remember the buffer */
+	msg->alf_UserData = buffer;
+
+        /* Clear the error return value */
+        SetIoErr (0);
+
+	/* Seek to the correct location */
+	{
+	    register LONG cof, offset;
+
+	    /* Seek to the correct position within the file */
+	    cof = Seek (lod->lod_FH, 0, OFFSET_CURRENT);
+	    if (offset = (msg->alf_Frame * lod->lod_FrameSize) - cof)
+		Seek (lod->lod_FH, offset, OFFSET_CURRENT);
+	}
+
+        /* Read the frame */
+        if (Read (lod->lod_FH, buffer, lod->lod_FrameSize) == lod->lod_FrameSize)
+        {
+            msg->alf_BitMap       = bm;
+            msg->alf_Sample       = sample;
+            msg->alf_SampleLength = lod->lod_SampleLength;
+            msg->alf_Period       = lod->lod_Period;
+        }
+	else
+	{
+	    DB (kprintf ("couldn't read\n"));
+	}
+    }
+    else
+    {
+	DB (kprintf ("no buffer shithead\n"));
+    }
+
+    DI (kprintf ("%ld %08lx\n", msg->alf_Frame, msg->alf_BitMap));
+
+    return msg->alf_BitMap;
+}
+
+/*****************************************************************************/
+
+static ULONG unloadframe (struct ClassBase *cb, struct adtFrame *msg)
+{
+    /* Unloading while playing seems to be a problem... */
+    FreeVec (msg->alf_UserData);
+    msg->alf_UserData = NULL;
+    return 0;
+}
+
+/*****************************************************************************/
+
+static ULONG ASM Dispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+{
+    register struct ClassBase *cb = (struct ClassBase *) cl->cl_UserData;
+
+    switch (msg->MethodID)
+    {
+	case ADTM_LOADFRAME:
+	    return (ULONG) loadframe (cb, cl, o, (struct adtFrame *)msg);
+
+	case ADTM_UNLOADFRAME:
+	    return (ULONG) unloadframe (cb, (struct adtFrame *)msg);
+
+	case DTM_TRIGGER:
+	    return (ULONG) DoSuperMethodA (cl, o, msg);
+
+	case OM_NEW:
+	    {
+		register ULONG retval;
+
+		if (retval = DoSuperMethodA (cl, o, msg))
+		{
+		    if (!(GetCDXL (cb, cl, (Object *) retval, ((struct opSet *) msg)->ops_AttrList)))
+		    {
+			CoerceMethod (cl, (Object *) retval, OM_DISPOSE);
+			retval = NULL;
+		    }
+		}
+		return retval;
+	    }
+
+	case OM_DISPOSE:
+	    {
+		register struct localData *lod = INST_DATA (cl, o);
+
+		FreeBitMap (lod->lod_KeyFrame);
+		FreeVec (lod->lod_Buffer);
+	    }
+
+	/* Let the superclass handle everything else */
+	default:
+	    return (ULONG) DoSuperMethodA (cl, o, msg);
+    }
+}
+
+/*****************************************************************************/
+
+Class *initClass (struct ClassBase * cb)
+{
+    register Class *cl;
+
+    if (cl = MakeClass (CDXLDTCLASS, ANIMATIONDTCLASS, NULL, sizeof (struct localData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = (ULONG (*)()) Dispatch;
+	cl->cl_UserData = (ULONG) cb;
+	AddClass (cl);
+    }
+
+    return (cl);
+}
+@
+
+
+40.2
+log
+@optimizations and now gets correct speed to play at.
+@
+text
+@d2 1
+d14 5
+a55 21
+static ULONG setdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+{
+    return (SetDTAttrsA (o, NULL, NULL, (struct TagItem *) & data));
+}
+
+/*****************************************************************************/
+
+static ULONG getdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+{
+    return (GetDTAttrsA (o, (struct TagItem *) & data));
+}
+
+/*****************************************************************************/
+
+static ULONG bestmodeid (struct ClassBase * cb, ULONG data,...)
+{
+    return BestModeIDA ((struct TagItem *) & data);
+}
+
+/*****************************************************************************/
+
+d107 1
+a107 1
+    getdtattrs (cb, o, DTA_Handle, &fh, TAG_DONE);
+d217 1
+a217 1
+		    setdtattrs (cb, o,
+d236 1
+a236 1
+		    getdtattrs (cb, o,
+d288 6
+d347 8
+d356 2
+@
+
+
+40.1
+log
+@removed a divide by zero.
+made it work when no sound
+@
+text
+@a21 2
+    ULONG		 lod_FileSize;		/* Size of the file */
+    ULONG		 lod_Frames;		/* Number of frames */
+a30 4
+
+    UWORD		 lod_Width;
+    UWORD		 lod_Height;
+    UWORD		 lod_Depth;
+d35 12
+a46 5
+#define	G(o)		((struct Gadget *)o)
+#define INTDIV(a, b)	(((a) + ((b) / 2)) / (b))
+#define	CDXL_SPEED_BPS	153600
+#define	NTSC_RATE	60
+#define	NTSC_FREQ	3579545
+d50 1
+a50 1
+ULONG setdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+d57 1
+a57 1
+ULONG getdtattrs (struct ClassBase * cb, Object * o, ULONG data,...)
+d64 1
+a64 1
+ULONG bestmodeid (struct ClassBase * cb, ULONG data,...)
+d71 3
+a73 1
+void CopyBitMap (struct ClassBase * cb, struct BitMap * bm1, struct BitMap * bm2)
+d77 4
+a80 5
+    ULONG width;
+    UBYTE *src;
+    UBYTE *dst;
+    LONG r;
+    LONG p;
+d82 1
+a82 3
+    width  = GetBitMapAttr (bm1, BMA_WIDTH) / 8;
+
+    for (p = bm1->Depth-1; p >= 0; p--)
+d87 2
+a88 2
+        for (r = bm1->Rows; r > 0; r--)
+        {
+d98 1
+a98 17
+Class *initClass (struct ClassBase * cb)
+{
+    Class *cl;
+
+    if (cl = MakeClass (CDXLDTCLASS, ANIMATIONDTCLASS, NULL, sizeof (struct localData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = Dispatch;
+	cl->cl_UserData = (ULONG) cb;
+	AddClass (cl);
+    }
+
+    return (cl);
+}
+
+/*****************************************************************************/
+
+ULONG ASM Dispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+d100 2
+a101 16
+    struct ClassBase *cb = (struct ClassBase *) cl->cl_UserData;
+    struct localData *lod = INST_DATA (cl, o);
+    ULONG retval;
+
+    switch (msg->MethodID)
+    {
+	case OM_NEW:
+	    if (retval = DoSuperMethodA (cl, o, msg))
+	    {
+		if (!(GetCDXL (cb, cl, (Object *) retval, ((struct opSet *) msg)->ops_AttrList)))
+		{
+		    CoerceMethod (cl, (Object *) retval, OM_DISPOSE);
+		    retval = NULL;
+		}
+	    }
+	    break;
+a102 30
+	case ADTM_LOADFRAME:
+	    retval = (ULONG) loadframe (cb, cl, o, (struct adtFrame *)msg);
+	    break;
+
+	case ADTM_UNLOADFRAME:
+	    retval = (ULONG) unloadframe (cb, cl, o, (struct adtFrame *)msg);
+	    break;
+
+	case DTM_TRIGGER:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    break;
+
+	case OM_DISPOSE:
+	    FreeBitMap (lod->lod_KeyFrame);
+	    FreeVec (lod->lod_Buffer);
+
+	/* Let the superclass handle everything else */
+	default:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    break;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+ULONG ASM GetCDXL (REG (a6) struct ClassBase * cb, REG (a0) Class * cl, REG (a2) Object * o, REG (a1) struct TagItem * attrs)
+{
+    struct localData *lod = INST_DATA (cl, o);
+a103 2
+    struct PanFrame *pf = &lod->lod_Header;
+    ULONG modeid, bmodeid;
+a104 1
+    ULONG flags = NULL;
+d110 1
+d113 2
+d117 1
+d122 1
+a122 3
+    getdtattrs (cb, o,
+		DTA_Handle, &fh,
+		TAG_DONE);
+d132 1
+a132 1
+		lod->lod_FileSize = (ULONG)lod->lod_FIB.fib_Size;
+d139 1
+a139 1
+		lod->lod_FileSize = (ULONG) Seek (fh, 0L, OFFSET_BEGINNING);
+d144 1
+a144 1
+	    lod->lod_Frames = lod->lod_FileSize / lod->lod_FrameSize;
+d146 3
+d150 2
+a151 2
+	    if (secs = INTDIV ((lod->lod_FileSize * 100), 153600))
+		fps  = INTDIV ((lod->lod_Frames * 10000), secs) / 100;
+d155 1
+d161 1
+a174 5
+		/* Remember these sizes */
+		lod->lod_Width  = (UWORD) pf->XSize;
+		lod->lod_Height = (UWORD) pf->YSize;
+		lod->lod_Depth  = (UWORD) pf->PixelSize;
+
+d183 1
+a183 1
+		CopyBitMap (cb, &lod->lod_Frame, lod->lod_KeyFrame);
+d187 1
+a187 1
+		bmodeid = LORES_KEY;
+d189 1
+a189 1
+		    bmodeid = HIRES;
+d191 1
+a191 1
+		    bmodeid |= LACE;
+d199 1
+a199 2
+			flags |= DIPF_IS_HAM;
+			bmodeid |= HAM_KEY;
+a209 1
+//			    kprintf ("!!! invalid HAM mode !!!\n");
+a215 1
+//			kprintf ("Can't handle video mode %ld\n", (LONG)PI_VIDEO(pf));
+a223 17
+#if 1
+		    modeid = bmodeid;
+#else
+		    if ((modeid	= bestmodeid (cb,
+					 BIDTAG_SourceID,	    bmodeid,
+					 BIDTAG_DIPFMustHave,	    flags,
+					 BIDTAG_NominalWidth,	    (ULONG) pf->XSize,
+					 BIDTAG_NominalHeight,	    (ULONG) pf->YSize,
+					 BIDTAG_DesiredWidth,	    (ULONG) pf->XSize,
+					 BIDTAG_DesiredHeight,	    (ULONG) pf->YSize,
+					 BIDTAG_Depth,		    (ULONG) pf->PixelSize,
+					 TAG_DONE)) == INVALID_ID)
+		    {
+			modeid = bmodeid;
+		    }
+#endif
+
+d225 1
+a225 1
+		    if (secs = INTDIV ((CDXL_SPEED_BPS * pf->AudioSize), lod->lod_FrameSize))
+d239 1
+a239 1
+				ADTA_Frames,	    lod->lod_Frames,
+a283 1
+    {
+a284 1
+    }
+d291 1
+a291 1
+struct BitMap *loadframe (struct ClassBase *cb, Class *cl, Object *o, struct adtFrame *msg)
+d293 3
+a295 6
+    struct localData *lod = INST_DATA (cl, o);
+    struct PanFrame *pf = &lod->lod_Header;
+    UBYTE *sample = NULL;
+    struct BitMap *bm;
+    register ULONG i;
+    LONG cof, offset;
+a296 2
+    ULONG psize;
+    char *buff;
+d298 1
+a298 1
+    /* See if there is one already allocated */
+d304 1
+a304 1
+    /* No, there wasn't so allocate one */
+d307 4
+d320 2
+a323 1
+    {
+a324 1
+    }
+d329 1
+d338 9
+a346 4
+        /* Seek to the correct position within the file */
+        cof = Seek (lod->lod_FH, 0, OFFSET_CURRENT);
+        if (offset = (msg->alf_Frame * lod->lod_FrameSize) - cof)
+            Seek (lod->lod_FH, offset, OFFSET_CURRENT);
+d363 1
+a363 1
+ULONG unloadframe (struct ClassBase *cb, Class *cl, Object *o, struct adtFrame *msg)
+d365 1
+d367 1
+d369 62
+@
+
+
+40.0
+log
+@initial RCS
+@
+text
+@d306 2
+a307 1
+		    secs = INTDIV ((CDXL_SPEED_BPS * pf->AudioSize), lod->lod_FrameSize);
+d309 2
+a310 2
+		    lod->lod_SampleLength = pf->AudioSize;
+		    lod->lod_Period = INTDIV (NTSC_FREQ, secs) / mult;
+d378 1
+a381 1
+    UBYTE *sample;
+d401 3
+a403 1
+	sample = (UBYTE *) ((ULONG)buffer + PAN_SIZE + CMAP_SIZE (pf) + IMAGE_SIZE(pf));
+@

@@ -1,0 +1,442 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    kcd:1.7; strict;
+comment  @ * @;
+
+
+1.7
+date     91.12.30.18.34.54;  author dlarson;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.12.13.11.54.23;  author dlarson;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.12.03.14.30.14;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.12.03.14.07.36;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.27.15.50.09;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.11.19.09.49.55;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.21.15.37.43;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Original snapshot from Ameristar
+@
+
+
+1.7
+log
+@Includes various optimizations and the long packet Christmas fix.  Probably
+last working version before enhancements and Novell "ARCNET Packet Header
+Definition Standard."
+@
+text
+@/*
+ * Command dispatch - BeginIO/AbortIO
+ */
+
+#ifndef RS485_H
+#include "rs485.h"
+#endif
+
+/*
+ * none of the following commands are implemented: Arcnet does not allow
+ * the notion of a promiscuous listener thus station aliasing isn't possible.
+ * Along the same lines, true multicasting isn't possible without using
+ * the broadcast mechanism - which may break listeners who are not prepared
+ * to participate properly.
+ * Sana devices do not support most old CMD_xxx calls.
+ */
+#define S2_notimplemented	0
+#define	S2_addmulticastaddress	S2_notimplemented
+#define	S2_delmulticastaddress	S2_notimplemented
+#define	S2_multicast		S2_notimplemented
+#define	S2_getspecialstats	S2_notimplemented
+#define CMD_reset		S2_notimplemented
+#define CMD_invalid		S2_notimplemented
+#define CMD_update		S2_notimplemented
+#define CMD_clear		S2_notimplemented
+#define CMD_stop		S2_notimplemented
+#define CMD_start		S2_notimplemented
+#define CMD_flush		S2_notimplemented
+
+/*
+ * All read/write packet routines go through common processing function
+ */
+#define S2_broadcast		CMD_rdwr
+#define S2_readorphan		CMD_rdwr
+#define CMD_read		CMD_rdwr
+#define CMD_write		CMD_rdwr
+
+/*
+ * protocol stat commands are so similar, they are implemented in one
+ * function call
+ */
+#define	S2_tracktype		S2_tracked
+#define	S2_untracktype		S2_tracked
+#define	S2_gettypestats		S2_tracked
+
+/*
+ * command dispatch table
+ */
+static int (*cmdtab[S2_END])(struct IOSana2Req *iob) = {
+	/* Command name			 blocking?	queue?		Command	*/
+	/* ------------			 ---------	------		-------	*/
+	CMD_invalid,			/* -notimp-			0	*/
+	CMD_reset,			/* -notimp-			1	*/
+	CMD_read,			/* can block 	read_q  	2	*/
+	CMD_write,			/* can block 	write_q		3	*/
+	CMD_update,			/* -notimp-			4	*/
+	CMD_clear,			/* -notimp-			5	*/
+	CMD_stop,			/* -notimp-			6	*/
+	CMD_start,			/* -notimp-			7	*/
+	CMD_flush,			/* -notimp-			8	*/
+	S2_devicequery,			/* immediate 			9	*/
+	S2_getstationaddress,		/* can block 	misc_q		10	*/
+	S2_configinterface,		/* immediate 		  	11	*/
+	S2_addmulticastaddress,		/* -notimp-			8	*/
+	S2_delmulticastaddress,		/* -notimp-			8	*/
+	S2_addmulticastaddress,		/* -notimp-			14	*/
+	S2_delmulticastaddress,		/* -notimp-			15	*/
+	S2_multicast,			/* -notimp-			16	*/
+	S2_broadcast,			/* can block 	write_q 	17	*/
+	S2_tracktype,			/* immediate 			18	*/
+	S2_untracktype,			/* immediate 			19	*/
+	S2_gettypestats,		/* immediate 			20	*/
+	S2_getspecialstats,		/* -notimp- 			21	*/
+	S2_getglobalstats,		/* immediate 			22	*/
+	S2_onevent,			/* can block 	misc_q		23	*/
+	S2_readorphan,			/* can block 	read_q		24	*/
+	S2_online,			/* immediate 			25	*/
+	S2_offline			/* immediate 			26	*/
+};
+
+/*
+ * BeginIO(iob, device) - start I/O on a particular unit.
+ * a few brief sanity checks on message: check command code is in range,
+ * check unit pointer: must exist on the rs485Units list.
+ *
+ * All commands are called from within a semaphore region; this saves a lot of
+ * forbid/permit calls within the code.  The semaphore also protects the stateful
+ * portions of the chip (eg autoinc address pointer) from inadvertent modification.
+ */
+ULONG __saveds __stdargs __asm
+LIBBeginIO( register __a1 struct IOSana2Req *iob, register __a6 struct rs485Device *device )
+{
+struct rs485Unit *up;
+int rtn;
+
+	rtn = COMPLETE;
+//	iob->ios2_WireError = iob->ios2_Req.io_Error = 0;
+	iob->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+
+	FORALL(&rs485Units, up, struct rs485Unit *){
+		if(up == UNIT(iob)){
+			break;
+		}
+	}
+	if(up != UNIT(iob)){
+		iob->ios2_Req.io_Error = S2ERR_BAD_ARGUMENT;
+		if(!UNIT(iob)){
+			iob->ios2_WireError = S2WERR_NULL_POINTER;
+		}
+		goto reply;
+	}
+
+	if(iob->ios2_Req.io_Command>=S2_END || cmdtab[iob->ios2_Req.io_Command]==S2_notimplemented){
+		iob->ios2_Req.io_Error = S2ERR_NOT_SUPPORTED;
+		goto reply;
+	}
+
+	ObtainSemaphore(&up->sem);
+	rtn = (*cmdtab[iob->ios2_Req.io_Command])(iob);
+	ReleaseSemaphore(&up->sem);
+
+reply:	if(rtn == COMPLETE){
+		if(!(iob->ios2_Req.io_Flags & SANA2IOF_QUICK)){
+			ReplyMsg(&iob->ios2_Req.io_Message);
+		}
+	}
+	return 0;
+}
+
+/*
+ * AbortIO(iob, device) - abort pending I/O on particular unit.  The driver is
+ * designed such that if the i/o req is on a queue, it can be aborted without
+ * further consideration.
+ */
+ULONG __saveds __stdargs __asm
+LIBAbortIO( register __a1 struct IOSana2Req *iob, register __a6 struct rs485Device *device )
+{
+struct IOSana2Req *piob;
+struct rs485Unit *up;
+struct List *lp;
+ULONG error;
+
+	FORALL(&rs485Units, up, struct rs485Unit *){
+		if(up == UNIT(iob)){
+			break;
+		}
+	}
+	if(up != UNIT(iob)){
+		return 0; 	/* not clear what ios2_Req.io_Error to do here */
+	}
+
+	switch(iob->ios2_Req.io_Command){
+	case CMD_READ:
+	case S2_READORPHAN:
+		lp = &up->read_q;
+		break;
+
+	case CMD_WRITE:
+	case S2_BROADCAST:
+		lp = &up->write_q;
+		break;
+
+	default:
+		lp = &up->misc_q;
+	}
+
+	error = 0;
+	ObtainSemaphore(&up->sem);
+	FORALL(lp, piob, struct IOSana2Req *){
+		if(iob == piob){
+			iob->ios2_Req.io_Error = error = IOERR_ABORTED;
+			Remove(&iob->ios2_Req.io_Message.mn_Node);
+			ReplyMsg(&iob->ios2_Req.io_Message);
+			break;
+		}
+	}
+	ReleaseSemaphore(&up->sem);
+
+	return error;
+}
+
+/*
+ * Null routine just returns 0
+ */
+ULONG __saveds __stdargs
+_LibNull()
+{
+	return 0L;
+}
+
+@
+
+
+1.6
+log
+@raw reads and writes work now.
+@
+text
+@@
+
+
+1.5
+log
+@doesn't print debugging messages...  (bad programmer)
+@
+text
+@@
+
+
+1.4
+log
+@Fixed online/offline/onevent.
+@
+text
+@@
+
+
+1.3
+log
+@First version which works with inet.library!!!
+@
+text
+@@
+
+
+1.2
+log
+@Getting it up to current spec...
+@
+text
+@d5 2
+a6 2
+#ifndef AMIGANET_H
+#include "amiganet.h"
+d84 1
+a84 1
+ * check unit pointer: must exist on the AmiganetUnits list.
+d91 1
+a91 1
+LIBBeginIO( register __a1 struct IOSana2Req *iob, register __a6 struct AmiganetDevice *device )
+d93 1
+a93 1
+struct AmiganetUnit *up;
+d97 1
+a97 1
+	iob->ios2_WireError = iob->ios2_Req.io_Error = 0;
+d100 1
+a100 1
+	FORALL(&AmiganetUnits, up, struct AmiganetUnit *){
+d136 1
+a136 1
+LIBAbortIO( register __a1 struct IOSana2Req *iob, register __a6 struct AmiganetDevice *device )
+d139 1
+a139 1
+struct AmiganetUnit *up;
+d143 1
+a143 1
+	FORALL(&AmiganetUnits, up, struct AmiganetUnit *){
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d14 2
+a15 3
+ * to participate properly.  Online cannot be done because of dynamic address
+ * discovery: the address of a node may become invalid soon after the board
+ * goes offline.  Sana devices do not support most old CMD_xxx calls.
+d17 12
+a28 14
+#define SANA2CMD_notimplemented		0
+#define	SANA2CMD_addstationalias	SANA2CMD_notimplemented
+#define	SANA2CMD_delstationalias	SANA2CMD_notimplemented
+#define	SANA2CMD_addmulticastaddress	SANA2CMD_notimplemented
+#define	SANA2CMD_delmulticastaddress	SANA2CMD_notimplemented
+#define	SANA2CMD_multicast		SANA2CMD_notimplemented
+#define	SANA2CMD_getspecialstats	SANA2CMD_notimplemented
+#define CMD_reset			SANA2CMD_notimplemented
+#define CMD_invalid			SANA2CMD_notimplemented
+#define CMD_update			SANA2CMD_notimplemented
+#define CMD_clear			SANA2CMD_notimplemented
+#define CMD_stop			SANA2CMD_notimplemented
+#define CMD_start			SANA2CMD_notimplemented
+#define CMD_flush			SANA2CMD_notimplemented
+d33 4
+a36 4
+#define SANA2CMD_broadcast		CMD_rdwr
+#define SANA2CMD_readorphan		CMD_rdwr
+#define CMD_read			CMD_rdwr
+#define CMD_write			CMD_rdwr
+d42 3
+a44 3
+#define	SANA2CMD_tracktype		SANA2CMD_tracked
+#define	SANA2CMD_untracktype		SANA2CMD_tracked
+#define	SANA2CMD_gettypestats		SANA2CMD_tracked
+d49 1
+a49 1
+static int (*cmdtab[SANA2_CMD_END])(struct IOSana2Req *iob) = {
+d61 18
+a78 18
+	SANA2CMD_devicequery,		/* immediate 			9	*/
+	SANA2CMD_getstationaddress,	/* can block 	misc_q		10	*/
+	SANA2CMD_configinterface,	/* immediate 		  	11	*/
+	SANA2CMD_addstationalias,	/* -notimp-			12	*/
+	SANA2CMD_delstationalias,	/* -notimp-			13	*/
+	SANA2CMD_addmulticastaddress,	/* -notimp-			14	*/
+	SANA2CMD_delmulticastaddress,	/* -notimp-			15	*/
+	SANA2CMD_multicast,		/* -notimp-			16	*/
+	SANA2CMD_broadcast,		/* can block 	write_q 	17	*/
+	SANA2CMD_tracktype,		/* immediate 			18	*/
+	SANA2CMD_untracktype,		/* immediate 			19	*/
+	SANA2CMD_gettypestats,		/* immediate 			20	*/
+	SANA2CMD_getspecialstats,	/* -notimp- 			21	*/
+	SANA2CMD_getglobalstats,	/* immediate 			22	*/
+	SANA2CMD_onevent,		/* can block 	misc_q		23	*/
+	SANA2CMD_readorphan,		/* can block 	read_q		24	*/
+	SANA2CMD_online,		/* immediate 			25	*/
+	SANA2CMD_offline		/* immediate 			26	*/
+d83 2
+a84 2
+ * a few brief sanity checks on message: check command code is in range, 
+ * check unit pointer: must exist on the AmiganetUnits list. 
+d90 1
+a90 1
+ULONG __saveds __stdargs __asm 
+d93 2
+a94 2
+	struct AmiganetUnit *up;
+	int rtn;
+d97 2
+a98 2
+	iob->S2io_WireError = iob->S2io_Error = 0;  
+	iob->S2io_Message.mn_Node.ln_Type = NT_MESSAGE;
+d106 1
+a106 1
+		iob->S2io_Error = S2ERR_BAD_ARGUMENT;
+d108 1
+a108 1
+			iob->S2io_WireError = S2WERR_NULL_POINTER;
+d113 2
+a114 2
+	if(iob->S2io_Command>=SANA2_CMD_END || cmdtab[iob->S2io_Command]==SANA2CMD_notimplemented){
+		iob->S2io_Error = S2ERR_NOT_SUPPORTED;
+d117 1
+a117 1
+	
+d119 1
+a119 1
+	rtn = (*cmdtab[iob->S2io_Command])(iob);
+d123 2
+a124 2
+		if(!(iob->S2io_Flags & SANA2IOF_QUICK)){
+			ReplyMsg(&iob->S2io_Message);
+d133 1
+a133 1
+ * further consideration.  
+d135 1
+a135 1
+ULONG __saveds __stdargs __asm 
+d138 4
+a141 4
+	struct IOSana2Req *piob;
+	struct AmiganetUnit *up;
+	struct List *lp;
+	ULONG error;
+d149 1
+a149 1
+		return 0; 	/* not clear what S2io_Error to do here */
+d152 1
+a152 1
+	switch(iob->S2io_Command){
+d154 1
+a154 1
+	case SANA2CMD_READORPHAN:
+d159 1
+a159 1
+	case SANA2CMD_BROADCAST:
+d171 3
+a173 3
+			iob->S2io_Error = error = IOERR_ABORTED;
+			Remove(&iob->S2io_Message.mn_Node);
+			ReplyMsg(&iob->S2io_Message);
+@

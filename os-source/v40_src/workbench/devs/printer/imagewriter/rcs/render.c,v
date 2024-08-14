@@ -1,0 +1,732 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  L35_48:1.7 L35_47:1.6 L35_46:1.6 L35_45:1.6 L35_42:1.5;
+locks    ; strict;
+comment  @ * @;
+
+
+1.8
+date     90.04.06.20.09.43;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.06.05.18.17.00;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     88.04.04.21.12.34;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     87.11.17.12.34.06;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     87.10.27.15.35.01;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.10.01.09.23.55;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.08.24.18.26.01;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.08.20.11.21.55;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 2
+@
+
+
+1.8
+log
+@for rcs 4.x header change
+@
+text
+@/*
+	Apple ImagewriterII (Imagewriter compatible) driver.
+	David Berezowski - May/87
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+#include "../printer/prtgfx.h"
+
+#define MAXSTARTCMD	8	/* max # of cmd bytes before binary data */
+#define NUMENDCMD	1	/* # of cmd bytes after binary data */
+#define NUMLFCMD	5	/* # of cmd bytes for linefeed */
+#define MAXCOLORBUFS	4	/* max # of color buffers */
+
+#define STARTLEN	9
+#define ENDLEN		11
+#define CPI		1
+#define	LPI		3
+#define LMARG		8
+
+static ULONG TwoBufSize;
+static UWORD RowSize, ColorSize, NumColorBufs, NumStartCmd, NumTotalCmd;
+static UWORD colorcodes[MAXCOLORBUFS]; /* printer color codes */
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	UBYTE *CompactBuf();
+	static ULONG BufSize, TotalBufSize, dataoffset;
+	static UWORD colors[MAXCOLORBUFS]; /* color ptrs */
+	/*
+		00-01	\033N		cpi (dpi for gfx)
+		02-03	\033>		uni-directional print
+		04-08	\033L000	set left margin to 0
+	*/
+	static char StartCmd[STARTLEN] = "\033N\033>\033L000";
+	/*
+		00-01	\033N		cpi
+		02-03	\033A		lpi
+		04-05	\033<		bi-directional print
+		06-10	\033Lnnn	set left margin to nnn
+	*/
+	static char EndCmd[ENDLEN] = "\033N\033A\033<\033Lnnn";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct - pointer to IODRPReq structure.
+				x - width of printed picture in pixels.
+				y - height of printed picture in pixels.
+			*/
+			/* round up to nearest 8 bytes */
+			RowSize = (x + 7) / 8 * 8;
+			NumStartCmd = (PD->pd_Preferences.PrintShade ==
+				SHADE_COLOR) ? MAXSTARTCMD : MAXSTARTCMD - 3;
+			NumTotalCmd = NumStartCmd + NUMENDCMD;
+			ColorSize = RowSize + NumTotalCmd;
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				NumColorBufs = MAXCOLORBUFS;
+				colors[0] = ColorSize * 3; /* Black */
+				colors[1] = ColorSize * 0; /* Yellow */
+				colors[2] = ColorSize * 1; /* Magenta */
+				colors[3] = ColorSize * 2; /* Cyan */
+				colorcodes[0] = '1'; /* Yellow */
+				colorcodes[1] = '2'; /* Magenta */
+				colorcodes[2] = '3'; /* Cyan */
+				colorcodes[3] = '0'; /* Black */
+			}
+			else { /* grey-scale or black&white */
+				NumColorBufs = 1;
+				colors[0] = ColorSize * 0; /* Black */
+			}
+			BufSize = ColorSize * NumColorBufs + NUMLFCMD;
+			if (PED->ped_YDotsInch == 144) {
+				TwoBufSize = BufSize * 2;
+				TotalBufSize = BufSize * 4;
+			}
+			else {
+				TwoBufSize = BufSize * 1;
+				TotalBufSize = BufSize * 2;
+			}
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = NumStartCmd;
+				err = (*(PD->pd_PWrite))(StartCmd, STARTLEN);
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row # (0 to Height - 1).
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors,
+				BufSize);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+			x = (PED->ped_YDotsInch == 144) ? 1 : y;
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NumStartCmd];
+			ptr = CompactBuf(ptrstart + NumStartCmd, ptrstart,
+				x, 1);
+			if (PED->ped_YDotsInch == 144 && y > 1) {
+				ptr = CompactBuf(&PD->pd_PrintBuf[
+					dataoffset + BufSize], ptr, y - 1, 0);
+			}
+			err = (*(PD->pd_PWrite))(ptrstart, ptr - ptrstart);
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NumStartCmd ?
+					TwoBufSize : 0) + NumStartCmd;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ClearAndInit(&PD->pd_PrintBuf[dataoffset]);
+			err = PDERR_NOERR;
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag.
+				y	- 0.
+			*/
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print */
+			if (ct != PDERR_CANCEL) {
+				/* restore pitch, spacing, and left margin */
+				switch (PD->pd_Preferences.PrintPitch) {
+					case PICA: /* 10 cpi */
+						EndCmd[CPI] = 'N';
+						break;
+					case ELITE: /* 12 cpi */
+						EndCmd[CPI] = 'E';
+						break;
+					default: /* 15 cpi (FINE) */
+						EndCmd[CPI] = 'q';
+						break;
+				}
+				switch (PD->pd_Preferences.PrintSpacing) {
+					case SIX_LPI:
+						EndCmd[LPI] = 'A';
+						break;
+					default: /* EIGHT_LPI */
+						EndCmd[LPI] = 'B';
+						break;
+				}
+				i = PD->pd_Preferences.PrintLeftMargin - 1;
+				EndCmd[LMARG] = i / 100 + '0';
+				EndCmd[LMARG + 1] = (i % 100) / 10 + '0';
+				EndCmd[LMARG + 2] = (i % 10) + '0';
+				err = (*(PD->pd_PWrite))(EndCmd, ENDLEN);
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag.
+				y	- 0.
+			*/
+			StartCmd[1] = SetDensity(x & SPECIAL_DENSITYMASK);
+			err = PDERR_NOERR;
+			break;
+	}
+	return(err);
+}
+
+UBYTE *CompactBuf(ptrstart, ptr2start, y, flag)
+UBYTE *ptrstart, *ptr2start;
+long y;
+int flag;
+{
+	static int x;
+	UBYTE *ptr, *ptr2;
+	long ct;
+	int i;
+
+	ptr2 = ptr2start; /* where to put the compacted data */
+	if (flag) {
+		x = 0; /* flag no transfer required yet */
+	}
+	for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+		i = RowSize;
+		ptr = ptrstart + i - 1;
+		while (i > 0 && *ptr == 0) {
+			i--;
+			ptr--;
+		}
+		if (i != 0) { /* if data */
+			i = (i + 7) / 8; /* calc size in bytes */
+			ptr = ptrstart - NumStartCmd;
+			if (NumStartCmd == MAXSTARTCMD) { /* if color */
+				*ptr++ = 27;
+				*ptr++ = 'K';
+				*ptr++ = colorcodes[ct];	/* color */
+			}
+			*ptr++ = 27;
+			*ptr++ = 'g';
+			*ptr++ = ((i % 1000) / 100) | '0';
+			*ptr++ = ((i % 100) / 10) | '0';
+			*ptr = (i % 10 ) | '0';		/* printout width */
+			i *= 8; /* convert back to pixels */
+			*(ptrstart + i) = 13;		/* <cr> */
+			i += NumTotalCmd;
+			if (x != 0) { /* if must transfer data */
+				/* get src start */
+				ptr = ptrstart - NumStartCmd;
+				do { /* transfer and update dest ptr */
+					*ptr2++ = *ptr++;
+				} while (--i);
+			}
+			else { /* no transfer required */
+				ptr2 += i; /* update dest ptr */
+			}
+		}
+		if (i != RowSize + NumTotalCmd) { /* if compacted or 0 */
+			x = 1; /* flag that we need to transfer next time */
+		}
+	}
+	if (PED->ped_YDotsInch == 72) {
+		y *= 2; /* convert from 72nds to 144ths */
+	}
+	*ptr2++ = 27;
+	*ptr2++ = 'T';
+	*ptr2++ = (y / 10) | '0';
+	*ptr2++ = (y % 10) | '0'; /* set spacing to y/144 */
+	*ptr2++ = 10; /* lf */
+	return(ptr2);
+}
+
+ClearAndInit(ptr)
+UBYTE *ptr;
+{
+	ULONG *lptr, i, j;
+
+	/*
+		Note : Since 'NumTotalCmd + NUMLFCMD' is > 3 bytes if is safe
+		to do the following to speed things up.
+	*/
+	i = TwoBufSize - NumTotalCmd - NUMLFCMD;
+	j = (ULONG)ptr;
+	if (!(j & 1)) { /* if on a word boundary, clear by longs */
+		i = (i + 3) / 4;
+		lptr = (ULONG *)ptr;
+		do {
+			*lptr++ = 0;
+		} while (--i);
+	}
+	else { /* clear by bytes */
+		do {
+			*ptr++ = 0;
+		} while (--i);
+	}
+}
+@
+
+
+1.7
+log
+@V1.3 Gamma 15        
+@
+text
+@@
+
+
+1.6
+log
+@added 144 ydpi support
+V1.3 Gamma 10 release
+@
+text
+@d19 5
+a23 1
+#define DEBUG0	0
+d40 3
+a42 2
+		00-01	\033N	10 cpi (dpi for gfx)
+		02-03	\033>	uni-directional print
+d44 1
+a44 1
+	static char StartCmd[4] = "\033N\033>"; /* first cmd */
+d46 4
+a49 3
+		00-01	\033N	10 cpi
+		02-03	\033A	6 lpi
+		04-05	\033<	bi-directional print
+d51 1
+a51 1
+	static char EndCmd[6] = "\033N\033A\033<"; /* last cmd */
+a91 5
+#if DEBUG0
+			kprintf("RS=%ld, CS=%ld, BS=%ld, 2BS=%ld, TBS=%ld\n",
+				RowSize, ColorSize, BufSize,
+				TwoBufSize, TotalBufSize);
+#endif DEBUG0
+d98 1
+a98 2
+				/* select 10 cpi and unidirectional mode */
+				err = (*(PD->pd_PWrite))(StartCmd, 4);
+d153 1
+d156 1
+a156 1
+						EndCmd[1] = 'N';
+d159 1
+a159 1
+						EndCmd[1] = 'E';
+d162 1
+a162 1
+						EndCmd[1] = 'q';
+d165 1
+a165 1
+				switch (PD->pd_Preferences.PrintPitch) {
+d167 1
+a167 1
+						EndCmd[3] = 'A';
+d170 1
+a170 1
+						EndCmd[3] = 'B';
+d173 5
+a177 2
+				/* select lpi, cpi, & bi-directional mode*/
+				err = (*(PD->pd_PWrite))(EndCmd, 6);
+d187 1
+a187 1
+				ct	- 0.
+@
+
+
+1.5
+log
+@removed 'y == 0' check in case 2
+V1.3 Gamma 3 release
+@
+text
+@d14 3
+a16 3
+#define MAXSTARTCMD		8	/* max # of cmd bytes before binary data */
+#define NUMENDCMD		1	/* # of cmd bytes after binary data */
+#define NUMLFCMD		5	/* # of cmd bytes for linefeed */
+d19 1
+a19 1
+#define DEBUG	0		/* debugging switch (0 - off, 1 - on) */
+d21 4
+d32 2
+a33 1
+	static UWORD RowSize, ColorSize, BufSize, TotalBufSize, dataoffset;
+d35 4
+a38 3
+	static UWORD colorcodes[MAXCOLORBUFS]; /* printer color codes */
+	static UWORD NumColorBufs; /* number of color bufs */
+	static UWORD NumStartCmd, NumTotalCmd; /* start and total cmd bytes */
+d40 5
+d46 1
+a46 1
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start;
+a48 7
+	struct PrtInfo *PInfo;
+	union colorEntry *ColorInt;
+	UBYTE *bptr, *yptr, *mptr, *cptr, Black, Yellow, Magenta, Cyan;
+	UBYTE *dmatrix, dvalue, threshold;
+	UWORD width, sx, xmult, xmod, color, bit;
+	WORD etx, etx2;
+
+d52 3
+a54 3
+				ct	- pointer to IODRPReq structure (use with caution!).
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+d56 7
+a62 9
+#if DEBUG
+			kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif
+			RowSize = (x + 7) / 8 * 8; /* round up to nearest 8 bytes */
+			NumStartCmd = (PD->pd_Preferences.PrintShade == SHADE_COLOR) ?
+				MAXSTARTCMD : MAXSTARTCMD - 3;
+			NumTotalCmd = NumStartCmd + NUMENDCMD; /* total cmd bytes */
+			ColorSize = RowSize + NumTotalCmd; /* size of each color buf */
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) { /* color */
+d78 13
+a90 1
+			TotalBufSize = BufSize * 2;
+d93 1
+a93 5
+#if DEBUG
+				kprintf("Couldn't get %ld bytes for printer buf\n",
+					TotalBufSize);
+#endif
+				err = PDERR_BUFFERMEMORY;
+d97 1
+a97 1
+				/* select unidirectional mode */
+d105 2
+a106 2
+				x	- color code.
+				y	- row #.
+d108 2
+a109 1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors);
+d115 3
+a117 7
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+
+				For each color buf, scan backwards through the buffer
+				for the first non-zere data byte.  Compact up to this
+				point, then send the entire compacted buffer in one go.
+d119 7
+a125 39
+			ptrstart = &PD->pd_PrintBuf[dataoffset];	/* ptr to data */
+			ptr2start = ptr2 = ptrstart - NumStartCmd;	/* ptr to buf start */
+			x = 0; /* flag no transfer required yet */
+			for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+				i = RowSize;
+				ptr = ptrstart + i - 1;
+				while (i > 0 && *ptr == 0) {
+					i--;
+					ptr--;
+				}
+				if (i != 0) { /* if data */
+					i = (i + 7) / 8; /* calc size in bytes */
+					ptr = ptrstart - NumStartCmd;
+					if (NumStartCmd == MAXSTARTCMD) { /* if color */
+						*ptr++ = 27;
+						*ptr++ = 'K';
+						*ptr++ = colorcodes[ct];	/* color */
+					}
+					*ptr++ = 27;
+					*ptr++ = 'g';
+					*ptr++ = ((i % 1000) / 100) | '0';
+					*ptr++ = ((i % 100) / 10) | '0';
+					*ptr = (i % 10 ) | '0';		/* printout width */
+					i *= 8; /* convert back to pixels */
+					*(ptrstart + i) = 13;		/* <cr> */
+					i += NumTotalCmd;
+					if (x != 0) { /* if must transfer data */
+						ptr = ptrstart - NumStartCmd; /* get src start */
+						do { /* transfer and update dest ptr */
+							*ptr2++ = *ptr++;
+						} while (--i);
+					}
+					else { /* no transfer required */
+						ptr2 += i; /* update dest ptr */
+					}
+				}
+				if (i != RowSize + NumTotalCmd) { /* if compacted or 0 */
+					x = 1; /* flag that we need to transfer next time */
+				}
+d127 1
+a127 7
+			y *= 2; /* convert from 72nds to 144ths */
+			*ptr2++ = 27;
+			*ptr2++ = 'T';
+			*ptr2++ = (y / 10) | '0';
+			*ptr2++ = (y % 10) | '0'; /* set spacing to y/144 */
+			*ptr2++ = 10; /* lf */
+			err = (*(PD->pd_PWrite))(ptr2start, ptr2 - ptr2start);
+d129 2
+a130 2
+				dataoffset = 
+					(dataoffset == NumStartCmd ? BufSize : 0) + NumStartCmd;
+d136 3
+a138 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d140 1
+a140 5
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = BufSize - NumTotalCmd - NUMLFCMD;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+d147 2
+a148 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d151 2
+a152 1
+			if (ct != PDERR_CANCEL) { /* if user did not cancel the print */
+d175 1
+a175 1
+			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+d177 1
+a177 1
+				FreeMem(PD->pd_PrintBuf, TotalBufSize); /* free memory */
+d183 3
+a185 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+a186 3
+#if DEBUG
+			kprintf("5: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif
+d192 88
+@
+
+
+1.4
+log
+@fixed bug with output width not being a multiple of 8
+moved 'case 1' code to transfer.c file
+V1.3 gamma 1 check-in
+@
+text
+@d106 1
+a106 1
+				y	- # of rows sent.
+d152 1
+a152 3
+			if (!(y *= 2)) {
+				y = 16;
+			}
+@
+
+
+1.3
+log
+@V1.3 beta 4 check-in
+@
+text
+@d55 1
+a55 1
+			RowSize = x;
+d98 2
+a99 62
+			PInfo = (struct PrtInfo *)ct;
+			x = PInfo->pi_xpos;
+			ColorInt = PInfo->pi_ColorInt;
+			xmult = PInfo->pi_xmult;
+			xmod = PInfo->pi_xmod;
+			etx = etx2 = PInfo->pi_etx;
+			width = PInfo->pi_width;
+			if (threshold = PInfo->pi_threshold) {
+				dvalue = threshold ^ 15;
+			}
+			else {
+				dmatrix = PInfo->pi_dmatrix + ((y & 3) << 2);
+			}
+			color = PD->pd_Preferences.PrintShade == SHADE_COLOR;
+			/* printer specific */
+			bptr = &PD->pd_PrintBuf[dataoffset + colors[0]];
+			yptr = &PD->pd_PrintBuf[dataoffset + colors[1]];
+			mptr = &PD->pd_PrintBuf[dataoffset + colors[2]];
+			cptr = &PD->pd_PrintBuf[dataoffset + colors[3]];
+			bit = 1 << (y & 7);
+			/* end */
+			do {
+                /* get color info */
+                Black = ColorInt->colorByte[PCMBLACK];
+                Yellow = ColorInt->colorByte[PCMYELLOW];
+                Magenta = ColorInt->colorByte[PCMMAGENTA];
+                Cyan = ColorInt->colorByte[PCMCYAN];
+                ColorInt++;
+                /* scale, dither, and render pixel */
+				sx = xmult;
+				etx -= xmod;
+				if (etx <= 0) {
+					etx += etx2;
+					sx++;
+				}
+				do { /* use this pixel 'sx' times */
+					if (!threshold) {
+	                    dvalue = dmatrix[x & 3];
+					}
+					if (Black > dvalue) {
+                        *(bptr + x) |= bit;
+                    }
+					else  { /* black not rendered */
+						if (color) {
+	                        if (Yellow > dvalue) {
+    	                        *(yptr + x) |= bit;
+        	                }
+	                        if (Magenta > dvalue) {
+    	                        *(mptr + x) |= bit;
+        	                }
+	                        if (Cyan > dvalue) {
+    	                        *(cptr + x) |= bit;
+        	                }
+						}
+					}
+                    ++x; /* done 1 more printer pixel */
+                } while (--sx);
+			} while (--width);
+
+			/* v1.2 */
+/*			PD->pd_PrintBuf[dataoffset + x + colors[ct]] |= 1 << (y & 7);
+*/			err = PDERR_NOERR; /* all ok */
+@
+
+
+1.2
+log
+@added support for 7 densities
+@
+text
+@d12 1
+a12 1
+#include "../printer/prtprivate.h"
+d99 7
+a105 7
+			x = PInfo->xpos;
+			ColorInt = PInfo->ColorInt;
+			xmult = PInfo->xmult;
+			xmod = PInfo->xmod;
+			etx = etx2 = PInfo->etx;
+			width = PInfo->width;
+			if (threshold = PInfo->threshold) {
+d109 1
+a109 1
+				dmatrix = PInfo->dmatrix + ((y & 3) << 2);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d31 1
+a31 2
+	static UWORD huns, tens, ones; /* used to program buffer size */
+	static UWORD NumColorBufs; /* actually number of color buffers req. */
+d33 2
+d87 2
+a88 2
+				/* select unidirectional mode*/
+				err = (*(PD->pd_PWrite))("\033>", 2);
+d192 3
+a194 3
+					*ptr++ = (huns = i / 100) | '0';
+					*ptr++ = (i - huns * 100) / 10 | '0';
+					*ptr = i % 10 | '0';		/* printout width */
+d249 21
+a269 2
+				/* select 6 lpi and bi-directional mode*/
+				err = (*(PD->pd_PWrite))("\033A\033<", 4);
+d286 2
+a287 1
+			err = PDERR_NOERR; /* all ok */
+@

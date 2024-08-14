@@ -1,0 +1,914 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  v37r4:1.11 Distillery:1.11;
+locks    ; strict;
+comment  @ * @;
+
+
+1.11
+date     91.03.09.21.00.14;  author J_Toebes;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.01.11.00.45.59;  author Doug;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.01.06.20.53.19;  author Doug;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.12.03.20.05.45;  author Doug;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.27.22.15.28;  author Doug;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.20.01.07.42;  author Doug;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.18.00.03.17;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.10.18.00.22.05;  author Doug;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.10.09.23.56.25;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.02.33.22;  author Doug;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.40.30;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file packet processing routines
+@
+
+
+1.11
+log
+@Correct parameters for setfiledate
+@
+text
+@
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1987, 1988 The Software Distillery.  All Rights  */
+/* |. o.| || Reserved.  This program may not be distributed without the    */
+/* | .  | || permission of the authors:                            BBS:    */
+/* | o  | ||   John Toebes     Doug Walker    Dave Baker                   */
+/* |  . |//                                                                */
+/* ======                                                                  */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* File Manipulation  */
+/*  ActDelete ActRename ActSetProtection ActSetComment */
+
+#include "handler.h"
+
+/* Arg1: Lock   */
+/* Arg2: Name   */
+ACTFN(ActDelete)
+{
+   NETPTR nlock;
+   struct FileLock *flock;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP;
+   OBUG(("ActDelete\n"));
+
+   flock = (struct FileLock *)pkt->dp_Arg1;
+
+   /* Can't delete in the root of NET: */
+   if(TESTROOT(flock, nlock))
+   {
+      if (ParseName(global, (char *)pkt->dp_Arg2, &nlock, global->work) ||
+            !nlock)
+      {
+         /* Either he is trying to delete a node or he got the name wrong */
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = (nlock ? ERROR_OBJECT_IN_USE
+                               : ERROR_WRITE_PROTECTED);
+         HPQ(global, hpkt);
+         return;
+      }
+      OBUGBSTR("RmtDelete: Sending to node ", nlock->NetNode->name);
+      if(!(RP = AllocRPacket(nlock->NetNode, BSTRLEN(global->work)+1)))
+      {
+         norpkt:
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+         HPQ(global, hpkt);
+         return;
+      }
+      MBSTR(global->work, RP->DataP);
+   }
+   else
+   {
+      if(!(RP = AllocRPacket(nlock->NetNode, 0))) goto norpkt;
+      RP->DataP = (char *)pkt->dp_Arg2;
+   }
+   OBUGBSTR("RmtDelete: remote node name =", RP->DataP);
+
+   RP->Type = pkt->dp_Type;
+   RP->Arg1 = (LONG)nlock;
+   RP->DLen = BSTRLEN(RP->DataP)+1;
+   if(RP->DLen == 1) RP->DLen = 0;
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = NP1;
+   hpkt->hp_NNode = nlock->NetNode;
+   hpkt->hp_Driver = nlock->NetNode->driver;
+
+   RemotePacket(global, hpkt);
+}
+
+/* Arg1: FromLock       */
+/* Arg2: FromName       */
+/* Arg3: ToLock         */
+/* Arg4: ToName         */
+
+ACTFN(ActRename)
+{
+   NETPTR nlock, nlock2;
+   struct FileLock *flock;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP;
+   char *pname1, *pname2;
+   int dlen;
+
+   OBUG(("ActRename\n"));
+
+   flock = (struct FileLock *)pkt->dp_Arg1;
+
+   /* See if it is a local lock */
+   if(TESTROOT(flock, nlock))
+   {
+      if(ParseName(global, (char *)pkt->dp_Arg2, &nlock, global->work) ||
+         !nlock)
+      {
+         /* Trying to rename a node, or something that doesn't exist */
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_OBJECT_NOT_FOUND;
+         HPQ(global, hpkt);
+         return;
+      }
+      pname1 = global->work;
+   } 
+   else 
+   {
+      pname1 = (char *)pkt->dp_Arg2;
+   }
+
+   flock = (struct FileLock *)pkt->dp_Arg3;
+
+   /* See if the second lock is a local lock */
+   if(TESTROOT(flock, nlock2))
+   {
+      pname2 = global->work+FILENAMELEN;
+      if(ParseName(global, (char *)pkt->dp_Arg4, &nlock2, pname2) || !nlock2)
+      {
+         /* See if they are trying to rename a node */
+         if(pname1[0] == 1 && pname1[1] == ':') 
+         {
+            if(pname2[0] > RNAMELEN) pname2[0] = RNAMELEN;
+            MBSTR(pname2, nlock->NetNode->name);
+            pkt->dp_Res1 = DOS_TRUE;
+            pkt->dp_Res2 = 0;
+         } 
+         else 
+         {
+            pkt->dp_Res1 = DOS_FALSE;
+            pkt->dp_Res2 = (nlock2 ? ERROR_OBJECT_EXISTS
+                                   : ERROR_RENAME_ACROSS_DEVICES);
+         }
+         HPQ(global, hpkt);
+         return;
+      }
+   } 
+   else 
+   {
+      pname2 = (char *)pkt->dp_Arg4;
+   }
+
+   /* Check for rename across devices */
+   if(nlock->NetNode != nlock2->NetNode)
+   {
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_RENAME_ACROSS_DEVICES;
+      HPQ(global, hpkt);
+      return;
+   }
+
+   dlen = FILENAMELEN+BSTRLEN(pname2)+2;
+   if(!(RP = AllocRPacket(nlock->NetNode, dlen)))
+   {
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+      HPQ(global, hpkt);
+      return;
+   }
+
+   MBSTR(pname1, RP->DataP);
+   MBSTR(pname2, RP->DataP+FILENAMELEN);
+
+   RP->Type = pkt->dp_Type;
+   RP->Arg1 = (LONG)nlock;
+   RP->Arg3 = (LONG)nlock2;
+   RP->DLen = dlen;
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = NP1|NP3;
+   hpkt->hp_NNode = nlock->NetNode;
+   hpkt->hp_Driver = nlock->NetNode->driver;
+
+   RemotePacket(global, hpkt);
+}
+
+/* Arg1: Unused */
+/* Arg2: Lock */
+/* Arg3: Name */
+/* Arg4: Mask of protection */
+
+ACTFN(ActSetProtection)
+{
+   struct FileLock *flock;
+   NETPTR nlock;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP;
+
+   OBUG(("ActSetProtection\n"));
+
+   OBUGBSTR("File to protect: ", pkt->dp_Arg3);
+
+   flock = (struct FileLock *)pkt->dp_Arg2;
+
+   if(TESTROOT(flock, nlock))
+   {
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->work) ||
+          !nlock)
+      {
+         /* Local lock - protection not implemented yet */
+         pkt->dp_Res1 = DOS_TRUE;
+         HPQ(global, hpkt);
+         return;
+      }
+      if(!(RP = AllocRPacket(nlock->NetNode, BSTRLEN(global->work)+1)))
+      {
+         norpkt:
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+         HPQ(global, hpkt);
+         return;
+      }
+      MBSTR(global->work, RP->DataP);
+   }
+   else
+   {
+      if(!(RP = AllocRPacket(nlock->NetNode, 0)))
+         goto norpkt;
+      RP->DataP = (char *)pkt->dp_Arg3;
+   }
+
+
+   RP->Type = pkt->dp_Type;
+   RP->Arg2 = (LONG)nlock;
+   RP->Arg4 = pkt->dp_Arg4;
+   RP->DLen = BSTRLEN(RP->DataP)+1;
+   if(RP->DLen == 1) RP->DLen = 0;
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = NP2;
+   hpkt->hp_NNode = nlock->NetNode;
+   hpkt->hp_Driver = nlock->NetNode->driver;
+
+   RemotePacket(global, hpkt);
+}
+
+/* Arg1: Unused */
+/* Arg2: Lock */
+/* Arg3: Name */
+/* Arg4: Comment */
+
+ACTFN(ActSetComment)
+{
+   struct FileLock *flock;
+   NETPTR nlock;
+   int len;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP;
+
+   OBUG(("ActSetComment\n"));
+
+   flock = (struct FileLock *)pkt->dp_Arg2;
+
+   OBUGBSTR("File to Comment: ", pkt->dp_Arg3);
+   OBUGBSTR("New Comment Str: ", pkt->dp_Arg4);
+
+   if(TESTROOT(flock, nlock))
+   {
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->work) ||
+          !nlock)
+      {
+         /* Can't SetComment local nodes */
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NODE_DOWN;
+         HPQ(global, hpkt);
+         return;
+      }
+      if(!(RP = AllocRPacket(nlock->NetNode, BSTRLEN(global->work)+1)))
+      {
+         norpkt:
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+         HPQ(global, hpkt);
+         return;
+      }
+      MBSTR(global->work, RP->DataP);
+   }
+   else
+   {
+      if(!(RP = AllocRPacket(nlock->NetNode, 0))) goto norpkt;
+      RP->DataP = (char *)pkt->dp_Arg3;
+   }
+
+   RP->Type = pkt->dp_Type;
+   RP->Arg2 = (LONG)nlock;
+   len = BSTRLEN(RP->DataP)+1;
+   len = (((len+3)>>2)<<2);
+   MBSTR(pkt->dp_Arg4, (RP->DataP+len));
+   RP->DLen = len + *((char *)pkt->dp_Arg4) + 1;
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = NP2;
+   hpkt->hp_NNode = nlock->NetNode;
+   hpkt->hp_Driver = nlock->NetNode->driver;
+
+   RemotePacket(global, hpkt);
+}
+
+/* Arg1: Unused */
+/* Arg2: BPTR Lock */
+/* Arg3: BSTR Name */
+/* Arg4: APTR !!!!!!!!! DateStamp*/
+
+ACTFN(ActSetFileDate)
+{
+   struct FileLock *flock;
+   NETPTR nlock;
+   int len;
+   char *name;
+   struct DosPacket *pkt = hpkt->hp_Pkt;
+   struct RPacket *RP;
+
+   OBUG(("ActSetFileDate\n"));
+   OBUG(("Arg1=0x%08lx Arg2=0x%08lx Arg3=0x%08lx Arg4=%08lx\n",
+      pkt->dp_Arg1, pkt->dp_Arg2, pkt->dp_Arg3, pkt->dp_Arg4))
+
+   flock = (struct FileLock *)pkt->dp_Arg2;
+
+   if(TESTROOT(flock, nlock))
+   {
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->work) ||
+          !nlock)
+      {
+         /* Can't SetDate local nodes */
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NODE_DOWN;
+         HPQ(global, hpkt);
+         return;
+      }
+      name = global->work;
+   }
+   else
+   {
+      name = pkt->dp_Arg3;
+   }
+
+   len = sizeof(struct DateStamp) + BSTRLEN(name) + 1;
+   if(!(RP = AllocRPacket(nlock->NetNode, len)))
+   {
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+      HPQ(global, hpkt);
+      return;
+   }
+   RP->Type = pkt->dp_Type;
+   RP->Arg2 = (LONG)nlock;
+   RP->DLen = len;
+   memcpy(RP->DataP, (char *)pkt->dp_Arg4, sizeof(struct DateStamp));
+   MBSTR(name, RP->DataP+sizeof(struct DateStamp));
+   RP->handle = hpkt;
+
+   hpkt->hp_RP = RP;
+   hpkt->hp_NPFlags = NP2;
+   hpkt->hp_NNode = nlock->NetNode;
+   hpkt->hp_Driver = nlock->NetNode->driver;
+
+   RemotePacket(global, hpkt);
+}
+@
+
+
+1.10
+log
+@Fix SetDate
+@
+text
+@d299 4
+a302 4
+/* Arg1: BPTR Lock */
+/* Arg2: BPTR DateStamp */
+/* Arg3: Unused */
+/* Arg4: Unused */
+d309 1
+d317 1
+a317 1
+   flock = (struct FileLock *)pkt->dp_Arg1;
+d321 2
+a322 9
+      /* Can't SetDate local nodes */
+      pkt->dp_Res1 = DOS_FALSE;
+      pkt->dp_Res2 = ERROR_NODE_DOWN;
+      HPQ(global, hpkt);
+      return;
+   }
+   else
+   {
+      if(!(RP = AllocRPacket(nlock->NetNode, 0)))
+d324 1
+d326 1
+a326 1
+         pkt->dp_Res2 = ERROR_NO_FREE_STORE;
+d330 5
+d337 8
+d346 4
+a349 3
+   RP->Arg1 = (LONG)nlock;
+   RP->DLen = sizeof(struct DateStamp);
+   RP->DataP = (char *)pkt->dp_Arg2;
+d353 1
+a353 1
+   hpkt->hp_NPFlags = NP1;
+@
+
+
+1.9
+log
+@Revise debugging messages
+@
+text
+@d299 4
+a302 4
+/* Arg1: Unused */
+/* Arg2: BPTR Lock */
+/* Arg3: Name (BPTR to BSTR) /
+/* Arg4: APTR (!) to DateStamp */
+d316 1
+a316 1
+   flock = (struct FileLock *)pkt->dp_Arg2;
+d320 9
+a328 11
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->work) ||
+          !nlock)
+      {
+         /* Can't SetDate local nodes */
+         pkt->dp_Res1 = DOS_FALSE;
+         pkt->dp_Res2 = ERROR_NODE_DOWN;
+         HPQ(global, hpkt);
+         return;
+      }
+      if(!(RP = AllocRPacket(nlock->NetNode, 
+         BSTRLEN(global->work)+5+sizeof(struct DateStamp))))
+a329 1
+         norpkt:
+a335 5
+   else
+   {
+      if(!(RP = AllocRPacket(nlock->NetNode, 0))) goto norpkt;
+      RP->DataP = (char *)pkt->dp_Arg3;
+   }
+d338 3
+a340 4
+   RP->Arg2 = (LONG)nlock;
+   len = (((BSTRLEN(RP->DataP)+4)>>2)<<2);
+   MQ(pkt->dp_Arg4, RP->DataP+len, sizeof(struct DateStamp));
+   RP->DLen = len + sizeof(struct DateStamp);
+d344 1
+a344 1
+   hpkt->hp_NPFlags = NP2;
+@
+
+
+1.8
+log
+@*** empty log message ***
+@
+text
+@d23 1
+a23 1
+   BUG(("ActDelete\n"));
+d40 1
+a40 1
+      BUGBSTR("RmtDelete: Sending to node ", nlock->NetNode->name);
+d56 1
+a56 1
+   BUGBSTR("RmtDelete: remote node name =", RP->DataP);
+d86 1
+a86 1
+   BUG(("ActRename\n"));
+d187 1
+a187 1
+   BUG(("ActSetProtection\n"));
+d189 1
+a189 1
+   BUGBSTR("File to protect: ", pkt->dp_Arg3);
+d249 1
+a249 1
+   BUG(("ActSetComment\n"));
+d253 2
+a254 2
+   BUGBSTR("File to Comment: ", pkt->dp_Arg3);
+   BUGBSTR("New Comment Str: ", pkt->dp_Arg4);
+d312 2
+a313 2
+   BUG(("ActSetFileDate\n"));
+   BUG(("Arg1=0x%08lx Arg2=0x%08lx Arg3=0x%08lx Arg4=%08lx\n",
+@
+
+
+1.7
+log
+@Many bug fixes, incl. proper passing of the res1 and res2 fields
+@
+text
+@d59 1
+a59 1
+   RP->Arg1 = (LONG)nlock->RPtr;
+d162 2
+a163 2
+   RP->Arg1 = (LONG)nlock->RPtr;
+   RP->Arg3 = (LONG)nlock2->RPtr;
+d222 1
+a222 1
+   RP->Arg2 = (LONG)nlock->RPtr;
+d284 1
+a284 1
+   RP->Arg2 = (LONG)nlock->RPtr;
+d346 1
+a346 1
+   RP->Arg2 = (LONG)nlock->RPtr;
+d353 1
+a353 1
+   hpkt->hp_NPFlags = NP1;
+@
+
+
+1.6
+log
+@New cut that (almost) works
+@
+text
+@d106 1
+a106 1
+      pname2 = (char *)pkt->dp_Arg2;
+d114 1
+a114 1
+      pname2 = global->work+BSTRLEN(global->work)+1;
+@
+
+
+1.5
+log
+@Rewrite for asynchronous execution
+@
+text
+@d62 1
+d64 1
+a67 1
+   RP->handle = hpkt;
+d165 1
+d167 1
+a170 1
+   RP->handle = hpkt;
+d226 1
+d228 1
+a231 1
+   RP->handle = hpkt;
+d289 1
+d291 1
+a294 1
+   RP->handle = hpkt;
+d350 1
+d352 1
+a355 1
+   RP->handle = hpkt;
+@
+
+
+1.4
+log
+@newer version (testroot calls added)
+@
+text
+@d15 3
+a17 6
+void
+ActDelete(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* a pointer to the dos packet sent    */
+                        /* Arg1: Lock   */
+                        /* Arg2: Name   */
+d21 2
+d30 1
+a30 1
+      if (ParseName(global, (char *)pkt->dp_Arg2, &nlock, global->RP.DataP) ||
+d37 1
+d41 11
+a51 2
+   } 
+   else 
+d53 2
+a54 1
+      MBSTR(pkt->dp_Arg2, global->RP.DataP);
+d56 1
+a56 1
+   BUGBSTR("RmtDelete: remote node name =", global->RP.DataP);
+d58 9
+a66 4
+   global->RP.Type = pkt->dp_Type;
+   global->RP.Arg1 = (LONG)nlock->RPtr;
+   global->RP.DLen = BSTRLEN(global->RP.DataP)+1;
+   if(global->RP.DLen == 1) global->RP.DLen = 0;
+d68 1
+a68 1
+   RemotePacket(global, nlock, &global->RP);
+d71 6
+a76 7
+void
+ActRename(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: FromLock       */
+                        /* Arg2: FromName       */
+                        /* Arg3: ToLock         */
+                        /* Arg4: ToName         */
+d80 4
+a83 1
+   char *tmpchar;
+d92 1
+a92 1
+      if(ParseName(global, (char *)pkt->dp_Arg2, &nlock, global->RP.DataP) ||
+d98 1
+d101 1
+d105 1
+a105 1
+      MBSTR(pkt->dp_Arg2, global->RP.DataP);
+d113 2
+a114 2
+      if(ParseName(global, (char *)pkt->dp_Arg4, &nlock,
+         global->RP.DataP+FILENAMELEN) || !nlock2)
+d117 1
+a117 1
+         if (global->RP.DataP[0] == 1 && global->RP.DataP[1] == ':') 
+d119 4
+a122 3
+            tmpchar = global->RP.DataP+FILENAMELEN;
+                      if(tmpchar[0] > RNAMELEN) tmpchar[0] = RNAMELEN;
+            MBSTR(tmpchar, nlock->NetNode->name);
+d130 1
+d136 1
+a136 1
+      MBSTR(pkt->dp_Arg4, global->RP.DataP+FILENAMELEN);
+d140 1
+a140 1
+   if (nlock->NetNode != nlock2->NetNode) 
+d144 1
+d148 11
+a158 4
+   global->RP.Type = pkt->dp_Type;
+   global->RP.Arg1 = (LONG)nlock->RPtr;
+   global->RP.Arg3 = (LONG)nlock2->RPtr;
+   global->RP.DLen = FILENAMELEN + BSTRLEN(global->RP.DataP+FILENAMELEN)+1;
+d160 11
+a170 1
+   RemotePacket(global, nlock, &global->RP);
+d173 6
+a178 7
+void
+ActSetProtection(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+                        /* Arg2: Lock */
+                        /* Arg3: Name */
+                        /* Arg4: Mask of protection */
+d182 2
+a186 2
+   flock = (struct FileLock *)pkt->dp_Arg2;
+
+d193 1
+a193 1
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->RP.DataP) ||
+d198 1
+d201 9
+d212 5
+a216 1
+      MBSTR(pkt->dp_Arg3, global->RP.DataP);
+d218 11
+a228 5
+   global->RP.Type = pkt->dp_Type;
+   global->RP.Arg2 = (LONG)nlock->RPtr;
+   global->RP.Arg4 = pkt->dp_Arg4;
+   global->RP.DLen = BSTRLEN(global->RP.DataP)+1;
+   if(global->RP.DLen == 1) global->RP.DLen = 0;
+d230 1
+a230 1
+   RemotePacket(global, nlock, &global->RP);
+d233 6
+a238 7
+void
+ActSetComment(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+                        /* Arg2: Lock */
+                        /* Arg3: Name */
+                        /* Arg4: Comment */
+d243 2
+d255 1
+a255 1
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->RP.DataP) ||
+d261 9
+d272 1
+d276 2
+a277 1
+      MBSTR(pkt->dp_Arg3, global->RP.DataP);
+d280 3
+a282 3
+   global->RP.Type = pkt->dp_Type;
+   global->RP.Arg2 = (LONG)nlock->RPtr;
+   len = BSTRLEN(global->RP.DataP)+1;
+d284 2
+a285 2
+   MBSTR(pkt->dp_Arg4, (global->RP.DataP+len));
+   global->RP.DLen = len + *((char *)pkt->dp_Arg4) + 1;
+d287 6
+a292 1
+   RemotePacket(global, nlock, &global->RP);
+d295 6
+a300 7
+void
+ActSetFileDate(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+                        /* Arg2: BPTR Lock */
+                        /* Arg3: Name (BPTR to BSTR) /
+                        /* Arg4: APTR (!) to DateStamp */
+d305 2
+d316 1
+a316 1
+      if(ParseName(global, (char *)pkt->dp_Arg3, &nlock, global->RP.DataP) ||
+d322 10
+d337 2
+a338 1
+      MBSTR(pkt->dp_Arg3, global->RP.DataP);
+d341 10
+a350 5
+   global->RP.Type = pkt->dp_Type;
+   global->RP.Arg2 = (LONG)nlock->RPtr;
+   len = (((BSTRLEN(global->RP.DataP)+4)>>2)<<2);
+   MQ(pkt->dp_Arg4, global->RP.DataP+len, sizeof(struct DateStamp));
+   global->RP.DLen = len + sizeof(struct DateStamp);
+d352 1
+a352 1
+   RemotePacket(global, nlock, &global->RP);
+@
+
+
+1.3
+log
+@Eliminate RDevice
+@
+text
+@d29 1
+a29 1
+   if (!flock || (nlock=(NETPTR)flock->fl_Key) != (NETPTR)nlock->NetNode)
+d73 1
+a73 1
+   if(!flock || (nlock=(NETPTR)flock->fl_Key) != (NETPTR)nlock->NetNode)
+d92 1
+a92 1
+   if(!flock || (nlock2=(NETPTR)flock->fl_Key) != (NETPTR)nlock2->NetNode)
+d151 3
+a153 2
+   if((!(flock=(struct FileLock *)pkt->dp_Arg2) ||
+      (nlock=(NETPTR)flock->fl_Key) != (NETPTR)nlock->NetNode))
+d194 1
+a194 2
+   if((!(flock=(struct FileLock *)pkt->dp_Arg2) ||
+      (nlock=(NETPTR)flock->fl_Key) != (NETPTR)nlock->NetNode))
+d236 3
+a238 2
+   if((!(flock=(struct FileLock *)pkt->dp_Arg2) ||
+      (nlock=(NETPTR)flock->fl_Key) != (NETPTR)nlock->NetNode))
+@
+
+
+1.2
+log
+@ACTFN macros
+@
+text
+@d15 4
+a20 1
+ACTFN(ActDelete)
+d29 1
+a29 1
+   if (!flock || !(nlock=(NETPTR)flock->fl_Key)->RDevice)
+d56 4
+a62 1
+ACTFN(ActRename)
+d73 1
+a73 1
+   if(!flock || !(nlock=(NETPTR)flock->fl_Key)->RDevice)
+d92 1
+a92 1
+   if(!flock || !(nlock2=(NETPTR)flock->fl_Key)->RDevice)
+d134 4
+a140 1
+ACTFN(ActSetProtection)
+d152 1
+a152 1
+      !(nlock=(NETPTR)flock->fl_Key)->RDevice))
+d174 4
+a180 1
+ACTFN(ActSetComment)
+d194 1
+a194 1
+      !(nlock=(NETPTR)flock->fl_Key)->RDevice))
+d220 4
+a226 1
+ACTFN(ActSetFileDate)
+d237 1
+a237 1
+      !(nlock=(NETPTR)flock->fl_Key)->RDevice))
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a14 4
+void
+ActDelete(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* a pointer to the dos packet sent    */
+d17 1
+a52 4
+void
+ActRename(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: FromLock       */
+d56 1
+a127 4
+void
+ActSetProtection(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+d131 1
+a164 4
+void
+ActSetComment(global,pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+d168 1
+a207 4
+void
+ActSetFileDate(global, pkt)
+GLOBAL global;
+struct DosPacket *pkt;  /* Arg1: Unused */
+d211 1
+@

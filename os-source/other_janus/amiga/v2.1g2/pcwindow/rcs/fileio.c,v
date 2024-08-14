@@ -1,0 +1,1054 @@
+head     1.2;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.2
+date     91.07.23.16.18.31;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.03.21.18.29.43;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.2
+log
+@brace change
+@
+text
+@
+/**** fileio.c **************************************************************
+ * 
+ * File Input/Output Routines  --  Zaphod Project
+ *
+ * Copyright (C) 1986, Commodore-Amiga, Inc.
+ * 
+ * CONFIDENTIAL and PROPRIETARY
+ *
+ * HISTORY   Name      Description
+ * -------   ------      --------------------------------------------
+ * 18 jul 89   -BK         Added function entry debug kprintfs to EVERY
+ *                         function. The Exorcism of RJ begins!
+ * 14 Apr 86   =RJ Mical=   Created this file
+ *
+ ***************************************************************************/
+
+#include "zaphod.h"
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <stdio.h>
+
+#define  DBG_GET_NEXT_NUMBER_ENTER        0
+#define  DBG_SHORT_GET_NEXT_NUMBER_ENTER  0
+#define  DBG_READ_KEY_TABLE_ENTER         1
+#define  DBG_READ_SCAN_CODE_TABLE_ENTER   1
+#define  DBG_SHORT_WRITE_ENTER            0
+#define  DBG_S_PRINTF_SHORT_WRITE_ENTER   0
+#define  DBG_READ_SETTINGS_GRUNT_ENTER    1
+#define  DBG_READ_SETTINGS_GRUNT_SIZES    1
+#define  DBG_WRITE_SETTINGS_FILE_ENTER    1
+#define  DBG_READ_SETTINGS_FILE_ENTER     1
+#define  DBG_READ_SETTINGS_FILE_SETTINGS  1
+
+#define FILE_BUFFER_SIZE    82
+
+BYTE FileBuffer[FILE_BUFFER_SIZE];
+SHORT FileIndex;
+LONG FileNumber;
+
+extern UBYTE ASCIIToPCTable[];
+
+   
+
+struct Settings
+   {
+   SHORT   DefaultColorTextDepth;
+   SHORT   TextOnePlaneColors[2];
+   SHORT   TextTwoPlaneColors[4];
+   SHORT   TextThreePlaneColors[8];
+   SHORT   TextFourPlaneColors[16];
+   SHORT   HighGraphicsColors[2];
+   SHORT   LowGraphicsColors[2][2][4];
+   SHORT   PresetMonoWidth;
+   SHORT   PresetMonoHeight;
+   SHORT   PresetMonoTopEdge;
+   SHORT   PresetMonoLeftEdge;
+   SHORT   PresetMonoDepth;
+   SHORT   PresetColorWidth;
+   SHORT   PresetColorHeight;
+   SHORT   PresetColorTopEdge;
+   SHORT   PresetColorLeftEdge;
+   SHORT   PresetMonoFlags;
+   SHORT   PresetColorFlags;
+   };
+
+struct   Settings Settings;
+
+ 
+/* The numeric input file format rules:
+ *  - Anywhere that a ';' character appears, the rest of the line is 
+ *   regarded as a comment and ignored
+ *  - Numbers are separated by any non-numeric character, including
+ *   blanks, spaces, end-of-line characters, the letter z, and any
+ *   other delimiter you care to use.      Any word that starts with a
+ *   '$' is treated as a hexadecimal number.
+ */
+
+/****i* PCWindow/GetNextNumber ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+BOOL GetNextNumber(numaddress, bufptr, indexaddress, filenumber)
+SHORT *numaddress, *indexaddress;
+BYTE *bufptr;
+LONG filenumber;
+/*
+ * When a number is found, it is saved in the memory location
+ * pointed to by numaddress, bufptrptr is advanced to point to the first
+ * non-numeric character, and this routine returns TRUE.  If no number
+ * is found, numaddress and bufptrptr are unchanged and this routine 
+ * returns FALSE.
+ */
+{
+   BYTE thischar;
+   SHORT index, result, base;
+
+#if (DEBUG1 & DBG_GET_NEXT_NUMBER_ENTER)
+   kprintf("FileIO.c:     GetNextNumber(numaddress=0x%lx,bufptr=0x%lx,indexaddress=0x%lx,filenumber=0x%lx)\n",numaddress,bufptr,indexaddress,filenumber);
+#endif
+
+   result = 0;
+   index = *indexaddress;
+   base = 10;
+
+   FOREVER
+      {
+      while (thischar = *(bufptr + index))
+         {
+         if ( ((thischar >= '0') && (thischar <= '9')) || (thischar == '$'))
+            {
+            if (thischar == '$')
+               {
+               base = 16;
+               thischar = '0';
+               }
+
+            thischar -= '0';
+
+            do
+               {
+               index++;
+               result = (result * base) + thischar;
+               thischar = *(bufptr + index);
+               if (base == 10) thischar -= '0';
+               else
+                  {
+                  if ((thischar >= 'a') && (thischar <= 'z')) 
+                     thischar = thischar - 'a' + 'A';
+                  if ((thischar >= '0') && (thischar <= '9'))
+                     thischar -= '0';
+                  else
+                     thischar = thischar - 'A' + 10;
+                  }
+               }
+            while ((thischar >= 0) && (thischar < base));
+            *indexaddress = index;
+            *numaddress = result;
+            return (TRUE);
+            }
+          
+         index++;
+
+         if (thischar == ';') 
+            {
+            if (XReadLine(bufptr, FILE_BUFFER_SIZE) == -1) return (FALSE);
+
+            index = 0;
+            }
+         }
+      if (XReadLine(bufptr, FILE_BUFFER_SIZE) == -1) return (FALSE);
+      index = 0;
+      }
+}
+
+/****i* PCWindow/ShortGetNextNumber ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+BOOL ShortGetNextNumber(num)
+SHORT *num;
+{
+#if (DEBUG1 & DBG_SHORT_GET_NEXT_NUMBER_ENTER)
+   kprintf("FileIO.c:     ShortGetNextNumber(num=0x%lx)\n",num);
+#endif
+
+   return(GetNextNumber(num, &FileBuffer[0], &FileIndex, FileNumber));
+}
+
+/****i* PCWindow/ReadKeyTable ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+VOID ReadKeyTable()
+{
+   SHORT num;
+   SHORT i;
+
+#if (DEBUG1 & DBG_READ_KEY_TABLE_ENTER)
+   kprintf("FileIO.c:     ReadKeyTable(VOID)\n");
+#endif
+
+   FileIndex = 0;
+   FileBuffer[0] = 0;
+   if ( (FileNumber = Open(&SidecarKeysFile[0], MODE_OLDFILE)) == 0)
+   {
+      MyAlert(ALERT_BAD_KEYS_FILE, NULL);
+      return;
+   }
+
+   InitXRead(FileNumber);
+
+   ShortGetNextNumber(&num);    PCAltCode = num;
+   ShortGetNextNumber(&num);    PCCapsLockCode = num;
+   ShortGetNextNumber(&num);    PCCtrlCode = num;
+   ShortGetNextNumber(&num);    PCLeftShiftCode = num;
+   ShortGetNextNumber(&num);    PCNumLockCode = num;
+   ShortGetNextNumber(&num);    PCPlusCode = num;
+   ShortGetNextNumber(&num);    PCPtrScrCode = num;
+   ShortGetNextNumber(&num);    PCRightShiftCode = num;
+   ShortGetNextNumber(&num);    PCScrollLockCode = num;
+   ShortGetNextNumber(&num);    PCTildeCode = num;
+   ShortGetNextNumber(&num);    PCBarCode = num;
+   ShortGetNextNumber(&num);    PCBackDashCode = num;
+   ShortGetNextNumber(&num);    PCBackSlashCode = num;
+
+   ShortGetNextNumber(&num);    AmigaCapsLockCode = num;
+   ShortGetNextNumber(&num);    AmigaLeftAltCode = num;
+   ShortGetNextNumber(&num);    AmigaNCode = num;
+   ShortGetNextNumber(&num);    AmigaPCode = num;
+   ShortGetNextNumber(&num);    AmigaPlusCode = num;
+   ShortGetNextNumber(&num);    AmigaRightAltCode = num;
+   ShortGetNextNumber(&num);    AmigaSCode = num;
+   ShortGetNextNumber(&num);    AmigaPrtScrCode = num;
+   ShortGetNextNumber(&num);    AmigaTildeBackDash = num;
+   ShortGetNextNumber(&num);    AmigaBarBackSlash = num;
+
+   for (i = 0; i < 128; i++)
+   {
+      if ( ShortGetNextNumber(&num) == FALSE )
+      {
+         MyAlert(ALERT_BAD_KEYS_FILE, NULL);
+         goto CLOSE_RETURN;
+      }
+      PCRawKeyTable[i] = num;
+   }
+
+   /* Is there another number to get?  If not, then we're using an 
+    * old file so use the presumably (poof) safe defaults.  
+    */
+   if (ShortGetNextNumber(&num) == FALSE)
+   {
+      MyAlert(ALERT_OLD_KEYSFILE, NULL);
+      goto CLOSE_RETURN;
+   }
+   PCKeypad0Code = num;
+   ShortGetNextNumber(&num);   PCKeypad1Code = num;
+   ShortGetNextNumber(&num);   PCKeypad2Code = num;
+   ShortGetNextNumber(&num);   PCKeypad3Code = num;
+   ShortGetNextNumber(&num);   PCKeypad4Code = num;
+   ShortGetNextNumber(&num);   PCKeypad5Code = num;
+   ShortGetNextNumber(&num);   PCKeypad6Code = num;
+   ShortGetNextNumber(&num);   PCKeypad7Code = num;
+   ShortGetNextNumber(&num);   PCKeypad8Code = num;
+   ShortGetNextNumber(&num);   PCKeypad9Code = num;
+   ShortGetNextNumber(&num);   PCKeypadDotCode = num;
+
+   ShortGetNextNumber(&num);   AmigaCursorUp = num;
+   ShortGetNextNumber(&num);   AmigaCursorLeft = num;
+   ShortGetNextNumber(&num);   AmigaCursorRight = num;
+   ShortGetNextNumber(&num);   AmigaCursorDown = num;
+   ShortGetNextNumber(&num);   AmigaDelCode = num;
+
+CLOSE_RETURN:
+   Close(FileNumber);
+}
+
+/****i* PCWindow/ReadScanCodeTable ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+VOID ReadScanCodeTable()
+{
+   SHORT num;
+   SHORT i;
+
+#if (DEBUG1 & DBG_READ_SCAN_CODE_TABLE_ENTER)
+   kprintf("FileIO.c:     ReadScanCodeTable(VOID)\n");
+#endif
+
+   FileIndex = 0;
+   FileBuffer[0] = 0;
+   if ( (FileNumber = Open(&ScanCodeFile[0], MODE_OLDFILE)) == 0)
+   {
+      MyAlert(ALERT_BAD_SCANCODE_FILE, NULL);
+      return;
+   }
+
+   InitXRead(FileNumber);
+
+   for (i = 0; i < 128 * 2; i++)
+   {
+      if ( ShortGetNextNumber(&num) == FALSE )
+      {
+         MyAlert(ALERT_BAD_SCANCODE_FILE, NULL);
+         goto CLOSE_RETURN;
+      }
+      ASCIIToPCTable[i] = num;
+   }
+
+CLOSE_RETURN:
+   Close(FileNumber);
+}
+
+/****i* PCWindow/ShortWrite ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+VOID ShortWrite(text, display)
+UBYTE *text;
+struct Display *display;
+{
+#if (DEBUG1 & DBG_SHORT_WRITE_ENTER)
+   kprintf("FileIO.c:     ShortWrite(text=0x%lx,display=0x%lx)\n",text,display);
+#endif
+
+   if (Write(FileNumber, text, StringLength(text)) == -1)
+      {
+      MyAlert(ALERT_BAD_SETTINGS_FILE, display);
+      }
+}
+
+/****i* PCWindow/SPrintfShortWrite ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+VOID   SPrintfShortWrite(text, data, display)
+UBYTE   *text;
+ULONG   data;
+struct   Display *display;
+{
+#if (DEBUG1 & DBG_S_PRINTF_SHORT_WRITE_ENTER)
+   kprintf("FileIO.c:     SPrintfShortWrite(text=0x%lx,data=0x%lx,display=0x%lx)\n",text,data,display);
+#endif
+
+   sprintf(&FileBuffer[0], text, data);
+   ShortWrite(&FileBuffer[0], display);
+}
+
+/****i* PCWindow/ReadSettingsGrunt *****************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+BOOL   ReadSettingsGrunt(display, reporterrors)
+struct Display *display;
+BOOL   reporterrors;
+/* The display argument can be NULL if there's no display for this fetch */
+{
+   SHORT i, i2;
+   SHORT   num;
+   BOOL   returnval;
+   struct   Process *process;
+   struct   Window *procwindow, *w;
+
+#if (DEBUG1 & DBG_READ_SETTINGS_GRUNT_ENTER)
+   kprintf("FileIO.c:     ReadSettingsGrunt(display=0x%lx,reporterrors=0x%lx)\n",display,reporterrors);
+#endif
+
+   returnval = FALSE;
+
+   if (display)
+      if (NOT MyLock(&display->DisplayLock)) goto RETURN;
+
+   process = (struct Process *)FindTask(0);
+   procwindow = (struct Window *)process->pr_WindowPtr;
+   if (display)
+   {
+      if (display->FirstWindow)
+      {
+         if (w = display->FirstWindow->DisplayWindow)
+            process->pr_WindowPtr = (APTR)w;
+      }
+   }
+
+   if ( (FileNumber = Open(&SidecarSettingsFile[0], MODE_OLDFILE)) == 0)
+   {
+      if (reporterrors) MyAlert(ALERT_BAD_SETTINGS_FILE, display);
+         goto UNLOCK_RETURN;
+   }
+
+   FileIndex = 0;
+   FileBuffer[0] = 0;
+
+   InitXRead(FileNumber);
+
+   /* Get the Flag word */
+   ShortGetNextNumber(&num);
+
+   /* Get the default cursor times */
+   /* The routine has to be changed to work with longs */
+   ShortGetNextNumber(&num);
+   ShortGetNextNumber(&num);
+
+   /* Get the default text depth */
+   ShortGetNextNumber(&num);
+   Settings.DefaultColorTextDepth = num;
+
+   /* The default display priority */
+   ShortGetNextNumber(&num);
+
+   /* And restore the palettes */
+   /* Text One Plane: */
+   for (i = 0; i < 2; i++)
+   {
+      ShortGetNextNumber(&num);
+      Settings.TextOnePlaneColors[i] = num;
+   }
+   /* Text Two Plane */
+   for (i = 0; i < 4; i++)
+   {
+      ShortGetNextNumber(&num);
+      Settings.TextTwoPlaneColors[i] = num;
+   }
+   /* Text Three Plane */
+   for (i = 0; i < 8; i++)
+   {
+      ShortGetNextNumber(&num);
+      Settings.TextThreePlaneColors[i] = num;
+   }
+   /* Text Four Plane */
+   for (i = 0; i < 16; i++)
+   {
+      ShortGetNextNumber(&num);
+      Settings.TextFourPlaneColors[i] = num;
+   }
+   /* High Graphics */
+   for (i = 0; i < 2; i++)
+   {
+      ShortGetNextNumber(&num);
+      Settings.HighGraphicsColors[i] = num;
+   }
+   /* Low Graphics Normal */
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+      {
+         ShortGetNextNumber(&num);
+         Settings.LowGraphicsColors[0][i][i2] = num;
+      }
+   /* Low Graphics Intensified */
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+      {
+         ShortGetNextNumber(&num);
+         Settings.LowGraphicsColors[1][i][i2] = num;
+      }
+
+   if (NOT ShortGetNextNumber(&num))
+   {
+      if (reporterrors) MyAlert(ALERT_BAD_SETTINGS_FILE, display);
+         returnval = FALSE;
+      goto CLOSE_RETURN;
+   }
+
+   if (display == NULL) goto CLOSE_RETURN;
+
+   ShortGetNextNumber(&num);  Settings.PresetMonoWidth = num;
+   ShortGetNextNumber(&num);  Settings.PresetMonoHeight = num;
+   ShortGetNextNumber(&num);  Settings.PresetMonoTopEdge = num;
+   ShortGetNextNumber(&num);  Settings.PresetMonoLeftEdge = num;
+   ShortGetNextNumber(&num);  Settings.PresetMonoDepth = num;
+   ShortGetNextNumber(&num);  Settings.PresetMonoFlags = num;
+
+   ShortGetNextNumber(&num);  Settings.PresetColorWidth = num;
+   ShortGetNextNumber(&num);  Settings.PresetColorHeight = num;
+   ShortGetNextNumber(&num);  Settings.PresetColorTopEdge = num;
+   ShortGetNextNumber(&num);  Settings.PresetColorLeftEdge = num;
+   if (ShortGetNextNumber(&num))
+   {
+      Settings.PresetColorFlags = num;
+      returnval = TRUE;
+   }
+
+CLOSE_RETURN:
+   Close(FileNumber);
+
+UNLOCK_RETURN:
+   if (display)
+      Unlock(&display->DisplayLock);
+
+   process->pr_WindowPtr = (APTR)procwindow;
+
+RETURN:
+
+#if (DEBUG3 & DBG_READ_SETTINGS_GRUNT_SIZES)
+   kprintf("FileIO.c:     PresetMonoWidth    =%ld\n",Settings.PresetMonoWidth);
+   kprintf("FileIO.c:     PresetMonoHeight   =%ld\n",Settings.PresetMonoHeight);
+   kprintf("FileIO.c:     PresetMonoTopEdge  =%ld\n",Settings.PresetMonoTopEdge);
+   kprintf("FileIO.c:     PresetMonoLeftEdge =%ld\n",Settings.PresetMonoLeftEdge);
+   kprintf("FileIO.c:     PresetMonoDepth    =%ld\n",Settings.PresetMonoDepth);
+   kprintf("FileIO.c:     PresetColorWidth   =%ld\n",Settings.PresetColorWidth);
+   kprintf("FileIO.c:     PresetColorHeight  =%ld\n",Settings.PresetColorHeight);
+   kprintf("FileIO.c:     PresetColorTopEdge =%ld\n",Settings.PresetColorTopEdge);
+   kprintf("FileIO.c:     PresetColorLeftEdge=%ld\n",Settings.PresetColorLeftEdge);
+#endif
+
+   return(returnval);
+}
+
+/****i* PCWindow/WriteSettingsFile ****************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+VOID   WriteSettingsFile(display)
+struct   Display *display;
+{
+   SHORT i, i2;
+   SHORT   num;
+   struct Process *process;
+   struct   Window *window;
+   struct   Window *procwindow;
+   struct   SuperWindow *swindow;
+
+#if (DEBUG1 & DBG_WRITE_SETTINGS_FILE_ENTER)
+   kprintf("FileIO.c:     WriteSettingsFile(display=0x%lx)\n",display);
+#endif
+
+   if (display == NULL) return;
+   if ((swindow = display->FirstWindow) == NULL) return;
+   if ((window = swindow->DisplayWindow) == NULL) return;
+
+   if (NOT MyLock(&display->DisplayLock)) return;
+
+   process = (struct Process *)FindTask(0);
+   procwindow = (struct Window *)process->pr_WindowPtr;
+   process->pr_WindowPtr = (APTR)window;
+
+   /****************/
+   /* Set Defaults */
+   /****************/
+   Settings.PresetMonoFlags = 0;
+   Settings.PresetColorFlags = 0;
+
+   /*********************/
+   /* Read Current File */
+   /*********************/
+   if(!ReadSettingsGrunt(display, FALSE))
+   {
+      Settings.DefaultColorTextDepth = 4;
+
+	  /*
+      Settings.TextOnePlaneColors[2];
+      Settings.TextTwoPlaneColors[4];
+      Settings.TextThreePlaneColors[8];
+      Settings.TextFourPlaneColors[16];
+      Settings.HighGraphicsColors[2];
+      Settings.LowGraphicsColors[2][2][4];
+	  */
+
+      Settings.PresetMonoWidth       = 640;
+      Settings.PresetMonoHeight      = 200;
+      Settings.PresetMonoTopEdge     = 0;
+      Settings.PresetMonoLeftEdge    = 0;
+      Settings.PresetMonoDepth       = 1;
+      Settings.PresetColorWidth      = 640;
+      Settings.PresetColorHeight     = 200;
+      Settings.PresetColorTopEdge    = 0;
+      Settings.PresetColorLeftEdge   = 0;
+      Settings.PresetMonoFlags       = 0;
+      Settings.PresetColorFlags      = 0;
+   }
+
+   i = PRESETS_GOT;
+
+   if (FlagIsSet(display->Modes, BORDER_VISIBLE)) 
+      i |= PRESET_BORDER_ON;
+
+   if (FlagIsClear(display->Modes, MEDIUM_RES)) 
+      i |= PRESET_HIRES;
+
+   if (FlagIsSet(swindow->Flags, WANTS_PRIVACY))
+      i |= PRESET_PRIVACY;
+
+   /* need PAL check here */
+
+   /* Set new settings for this display type */
+   if (FlagIsClear(display->Modes, COLOR_DISPLAY)) {
+      /* Reset the Mono Settings */
+      Settings.PresetMonoWidth       = window->Width;
+      Settings.PresetMonoHeight      = window->Height;
+      Settings.PresetMonoTopEdge     = window->TopEdge;
+      Settings.PresetMonoLeftEdge    = window->LeftEdge;
+      Settings.PresetMonoDepth       = swindow->TextDepth;
+
+      Settings.PresetMonoFlags       = i;
+   } 
+   else {
+      /* Reset the Color Settings */
+      Settings.PresetColorWidth      = window->Width;
+      Settings.PresetColorHeight     = window->Height;
+      Settings.PresetColorTopEdge    = window->TopEdge;
+      Settings.PresetColorLeftEdge   = window->LeftEdge;
+
+      Settings.PresetColorFlags      = i;
+
+      Settings.DefaultColorTextDepth = DefaultColorTextDepth;
+   }
+
+
+   /* If there's already a settings file out there, zap it! */
+   if(!DeleteFile(&SidecarSettingsFile[0]))
+   {
+      /* No Old file so write color depth */
+      Settings.DefaultColorTextDepth=4;
+   }
+
+   if ( (FileNumber = Open(&SidecarSettingsFile[0], MODE_NEWFILE)) == 0)
+   {
+      MyAlert(ALERT_BAD_SETTINGS_FILE, display);
+      goto UNLOCK_RETURN;
+   }
+
+   ShortWrite("; Sidecar Settings File\n;\n; So, how's it going, eh?\n", 
+         display);
+
+   ShortWrite("; RJ Mical sends his greetings!\n;\n\n", 
+         display);
+
+   num = 0;
+   SPrintfShortWrite("; Flag Word:\n   $%04lx\n\n", num, display);
+   
+   sprintf(&FileBuffer[0], "; Default Cursor Rate:\n   %02ld %06ld\n\n",
+         swindow->CursorSeconds, swindow->CursorMicros);
+   ShortWrite(&FileBuffer[0], display);
+                
+   SPrintfShortWrite("; Default Color Text Depth:\n   %1ld\n\n", 
+         Settings.DefaultColorTextDepth, display);
+
+   SPrintfShortWrite("; Display Task Priority:\n   %02ld\n\n", 
+         DisplayPriority, display);
+
+   ShortWrite("; Default Palettes:\n", display);
+   ShortWrite("; Text One Plane:\n   ", display);
+   for (i = 0; i < 2; i++)
+   {
+      SPrintfShortWrite("$%04lx ",TextOnePlaneColors[i], display);
+   }
+
+   ShortWrite("\n; Text Two Plane:\n   ", display);
+   for (i = 0; i < 4; i++)
+   {
+      SPrintfShortWrite("$%04lx ",TextTwoPlaneColors[i], display);
+   }
+
+   ShortWrite("\n; Text Three Plane:\n   ", display);
+   for (i = 0; i < 8; i++)
+   {
+      SPrintfShortWrite("$%04lx ",TextThreePlaneColors[i], display);
+   }
+
+   ShortWrite("\n; Text Four Plane:\n   ", display);
+   for (i = 0; i < 8; i++)
+   {
+      SPrintfShortWrite("$%04lx ",TextFourPlaneColors[i], display);
+   }
+
+   ShortWrite("\n   ",display);
+   for (i = 8; i < 16; i++)
+   {
+      SPrintfShortWrite("$%04lx ",TextFourPlaneColors[i], display);
+   }
+
+   ShortWrite("\n; High Graphics:\n   ", display);
+   for (i = 0; i < 2; i++)
+   {
+      SPrintfShortWrite("$%04lx ",HighGraphicsColors[i], display);
+   }
+
+   ShortWrite("\n; Low Graphics Normal:\n   ", display);
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+      {
+         SPrintfShortWrite("$%04lx ",LowGraphicsColors[0][i][i2], display);
+      }
+
+   ShortWrite("\n; Low Graphics Intensified:\n   ", display);
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+      {
+         SPrintfShortWrite("$%04lx ",LowGraphicsColors[1][i][i2], display);
+      }
+
+   ShortWrite("\n\n; Is reality truly existential?  What do you think:",
+              display);
+   ShortWrite("\n   $FFFF\n\n",display);
+
+   SPrintfShortWrite("; Mono Width\n\t%ld\n", 
+                     Settings.PresetMonoWidth, display);
+
+   SPrintfShortWrite("; Mono Height\n\t%ld\n", 
+                     Settings.PresetMonoHeight, display);
+
+   SPrintfShortWrite("; Mono TopEdge\n\t%ld\n", 
+                     Settings.PresetMonoTopEdge, display);
+
+   SPrintfShortWrite("; Mono LeftEdge\n\t%ld\n", 
+                     Settings.PresetMonoLeftEdge, display);
+
+   SPrintfShortWrite("; Mono Depth\n\t%ld\n", 
+                     Settings.PresetMonoDepth, display);
+
+   SPrintfShortWrite("; Mono Flags\n\t%ld\n", 
+                     Settings.PresetMonoFlags, display);
+
+   SPrintfShortWrite("; Color Width\n\t%ld\n", 
+                     Settings.PresetColorWidth, display);
+
+   SPrintfShortWrite("; Color Height\n\t%ld\n", 
+                     Settings.PresetColorHeight, display);
+
+   SPrintfShortWrite("; Color TopEdge\n\t%ld\n", 
+                     Settings.PresetColorTopEdge, display);
+
+   SPrintfShortWrite("; Color LeftEdge\n\t%ld\n", 
+                     Settings.PresetColorLeftEdge, display);
+
+   SPrintfShortWrite("; Color Flags\n\t%ld\n", 
+                     Settings.PresetColorFlags, display);
+
+   Close(FileNumber);
+                          
+UNLOCK_RETURN:
+   process->pr_WindowPtr = (APTR)procwindow;
+
+   Unlock(&display->DisplayLock);
+}
+ 
+/****i* PCWindow/ReadSettingsFile ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+BOOL ReadSettingsFile(display, reporterrors)
+struct Display *display;
+BOOL reporterrors;
+/* The display argument can be NULL if there's no display for this fetch */
+{
+   BOOL   retvalue;
+   SHORT i, i2;
+
+#if (DEBUG1 & DBG_READ_SETTINGS_FILE_ENTER)
+   kprintf("FileIO.c:     ReadSettingsFile(display=0x%lx,reporterrors=0x%lx)\n",display,reporterrors);
+#endif
+
+   retvalue = ReadSettingsGrunt(display, reporterrors);
+   if (NOT retvalue) goto DONE;
+
+   DefaultColorTextDepth = Settings.DefaultColorTextDepth;
+
+   /* Text One Plane: */
+   for (i = 0; i < 2; i++)
+      TextOnePlaneColors[i] = Settings.TextOnePlaneColors[i];
+
+   /* Text Two Plane */
+   for (i = 0; i < 4; i++)
+      TextTwoPlaneColors[i] = Settings.TextTwoPlaneColors[i];
+
+   /* Text Three Plane */
+   for (i = 0; i < 8; i++)
+      TextThreePlaneColors[i] = Settings.TextThreePlaneColors[i];
+
+   /* Text Four Plane */
+   for (i = 0; i < 16; i++)
+      TextFourPlaneColors[i] = Settings.TextFourPlaneColors[i];
+
+   /* High Graphics */
+   for (i = 0; i < 2; i++)
+      HighGraphicsColors[i] = Settings.HighGraphicsColors[i];
+
+   /* Low Graphics Normal */
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+         LowGraphicsColors[0][i][i2] = Settings.LowGraphicsColors[0][i][i2];
+
+   /* Low Graphics Intensified */
+   for (i = 0; i < 2; i++)
+      for (i2 = 0; i2 < 4; i2++)
+         LowGraphicsColors[1][i][i2] = Settings.LowGraphicsColors[1][i][i2];
+
+   display->PresetMonoWidth     = Settings.PresetMonoWidth;
+   display->PresetMonoHeight    = Settings.PresetMonoHeight;
+   display->PresetMonoTopEdge   = Settings.PresetMonoTopEdge;
+   display->PresetMonoLeftEdge  = Settings.PresetMonoLeftEdge;
+   display->PresetMonoDepth     = Settings.PresetMonoDepth;
+   display->PresetColorWidth    = Settings.PresetColorWidth;
+   display->PresetColorHeight   = Settings.PresetColorHeight;
+   display->PresetColorTopEdge  = Settings.PresetColorTopEdge;
+   display->PresetColorLeftEdge = Settings.PresetColorLeftEdge;
+   display->PresetMonoFlags     = Settings.PresetMonoFlags;
+   display->PresetColorDepth    = DefaultColorTextDepth;
+   display->PresetColorFlags    = Settings.PresetColorFlags;
+   SetFlag(display->Modes2, WINDOW_PRESETS);
+
+DONE:
+
+#if (DEBUG3 & DBG_READ_SETTINGS_FILE_SETTINGS)
+   PrintSettings();
+#endif
+
+   return(retvalue);
+}
+
+/****i* PCWindow/PrintSettings ******************************************
+*
+*   NAME   
+*
+*   SYNOPSIS
+*
+*   FUNCTION
+*
+*   INPUTS
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*
+*****************************************************************************
+*
+*/
+
+#if 0
+VOID PrintSettings()
+{
+   kprintf("Settings.DefaultColorTextDepth=%ld\n",Settings.DefaultColorTextDepth);
+   kprintf("Settings.PresetMonoWidth      =%ld\n",Settings.PresetMonoWidth);
+   kprintf("Settings.PresetMonoHeight     =%ld\n",Settings.PresetMonoHeight);
+   kprintf("Settings.PresetMonoTopEdge    =%ld\n",Settings.PresetMonoTopEdge);
+   kprintf("Settings.PresetMonoLeftEdge   =%ld\n",Settings.PresetMonoLeftEdge);
+   kprintf("Settings.PresetMonoDepth      =%ld\n",Settings.PresetMonoDepth);
+   kprintf("Settings.PresetColorWidth     =%ld\n",Settings.PresetColorWidth);
+   kprintf("Settings.PresetColorHeight    =%ld\n",Settings.PresetColorHeight);
+   kprintf("Settings.PresetColorTopEdge   =%ld\n",Settings.PresetColorTopEdge);
+   kprintf("Settings.PresetColorLeftEdge  =%ld\n",Settings.PresetColorLeftEdge);
+}
+#endif
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d723 2
+d726 1
+a726 2
+   if (FlagIsClear(display->Modes, COLOR_DISPLAY))
+   {
+d735 2
+a736 1
+   } else {
+@

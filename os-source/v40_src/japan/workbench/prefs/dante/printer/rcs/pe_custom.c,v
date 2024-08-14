@@ -1,0 +1,1593 @@
+head     38.14;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+38.14
+date     92.11.11.15.47.11;  author vertex;  state Exp;
+branches ;
+next     38.13;
+
+38.13
+date     92.11.09.14.34.34;  author vertex;  state Exp;
+branches ;
+next     38.12;
+
+38.12
+date     92.10.01.12.55.53;  author vertex;  state Exp;
+branches ;
+next     38.11;
+
+38.11
+date     92.03.24.17.59.55;  author vertex;  state Exp;
+branches ;
+next     38.10;
+
+38.10
+date     91.11.11.11.37.00;  author vertex;  state Exp;
+branches ;
+next     38.9;
+
+38.9
+date     91.10.01.17.36.13;  author vertex;  state Exp;
+branches ;
+next     38.8;
+
+38.8
+date     91.09.19.15.42.31;  author vertex;  state Exp;
+branches ;
+next     38.7;
+
+38.7
+date     91.08.20.10.47.21;  author vertex;  state Exp;
+branches ;
+next     38.6;
+
+38.6
+date     91.08.12.13.07.48;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     91.08.06.15.39.01;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.07.15.11.32.14;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.07.10.18.52.07;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.07.02.13.16.35;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.07.02.12.42.22;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Prefs editor shell - Printer custom interface
+@
+
+
+38.14
+log
+@ADDED JAPAN SUPPORT
+@
+text
+@
+/* includes */
+#include <exec/types.h>
+#include <exec/libraries.h>
+#include <exec/ports.h>
+#include <exec/memory.h>
+#include <exec/execbase.h>
+#include <devices/keymap.h>
+#include <intuition/intuition.h>
+#include <intuition/screens.h>
+#include <intuition/gadgetclass.h>
+#include <graphics/text.h>
+#include <libraries/asl.h>
+#include <libraries/gadtools.h>
+#include <libraries/locale.h>
+#include <prefs/printertxt.h>
+#include <dos/dos.h>
+#include <dos/exall.h>
+#include <string.h>
+
+/* prototypes */
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/alib_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/asl_protos.h>
+#include <clib/icon_protos.h>
+
+/* direct ROM interface */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/gadtools_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+#include <pragmas/asl_pragmas.h>
+#include <pragmas/icon_pragmas.h>
+
+/* application includes */
+#include "pe_custom.h"
+#include "pe_strings.h"
+#include "pe_utils.h"
+#include "pe_iff.h"
+
+
+#define SysBase ed->ed_SysBase
+
+
+/*****************************************************************************/
+
+
+/* The IFF chunks known to this prefs editor. IFFPrefChunkCnt says how many
+ * chunks there are
+ */
+#define IFFPrefChunkCnt 3
+static LONG far IFFPrefChunks[] =
+{
+    ID_PREF, ID_PRHD,
+    ID_PREF, ID_PTXT,
+    ID_PREF, ID_PUNT,
+};
+
+
+/*****************************************************************************/
+
+
+/* The PrefHeader structure this editor outputs */
+static struct PrefHeader far IFFPrefHeader =
+{
+    0,   /* version */
+    0,   /* type    */
+    0    /* flags   */
+};
+
+
+/*****************************************************************************/
+
+
+VOID ProcessArgs(EdDataPtr ed, struct DiskObject *diskObj)
+{
+    if (diskObj)
+    {
+        if (FindToolType(diskObj->do_ToolTypes,"UNIT"))
+        {
+            ed->ed_ShowUnits = TRUE;
+        }
+    }
+    else
+        ed->ed_ShowUnits = ed->ed_Args[OPT_UNIT];
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus BuildList(EdDataPtr ed, struct List *list, STRPTR pattern, WORD strip)
+{
+UBYTE                exAllBuffer[512];
+struct ExAllControl *eac;
+struct ExAllData    *ead;
+BPTR                 lock;
+BPTR                 oldCD;
+BOOL                 more;
+char                 pat[20];
+BOOL                 ok;
+BOOL                 nomem = FALSE;
+UWORD                len;
+STRPTR		     name;
+struct Node         *new;
+struct Node         *node;
+struct DevProc      *dvp;
+
+    NewList(list);
+
+    ok = FALSE;
+    if (eac = (struct ExAllControl *) AllocDosObject(DOS_EXALLCONTROL,0))
+    {
+        ParsePatternNoCase(pattern,pat,20);
+        eac->eac_LastKey     = 0;
+        eac->eac_MatchString = pat;
+
+        dvp = (struct DevProc *) GetDeviceProc("PRINTERS:",0);
+        while (dvp)
+        {
+            eac->eac_LastKey = 0;                     /* use now as null BSTR */
+            if (lock = DoPkt3(dvp->dvp_Port,ACTION_LOCATE_OBJECT,dvp->dvp_Lock,MKBADDR(&eac->eac_LastKey),SHARED_LOCK))
+            {
+                oldCD = CurrentDir(lock);
+
+                ok = TRUE;
+                do
+                {
+                    more = ExAll(lock,(struct ExAllData *)exAllBuffer,sizeof(exAllBuffer),ED_TYPE,eac);
+                    if ((!more) && (IoErr() != ERROR_NO_MORE_ENTRIES))
+                    {
+                        ok = FALSE;
+                        break;
+                    }
+
+                    if (eac->eac_Entries > 0)
+                    {
+                        ead = (struct ExAllData *) exAllBuffer;
+                        do
+                        {
+                            if (ead->ed_Type < 0)
+                            {
+                                name = (STRPTR)ead->ed_Name;
+                                len  = strlen(name) - strip;
+
+                                if (new = AllocRemember(&ed->ed_Tracker,sizeof(struct Node)+len+1,MEMF_PUBLIC|MEMF_CLEAR))
+                                {
+                                    new->ln_Name = (STRPTR)((ULONG)new + sizeof(struct Node));
+                                    CopyMem(name,new->ln_Name,len);
+
+                                    node = list->lh_Head;
+                                    while (node->ln_Succ)
+                                    {
+                                        if (Stricmp(node->ln_Name,new->ln_Name) >= 0)
+                                            break;
+                                        node = node->ln_Succ;
+                                    }
+                                    Insert(list,new,node->ln_Pred);
+                                }
+                                else
+                                {
+                                    nomem = TRUE;
+                                    break;
+                                }
+                            }
+                            ead = ead->ed_Next;
+                        }
+                        while (ead);
+                    }
+                }
+                while (more);
+
+                CurrentDir(oldCD);
+                UnLock(lock);
+            }
+            dvp = GetDeviceProc("PRINTERS:",dvp);
+        }
+
+        FreeDosObject(DOS_EXALLCONTROL,eac);
+    }
+
+    if (nomem)
+    {
+        SetIoErr(ERROR_NO_FREE_STORE);
+        ok = FALSE;
+    }
+
+    if (ok)
+        return(ES_NORMAL);
+
+    return(ES_DOSERROR);
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus InitEdData(EdDataPtr ed)
+{
+    strcpy(ed->ed_PrefsDefaults.ep_Basic.pt_Driver,"generic");
+    ed->ed_PrefsDefaults.ep_Basic.pt_Port         = PP_PARALLEL;
+    ed->ed_PrefsDefaults.ep_Basic.pt_PaperType    = PT_FANFOLD;
+    ed->ed_PrefsDefaults.ep_Basic.pt_PaperSize    = PS_N_TRACTOR;
+    ed->ed_PrefsDefaults.ep_Basic.pt_PaperLength  = 66;
+    ed->ed_PrefsDefaults.ep_Basic.pt_Pitch        = PP_PICA;
+    ed->ed_PrefsDefaults.ep_Basic.pt_Spacing      = PS_SIX_LPI;
+    ed->ed_PrefsDefaults.ep_Basic.pt_LeftMargin   = 5;
+    ed->ed_PrefsDefaults.ep_Basic.pt_RightMargin  = 75;
+    ed->ed_PrefsDefaults.ep_Basic.pt_Quality      = PQ_DRAFT;
+
+    ed->ed_PrefsWork    = ed->ed_PrefsDefaults;
+    ed->ed_PrefsInitial = ed->ed_PrefsDefaults;
+
+    return(ES_NORMAL);
+}
+
+
+/*****************************************************************************/
+
+
+VOID CleanUpEdData(EdDataPtr ed)
+{
+    FreeRemember(&ed->ed_Tracker,TRUE);
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus ReadPrefs(EdDataPtr ed, struct IFFHandle *iff, struct ContextNode *cn)
+{
+    if (cn->cn_ID == ID_PUNT && cn->cn_Type == ID_PREF)
+    {
+        if (ReadChunkBytes(iff,&ed->ed_PrefsWork.ep_Unit,sizeof(struct PrinterUnitPrefs)) == sizeof(struct PrinterUnitPrefs))
+            return(ES_NORMAL);
+    }
+    else
+    {
+        if (cn->cn_ID != ID_PTXT || cn->cn_Type != ID_PREF)
+            return(ES_IFF_UNKNOWNCHUNK);
+
+        if (ReadChunkBytes(iff,&ed->ed_PrefsWork,sizeof(struct PrinterTxtPrefs)) == sizeof(struct PrinterTxtPrefs))
+            return(ES_NORMAL);
+    }
+
+    return(ES_IFFERROR);
+}
+
+
+EdStatus OpenPrefs(EdDataPtr ed, STRPTR name)
+{
+    return(ReadIFF(ed,name,IFFPrefChunks,IFFPrefChunkCnt,ReadPrefs));
+}
+
+
+/*****************************************************************************/
+
+
+EdStatus WritePrefs(EdDataPtr ed, struct IFFHandle *iff, struct ContextNode *cn)
+{
+    if (!PushChunk(iff,0,ID_PTXT,sizeof(struct PrinterTxtPrefs)))
+        if (WriteChunkBytes(iff,&ed->ed_PrefsWork,sizeof(struct PrinterTxtPrefs)) == sizeof(struct PrinterTxtPrefs))
+            if (!PopChunk(iff))
+
+                if (!PushChunk(iff,0,ID_PUNT,sizeof(struct PrinterUnitPrefs)))
+                    if (WriteChunkBytes(iff,&ed->ed_PrefsWork.ep_Unit,sizeof(struct PrinterUnitPrefs)) == sizeof(struct PrinterUnitPrefs))
+                        if (!PopChunk(iff))
+                            return(ES_NORMAL);
+
+    return(ES_IFFERROR);
+}
+
+
+EdStatus SavePrefs(EdDataPtr ed, STRPTR name)
+{
+    return(WriteIFF(ed,name,&IFFPrefHeader,WritePrefs));
+}
+
+
+/*****************************************************************************/
+
+
+#define NW_WIDTH     556
+#define NW_HEIGHT    215
+#define	NW_IDCMP     (IDCMP_MOUSEBUTTONS | IDCMP_MENUPICK | IDCMP_REFRESHWINDOW | IDCMP_INTUITICKS | BUTTONIDCMP | CHECKBOXIDCMP | SLIDERIDCMP | CYCLEIDCMP | TEXTIDCMP | LISTVIEWIDCMP)
+#define	NW_FLAGS     (WFLG_ACTIVATE | WFLG_DEPTHGADGET | WFLG_DRAGBAR | WFLG_SIMPLE_REFRESH)
+#define NW_MINWIDTH  NW_WIDTH
+#define NW_MINHEIGHT NW_HEIGHT
+#define NW_MAXWIDTH  NW_WIDTH
+#define NW_MAXHEIGHT NW_HEIGHT
+#define ZOOMWIDTH    200
+
+struct EdMenu far EM[] = {
+    {NM_TITLE,  MSG_PROJECT_MENU,           EC_NOP, 0},
+      {NM_ITEM, MSG_PROJECT_OPEN,           EC_OPEN, 0},
+      {NM_ITEM, MSG_PROJECT_SAVE_AS,        EC_SAVEAS, 0},
+      {NM_ITEM, MSG_NOTHING,                EC_NOP, 0},
+      {NM_ITEM, MSG_PROJECT_QUIT,           EC_CANCEL, 0},
+
+    {NM_TITLE,  MSG_EDIT_MENU,              EC_NOP, 0},
+      {NM_ITEM, MSG_EDIT_RESET_TO_DEFAULTS, EC_RESETALL, 0},
+      {NM_ITEM, MSG_EDIT_LAST_SAVED,        EC_LASTSAVED, 0},
+      {NM_ITEM, MSG_EDIT_RESTORE,           EC_RESTORE, 0},
+
+    {NM_TITLE,  MSG_OPTIONS_MENU,           EC_NOP, 0},
+      {NM_ITEM, MSG_OPTIONS_SAVE_ICONS,     EC_SAVEICONS, CHECKIT|MENUTOGGLE},
+
+    {NM_END,    MSG_NOTHING,                EC_NOP, 0}
+};
+
+/* main display gadgets */
+struct EdGadget far EG[] = {
+    {BUTTON_KIND,   8,   189,  87,  20, MSG_SAVE_GAD,         EC_SAVE,         0},
+    {BUTTON_KIND,   234, 189,  87,  20, MSG_USE_GAD,          EC_USE,          0},
+    {BUTTON_KIND,   461, 189,  87,  20, MSG_CANCEL_GAD,       EC_CANCEL,       0},
+
+    {LISTVIEW_KIND, 8,   20,   204, 140,MSG_PRT_PRINTERTYPE_GAD,  EC_PRINTERS,     0},
+    {INTEGER_KIND,  504, 122,  44,  20, MSG_PRT_PAPERLENGTH_GAD,  EC_PAPERLENGTH,  0},
+    {INTEGER_KIND,  504, 143,  44,  20, MSG_PRT_LEFTMARGIN_GAD,   EC_LEFTMARGIN,   0},
+    {INTEGER_KIND,  504, 164,  44,  20, MSG_PRT_RIGHTMARGIN_GAD,  EC_RIGHTMARGIN,  0},
+
+    {CYCLE_KIND,    372,  8,   176, 18, MSG_PRT_PRINTERPORT_GAD,  EC_PRINTERPORT,  0},
+    {CYCLE_KIND,    372,  27,  176, 18, MSG_PRT_PRINTPITCH_GAD,   EC_PRINTPITCH,   0},
+    {CYCLE_KIND,    372,  46,  176, 18, MSG_PRT_PRINTSPACING_GAD, EC_PRINTSPACING, 0},
+    {CYCLE_KIND,    372,  65,  176, 18, MSG_PRT_PRINTQUALITY_GAD, EC_PRINTQUALITY, 0},
+    {CYCLE_KIND,    372,  84,  176, 18, MSG_PRT_PAPERTYPE_GAD,    EC_PAPERTYPE,    0},
+    {CYCLE_KIND,    372,  103,  176, 18, MSG_PRT_PAPERSIZE_GAD,    EC_PAPERSIZE,    0},
+
+    {INTEGER_KIND,  166,  138, 46,  18, MSG_PRT_DEVICEUNIT_GAD,   EC_UNIT,         0}
+};
+
+
+/*****************************************************************************/
+
+
+BOOL CreateDisplay(EdDataPtr ed)
+{
+UWORD zoomSize[4];
+
+    BuildList(ed,&ed->ed_AvailPrinters,"~(#?.info)",0);
+
+    zoomSize[0] = -1;
+    zoomSize[1] = -1;
+    zoomSize[2] = ZOOMWIDTH;
+    zoomSize[3] = ed->ed_Screen->WBorTop + ed->ed_Screen->Font->ta_YSize + 1;
+
+    ed->ed_PrinterPortLabels[0]  = GetString(&ed->ed_LocaleInfo,MSG_PRT_PARALLEL);
+    ed->ed_PrinterPortLabels[1]  = GetString(&ed->ed_LocaleInfo,MSG_PRT_SERIAL);
+    ed->ed_PaperTypeLabels[0]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_FANFOLD);
+    ed->ed_PaperTypeLabels[1]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_SINGLE);
+    ed->ed_PaperSizeLabels[0]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_USLETTER);
+    ed->ed_PaperSizeLabels[1]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_USLEGAL);
+    ed->ed_PaperSizeLabels[2]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_NARROWTRACTOR);
+    ed->ed_PaperSizeLabels[3]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_WIDETRACTOR);
+    ed->ed_PaperSizeLabels[4]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_CUSTOM);
+    ed->ed_PaperSizeLabels[5]    = GetString(&ed->ed_LocaleInfo,MSG_PRT_DINA4);
+    ed->ed_PrintPitchLabels[0]   = GetString(&ed->ed_LocaleInfo,MSG_PRT_PICA10);
+    ed->ed_PrintPitchLabels[1]   = GetString(&ed->ed_LocaleInfo,MSG_PRT_ELITE12);
+    ed->ed_PrintPitchLabels[2]   = GetString(&ed->ed_LocaleInfo,MSG_PRT_FINE15);
+    ed->ed_PrintSpacingLabels[0] = GetString(&ed->ed_LocaleInfo,MSG_PRT_LPI6);
+    ed->ed_PrintSpacingLabels[1] = GetString(&ed->ed_LocaleInfo,MSG_PRT_LPI8);
+    ed->ed_PrintQualityLabels[0] = GetString(&ed->ed_LocaleInfo,MSG_PRT_DRAFT);
+    ed->ed_PrintQualityLabels[1] = GetString(&ed->ed_LocaleInfo,MSG_PRT_LETTER);
+
+    ed->ed_LastAdded = CreateContext(&ed->ed_Gadgets);
+    DoPrefsGadget(ed,&EG[0],NULL,TAG_DONE);
+    DoPrefsGadget(ed,&EG[1],NULL,TAG_DONE);
+    DoPrefsGadget(ed,&EG[2],NULL,TAG_DONE);
+
+    RenderGadgets(ed);
+
+    if ((ed->ed_LastAdded)
+    &&  (ed->ed_Menus = CreatePrefsMenus(ed,EM))
+    &&  (ed->ed_Window = OpenPrefsWindow(ed,WA_InnerWidth,  NW_WIDTH,
+                                            WA_InnerHeight, NW_HEIGHT,
+                                            WA_MinWidth,    NW_MINWIDTH,
+                                            WA_MinHeight,   NW_MINHEIGHT,
+                                            WA_MaxWidth,    NW_MAXWIDTH,
+                                            WA_MaxHeight,   NW_MAXHEIGHT,
+                                            WA_IDCMP,       NW_IDCMP,
+                                            WA_Flags,       NW_FLAGS,
+                                            WA_Zoom,        zoomSize,
+                                            WA_AutoAdjust,  TRUE,
+                                            WA_PubScreen,   ed->ed_Screen,
+                                            WA_Title,       GetString(&ed->ed_LocaleInfo,MSG_PRT_NAME),
+                                            WA_NewLookMenus,TRUE,
+                                            WA_Gadgets,     ed->ed_Gadgets,
+                                            TAG_DONE)))
+    {
+        return(TRUE);
+    }
+
+    DisposeDisplay(ed);
+    return(FALSE);
+}
+
+
+/*****************************************************************************/
+
+
+VOID DisposeDisplay(EdDataPtr ed)
+{
+    if (ed->ed_Window)
+    {
+        ClearMenuStrip(ed->ed_Window);
+        CloseWindow(ed->ed_Window);
+    }
+    FreeMenus(ed->ed_Menus);
+    FreeGadgets(ed->ed_Gadgets);
+}
+
+
+/*****************************************************************************/
+
+
+VOID RenderGadgets(EdDataPtr ed)
+{
+UWORD           i;
+struct Node    *node;
+ULONG           pSize;
+struct EdGadget eg;
+
+    pSize = ed->ed_PrefsWork.ep_Basic.pt_PaperSize;
+    if (pSize == PS_EURO_A4)
+        pSize = PS_EURO_A0;
+
+    eg = EG[3];
+    if (ed->ed_ShowUnits)
+        eg.eg_Height = eg.eg_Height-20;
+
+    i    = 0;
+    node = ed->ed_AvailPrinters.lh_Head;
+    while (node->ln_Succ)
+    {
+        if (Stricmp(ed->ed_PrefsWork.ep_Basic.pt_Driver,node->ln_Name) == 0)
+            break;
+        i++;
+        node = node->ln_Succ;
+    }
+
+    if (!node->ln_Succ)
+        i = 0;
+
+    ed->ed_Printers = DoPrefsGadget(ed,&eg,ed->ed_Printers,
+                                           GTLV_Selected,     i,
+                                           GTLV_MakeVisible,  i,
+                                           GTLV_Labels,       &ed->ed_AvailPrinters,
+                                           GTLV_ShowSelected, NULL,
+                                           LAYOUTA_SPACING,   4,
+                                           GTLV_ScrollWidth,  18,
+                                           TAG_DONE);
+
+    ed->ed_PaperLength = DoPrefsGadget(ed,&EG[4],ed->ed_PaperLength,
+                                                 GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_PaperLength,
+                                                 GTIN_MaxChars, 3,
+                                                 TAG_DONE);
+
+    ed->ed_LeftMargin = DoPrefsGadget(ed,&EG[5],ed->ed_LeftMargin,
+                                                GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_LeftMargin,
+                                                GTIN_MaxChars, 3,
+						TAG_DONE);
+
+    ed->ed_RightMargin = DoPrefsGadget(ed,&EG[6],ed->ed_RightMargin,
+                                                 GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_RightMargin,
+                                                 GTIN_MaxChars, 3,
+                                                 TAG_DONE);
+
+    ed->ed_PrinterPort = DoPrefsGadget(ed,&EG[7],ed->ed_PrinterPort,
+                                                 GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Port,
+                                                 GTCY_Labels, ed->ed_PrinterPortLabels,
+                                                 TAG_DONE);
+
+    ed->ed_PrintPitch = DoPrefsGadget(ed,&EG[8],ed->ed_PrintPitch,
+                                                GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Pitch,
+                                                GTCY_Labels, ed->ed_PrintPitchLabels,
+                                                TAG_DONE);
+
+    ed->ed_PrintSpacing = DoPrefsGadget(ed,&EG[9],ed->ed_PrintSpacing,
+                                                  GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Spacing,
+                                                  GTCY_Labels, ed->ed_PrintSpacingLabels,
+                                                  TAG_DONE);
+
+    ed->ed_PrintQuality = DoPrefsGadget(ed,&EG[10],ed->ed_PrintQuality,
+                                                   GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Quality,
+                                                   GTCY_Labels, ed->ed_PrintQualityLabels,
+                                                   TAG_DONE);
+
+    ed->ed_PaperType = DoPrefsGadget(ed,&EG[11],ed->ed_PaperType,
+                                                GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_PaperType,
+                                                GTCY_Labels, ed->ed_PaperTypeLabels,
+                                                TAG_DONE);
+
+    ed->ed_PaperSize = DoPrefsGadget(ed,&EG[12],ed->ed_PaperSize,
+                                                GTCY_Active, pSize,
+                                                GTCY_Labels, ed->ed_PaperSizeLabels,
+                                                TAG_DONE);
+
+    if (ed->ed_ShowUnits)
+        ed->ed_Unit = DoPrefsGadget(ed,&EG[13],ed->ed_Unit,
+                                               GTIN_Number,   ed->ed_PrefsWork.ep_Unit.pu_UnitNum,
+                                               GTIN_MaxChars, 3,
+                                               TAG_DONE);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ProcessTextGadget(EdDataPtr ed, EdCommand ec, BOOL screenStuff)
+{
+LONG           num;
+BOOL           refresh;
+BOOL           shift;
+struct Gadget *act;
+
+    refresh = FALSE;
+    act     = NULL;
+    shift   = (IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT) & ed->ed_CurrentMsg.Qualifier;
+
+    switch (ec)
+    {
+        case EC_PAPERLENGTH    : num = ((struct StringInfo *)ed->ed_PaperLength->SpecialInfo)->LongInt;
+                                 if (num < 1)
+                                 {
+                                     num = 1;
+                                     act = ed->ed_PaperLength;
+                                     refresh = TRUE;
+                                 }
+                                 else
+                                 {
+                                     if (shift)
+                                         act = ed->ed_RightMargin;
+                                     else
+                                         act = ed->ed_LeftMargin;
+                                 }
+                                 ed->ed_PrefsWork.ep_Basic.pt_PaperLength = num;
+				 break;
+
+        case EC_LEFTMARGIN     : num = ((struct StringInfo *)ed->ed_LeftMargin->SpecialInfo)->LongInt;
+                                 if (num < 0)
+                                 {
+                                     num = 0;
+                                     act = ed->ed_LeftMargin;
+                                     refresh = TRUE;
+                                 }
+                                 else if (num > ed->ed_PrefsWork.ep_Basic.pt_RightMargin)
+                                 {
+                                     num = ed->ed_PrefsWork.ep_Basic.pt_RightMargin;
+                                     act = ed->ed_LeftMargin;
+                                     refresh = TRUE;
+                                  }
+                                 else
+                                 {
+                                     if (shift)
+                                         act = ed->ed_PaperLength;
+                                     else
+                                         act = ed->ed_RightMargin;
+                                 }
+                                 ed->ed_PrefsWork.ep_Basic.pt_LeftMargin = num;
+			         break;
+
+        case EC_RIGHTMARGIN    : num = ((struct StringInfo *)ed->ed_RightMargin->SpecialInfo)->LongInt;
+                                 if (num < ed->ed_PrefsWork.ep_Basic.pt_LeftMargin)
+                                 {
+                                     num = ed->ed_PrefsWork.ep_Basic.pt_LeftMargin;
+                                     act = ed->ed_RightMargin;
+                                     refresh = TRUE;
+                                 }
+                                 else
+                                 {
+                                     if (shift)
+                                         act = ed->ed_LeftMargin;
+                                     else
+                                         act = ed->ed_PaperLength;
+                                 }
+                                 ed->ed_PrefsWork.ep_Basic.pt_RightMargin = num;
+				 break;
+
+        case EC_UNIT           : num = ((struct StringInfo *)ed->ed_Unit->SpecialInfo)->LongInt;
+                                 if (num < 0)
+                                 {
+                                     num = 0;
+                                     refresh = TRUE;
+                                 }
+                                 else if (num > 255)
+                                 {
+                                     num = 255;
+                                     refresh = TRUE;
+                                 }
+                                 ed->ed_PrefsWork.ep_Unit.pu_UnitNum = num;
+				 break;
+    }
+
+    if (screenStuff)
+    {
+        if (refresh)
+        {
+            DisplayBeep(window->WScreen);
+            RenderGadgets(ed);
+        }
+
+        if (act)
+            ActivateGadget(act,window,NULL);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID SyncTextGadgets(EdDataPtr ed)
+{
+    ProcessTextGadget(ed,EC_PAPERLENGTH,FALSE);
+    ProcessTextGadget(ed,EC_LEFTMARGIN,FALSE);
+    ProcessTextGadget(ed,EC_RIGHTMARGIN,FALSE);
+
+    if (ed->ed_Unit)
+        ProcessTextGadget(ed,EC_UNIT,FALSE);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ProcessSpecialCommand(EdDataPtr ed, EdCommand ec)
+{
+UWORD        icode;
+struct Node *node;
+
+    icode = ed->ed_CurrentMsg.Code;
+
+    switch (ec)
+    {
+        case EC_PRINTERS       : node = ed->ed_AvailPrinters.lh_Head;
+                                 while (icode--)
+                                 {
+                                    node = node->ln_Succ;
+                                 }
+                                 strcpy(ed->ed_PrefsWork.ep_Basic.pt_Driver,node->ln_Name);
+                                 break;
+
+        case EC_PRINTERPORT    : ed->ed_PrefsWork.ep_Basic.pt_Port = icode;
+                                 break;
+
+        case EC_PAPERTYPE      : ed->ed_PrefsWork.ep_Basic.pt_PaperType = icode;
+                                 break;
+
+        case EC_PAPERSIZE      : if (icode == PS_EURO_A0)
+                                     icode = PS_EURO_A4;
+                                 ed->ed_PrefsWork.ep_Basic.pt_PaperSize = icode;
+                                 break;
+
+        case EC_PRINTPITCH     : ed->ed_PrefsWork.ep_Basic.pt_Pitch = icode;
+                                 break;
+
+        case EC_PRINTSPACING   : ed->ed_PrefsWork.ep_Basic.pt_Spacing = icode;
+                                 break;
+
+        case EC_PRINTQUALITY   : ed->ed_PrefsWork.ep_Basic.pt_Quality = icode;
+                                 break;
+
+        case EC_PAPERLENGTH    :
+        case EC_LEFTMARGIN     :
+        case EC_RIGHTMARGIN    :
+        case EC_UNIT           : ProcessTextGadget(ed,ec,TRUE);
+				 break;
+
+        default                : break;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID GetSpecialCmdState(EdDataPtr ed, EdCommand ec, CmdStatePtr state)
+{
+    state->cs_Available = TRUE;
+    state->cs_Selected  = FALSE;
+}
+@
+
+
+38.13
+log
+@ADDED JAPAN SUPPORT
+@
+text
+@d293 1
+a293 1
+#define NW_HEIGHT    220
+@
+
+
+38.12
+log
+@Uses GTLV_MakeVisible to make selected printer always visible
+@
+text
+@d293 1
+a293 1
+#define NW_HEIGHT    176
+d322 3
+a324 3
+    {BUTTON_KIND,   8,   159,  87,  14, MSG_SAVE_GAD,         EC_SAVE,         0},
+    {BUTTON_KIND,   234, 159,  87,  14, MSG_USE_GAD,          EC_USE,          0},
+    {BUTTON_KIND,   461, 159,  87,  14, MSG_CANCEL_GAD,       EC_CANCEL,       0},
+d326 11
+a336 11
+    {LISTVIEW_KIND, 8,   18,   204, 130,MSG_PRT_PRINTERTYPE_GAD,  EC_PRINTERS,     0},
+    {INTEGER_KIND,  504, 104,  44,  14, MSG_PRT_PAPERLENGTH_GAD,  EC_PAPERLENGTH,  0},
+    {INTEGER_KIND,  504, 118,  44,  14, MSG_PRT_LEFTMARGIN_GAD,   EC_LEFTMARGIN,   0},
+    {INTEGER_KIND,  504, 132,  44,  14, MSG_PRT_RIGHTMARGIN_GAD,  EC_RIGHTMARGIN,  0},
+
+    {CYCLE_KIND,    372,  8,   176, 14, MSG_PRT_PRINTERPORT_GAD,  EC_PRINTERPORT,  0},
+    {CYCLE_KIND,    372,  25,  176, 14, MSG_PRT_PRINTPITCH_GAD,   EC_PRINTPITCH,   0},
+    {CYCLE_KIND,    372,  39,  176, 14, MSG_PRT_PRINTSPACING_GAD, EC_PRINTSPACING, 0},
+    {CYCLE_KIND,    372,  53,  176, 14, MSG_PRT_PRINTQUALITY_GAD, EC_PRINTQUALITY, 0},
+    {CYCLE_KIND,    372,  70,  176, 14, MSG_PRT_PAPERTYPE_GAD,    EC_PAPERTYPE,    0},
+    {CYCLE_KIND,    372,  84,  176, 14, MSG_PRT_PAPERSIZE_GAD,    EC_PAPERSIZE,    0},
+d338 1
+a338 1
+    {INTEGER_KIND,  166,  132, 46,  14, MSG_PRT_DEVICEUNIT_GAD,   EC_UNIT,         0}
+d458 1
+a458 1
+                                           LAYOUTA_SPACING,   1,
+@
+
+
+38.11
+log
+@Removed WA_Left and WA_Top
+@
+text
+@d455 1
+@
+
+
+38.10
+log
+@*** empty log message ***
+@
+text
+@a291 2
+#define NW_LEFT      0
+#define NW_TOP       0
+d351 2
+a352 2
+    zoomSize[0] = NW_LEFT;
+    zoomSize[1] = NW_TOP;
+d383 1
+a383 3
+    &&  (ed->ed_Window = OpenPrefsWindow(ed,WA_Left,        NW_LEFT,
+                                            WA_Top,         NW_TOP,
+                                            WA_InnerWidth,  NW_WIDTH,
+@
+
+
+38.9
+log
+@Now looks in PRINTERS: for printer drivers
+@
+text
+@a428 8
+VOID RenderDisplay(EdDataPtr ed)
+{
+}
+
+
+/*****************************************************************************/
+
+
+a681 9
+}
+
+
+/*****************************************************************************/
+
+
+EdCommand GetCommand(EdDataPtr ed)
+{
+    return(EC_NOP);
+@
+
+
+38.8
+log
+@Added SyncTextGadgets() support
+@
+text
+@d101 1
+a101 2
+EdStatus BuildList(EdDataPtr ed, struct List *list, STRPTR directory,
+		   STRPTR pattern, WORD strip)
+d107 1
+d116 1
+d127 2
+a128 1
+        if (lock = Lock(directory,ACCESS_READ))
+d130 2
+a131 2
+            ok = TRUE;
+            do
+d133 4
+a136 2
+                more = ExAll(lock,(struct ExAllData *)exAllBuffer,sizeof(exAllBuffer),ED_TYPE,eac);
+                if ((!more) && (IoErr() != ERROR_NO_MORE_ENTRIES))
+d138 6
+a143 3
+                    ok = FALSE;
+                    break;
+                }
+d145 1
+a145 4
+                if (eac->eac_Entries > 0)
+                {
+                    ead = (struct ExAllData *) exAllBuffer;
+                    do
+d147 2
+a148 1
+                        if (ead->ed_Type < 0)
+d150 4
+a153 2
+		            name = (STRPTR)ead->ed_Name;
+		    	    len  = strlen(name) - strip;
+d155 4
+a158 4
+			    if (new = AllocRemember(&ed->ed_Tracker,sizeof(struct Node)+len+1,MEMF_PUBLIC|MEMF_CLEAR))
+		            {
+			        new->ln_Name = (STRPTR)((ULONG)new + sizeof(struct Node));
+                                CopyMem(name,new->ln_Name,len);
+d160 10
+a169 2
+                                node = list->lh_Head;
+                                while (node->ln_Succ)
+d171 2
+a172 3
+                                    if (Stricmp(node->ln_Name,new->ln_Name) >= 0)
+                                        break;
+                                    node = node->ln_Succ;
+a173 6
+                                Insert(list,new,node->ln_Pred);
+			    }
+                            else
+                            {
+                                nomem = TRUE;
+                                break;
+d175 1
+d177 1
+a177 1
+                        ead = ead->ed_Next;
+a178 1
+                    while (ead);
+d180 4
+d185 2
+a186 1
+            while (more);
+a187 2
+            UnLock(lock);
+        }
+d198 1
+a198 1
+      return(ES_NORMAL);
+d351 1
+a351 1
+    BuildList(ed,&ed->ed_AvailPrinters,"DEVS:Printers","~(#?.info)",0);
+@
+
+
+38.7
+log
+@Now uses DoPrefsGadget instead of CreatePrefsGadget for better look upon window
+  opening
+@
+text
+@d57 27
+d250 1
+a250 1
+    return(ReadIFF(ed,name,ReadPrefs));
+d274 1
+a274 1
+    return(WriteIFF(ed,name,WritePrefs));
+a346 5
+    if (!(ed->ed_Menus = CreatePrefsMenus(ed,EM)))
+    {
+	return(FALSE);
+    }
+
+d372 26
+a397 30
+    if (!ed->ed_LastAdded)
+    {
+        DisposeDisplay(ed);
+        return(FALSE);
+    }
+
+    if (!(ed->ed_Window = OpenPrefsWindow(ed,WA_Left,        NW_LEFT,
+                                             WA_Top,         NW_TOP,
+                                             WA_InnerWidth,  NW_WIDTH,
+                                             WA_InnerHeight, NW_HEIGHT,
+                                             WA_MinWidth,    NW_MINWIDTH,
+                                             WA_MinHeight,   NW_MINHEIGHT,
+                                             WA_MaxWidth,    NW_MAXWIDTH,
+                                             WA_MaxHeight,   NW_MAXHEIGHT,
+                                             WA_IDCMP,       NW_IDCMP,
+                                             WA_Flags,       NW_FLAGS,
+                                             WA_Zoom,        zoomSize,
+                                             WA_AutoAdjust,  TRUE,
+                                             WA_PubScreen,   ed->ed_Screen,
+                                             WA_Title,       GetString(&ed->ed_LocaleInfo,MSG_PRT_NAME),
+                                             WA_NewLookMenus,TRUE,
+                                             WA_Gadgets,     ed->ed_Gadgets,
+                                             TAG_DONE)))
+    {
+        DisposeDisplay(ed);
+	return(FALSE);
+    }
+
+    return(TRUE);
+}
+a511 1
+
+d518 1
+a518 1
+VOID ProcessSpecialCommand(EdDataPtr ed, EdCommand ec)
+d520 4
+a523 6
+UWORD            icode;
+BOOL             refresh;
+BOOL             shift;
+struct Node     *node;
+LONG             num;
+struct Gadget   *act;
+a524 1
+    icode   = ed->ed_CurrentMsg.Code;
+a530 28
+        case EC_PRINTERS       : node = ed->ed_AvailPrinters.lh_Head;
+                                 while (icode--)
+                                 {
+                                    node = node->ln_Succ;
+                                 }
+                                 strcpy(ed->ed_PrefsWork.ep_Basic.pt_Driver,node->ln_Name);
+                                 break;
+
+        case EC_PRINTERPORT    : ed->ed_PrefsWork.ep_Basic.pt_Port = icode;
+                                 break;
+
+        case EC_PAPERTYPE      : ed->ed_PrefsWork.ep_Basic.pt_PaperType = icode;
+                                 break;
+
+        case EC_PAPERSIZE      : if (icode == PS_EURO_A0)
+                                     icode = PS_EURO_A4;
+                                 ed->ed_PrefsWork.ep_Basic.pt_PaperSize = icode;
+                                 break;
+
+        case EC_PRINTPITCH     : ed->ed_PrefsWork.ep_Basic.pt_Pitch = icode;
+                                 break;
+
+        case EC_PRINTSPACING   : ed->ed_PrefsWork.ep_Basic.pt_Spacing = icode;
+                                 break;
+
+        case EC_PRINTQUALITY   : ed->ed_PrefsWork.ep_Basic.pt_Quality = icode;
+                                 break;
+
+a534 1
+                                     DisplayBeep(window->WScreen);
+a551 1
+                                     DisplayBeep(window->WScreen);
+a557 1
+                                     DisplayBeep(window->WScreen);
+a574 1
+                                     DisplayBeep(window->WScreen);
+a591 1
+                                     DisplayBeep(window->WScreen);
+a596 1
+                                     DisplayBeep(window->WScreen);
+d601 9
+d611 2
+a612 1
+        default                : break;
+d614 53
+d668 8
+a675 2
+    if (refresh)
+        RenderGadgets(ed);
+d677 2
+a678 2
+    if (act)
+        ActivateGadget(act,window,NULL);
+@
+
+
+38.6
+log
+@Now uses WA_Gadgets to add the gadgets to the window
+@
+text
+@a86 2
+struct Node         *current;
+struct Node         *previous;
+d88 1
+d126 8
+a133 16
+                        	current  = list->lh_Head;
+                        	previous = (struct Node *)list;
+
+                        	while (current->ln_Succ)
+                        	{
+                            	    if (Stricmp(current->ln_Name,new->ln_Name) > 0)
+                                    {
+                                	Insert(list,new,previous);
+                                	break;
+	                            }
+        	                    previous = current;
+                	            current  = current->ln_Succ;
+                        	}
+
+		        	if (!current->ln_Succ)
+		            	    AddTail(list,new);
+d311 1
+a311 3
+UWORD           zoomSize[4];
+ULONG           pSize;
+struct EdGadget eg;
+a342 8
+    pSize = ed->ed_PrefsWork.ep_Basic.pt_PaperSize;
+    if (pSize == PS_EURO_A4)
+        pSize = PS_EURO_A0;
+
+    eg = EG[3];
+    if (ed->ed_ShowUnits)
+        eg.eg_Height = eg.eg_Height-20;
+
+d344 3
+a346 3
+    CreatePrefsGadget(ed,&EG[0],TAG_DONE);
+    CreatePrefsGadget(ed,&EG[1],TAG_DONE);
+    CreatePrefsGadget(ed,&EG[2],TAG_DONE);
+d348 1
+a348 37
+    ed->ed_Printers      = CreatePrefsGadget(ed,&eg,GTLV_Labels,       &ed->ed_AvailPrinters,
+                                                    GTLV_ShowSelected, NULL,
+                                                    LAYOUTA_SPACING,   1,
+                                                    GTLV_ScrollWidth,  18,
+                                                    TAG_DONE);
+
+    ed->ed_PaperLength   = CreatePrefsGadget(ed,&EG[4],GTIN_MaxChars, 3,
+						       GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_PaperLength,
+                                                       TAG_DONE);
+
+    ed->ed_LeftMargin    = CreatePrefsGadget(ed,&EG[5],GTIN_MaxChars, 3,
+						       GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_LeftMargin,
+                                                       TAG_DONE);
+
+    ed->ed_RightMargin   = CreatePrefsGadget(ed,&EG[6],GTIN_MaxChars, 3,
+						       GTIN_Number,   ed->ed_PrefsWork.ep_Basic.pt_RightMargin,
+                                                       TAG_DONE);
+
+    ed->ed_PrinterPort   = CreatePrefsGadget(ed,&EG[7],GTCY_Labels, ed->ed_PrinterPortLabels,
+                                                       GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Port,
+                                                       TAG_DONE);
+
+    ed->ed_PrintPitch    = CreatePrefsGadget(ed,&EG[8],GTCY_Labels, ed->ed_PrintPitchLabels,
+                                                       GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Pitch,
+                                                       TAG_DONE);
+
+    ed->ed_PrintSpacing  = CreatePrefsGadget(ed,&EG[9],GTCY_Labels, ed->ed_PrintSpacingLabels,
+                                                       GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Spacing,
+                                                       TAG_DONE);
+
+    ed->ed_PrintQuality  = CreatePrefsGadget(ed,&EG[10],GTCY_Labels, ed->ed_PrintQualityLabels,
+                                                        GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_Quality,
+                                                        TAG_DONE);
+
+    ed->ed_PaperType     = CreatePrefsGadget(ed,&EG[11],GTCY_Labels, ed->ed_PaperTypeLabels,
+                                                        GTCY_Active, ed->ed_PrefsWork.ep_Basic.pt_PaperType,
+                                                        TAG_DONE);
+a349 9
+    ed->ed_PaperSize     = CreatePrefsGadget(ed,&EG[12],GTCY_Labels, ed->ed_PaperSizeLabels,
+                                                        GTCY_Active, pSize,
+                                                        TAG_DONE);
+
+    if (ed->ed_ShowUnits)
+        ed->ed_Unit      = CreatePrefsGadget(ed,&EG[13],GTIN_MaxChars, 3,
+                                                        GTIN_Number,   ed->ed_PrefsWork.ep_Unit.pu_UnitNum,
+                                                        TAG_DONE);
+
+d410 12
+a421 3
+UWORD        i;
+struct Node *node;
+ULONG        pSize;
+a427 3
+        {
+            SetGadgetAttr(ed,ed->ed_Printers,GTLV_Selected, i,
+                                             TAG_DONE);
+a428 1
+        }
+d433 2
+a434 20
+    SetGadgetAttr(ed,ed->ed_PaperLength,GTIN_Number,ed->ed_PrefsWork.ep_Basic.pt_PaperLength,
+				        TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_LeftMargin,GTIN_Number,ed->ed_PrefsWork.ep_Basic.pt_LeftMargin,
+				       TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_RightMargin,GTIN_Number,ed->ed_PrefsWork.ep_Basic.pt_RightMargin,
+				        TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_PrinterPort,GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Port,
+				        TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_PrintPitch,GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Pitch,
+				       TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_PrintSpacing,GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Spacing,
+				         TAG_DONE);
+
+    SetGadgetAttr(ed,ed->ed_PrintQuality,GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Quality,
+				         TAG_DONE);
+d436 52
+a487 8
+    SetGadgetAttr(ed,ed->ed_PaperType,GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_PaperType,
+				      TAG_DONE);
+
+    pSize = ed->ed_PrefsWork.ep_Basic.pt_PaperSize;
+    if (pSize == PS_EURO_A4)
+        pSize = PS_EURO_A0;
+    SetGadgetAttr(ed,ed->ed_PaperSize,GTCY_Active,pSize,
+				      TAG_DONE);
+d490 4
+a493 2
+        SetGadgetAttr(ed,ed->ed_Unit,GTIN_Number,ed->ed_PrefsWork.ep_Unit.pu_UnitNum,
+                                     TAG_DONE);
+@
+
+
+38.5
+log
+@Changes for new prefs shell
+@
+text
+@a335 21
+    if (!(ed->ed_Window = OpenPrefsWindow(ed,WA_Left,        NW_LEFT,
+                                             WA_Top,         NW_TOP,
+                                             WA_InnerWidth,  NW_WIDTH,
+                                             WA_InnerHeight, NW_HEIGHT,
+                                             WA_MinWidth,    NW_MINWIDTH,
+                                             WA_MinHeight,   NW_MINHEIGHT,
+                                             WA_MaxWidth,    NW_MAXWIDTH,
+                                             WA_MaxHeight,   NW_MAXHEIGHT,
+                                             WA_IDCMP,       NW_IDCMP,
+                                             WA_Flags,       NW_FLAGS,
+                                             WA_Zoom,        zoomSize,
+                                             WA_AutoAdjust,  TRUE,
+                                             WA_PubScreen,   ed->ed_Screen,
+                                             WA_Title,       GetString(&ed->ed_LocaleInfo,MSG_PRT_NAME),
+                                             WA_NewLookMenus,TRUE,
+                                             TAG_DONE)))
+    {
+        FreeMenus(ed->ed_Menus);
+	return(FALSE);
+    }
+
+d420 22
+d451 5
+a455 2
+    ClearMenuStrip(ed->ed_Window);
+    CloseWindow(ed->ed_Window);
+@
+
+
+38.4
+log
+@Changes for new pe_strings.c prefs shell module
+@
+text
+@d203 1
+d214 1
+a214 1
+        if (ReadChunkBytes(iff,&(((struct ExtPrefs *)ed->ed_PrefsIO))->ep_Unit,sizeof(struct PrinterUnitPrefs)) == sizeof(struct PrinterUnitPrefs))
+d222 1
+a222 1
+        if (ReadChunkBytes(iff,ed->ed_PrefsIO,sizeof(struct PrinterTxtPrefs)) == sizeof(struct PrinterTxtPrefs))
+d230 1
+a230 1
+EdStatus OpenPrefs(EdDataPtr ed, STRPTR name, APTR destPrefs)
+a231 1
+    ed->ed_PrefsIO = destPrefs;
+d242 1
+a242 1
+        if (WriteChunkBytes(iff,ed->ed_PrefsIO,sizeof(struct PrinterTxtPrefs)) == sizeof(struct PrinterTxtPrefs))
+d246 1
+a246 1
+                    if (WriteChunkBytes(iff,&((struct ExtPrefs *)ed->ed_PrefsIO)->ep_Unit,sizeof(struct PrinterUnitPrefs)) == sizeof(struct PrinterUnitPrefs))
+d254 1
+a254 1
+EdStatus SavePrefs(EdDataPtr ed, STRPTR name, APTR sourPrefs)
+a255 1
+    ed->ed_PrefsIO = sourPrefs;
+d390 2
+d406 2
+a407 2
+    ed->ed_PrinterPort   = CreatePrefsGadget(ed,&EG[7],GTCY_Labels,ed->ed_PrinterPortLabels,
+                                                       GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Port,
+d410 6
+a415 6
+    ed->ed_PrintPitch    = CreatePrefsGadget(ed,&EG[8],GTCY_Labels,ed->ed_PrintPitchLabels,
+                                                       GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Pitch,
+                                                       TAG_DONE);
+
+    ed->ed_PrintSpacing  = CreatePrefsGadget(ed,&EG[9],GTCY_Labels,ed->ed_PrintSpacingLabels,
+                                                       GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Spacing,
+d418 2
+a419 2
+    ed->ed_PrintQuality  = CreatePrefsGadget(ed,&EG[10],GTCY_Labels,ed->ed_PrintQualityLabels,
+                                                        GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_Quality,
+d422 2
+a423 2
+    ed->ed_PaperType     = CreatePrefsGadget(ed,&EG[11],GTCY_Labels,ed->ed_PaperTypeLabels,
+                                                        GTCY_Active,ed->ed_PrefsWork.ep_Basic.pt_PaperType,
+d426 2
+a427 2
+    ed->ed_PaperSize     = CreatePrefsGadget(ed,&EG[12],GTCY_Labels,ed->ed_PaperSizeLabels,
+                                                        GTCY_Active,pSize,
+d437 1
+a437 3
+        CloseWindow(ed->ed_Window);
+        FreeMenus(ed->ed_Menus);
+        FreeGadgets(ed->ed_Gadgets);
+a440 6
+    SetFont(ed->ed_Window->RPort,ed->ed_Font);
+    SetMenuStrip(ed->ed_Window,ed->ed_Menus);
+    AddGList(ed->ed_Window,ed->ed_Gadgets,-1,-1,NULL);
+    RefreshGList(ed->ed_Gadgets,ed->ed_Window,NULL,-1);
+    GT_RefreshWindow(ed->ed_Window,NULL);
+
+d480 1
+a480 2
+            SetGadgetAttr(ed,ed->ed_Printers,GTLV_Labels, &ed->ed_AvailPrinters,
+                                             GTLV_Selected, i,
+d537 1
+a537 1
+    icode   = ed->ed_CurrentMsg->Code;
+d540 1
+a540 1
+    shift   = (IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT) & ed->ed_CurrentMsg->Qualifier;
+a675 3
+
+    if (ec == EC_SAVEICONS)
+        state->cs_Selected = ed->ed_SaveIcons;
+@
+
+
+38.3
+log
+@Changes for new prefs shell
+Added support for unit gadget
+@
+text
+@d46 1
+a46 1
+#include "texttable.h"
+a193 2
+    BuildList(ed,&ed->ed_AvailPrinters,"DEVS:Printers","~(#?.info)",0);
+
+d300 4
+a303 4
+    {LISTVIEW_KIND, 8,   18,   204, 130,MSG_PRINTERTYPE_GAD,  EC_PRINTERS,     0},
+    {INTEGER_KIND,  504, 104,  44,  14, MSG_PAPERLENGTH_GAD,  EC_PAPERLENGTH,  0},
+    {INTEGER_KIND,  504, 118,  44,  14, MSG_LEFTMARGIN_GAD,   EC_LEFTMARGIN,   0},
+    {INTEGER_KIND,  504, 132,  44,  14, MSG_RIGHTMARGIN_GAD,  EC_RIGHTMARGIN,  0},
+d305 6
+a310 6
+    {CYCLE_KIND,    372,  8,   176, 14, MSG_PRINTERPORT_GAD,  EC_PRINTERPORT,  0},
+    {CYCLE_KIND,    372,  25,  176, 14, MSG_PRINTPITCH_GAD,   EC_PRINTPITCH,   0},
+    {CYCLE_KIND,    372,  39,  176, 14, MSG_PRINTSPACING_GAD, EC_PRINTSPACING, 0},
+    {CYCLE_KIND,    372,  53,  176, 14, MSG_PRINTQUALITY_GAD, EC_PRINTQUALITY, 0},
+    {CYCLE_KIND,    372,  70,  176, 14, MSG_PAPERTYPE_GAD,    EC_PAPERTYPE,    0},
+    {CYCLE_KIND,    372,  84,  176, 14, MSG_PAPERSIZE_GAD,    EC_PAPERSIZE,    0},
+d312 1
+a312 1
+    {INTEGER_KIND,  166,  132, 46,  14, MSG_DEVICEUNIT_GAD,   EC_UNIT,         0}
+d325 2
+d350 1
+a350 1
+                                             WA_Title,       EDITOR_NAME,
+d358 17
+a374 17
+    ed->ed_PrinterPortLabels[0]  = GetString(&ed->ed_LocaleInfo,MSG_PARALLEL);
+    ed->ed_PrinterPortLabels[1]  = GetString(&ed->ed_LocaleInfo,MSG_SERIAL);
+    ed->ed_PaperTypeLabels[0]    = GetString(&ed->ed_LocaleInfo,MSG_FANFOLD);
+    ed->ed_PaperTypeLabels[1]    = GetString(&ed->ed_LocaleInfo,MSG_SINGLE);
+    ed->ed_PaperSizeLabels[0]    = GetString(&ed->ed_LocaleInfo,MSG_USLETTER);
+    ed->ed_PaperSizeLabels[1]    = GetString(&ed->ed_LocaleInfo,MSG_USLEGAL);
+    ed->ed_PaperSizeLabels[2]    = GetString(&ed->ed_LocaleInfo,MSG_NARROWTRACTOR);
+    ed->ed_PaperSizeLabels[3]    = GetString(&ed->ed_LocaleInfo,MSG_WIDETRACTOR);
+    ed->ed_PaperSizeLabels[4]    = GetString(&ed->ed_LocaleInfo,MSG_CUSTOM);
+    ed->ed_PaperSizeLabels[5]    = GetString(&ed->ed_LocaleInfo,MSG_DINA4);
+    ed->ed_PrintPitchLabels[0]   = GetString(&ed->ed_LocaleInfo,MSG_PICA10);
+    ed->ed_PrintPitchLabels[1]   = GetString(&ed->ed_LocaleInfo,MSG_ELITE12);
+    ed->ed_PrintPitchLabels[2]   = GetString(&ed->ed_LocaleInfo,MSG_FINE15);
+    ed->ed_PrintSpacingLabels[0] = GetString(&ed->ed_LocaleInfo,MSG_LPI6);
+    ed->ed_PrintSpacingLabels[1] = GetString(&ed->ed_LocaleInfo,MSG_LPI8);
+    ed->ed_PrintQualityLabels[0] = GetString(&ed->ed_LocaleInfo,MSG_DRAFT);
+    ed->ed_PrintQualityLabels[1] = GetString(&ed->ed_LocaleInfo,MSG_LETTER);
+@
+
+
+38.2
+log
+@Made window a bit wider for easier localization
+@
+text
+@d31 1
+d42 1
+d57 17
+d180 10
+a189 10
+    strcpy(ed->ed_PrefsDefaults.pt_Driver,"generic");
+    ed->ed_PrefsDefaults.pt_Port         = PP_PARALLEL;
+    ed->ed_PrefsDefaults.pt_PaperType    = PT_FANFOLD;
+    ed->ed_PrefsDefaults.pt_PaperSize    = PS_N_TRACTOR;
+    ed->ed_PrefsDefaults.pt_PaperLength  = 66;
+    ed->ed_PrefsDefaults.pt_Pitch        = PP_PICA;
+    ed->ed_PrefsDefaults.pt_Spacing      = PS_SIX_LPI;
+    ed->ed_PrefsDefaults.pt_LeftMargin   = 5;
+    ed->ed_PrefsDefaults.pt_RightMargin  = 75;
+    ed->ed_PrefsDefaults.pt_Quality      = PQ_DRAFT;
+d214 8
+a221 1
+        return(ES_NORMAL);
+d223 3
+a225 2
+    if (cn->cn_ID != ID_PTXT || cn->cn_Type != ID_PREF)
+        return(ES_IFF_UNKNOWNCHUNK);
+a226 3
+    if (ReadChunkBytes(iff,ed->ed_PrefsIO,sizeof(struct PrinterTxtPrefs)) == sizeof(struct PrinterTxtPrefs))
+        return(ES_NORMAL);
+
+a242 4
+struct PrinterUnitPrefs pup;
+
+    memset(&pup,0,sizeof(struct PrinterUnitPrefs));
+
+d246 1
+d248 1
+a248 1
+                    if (WriteChunkBytes(iff,&pup,sizeof(struct PrinterUnitPrefs)) == sizeof(struct PrinterUnitPrefs))
+d312 3
+a314 1
+    {CYCLE_KIND,    372,  84,  176, 14, MSG_PAPERSIZE_GAD,    EC_PAPERSIZE,    0}
+d323 3
+a325 2
+UWORD zoomSize[4];
+ULONG pSize;
+d376 1
+a376 1
+    pSize = ed->ed_PrefsWork.pt_PaperSize;
+d380 4
+d389 3
+a391 3
+    ed->ed_Printers      = CreatePrefsGadget(ed,&EG[3],GTLV_Labels,       &ed->ed_AvailPrinters,
+                                                       GTLV_ShowSelected, NULL,
+                                                       TAG_DONE);
+d394 1
+a394 1
+						       GTIN_Number,   ed->ed_PrefsWork.pt_PaperLength,
+d398 1
+a398 1
+						       GTIN_Number,   ed->ed_PrefsWork.pt_LeftMargin,
+d402 1
+a402 1
+						       GTIN_Number,   ed->ed_PrefsWork.pt_RightMargin,
+d406 1
+a406 1
+                                                       GTCY_Active,ed->ed_PrefsWork.pt_Port,
+d410 1
+a410 1
+                                                       GTCY_Active,ed->ed_PrefsWork.pt_Pitch,
+d414 1
+a414 1
+                                                       GTCY_Active,ed->ed_PrefsWork.pt_Spacing,
+d418 1
+a418 1
+                                                        GTCY_Active,ed->ed_PrefsWork.pt_Quality,
+d422 1
+a422 1
+                                                        GTCY_Active,ed->ed_PrefsWork.pt_PaperType,
+d429 5
+d485 1
+a485 1
+        if (Stricmp(ed->ed_PrefsWork.pt_Driver,node->ln_Name) == 0)
+d496 1
+a496 1
+    SetGadgetAttr(ed,ed->ed_PaperLength,GTIN_Number,ed->ed_PrefsWork.pt_PaperLength,
+d499 1
+a499 1
+    SetGadgetAttr(ed,ed->ed_LeftMargin,GTIN_Number,ed->ed_PrefsWork.pt_LeftMargin,
+d502 1
+a502 1
+    SetGadgetAttr(ed,ed->ed_RightMargin,GTIN_Number,ed->ed_PrefsWork.pt_RightMargin,
+d505 1
+a505 1
+    SetGadgetAttr(ed,ed->ed_PrinterPort,GTCY_Active,ed->ed_PrefsWork.pt_Port,
+d508 1
+a508 1
+    SetGadgetAttr(ed,ed->ed_PrintPitch,GTCY_Active,ed->ed_PrefsWork.pt_Pitch,
+d511 1
+a511 1
+    SetGadgetAttr(ed,ed->ed_PrintSpacing,GTCY_Active,ed->ed_PrefsWork.pt_Spacing,
+d514 1
+a514 1
+    SetGadgetAttr(ed,ed->ed_PrintQuality,GTCY_Active,ed->ed_PrefsWork.pt_Quality,
+d517 1
+a517 1
+    SetGadgetAttr(ed,ed->ed_PaperType,GTCY_Active,ed->ed_PrefsWork.pt_PaperType,
+d520 1
+a520 1
+    pSize = ed->ed_PrefsWork.pt_PaperSize;
+d525 5
+d557 1
+a557 1
+                                 strcpy(ed->ed_PrefsWork.pt_Driver,node->ln_Name);
+d560 1
+a560 1
+        case EC_PRINTERPORT    : ed->ed_PrefsWork.pt_Port = icode;
+d563 1
+a563 1
+        case EC_PAPERTYPE      : ed->ed_PrefsWork.pt_PaperType = icode;
+d568 1
+a568 1
+                                 ed->ed_PrefsWork.pt_PaperSize = icode;
+d571 1
+a571 1
+        case EC_PRINTPITCH     : ed->ed_PrefsWork.pt_Pitch = icode;
+d574 1
+a574 1
+        case EC_PRINTSPACING   : ed->ed_PrefsWork.pt_Spacing = icode;
+d577 1
+a577 1
+        case EC_PRINTQUALITY   : ed->ed_PrefsWork.pt_Quality = icode;
+d595 1
+a595 1
+                                 ed->ed_PrefsWork.pt_PaperLength = num;
+d606 1
+a606 1
+                                 else if (num > ed->ed_PrefsWork.pt_RightMargin)
+d608 1
+a608 1
+                                     num = ed->ed_PrefsWork.pt_RightMargin;
+d612 1
+a612 1
+                                 }
+d620 1
+a620 1
+                                 ed->ed_PrefsWork.pt_LeftMargin = num;
+d624 1
+a624 1
+                                 if (num < ed->ed_PrefsWork.pt_LeftMargin)
+d626 1
+a626 1
+                                     num = ed->ed_PrefsWork.pt_LeftMargin;
+d638 17
+a654 1
+                                 ed->ed_PrefsWork.pt_RightMargin = num;
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d247 1
+a247 1
+#define NW_WIDTH     554
+d278 2
+a279 2
+    {BUTTON_KIND,   233, 159,  87,  14, MSG_USE_GAD,          EC_USE,          0},
+    {BUTTON_KIND,   459, 159,  87,  14, MSG_CANCEL_GAD,       EC_CANCEL,       0},
+d282 3
+a284 3
+    {INTEGER_KIND,  502, 104,  44,  14, MSG_PAPERLENGTH_GAD,  EC_PAPERLENGTH,  0},
+    {INTEGER_KIND,  502, 118,  44,  14, MSG_LEFTMARGIN_GAD,   EC_LEFTMARGIN,   0},
+    {INTEGER_KIND,  502, 132,  44,  14, MSG_RIGHTMARGIN_GAD,  EC_RIGHTMARGIN,  0},
+d286 6
+a291 6
+    {CYCLE_KIND,    370,  8,   176, 14, MSG_PRINTERPORT_GAD,  EC_PRINTERPORT,  0},
+    {CYCLE_KIND,    370,  25,  176, 14, MSG_PRINTPITCH_GAD,   EC_PRINTPITCH,   0},
+    {CYCLE_KIND,    370,  39,  176, 14, MSG_PRINTSPACING_GAD, EC_PRINTSPACING, 0},
+    {CYCLE_KIND,    370,  53,  176, 14, MSG_PRINTQUALITY_GAD, EC_PRINTQUALITY, 0},
+    {CYCLE_KIND,    370,  70,  176, 14, MSG_PAPERTYPE_GAD,    EC_PAPERTYPE,    0},
+    {CYCLE_KIND,    370,  84,  176, 14, MSG_PAPERSIZE_GAD,    EC_PAPERSIZE,    0}
+@

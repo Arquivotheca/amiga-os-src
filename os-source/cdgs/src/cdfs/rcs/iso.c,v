@@ -1,0 +1,1165 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.8
+date     93.03.04.17.11.42;  author jesup;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     93.03.04.00.30.33;  author jesup;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     93.01.16.13.34.47;  author jerryh;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.02.20.02.55.12;  author jesup;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.12.22.21.03.35;  author bryce;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.12.21.23.41.30;  author bryce;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.12.21.23.18.20;  author bryce;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.16.09.20.14;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.8
+log
+@Unmount wasn't checking if ThisVol existed before modifying it...
+@
+text
+@/***********************************************************************
+****************                                        ****************
+****************        -=   CD FILE SYSTEM   =-        ****************
+****************                                        ****************
+************************************************************************
+***                                                                  ***
+***   Written by Carl Sassenrath for Commodore International, Ltd.   ***
+*** Copyright (C) 1991 Commodore Electronics Ltd. All rights reserved***                                                                  ***
+***                                                                  ***
+***         Confidential and Proprietary System Source Code          ***
+***                                                                  ***
+***********************************************************************/
+
+#include "main.h"
+
+IMPORT  void    *ReadBlock();
+
+#define D(x)    ;
+#define DD(x)   ;
+
+ 
+/***********************************************************************
+***
+***  FindVol
+***
+***********************************************************************/
+VOLDEV *FindVol(name,date)
+    char    *name;
+    struct  DateStamp *date;
+{
+    REG VOLDEV *vol;
+
+    /* Check if volume node already present */
+    Forbid();
+        vol  = (VOLDEV *) BTOA(DOSInfo->di_DevInfo);
+        for (; vol; vol = (VOLDEV *)BTOA(vol->dev.dl_Next))
+        {
+/*          Debug2("Check volume: %s\n",BTOA(vol->dev.dl_Name));    */
+            if (vol->dev.dl_Type != DLT_VOLUME) continue;
+            if (!MatchBStr(name,BTOA(vol->dev.dl_Name))) continue;
+            if (!CompDate(&vol->dev.dl_VolumeDate,date)) continue;
+            break;
+        }
+    Permit();
+
+/*  if (vol) Debug2("vol found %lx %s\n",vol,&name[1]);*/
+/*  else Debug2("new vol\n");*/
+    return vol;
+}
+
+/***********************************************************************
+***
+***  IsValidVolDesc
+***
+***********************************************************************/
+IsValidVolDesc(p)
+    struct PrimVolDescriptor *p;
+{
+    if (!MatchStr(p->StdIdent,STD_IDENT,sizeof(p->StdIdent)))
+        return FALSE;
+
+    if (p->VolDescVers != 1) return FALSE;
+
+    return TRUE;
+}
+
+/***********************************************************************
+***
+***  FindPVD
+***
+*** Find a valid PVD, picking a valid Amiga PVD first over just a
+*** random PVD.  The volume descriptors are read into a large
+*** temporary buffer to be scanned.  If no Amiga PVD can be found
+*** then the first valid PVD is used.
+***
+***********************************************************************/
+PVD *FindPVD()
+{
+    LONG first = 0;
+    LONG size;
+    REG LONG lsn,b,i;
+    REG PVD *p;
+    REG UBYTE *temp,*block;
+
+    /* Get a temporary buffer to search for PVD: */
+    size = 16;
+    if (!(block = MakeVector(SECT_SIZE)))
+        return NULL;
+
+    temp = MakeVector(SECT_SIZE<<4);
+    if (!temp) /* Try again, use smaller size */
+    {
+        size = 2;
+        temp = MakeVector(SECT_SIZE<<1);
+        if (!temp) {
+            FreeVector(block);
+            return NULL;
+        }
+    }
+
+    /* Search for PVD in volume descriptor area: */
+    for (lsn = 16; lsn < 256; lsn += size)
+    {
+        Debug3("\tp%lx.%lx\n",lsn,size);
+        D(Debug0("PVD Srch: %lx.%lx\n",lsn,size));
+
+        if (ReadCD(temp,lsn,size)) break; /* had an error */
+
+        /* Examine each sector: */
+        for (i = 0, b = 0; i < size; i++, b+=SECT_SIZE)
+        {
+            p = (PVD *)(&temp[b]);
+
+            if (!IsValidVolDesc(p)) continue;
+
+            switch (p->VolDescType)
+            {
+            case BOOT_VOL_DESC:
+                if (BootRecLSN) break;
+                if (MatchStr(((BVD*)p)->BootSysIdent,SYS_IDENT,sizeof(((BVD*)p)->BootSysIdent)))
+                {
+                    BootRecLSN = lsn + i;
+                }
+                break;
+
+            case PRIM_VOL_DESC:
+                /* Save first, in case no valid Amiga PVD */
+                if (!first) {
+                    first = lsn;
+                    CopyMem(p,block,SECT_SIZE);
+                }
+
+                /* Is it an Amiga PVD? */
+                if (MatchStr(p->SysIdent,SYS_IDENT,sizeof(p->SysIdent)) ||
+                    MatchStr(p->SysIdent,SYS_IDENT2,sizeof(p->SysIdent)))
+                {
+                    BootPVDLSN = lsn + i;  /* Only set for Amiga */
+                    /* if we didn't just copy it, do now */
+                    if (first != lsn)
+                        CopyMem(p,block,SECT_SIZE);
+                    FreeVector(temp);
+                    return (PVD *)block;
+                }
+                break;
+
+            case TERM_VOL_DESC:
+                lsn = 256;  /* stop the loop */
+                i = size;   /* stop the loop */
+                break;
+
+            default:
+                break;
+            }   
+        }
+    }
+
+    FreeVector(temp);
+
+    Debug1("\tNC\n");
+    if (first)
+        return (PVD *)block;
+
+    Debug1("\tNI\n");
+    FreeVector(block);
+    return NULL;
+}
+
+
+/***********************************************************************
+***
+***  MakePathTable
+***
+***********************************************************************/
+MakePathTable(pvd)
+    REG PVD *pvd;
+{
+    UBYTE *p;
+    ULONG size;
+
+    PathTableSize = pvd->PathTableSize;
+    PathTable = MakeVector(PathTableSize+16);
+
+    D(Debug0("Path/Make PathTable.  size=%ld\n",PathTableSize));
+
+    /* copy path table 1 block at a time - a bit ugly, but this stops us from
+       having to do non-blocksize IO's */
+    for (size = 0;
+	 size < PathTableSize;
+	 size += BlockSize)
+    {
+	    if (!(p = ReadBlock(pvd->MPathTable[0] + (size>>BlockShift),-1,
+				FALSE,FALSE)))
+	    {
+        	FreeVector(PathTable);
+	        return FALSE;
+	    }
+	    /* make sure we don't copy past the end */
+	    CopyMem(p,((char *)PathTable)+size,
+		    MIN(PathTableSize-size,BlockSize));
+    }
+
+    MaxPaths = CountPaths();
+    PathIndex = MakeVector((MaxPaths+2)<<2);
+    IndexPaths();
+
+    return TRUE;
+}
+
+/***********************************************************************
+***
+***  SetOptions
+***
+*** Scan the PVD looking for file system options.
+***
+*** The primary volume descriptor must still be in scratch memory
+*** for this function to work.
+***
+***********************************************************************/
+#define OC(a,b) (((a)<<8)+(b))
+SetOptions(pvd)
+    PVD *pvd;
+{
+    UWORD *op;
+    UWORD code,size;
+
+    op = (UWORD *)&pvd->ApplicationUse[1];  /* 650 bytes */
+
+    while ((code = *op++))
+    {
+        size = *op++;
+
+        Debug2("\tZ%lx.%lx\n",code,size);
+
+        switch(code)
+        {
+        case OC('B','F'):   /* boot file name */
+            CopyStr(BootFile,op,32);
+            break;
+
+        case OC('C','D'):   /* dir cache size in blocks */
+            DirCacheSize = *op;
+            break;
+
+        case OC('C','R'):   /* read cache size in blocks    */
+            CacheSize = *op;
+            break;
+
+        case OC('D','R'):   /* direct file reading  */
+            DirectRead = TRUE; /* V23.3 */
+            break;
+
+        case OC('F','S'):   /* fast directory searches */
+            FastSearch = TRUE;
+            break;
+
+        case OC('N','P'):   /* No prefs flag */
+            NoPrefs = TRUE;
+            break;
+
+        case OC('P','L'):   /* lock pool */
+            LockPoolSize = *op;
+            break;
+
+        case OC('P','F'):   /* file pool */
+            FilePoolSize = *op;
+            break;
+
+        case OC('R','C'):   /* read retry count */
+            Retry = *op;
+            break;
+
+        case OC('T','M'):   /* trademark info   */
+            TMInfo = *((struct TMStruct *)op);
+            break;
+
+        case OC('D','S'):   /* Double-speed OK (data disk) */
+            DoubleSpeedOK = TRUE;
+            break;
+
+        default:
+            break;
+        }
+
+        op = (UWORD *)((LONG)op + (LONG)size);
+    }
+}
+
+/***********************************************************************
+***
+***  Mount
+***
+***********************************************************************/
+Mount(boot)
+    BOOL boot;      /* TRUE when booting from this */
+{
+    REG VOLDEV *vol;
+    REG PVD *pvd;
+    char    date[8];
+    struct  DateStamp stamp;
+    char    name[MAX_BSTR_LEN];
+
+    D(Debug0("Mount : boot=%ld\n",boot));
+
+    /* Can we find a valid PVD on the disk? */
+    if (!PVDBuffer)
+    {
+        /* it hasn't been read before */
+        if (!(pvd = FindPVD())) return NULL;
+        if (boot) SetOptions(pvd);
+    } else {
+        pvd = PVDBuffer;
+        PVDBuffer = NULL;   /* we're going to free it */
+    }
+
+    /* Convert volume related info: */
+    DStrToBStr(name,pvd->VolIdent,MAX_BSTR_LEN-2);
+    ConvertDate(date,&pvd->VolCreateTime);
+    MakeDate(&stamp,&date[0]);
+
+    /* Find existing DOS Volume */
+    vol = FindVol(name,&stamp);
+
+    /* If volume doesn't exist, create it: */
+    if (!vol)
+    {
+        vol = MakeVector(sizeof(*vol));
+        if (!vol) {
+            FreeVector(pvd);
+            return NULL;
+        }
+
+        MaxBlocks = vol->MaxBlocks = pvd->VolSize;
+        BlockSize = vol->BlockSize = pvd->BlockSize;
+        BlockMask = BlockSize - 1;
+        SetBlockShift();
+
+        if (!MakePathTable(pvd)) 
+        {
+            FreeVector(pvd);
+            FreeVector(vol);
+            return NULL;
+        }
+
+        vol->dev.dl_Type = DLT_VOLUME;
+        vol->dev.dl_DiskType = ID_DOS_DISK;
+        vol->dev.dl_Name = (BSTR)ATOB(vol->name);
+        vol->dev.dl_Lock = vol->dev.dl_LockList = NULL;
+
+        RootDirLBN = vol->RootDirLBN = PathTable->Extent;
+        vol->PathTableSize = PathTableSize;
+        vol->PathTable = PathTable;
+        vol->MaxPaths = MaxPaths;
+        vol->PathIndex = PathIndex;
+
+        CopyMem(name,vol->name,name[0]+2); /* include len & term */
+        vol->dev.dl_VolumeDate = stamp;  /* struct copy */
+
+        Forbid();
+            vol->dev.dl_Next = DOSInfo->di_DevInfo;
+            DOSInfo->di_DevInfo = ATOB(vol);
+        Permit();
+    }
+    else /* remount old vol */
+    {
+        MaxBlocks = vol->MaxBlocks;
+        BlockSize = vol->BlockSize;
+        BlockMask = BlockSize - 1;
+        SetBlockShift();
+        RootDirLBN = vol->RootDirLBN;
+        PathTableSize = vol->PathTableSize;
+        PathTable = vol->PathTable;
+        MaxPaths = vol->MaxPaths;
+        PathIndex = vol->PathIndex;
+        ReadErrs = vol->ReadErrs;
+    }
+
+/*  Debug1("MB=%ld RD=%ld PTS=%ld PT=%lx\n",*/
+/*      MaxBlocks, RootDirLBN, PathTableSize, PathTable);*/
+
+    ThisVol = vol;
+    vol->dev.dl_Task = FSPort;
+
+    /* done with pvd, free it */
+    FreeVector(pvd);
+
+    Debug1("\tM%s\n", &vol->name[1]);
+    return TRUE;
+}
+
+
+/***********************************************************************
+***
+***  UnMount
+***
+*** Unmount a CD volume.  If there are no locks on it, deallocate
+*** its resources, otherwize wait for all locks to be freed.
+***
+***********************************************************************/
+UnMount()
+{
+    D(Debug0("Unmount $%lx\n",ThisVol));
+    if (ThisVol)
+    {
+	if (!ThisVol->dev.dl_LockList) DeMount(ThisVol);
+	ThisVol->ReadErrs = ReadErrs;
+    }
+    FlushCache();
+
+    ThisVol = NULL;
+}
+
+/***********************************************************************
+***
+***  DeMount
+***
+*** Unlink a volume from the system tables and free its resources.
+***
+***********************************************************************/
+DeMount(vol)
+    REG VOLDEV *vol;
+{
+    REG VOLDEV *v;
+
+    /* Find the vol in dos device list (critical section): */
+    Forbid();
+    v = (VOLDEV *) BTOA(DOSInfo->di_DevInfo);
+    if (v == vol)   /* at head of list */
+    {
+        DOSInfo->di_DevInfo = v->dev.dl_Next;
+    }
+    else
+    {
+        for (; v; v = (VOLDEV *)BTOA(v->dev.dl_Next))
+        {
+            if (vol == (VOLDEV *)BTOA(v->dev.dl_Next)) break;
+        }
+
+        if (v) v->dev.dl_Next = vol->dev.dl_Next;
+    }
+    Permit();
+
+    FreeVector(vol->PathIndex);
+    FreeVector(vol->PathTable);
+    FreeVector(vol);
+}
+
+/***********************************************************************
+***
+***  SetVolInfo
+***
+***********************************************************************/
+SetVolInfo(vi)
+    REG struct InfoData *vi;
+{
+    if (ThisVol)
+    {
+        vi->id_NumSoftErrors    = ReadErrs;
+        vi->id_UnitNumber   = UnitNumber;
+        vi->id_DiskState    = ID_WRITE_PROTECTED;
+        vi->id_NumBlocks    = 
+        vi->id_NumBlocksUsed    = MaxBlocks;
+        vi->id_BytesPerBlock    = BlockSize;
+        vi->id_DiskType     = ThisVol->dev.dl_DiskType;
+        vi->id_VolumeNode   = ATOB(ThisVol);
+        vi->id_InUse        = (ThisVol->dev.dl_LockList?DOS_TRUE:DOS_FALSE);
+    }
+    else vi->id_DiskType = ID_NO_DISK_PRESENT; /* was DiskState, CES */
+}
+
+/***********************************************************************
+***
+***  SetBlockShift
+***
+***********************************************************************/
+SetBlockShift()
+{
+    switch (BlockSize)
+    {
+    case 2048: BlockShift = 11; return;
+    case 1024: BlockShift = 10; return;
+    case  512: BlockShift =  9; return;
+    default:   BlockShift = 11;
+    }
+}
+
+
+/***********************************************************************
+***
+***  CallBoot
+***
+*** Call boot code, saving registers first.  Pass the second
+*** argument in A1 (an open CD I/O Request).
+***
+***********************************************************************/
+#asm
+    public  _CallBoot
+_CallBoot:
+        movem.l 4(sp),a0/a1
+        movem.l d2-d7/a2-a6,-(sp)
+        jsr (a0)        ; a1 for Arg
+        movem.l (sp)+,d2-d7/a2-a6
+        rts
+#endasm
+@
+
+
+1.7
+log
+@Read path table using block reads instead of requiring the device to
+support odd-sized reads.
+@
+text
+@d401 6
+a406 4
+    if (ThisVol && !ThisVol->dev.dl_LockList) DeMount(ThisVol);
+
+    ThisVol->ReadErrs = ReadErrs;
+
+@
+
+
+1.6
+log
+@cd.device instead of cdtv.device.
+@
+text
+@d177 2
+a178 1
+    char *p;
+d185 5
+a189 1
+    if (ReadBytes(PathTable,pvd->MPathTable[0]<<BlockShift,PathTableSize))
+d191 9
+a199 2
+        FreeVector(PathTable);
+        return FALSE;
+@
+
+
+1.5
+log
+@Handle PVD's better.  Reduce overhead on read (faster boot).  Free any
+PVD earlier read in ValidDisk() when Mount is called (saves 2K of ram!)
+@
+text
+@d3 1
+a3 1
+****************        -=  CDTV FILE SYSTEM  =-        ****************
+d16 1
+a16 1
+IMPORT	void	*ReadBlock();
+d18 2
+a19 2
+#define	D(x)	;
+#define	DD(x)	;
+d28 2
+a29 2
+	char	*name;
+	struct	DateStamp *date;
+d31 1
+a31 1
+	REG VOLDEV *vol;
+d33 16
+a48 16
+	/* Check if volume node already present */
+	Forbid();
+		vol  = (VOLDEV *) BTOA(DOSInfo->di_DevInfo);
+		for (; vol; vol = (VOLDEV *)BTOA(vol->dev.dl_Next))
+		{
+/*			Debug2("Check volume: %s\n",BTOA(vol->dev.dl_Name));	*/
+			if (vol->dev.dl_Type != DLT_VOLUME) continue;
+			if (!MatchBStr(name,BTOA(vol->dev.dl_Name))) continue;
+			if (!CompDate(&vol->dev.dl_VolumeDate,date)) continue;
+			break;
+		}
+	Permit();
+
+/*	if (vol) Debug2("vol found %lx %s\n",vol,&name[1]);*/
+/*	else Debug2("new vol\n");*/
+	return vol;
+d57 1
+a57 1
+	struct PrimVolDescriptor *p;
+d59 2
+a60 2
+	if (!MatchStr(p->StdIdent,STD_IDENT,sizeof(p->StdIdent)))
+		return FALSE;
+d62 3
+a64 3
+	if (p->VolDescVers != 1) return FALSE;
+
+	return TRUE;
+d71 4
+a74 4
+***	Find a valid PVD, picking a valid Amiga PVD first over just a
+***	random PVD.  The volume descriptors are read into a large
+***	temporary buffer to be scanned.  If no Amiga PVD can be found
+***	then the first valid PVD is used.
+d79 87
+a165 87
+	LONG first = 0;
+	LONG size;
+	REG LONG lsn,b,i;
+	REG PVD *p;
+	REG UBYTE *temp,*block;
+
+	/* Get a temporary buffer to search for PVD: */
+	size = 16;
+	if (!(block = MakeVector(SECT_SIZE)))
+		return NULL;
+
+	temp = MakeVector(SECT_SIZE<<4);
+	if (!temp) /* Try again, use smaller size */
+	{
+		size = 2;
+		temp = MakeVector(SECT_SIZE<<1);
+		if (!temp) {
+			FreeVector(block);
+			return NULL;
+		}
+	}
+
+	/* Search for PVD in volume descriptor area: */
+	for (lsn = 16; lsn < 256; lsn += size)
+	{
+		Debug3("\tp%lx.%lx\n",lsn,size);
+ 		D(Debug0("PVD Srch: %lx.%lx\n",lsn,size));
+
+		if (ReadCD(temp,lsn,size)) break; /* had an error */
+
+		/* Examine each sector: */
+		for (i = 0, b = 0; i < size; i++, b+=SECT_SIZE)
+		{
+			p = (PVD *)(&temp[b]);
+
+			if (!IsValidVolDesc(p)) continue;
+
+			switch (p->VolDescType)
+			{
+			case BOOT_VOL_DESC:
+				if (BootRecLSN) break;
+				if (MatchStr(((BVD*)p)->BootSysIdent,SYS_IDENT,sizeof(((BVD*)p)->BootSysIdent)))
+				{
+					BootRecLSN = lsn + i;
+				}
+				break;
+
+			case PRIM_VOL_DESC:
+				/* Save first, in case no valid Amiga PVD */
+				if (!first) {
+					first = lsn;
+					CopyMem(p,block,SECT_SIZE);
+				}
+
+				/* Is it an Amiga PVD? */
+				if (MatchStr(p->SysIdent,SYS_IDENT,sizeof(p->SysIdent)) ||
+				    MatchStr(p->SysIdent,SYS_IDENT2,sizeof(p->SysIdent)))
+				{
+					BootPVDLSN = lsn + i;  /* Only set for Amiga */
+					/* if we didn't just copy it, do now */
+					if (first != lsn)
+					    CopyMem(p,block,SECT_SIZE);
+					FreeVector(temp);
+					return (PVD *)block;
+				}
+				break;
+
+			case TERM_VOL_DESC:
+				lsn = 256;	/* stop the loop */
+				i = size;	/* stop the loop */
+				break;
+
+			default:
+				break;
+			}	
+		}
+	}
+
+	FreeVector(temp);
+
+	Debug1("\tNC\n");
+	if (first)
+		return (PVD *)block;
+
+	Debug1("\tNI\n");
+	FreeVector(block);
+	return NULL;
+d175 1
+a175 1
+	REG PVD *pvd;
+d177 1
+a177 1
+	char *p;
+d179 16
+a194 16
+	PathTableSize = pvd->PathTableSize;
+	PathTable = MakeVector(PathTableSize+16);
+
+	D(Debug0("Path/Make PathTable.  size=%ld\n",PathTableSize));
+
+	if (ReadBytes(PathTable,pvd->MPathTable[0]<<BlockShift,PathTableSize))
+	{
+		FreeVector(PathTable);
+		return FALSE;
+	}
+
+	MaxPaths = CountPaths();
+	PathIndex = MakeVector((MaxPaths+2)<<2);
+	IndexPaths();
+
+	return TRUE;
+d201 1
+a201 1
+***	Scan the PVD looking for file system options.
+d203 2
+a204 2
+***	The primary volume descriptor must still be in scratch memory
+***	for this function to work.
+d207 1
+a207 1
+#define	OC(a,b)	(((a)<<8)+(b))
+d209 1
+a209 1
+	PVD *pvd;
+d211 2
+a212 2
+	UWORD *op;
+	UWORD code,size;
+d214 60
+a273 60
+	op = (UWORD *)&pvd->ApplicationUse[1];	/* 650 bytes */
+
+	while ((code = *op++))
+	{
+		size = *op++;
+
+		Debug2("\tZ%lx.%lx\n",code,size);
+
+		switch(code)
+		{
+		case OC('B','F'):	/* boot file name */
+			CopyStr(BootFile,op,32);
+			break;
+
+		case OC('C','D'):	/* dir cache size in blocks */
+			DirCacheSize = *op;
+			break;
+
+		case OC('C','R'):	/* read cache size in blocks	*/
+			CacheSize = *op;
+			break;
+
+		case OC('D','R'):	/* direct file reading	*/
+			DirectRead = TRUE; /* V23.3 */
+			break;
+
+		case OC('F','S'):	/* fast directory searches */
+			FastSearch = TRUE;
+			break;
+
+		case OC('N','P'):	/* No prefs flag */
+			NoPrefs = TRUE;
+			break;
+
+		case OC('P','L'):	/* lock pool */
+			LockPoolSize = *op;
+			break;
+
+		case OC('P','F'):	/* file pool */
+			FilePoolSize = *op;
+			break;
+
+		case OC('R','C'):	/* read retry count	*/
+			Retry = *op;
+			break;
+
+		case OC('T','M'):	/* trademark info	*/
+			TMInfo = *((struct TMStruct *)op);
+			break;
+
+ 		case OC('D','S'):	/* Double-speed OK (data disk) */
+ 			DoubleSpeedOK = TRUE;
+ 			break;
+
+		default:
+			break;
+		}
+
+		op = (UWORD *)((LONG)op + (LONG)size);
+	}
+d282 1
+a282 1
+	BOOL boot;		/* TRUE when booting from this */
+d284 92
+a375 92
+	REG VOLDEV *vol;
+	REG PVD *pvd;
+	char	date[8];
+	struct	DateStamp stamp;
+	char	name[MAX_BSTR_LEN];
+
+	D(Debug0("Mount	: boot=%ld\n",boot));
+
+	/* Can we find a valid PVD on the disk? */
+	if (!PVDBuffer)
+	{
+		/* it hasn't been read before */
+		if (!(pvd = FindPVD())) return NULL;
+		if (boot) SetOptions(pvd);
+	} else {
+		pvd = PVDBuffer;
+		PVDBuffer = NULL;	/* we're going to free it */
+	}
+
+	/* Convert volume related info: */
+	DStrToBStr(name,pvd->VolIdent,MAX_BSTR_LEN-2);
+	ConvertDate(date,&pvd->VolCreateTime);
+	MakeDate(&stamp,&date[0]);
+
+	/* Find existing DOS Volume */
+	vol = FindVol(name,&stamp);
+
+	/* If volume doesn't exist, create it: */
+	if (!vol)
+	{
+		vol = MakeVector(sizeof(*vol));
+		if (!vol) {
+			FreeVector(pvd);
+			return NULL;
+		}
+
+		MaxBlocks = vol->MaxBlocks = pvd->VolSize;
+		BlockSize = vol->BlockSize = pvd->BlockSize;
+		BlockMask = BlockSize - 1;
+		SetBlockShift();
+
+		if (!MakePathTable(pvd)) 
+		{
+			FreeVector(pvd);
+			FreeVector(vol);
+			return NULL;
+		}
+
+		vol->dev.dl_Type = DLT_VOLUME;
+		vol->dev.dl_DiskType = ID_DOS_DISK;
+		vol->dev.dl_Name = (BSTR)ATOB(vol->name);
+		vol->dev.dl_Lock = vol->dev.dl_LockList = NULL;
+
+		RootDirLBN = vol->RootDirLBN = PathTable->Extent;
+		vol->PathTableSize = PathTableSize;
+		vol->PathTable = PathTable;
+		vol->MaxPaths = MaxPaths;
+		vol->PathIndex = PathIndex;
+
+		CopyMem(name,vol->name,name[0]+2); /* include len & term */
+		vol->dev.dl_VolumeDate = stamp;  /* struct copy */
+
+		Forbid();
+			vol->dev.dl_Next = DOSInfo->di_DevInfo;
+			DOSInfo->di_DevInfo = ATOB(vol);
+		Permit();
+	}
+	else /* remount old vol */
+	{
+		MaxBlocks = vol->MaxBlocks;
+		BlockSize = vol->BlockSize;
+		BlockMask = BlockSize - 1;
+		SetBlockShift();
+		RootDirLBN = vol->RootDirLBN;
+		PathTableSize = vol->PathTableSize;
+		PathTable = vol->PathTable;
+		MaxPaths = vol->MaxPaths;
+		PathIndex = vol->PathIndex;
+		ReadErrs = vol->ReadErrs;
+	}
+
+/*	Debug1("MB=%ld RD=%ld PTS=%ld PT=%lx\n",*/
+/*		MaxBlocks, RootDirLBN, PathTableSize, PathTable);*/
+
+	ThisVol = vol;
+	vol->dev.dl_Task = FSPort;
+
+	/* done with pvd, free it */
+	FreeVector(pvd);
+
+	Debug1("\tM%s\n", &vol->name[1]);
+	return TRUE;
+d383 2
+a384 2
+***	Unmount a CD volume.  If there are no locks on it, deallocate
+***	its resources, otherwize wait for all locks to be freed.
+d389 1
+a389 1
+	if (ThisVol && !ThisVol->dev.dl_LockList) DeMount(ThisVol);
+d391 1
+a391 1
+	ThisVol->ReadErrs = ReadErrs;
+d393 1
+a393 1
+	FlushCache();
+d395 1
+a395 1
+	ThisVol = NULL;
+d402 1
+a402 1
+***	Unlink a volume from the system tables and free its resources.
+d406 1
+a406 1
+	REG VOLDEV *vol;
+d408 1
+a408 1
+	REG VOLDEV *v;
+d410 21
+a430 21
+	/* Find the vol in dos device list (critical section): */
+	Forbid();
+	v = (VOLDEV *) BTOA(DOSInfo->di_DevInfo);
+	if (v == vol)	/* at head of list */
+	{
+		DOSInfo->di_DevInfo = v->dev.dl_Next;
+	}
+	else
+	{
+		for (; v; v = (VOLDEV *)BTOA(v->dev.dl_Next))
+		{
+			if (vol == (VOLDEV *)BTOA(v->dev.dl_Next)) break;
+		}
+
+		if (v) v->dev.dl_Next = vol->dev.dl_Next;
+	}
+	Permit();
+
+	FreeVector(vol->PathIndex);
+	FreeVector(vol->PathTable);
+	FreeVector(vol);
+d439 1
+a439 1
+	REG struct InfoData *vi;
+d441 13
+a453 13
+	if (ThisVol)
+	{
+		vi->id_NumSoftErrors	= ReadErrs;
+		vi->id_UnitNumber	= UnitNumber;
+		vi->id_DiskState	= ID_WRITE_PROTECTED;
+		vi->id_NumBlocks	= 
+		vi->id_NumBlocksUsed	= MaxBlocks;
+		vi->id_BytesPerBlock	= BlockSize;
+		vi->id_DiskType		= ThisVol->dev.dl_DiskType;
+		vi->id_VolumeNode	= ATOB(ThisVol);
+		vi->id_InUse		= (ThisVol->dev.dl_LockList?DOS_TRUE:DOS_FALSE);
+	}
+	else vi->id_DiskType = ID_NO_DISK_PRESENT; /* was DiskState, CES */
+d463 7
+a469 7
+	switch (BlockSize)
+	{
+	case 2048: BlockShift = 11; return;
+	case 1024: BlockShift = 10; return;
+	case  512: BlockShift =  9; return;
+	default:   BlockShift = 11;
+	}
+d477 2
+a478 2
+***	Call boot code, saving registers first.  Pass the second
+***	argument in A1 (an open CD I/O Request).
+d482 1
+a482 1
+	public	_CallBoot
+d484 5
+a488 5
+		movem.l	4(sp),a0/a1
+		movem.l	d2-d7/a2-a6,-(sp)
+		jsr	(a0)		; a1 for Arg
+		movem.l	(sp)+,d2-d7/a2-a6
+		rts
+@
+
+
+1.4
+log
+@Off!  I said debugging off!
+@
+text
+@d83 1
+a83 1
+	REG UBYTE *temp;
+d87 3
+d95 4
+a98 1
+		if (!temp) return 0;
+d128 4
+a131 1
+				if (!first) first = lsn;
+d138 3
+a140 1
+					CopyMem(p,ScratchBlock,SECT_SIZE);
+d142 1
+a142 1
+					return (PVD *)ScratchBlock;
+d161 1
+a161 4
+	{
+		if (ReadCD(ScratchBlock,first,1) == 0)
+			return (PVD *)ScratchBlock;
+	}
+d164 2
+a165 1
+	return 0;
+a263 1
+#ifdef	NDEF
+d265 1
+a265 1
+ 			DoubleSpeedOk = TRUE;
+a266 1
+#endif
+d293 9
+a301 2
+	if (!(pvd = FindPVD())) return NULL;
+	if (boot) SetOptions(pvd);
+d315 4
+a318 1
+		if (!vol) return NULL;
+d327 1
+d370 3
+@
+
+
+1.3
+log
+@Comments and disabled double-speed enable :-)
+@
+text
+@d18 1
+a18 1
+#define	D(x)	x;
+@
+
+
+1.2
+log
+@Remove large block of dead code, BootOptions().  This used to load
+special boot blocks and execute them.  It was referenced from
+#ifdef'ed out code.
+
+Removed in prepraration for freeing 2K of memory (ScratchBlock),
+and eliminating a 32K backwards seek and read during file system
+startup.
+@
+text
+@d18 4
+d99 1
+d173 2
+d255 6
+d282 2
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a435 42
+/***********************************************************************
+***
+***  BootOptions
+***
+***	Setup boot time options, including loading and executing
+***	some other bootstrap.
+***
+***********************************************************************/
+BootOptions()	
+{
+	REG ULONG sect,size;
+	REG ULONG *l;
+	REG BVD *b = (BVD*)ScratchBlock;
+	REG char *boot;
+
+	/* ScatchBlock hold PVD from FindPVD() */
+	SetOptions(ScratchBlock); /* do this before full boot	*/
+
+		if (BootRecLSN)	/* there is a boot rec	*/
+		{
+			if (!ReadCD(b,BootRecLSN,1))	/* get it */
+			{
+				if (!(b->BootSysUse)) /* Execute this sector? */
+				{
+					CallBoot(&b->BootSysUse[1],&DevIOReq);
+				}
+				else	/* it's a pointer to boot sectors */
+				{
+					l = (ULONG *)&b->BootSysUse[1];
+					size = *l++;	/* in sectors	*/
+					sect = *l;	/* an LSN	*/
+					boot = MakeVector(size<<SECT_SHIFT);
+					if (boot)
+					{					
+						if (ReadCD(boot,sect,size))
+							CallBoot(boot,&DevIOReq);
+					}
+					FreeVector(boot);
+				}
+			}
+		}
+}
+@

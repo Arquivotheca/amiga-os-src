@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	57
+DATE	MACRO
+		dc.b	'16.3.90'
+	ENDM
+VERS	MACRO
+		dc.b	'kickad 36.57'
+	ENDM
+VSTRING	MACRO
+		dc.b	'kickad 36.57 (16.3.90)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: kickad 36.57 (16.3.90)',0
+	ENDM

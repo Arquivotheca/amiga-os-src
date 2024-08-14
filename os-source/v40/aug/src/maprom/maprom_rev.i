@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'26.8.92'
+	ENDM
+VERS	MACRO
+		dc.b	'maprom 39.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'maprom 39.9 (26.8.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: maprom 39.9 (26.8.92)',0
+	ENDM

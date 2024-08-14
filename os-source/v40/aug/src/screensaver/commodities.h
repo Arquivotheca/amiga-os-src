@@ -1,0 +1,331 @@
+#ifndef LOCALESTR_COMMODIITES_H
+#define LOCALESTR_COMMODIITES_H
+
+
+/****************************************************************************/
+
+
+/* This file was created automatically by CatComp.
+ * Do NOT edit by hand!
+ */
+
+
+#ifndef EXEC_TYPES_H
+#include <exec/types.h>
+#endif
+
+
+/****************************************************************************/
+
+
+#define MSG_NOTHING 0
+#define MSG_NOTHING_STR ""
+
+#define MSG_WINDOW_TITLE 1
+#define MSG_WINDOW_TITLE_STR "%s: Hot Key = <%s>"
+
+#define MSG_PROJECT_MENU 2
+#define MSG_PROJECT_MENU_STR "Project"
+
+#define MSG_PROJECT_HIDE 3
+#define MSG_PROJECT_HIDE_STR "H\000Hide"
+
+#define MSG_PROJECT_QUIT 4
+#define MSG_PROJECT_QUIT_STR "Q\000Quit"
+
+#ifdef CX_EXCHANGE
+#define MSG_EX_NAME 1000
+#define MSG_EX_NAME_STR "Exchange"
+
+#define MSG_EX_TITLE 1001
+#define MSG_EX_TITLE_STR "Commodities Exchange"
+
+#define MSG_EX_DESCRIPTION 1002
+#define MSG_EX_DESCRIPTION_STR "Controls System Commodities"
+
+#define MSG_EX_AVAIL_HDR 1003
+#define MSG_EX_AVAIL_HDR_STR "Available Commodities"
+
+#define MSG_EX_INFO_HDR 1004
+#define MSG_EX_INFO_HDR_STR "Information"
+
+#define MSG_EX_SHOWINTERFACE_GAD 1005
+#define MSG_EX_SHOWINTERFACE_GAD_STR "Show Interface"
+
+#define MSG_EX_HIDEINTERFACE_GAD 1006
+#define MSG_EX_HIDEINTERFACE_GAD_STR "Hide Interface"
+
+#define MSG_EX_REMOVE_GAD 1007
+#define MSG_EX_REMOVE_GAD_STR "Remove"
+
+#define MSG_EX_STATUS_ACTIVE 1008
+#define MSG_EX_STATUS_ACTIVE_STR "Active"
+
+#define MSG_EX_STATUS_INACTIVE 1009
+#define MSG_EX_STATUS_INACTIVE_STR "Inactive"
+
+#endif /* CX_EXCHANGE */
+
+#ifdef CX_BLANKER
+#define MSG_BL_NAME 2000
+#define MSG_BL_NAME_STR "Blanker"
+
+#define MSG_BL_TITLE 2001
+#define MSG_BL_TITLE_STR "System Screen Blanker"
+
+#define MSG_BL_DESCRIPTION 2002
+#define MSG_BL_DESCRIPTION_STR "Blanks Screen When System Inactive"
+
+#define MSG_BL_SECONDS_GAD 2003
+#define MSG_BL_SECONDS_GAD_STR "Seconds:"
+
+#define MSG_BL_CYCLECOLORS_GAD 2004
+#define MSG_BL_CYCLECOLORS_GAD_STR "Cycle Colors:"
+
+#define MSG_BL_ANIMATION_GAD 2005
+#define MSG_BL_ANIMATION_GAD_STR "Animation:"
+
+#endif /* CX_BLANKER */
+
+#ifdef CX_NOCAPSLOCK
+#define MSG_NCL_NAME 3000
+#define MSG_NCL_NAME_STR "NoCapsLock"
+
+#define MSG_NCL_TITLE 3001
+#define MSG_NCL_TITLE_STR "NoCapsLock:"
+
+#define MSG_NCL_DESCRIPTION 3002
+#define MSG_NCL_DESCRIPTION_STR "Renders the CAPS LOCK key ineffective"
+
+#endif /* CX_NOCAPSLOCK */
+
+#ifdef CX_CLICKTOFRONT
+#define MSG_CTF_NAME 4000
+#define MSG_CTF_NAME_STR "ClickToFront"
+
+#define MSG_CTF_TITLE 4001
+#define MSG_CTF_TITLE_STR "ClickToFront:"
+
+#define MSG_CTF_DESCRIPTION 4002
+#define MSG_CTF_DESCRIPTION_STR "Double-Click Windows To Front"
+
+#endif /* CX_CLICKTOFRONT */
+
+#ifdef CX_AUTOPOINT
+#define MSG_AP_NAME 5000
+#define MSG_AP_NAME_STR "AutoPoint"
+
+#define MSG_AP_TITLE 5001
+#define MSG_AP_TITLE_STR "Automatic Window Activator"
+
+#define MSG_AP_DESCRIPTION 5002
+#define MSG_AP_DESCRIPTION_STR "Activates The Window Under The Mouse"
+
+#endif /* CX_AUTOPOINT */
+
+#ifdef CX_FKEY
+#define MSG_FK_NAME 6000
+#define MSG_FK_NAME_STR "FKey"
+
+#define MSG_FK_SAVE 6001
+#define MSG_FK_SAVE_STR "S\000Save Defined Keys"
+
+#define MSG_FK_TITLE 6002
+#define MSG_FK_TITLE_STR "Function To Keys:"
+
+#define MSG_FK_DESCRIPTION 6003
+#define MSG_FK_DESCRIPTION_STR "Attach Special Functions To Keys"
+
+#define MSG_FK_DEFKEYS_GAD 6004
+#define MSG_FK_DEFKEYS_GAD_STR "Defined Keys"
+
+#define MSG_FK_ADDKEY_GAD 6005
+#define MSG_FK_ADDKEY_GAD_STR "New Key"
+
+#define MSG_FK_REMKEY_GAD 6006
+#define MSG_FK_REMKEY_GAD_STR "Delete Key"
+
+#define MSG_FK_CMD_GAD 6007
+#define MSG_FK_CMD_GAD_STR "Command"
+
+#define MSG_FK_PARMS_GAD 6008
+#define MSG_FK_PARMS_GAD_STR "Command Parameters"
+
+#define MSG_FK_CMD_CYCLEW 6009
+#define MSG_FK_CMD_CYCLEW_STR "Cycle Windows"
+
+#define MSG_FK_CMD_CYCLES 6010
+#define MSG_FK_CMD_CYCLES_STR "Cycle Screens"
+
+#define MSG_FK_CMD_MAKEBIG 6011
+#define MSG_FK_CMD_MAKEBIG_STR "Enlarge Window"
+
+#define MSG_FK_CMD_MAKESMALL 6012
+#define MSG_FK_CMD_MAKESMALL_STR "Shrink Window"
+
+#define MSG_FK_CMD_TOGGLE 6013
+#define MSG_FK_CMD_TOGGLE_STR "Toggle Window Size"
+
+#define MSG_FK_CMD_INSERT 6014
+#define MSG_FK_CMD_INSERT_STR "Insert Text"
+
+#define MSG_FK_CMD_PROGRAM 6015
+#define MSG_FK_CMD_PROGRAM_STR "Run Program"
+
+#define MSG_FK_CMD_AREXX 6016
+#define MSG_FK_CMD_AREXX_STR "Run ARexx Script"
+
+#define MSG_FK_BADKEY_TITLE 6017
+#define MSG_FK_BADKEY_TITLE_STR "FKey Error"
+
+#define MSG_FK_BADKEY_PROMPT 6018
+#define MSG_FK_BADKEY_PROMPT_STR "Invalid keyboard sequence"
+
+#define MSG_FK_BADKEY_GAD 6019
+#define MSG_FK_BADKEY_GAD_STR "Continue"
+
+#endif /* CX_FKEY */
+
+#ifdef CX_CROSSDOS
+#define MSG_CD_NAME 7000
+#define MSG_CD_NAME_STR "CrossDOS"
+
+#define MSG_CD_PROJECT_SAVE 7001
+#define MSG_CD_PROJECT_SAVE_STR "S\000Save"
+
+#define MSG_CD_TITLE 7002
+#define MSG_CD_TITLE_STR "CrossDOS Controller:"
+
+#define MSG_CD_DESCRIPTION 7003
+#define MSG_CD_DESCRIPTION_STR "Control CrossDOS Features"
+
+#define MSG_CD_FILTER_GAD 7004
+#define MSG_CD_FILTER_GAD_STR "Text Filtering"
+
+#define MSG_CD_TRANS_GAD 7005
+#define MSG_CD_TRANS_GAD_STR "Text Translation"
+
+#define MSG_CD_TRANSTYPE_GAD 7006
+#define MSG_CD_TRANSTYPE_GAD_STR "Translation Types"
+
+#endif /* CX_CROSSDOS */
+
+#ifdef CX_SCREENSAVER
+#define MSG_SS_NAME 8000
+#define MSG_SS_NAME_STR "ScreenSaver"
+
+#define MSG_SS_TITLE 8001
+#define MSG_SS_TITLE_STR "System Screen Saver"
+
+#define MSG_SS_DESCRIPTION 8002
+#define MSG_SS_DESCRIPTION_STR "Save Topmost Screen to Clipboard"
+
+#endif /* CX_SCREENSAVER */
+
+
+/****************************************************************************/
+
+
+#ifdef STRINGARRAY
+
+struct AppString
+{
+    LONG   as_ID;
+    STRPTR as_Str;
+};
+
+struct AppString AppStrings[] =
+{
+    {MSG_NOTHING,MSG_NOTHING_STR},
+    {MSG_WINDOW_TITLE,MSG_WINDOW_TITLE_STR},
+    {MSG_PROJECT_MENU,MSG_PROJECT_MENU_STR},
+    {MSG_PROJECT_HIDE,MSG_PROJECT_HIDE_STR},
+    {MSG_PROJECT_QUIT,MSG_PROJECT_QUIT_STR},
+#ifdef CX_EXCHANGE
+    {MSG_EX_NAME,MSG_EX_NAME_STR},
+    {MSG_EX_TITLE,MSG_EX_TITLE_STR},
+    {MSG_EX_DESCRIPTION,MSG_EX_DESCRIPTION_STR},
+    {MSG_EX_AVAIL_HDR,MSG_EX_AVAIL_HDR_STR},
+    {MSG_EX_INFO_HDR,MSG_EX_INFO_HDR_STR},
+    {MSG_EX_SHOWINTERFACE_GAD,MSG_EX_SHOWINTERFACE_GAD_STR},
+    {MSG_EX_HIDEINTERFACE_GAD,MSG_EX_HIDEINTERFACE_GAD_STR},
+    {MSG_EX_REMOVE_GAD,MSG_EX_REMOVE_GAD_STR},
+    {MSG_EX_STATUS_ACTIVE,MSG_EX_STATUS_ACTIVE_STR},
+    {MSG_EX_STATUS_INACTIVE,MSG_EX_STATUS_INACTIVE_STR},
+#endif /* CX_EXCHANGE */
+
+#ifdef CX_BLANKER
+    {MSG_BL_NAME,MSG_BL_NAME_STR},
+    {MSG_BL_TITLE,MSG_BL_TITLE_STR},
+    {MSG_BL_DESCRIPTION,MSG_BL_DESCRIPTION_STR},
+    {MSG_BL_SECONDS_GAD,MSG_BL_SECONDS_GAD_STR},
+    {MSG_BL_CYCLECOLORS_GAD,MSG_BL_CYCLECOLORS_GAD_STR},
+    {MSG_BL_ANIMATION_GAD,MSG_BL_ANIMATION_GAD_STR},
+#endif /* CX_BLANKER */
+
+#ifdef CX_NOCAPSLOCK
+    {MSG_NCL_NAME,MSG_NCL_NAME_STR},
+    {MSG_NCL_TITLE,MSG_NCL_TITLE_STR},
+    {MSG_NCL_DESCRIPTION,MSG_NCL_DESCRIPTION_STR},
+#endif /* CX_NOCAPSLOCK */
+
+#ifdef CX_CLICKTOFRONT
+    {MSG_CTF_NAME,MSG_CTF_NAME_STR},
+    {MSG_CTF_TITLE,MSG_CTF_TITLE_STR},
+    {MSG_CTF_DESCRIPTION,MSG_CTF_DESCRIPTION_STR},
+#endif /* CX_CLICKTOFRONT */
+
+#ifdef CX_AUTOPOINT
+    {MSG_AP_NAME,MSG_AP_NAME_STR},
+    {MSG_AP_TITLE,MSG_AP_TITLE_STR},
+    {MSG_AP_DESCRIPTION,MSG_AP_DESCRIPTION_STR},
+#endif /* CX_AUTOPOINT */
+
+#ifdef CX_FKEY
+    {MSG_FK_NAME,MSG_FK_NAME_STR},
+    {MSG_FK_SAVE,MSG_FK_SAVE_STR},
+    {MSG_FK_TITLE,MSG_FK_TITLE_STR},
+    {MSG_FK_DESCRIPTION,MSG_FK_DESCRIPTION_STR},
+    {MSG_FK_DEFKEYS_GAD,MSG_FK_DEFKEYS_GAD_STR},
+    {MSG_FK_ADDKEY_GAD,MSG_FK_ADDKEY_GAD_STR},
+    {MSG_FK_REMKEY_GAD,MSG_FK_REMKEY_GAD_STR},
+    {MSG_FK_CMD_GAD,MSG_FK_CMD_GAD_STR},
+    {MSG_FK_PARMS_GAD,MSG_FK_PARMS_GAD_STR},
+    {MSG_FK_CMD_CYCLEW,MSG_FK_CMD_CYCLEW_STR},
+    {MSG_FK_CMD_CYCLES,MSG_FK_CMD_CYCLES_STR},
+    {MSG_FK_CMD_MAKEBIG,MSG_FK_CMD_MAKEBIG_STR},
+    {MSG_FK_CMD_MAKESMALL,MSG_FK_CMD_MAKESMALL_STR},
+    {MSG_FK_CMD_TOGGLE,MSG_FK_CMD_TOGGLE_STR},
+    {MSG_FK_CMD_INSERT,MSG_FK_CMD_INSERT_STR},
+    {MSG_FK_CMD_PROGRAM,MSG_FK_CMD_PROGRAM_STR},
+    {MSG_FK_CMD_AREXX,MSG_FK_CMD_AREXX_STR},
+    {MSG_FK_BADKEY_TITLE,MSG_FK_BADKEY_TITLE_STR},
+    {MSG_FK_BADKEY_PROMPT,MSG_FK_BADKEY_PROMPT_STR},
+    {MSG_FK_BADKEY_GAD,MSG_FK_BADKEY_GAD_STR},
+#endif /* CX_FKEY */
+
+#ifdef CX_CROSSDOS
+    {MSG_CD_NAME,MSG_CD_NAME_STR},
+    {MSG_CD_PROJECT_SAVE,MSG_CD_PROJECT_SAVE_STR},
+    {MSG_CD_TITLE,MSG_CD_TITLE_STR},
+    {MSG_CD_DESCRIPTION,MSG_CD_DESCRIPTION_STR},
+    {MSG_CD_FILTER_GAD,MSG_CD_FILTER_GAD_STR},
+    {MSG_CD_TRANS_GAD,MSG_CD_TRANS_GAD_STR},
+    {MSG_CD_TRANSTYPE_GAD,MSG_CD_TRANSTYPE_GAD_STR},
+#endif /* CX_CROSSDOS */
+
+#ifdef CX_SCREENSAVER
+    {MSG_SS_NAME,MSG_SS_NAME_STR},
+    {MSG_SS_TITLE,MSG_SS_TITLE_STR},
+    {MSG_SS_DESCRIPTION,MSG_SS_DESCRIPTION_STR},
+#endif /* CX_SCREENSAVER */
+};
+
+
+#endif /* STRINGARRAY */
+
+
+/****************************************************************************/
+
+
+#endif /* LOCALESTR_COMMODIITES_H */

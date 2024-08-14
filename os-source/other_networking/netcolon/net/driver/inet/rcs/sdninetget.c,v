@@ -1,0 +1,762 @@
+head     1.12;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.12; strict;
+comment  @ * @;
+
+
+1.12
+date     91.06.09.11.23.42;  author dlarson;  state Stab;
+branches ;
+next     1.11;
+
+1.11
+date     91.06.03.10.39.41;  author J_Toebes;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.05.10.14.24.46;  author J_Toebes;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.01.17.01.17.11;  author Doug;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.10.22.22.08;  author J_Toebes;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.01.09.18.12.42;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.20.21.30.21;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.17.19.02.21;  author J_Toebes;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.15.08.19.00;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.11.02.00.00.15;  author J_Toebes;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.11.01.23.39.35;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.01.21.09.02;  author Doug;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@SDNReceive and SDNAccept for INET
+@
+
+
+1.12
+log
+@???
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
+* |_o_o|\\ Copyright (c) 1990 The Software Distillery.                    *
+* |. o.| ||          All Rights Reserved                                  *
+* | .  | ||          Written by John Toebes and Doug Walker               *
+* | o  | ||          The Software Distillery                              *
+* |  . |//           207 Livingstone Drive                                *
+* ======             Cary, NC 27513                                       *
+*                    BBS:(919)-460-7430                                   *
+\* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*
+**      $Filename: SDNInetGet.c $
+**      $Author: J_Toebes $
+**      $Revision: 1.11 $
+**      $Date: 91/06/03 10:39:41 $
+**      $Log:	SDNInetGet.c,v $
+ * Revision 1.11  91/06/03  10:39:41  J_Toebes
+ * Revisions made by Toebes during my NC trip.  God only knows...
+ *
+ * Revision 1.10  91/05/10  14:24:46  J_Toebes
+ * Add in safety check for initialization to ensure proper synchronization.
+ *
+**
+**/
+
+#include "sdninet.h"
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNAccept                                                          */
+/*                                                                             */
+/* PURPOSE: Read the next incoming packet and accept new connections           */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    rc = SDNAccept(drglobal, RP);                                            */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*                                                                             */
+/*    RP        struct RPacket ** (out)    Packet that has arrived             */
+/*                                                                             */
+/*    rc        int               (ret)    SDN_OK, SDN_ERR == read error,      */
+/*                                         SDN_NONE == nothing to read         */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Driver must be prepared to handle this being called when nothing is      */
+/*       pending since multiple drivers may be sharing a signal bit.  If a     */
+/*       packet did come in, but is munged, SDN_ERR is returned;  if no packet */
+/*       was available, SDN_NONE is returned.  If a pending write request has  */
+/*       been completed, a special packet type is returned and a copy of the   */
+/*       original RPacket structure's 'statedata' pointer is returned.         */
+/*                                                                             */
+/*    The memory pointed to by RP is owned by the NET: code                    */
+/*       until FreeRPacket is called.  FreeRPacket should be called ASAP after */
+/*       calling PluckRPacket to allow the driver to reuse the RPacket for the */
+/*       next read request.                                                    */
+/*                                                                             */
+/*    When a new connection is established, this routine will return a filled  */
+/*       in RPACKET with an action indicating the establishment of the         */
+/*       connection.  For connections that are broken, a phoney rpacket is     */
+/*       also returned.                                                        */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNAccept       (register __a0 INETGLOBAL tg,
+                                register __a1 struct RPacket **rp,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   struct INETRPacket *irp;
+   int curfh;
+   int i, len;
+   struct selectargs sa;
+
+   *rp = NULL;
+
+   if (tg->fhscurmask == 0)
+   {
+      /* There are no unprocessed messages, just ask if we have anything to do */
+
+      tg->fhscurmask = tg->fhsmask;
+      sa.socks  = tg->_socks;         /* array of socket ptrs              */
+      sa.rd_set = (fd_set *)&tg->fhscurmask; /* sockets considered for read event */
+      sa.wr_set = 0;                  /* sockets considered for write event*/
+      sa.ex_set = 0;                  /* sockets considered for ex events  */
+      sa.task   = FindTask(0L);       /* task to signal when selecting     */
+      sa.sigbit = tg->socket_sigio;   /* signal to send when selecting     */
+      sa.numfds = tg->fhscount+1;     /* number of fds to consider         */
+      sa.errno  = 0;                  /* return error value                */
+      sa.rval   = 0;                  /* number of fds found ready         */
+
+      SelectAsm(&sa);
+
+      if (sa.errno)
+      {
+         /* There was some sort of error.  We really don't care, just let  */
+         /* them know that it failed.                                      */
+         return(SDN_ERR);
+      }
+
+      if (!sa.rval)
+      {
+         /* Nothing really happened, just let them know */
+         tg->fhscurmask = 0;
+         return(SDN_NONE);
+      }
+   }
+
+   /* We have something that has happened on a connection               */
+   /* Find out what it is.  We will give first attack to anyone that    */
+   /* is establishing a new connection.                                 */
+   if (tg->fhscurmask & tg->sockmask)
+   {
+      /* Reset the flag to indicate that we have processed it           */
+      tg->fhscurmask &= ~tg->sockmask;
+
+      if ((irp = (struct INETRPacket *)SDNAllocRPacket((APTR)tg, NULL, NETBUFSIZE)) == NULL)
+      {
+         BUG(("Oops, out of memory\n"));
+         return(SDN_ERR);
+      }
+
+      /* We have a new connection */
+      BUG(("Special event\n"));
+
+      /* Find us an empty slot to hold the connection */
+      for(i = 0; i < MAXCONNECT; i++)
+         if (tg->connect[i].usage == -1)
+            break;
+
+      if (i >= MAXCONNECT)
+      {
+         BUG(("Too many connections, ignoring it\n"));
+         SDNFreeRPacket((APTR)tg, irp);
+      }
+      else
+      {
+         len = sizeof(&tg->sin);
+         tg->connect[i].fh = iaccept(tg, tg->sock, &tg->sin, &len);
+         if (tg->connect[i].fh == -1)
+         {
+            BUGR("Accept Error");
+            SDNFreeRPacket((APTR)tg, irp);
+         }
+         else
+         {
+            tg->fhsmask |= INETMASK(tg->connect[i].fh);
+            BUG(("New connection %ld on: port=%ld Addr=%08lx\n",
+                  i, tg->sin.sin_port, tg->sin.sin_addr.s_addr));
+            tg->connect[i].usage = STATUS_NOINIT;
+            tg->connect[i].opack = 0;
+
+            /* Now Fabricate the new connection packet */
+            irp->con = &tg->connect[i];
+            irp->rp.Type = ACTION_NETWORK_START;
+            irp->rp.Arg1 = (LONG)irp->con;
+            *rp = &irp->rp;
+            SDNSetConData((APTR)tg, *rp, NULL);
+            return(SDN_OK);
+         }
+      }
+   }
+
+   /* No new connections, but someone came in with a request */
+   for(i = 0; i < MAXCONNECT; i++)
+   {
+      if ((tg->connect[i].usage != -1) &&
+          (tg->fhscurmask & INETMASK(tg->connect[i].fh)))
+      {
+         if ((irp = (struct INETRPacket *)SDNAllocRPacket((APTR)tg, NULL, NETBUFSIZE)) == NULL)
+         {
+            BUG(("Oops, out of memory\n"));
+            return(SDN_ERR);
+         }
+
+         irp->con = &tg->connect[i];
+         curfh = irp->con->fh;
+
+         /* This is the one that sent us a message */
+         /* Reset the flag so that we know that we have processed it    */
+         tg->fhscurmask &= ~INETMASK(curfh);
+         BUG(("AcceptRPacket: reading %d from Connection %ld. . .\n", RPSIZEN, i));
+         irp->rp.DataP[0] = '\0';
+         len = readn(tg, curfh, RPBASE(&(irp->rp)), RPSIZEN);
+
+         /* DO a sanity check on what we get.  If it is even slightly wrong  */
+         /* we should immediately terminate the connection.  If it was a     */
+         /* legitimate user, he will have to reestablish the connection.     */
+         /* Note that this will cause any outstanding locks or file handles  */
+         /* to be purged automatically.                                      */
+         if ((len != RPSIZEN)       ||
+             (irp->rp.DLen > NETBUFSIZE) ||
+             (irp->rp.DLen < 0)          ||
+             ((irp->rp.DLen != 0) &&
+              (readn(tg, curfh, irp->rp.DataP, irp->rp.DLen) != irp->rp.DLen)))
+         {
+            /* Something is wrong here, assume that the connection */
+            /* is now closed and get rid of it.                    */
+            tg->fhsmask ^= INETMASK(curfh);
+            iclose(tg, curfh);
+
+            /* We also need to remove the dead connection from the table of  */
+            /* open connections.                                             */
+            tg->connect[i].usage = -1; /* Indicate it is available           */
+
+            /* Now go through and mark all outstanding rpackets for this     */
+            /* connection as dead.                                           */
+            /* !!!!!!!!!!!!!!!!!!!!!!                                        */
+
+            /* We need to return a packet indicating that the connection     */
+            /* has now been broken                                           */
+            irp->rp.Type = ACTION_NETWORK_END;
+            irp->rp.Arg1 = (LONG)irp->con->data;
+            irp->rp.Arg2 = 0;
+            irp->rp.DLen = 0;
+         }
+         *rp = &irp->rp;
+	 if (irp->con->usage == STATUS_NOINIT)
+	 {
+	    /* This better be the initialization packet for the connection  */
+	    /* if it is, we just want to eat the packet and go back for the */
+	    /* next packet to come in.					    */
+	    /* if it isn't, just return it with an error....                */
+	    if (irp->rp.Type != ACTION_NETWORK_ESTABLISH)
+	    {
+	       irp->rp.Type = ACTION_NETWORK_DISOLVE;
+	       irp->rp.DLen = 0;
+	       SDNReply((APTR)tg, &irp->rp);
+	    }
+	    irp->con->usage = 0;
+	    continue;
+	 }
+         irp->con->usage++;
+	 if (irp->rp.Type == ACTION_NETWORK_DISOLVE)
+	    return(SDN_ERR);
+         return(SDN_OK);
+      }
+   }
+   return(SDN_NONE);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNReceive                                                         */
+/*                                                                             */
+/* PURPOSE: Get the next response packet                                       */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    rc = SDNReceive(drglobal, mask, RP);                                     */
+/*                                                                             */
+/*    drglobal  APTR              (in)  Driver-specific global data pointer    */
+/*                                                                             */
+/*    mask      ULONG             (in)  Mask of signal bits that have gone off */
+/*                                                                             */
+/*    RP        struct RPacket ** (out) RPacket that has arrived               */
+/*                                                                             */
+/*    rc        int               (ret) SDN_OK, SDN_ERR == read error,         */
+/*                                      SDN_NONE == nothing to read            */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Driver must be prepared to handle this being called when nothing is      */
+/*       pending since multiple drivers may be sharing a signal bit.  If a     */
+/*       packet did come in, but is munged, SDN_ERR is returned;  if no packet */
+/*       was available, SDN_NONE is returned.  If a pending write request has  */
+/*       been completed, a special packet type is returned and a copy of the   */
+/*       original RPacket structure's 'statedata' pointer is returned.         */
+/*                                                                             */
+/*    The memory pointed to by RP is owned by the NET: code                    */
+/*       until FreeRPacket is called.  FreeRPacket should be called ASAP after */
+/*       calling SDNReceive to allow the driver to reuse the RPacket for the   */
+/*       next read request.                                                    */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNReceive      (register __a0 INETGLOBAL tg,
+                                register __d0 ULONG mask,
+                                register __a1 struct RPacket **rp,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   int rc;
+   long sockmask, fhscurmask;
+
+   fhscurmask = tg->fhscurmask;
+   if ((sockmask = tg->sockmask) != 0)
+   {
+      tg->fhscurmask &= ~sockmask;
+      tg->fhsmask    &= ~sockmask;
+   }
+   rc = SDNAccept((APTR)tg, rp);
+   tg->fhscurmask |= fhscurmask & sockmask;
+   tg->fhsmask    |= sockmask;
+   return(rc);
+}
+@
+
+
+1.11
+log
+@Revisions made by Toebes during my NC trip.  God only knows...
+@
+text
+@d11 1
+a11 1
+**      $Filename: SDNInetGet.c $ 
+d13 2
+a14 2
+**      $Revision: 1.10 $
+**      $Date: 91/05/10 14:24:46 $
+d16 3
+d21 1
+a21 1
+ * 
+a24 1
+#include "netcomm.h"
+d78 1
+a78 1
+      
+d98 1
+a98 1
+   
+d120 1
+a120 1
+      
+d161 1
+a161 1
+   
+d203 1
+a203 1
+            
+@
+
+
+1.10
+log
+@Add in safety check for initialization to ensure proper synchronization.
+@
+text
+@d13 2
+a14 2
+**      $Revision: 1.20 $
+**      $Date: 91/03/11 11:18:39 $
+d16 3
+d210 1
+@
+
+
+1.9
+log
+@Add debugging msgs, check return codes
+@
+text
+@d10 8
+d143 1
+a143 1
+            tg->connect[i].usage = 1;
+d205 1
+a205 1
+            irp->rp.Type = ACTION_NETWORK_TERM;
+d210 15
+d226 2
+@
+
+
+1.8
+log
+@Reduce count on number of file handles searched by select.
+@
+text
+@d167 1
+a167 1
+         BUG(("AcceptRPacket: reading %d from Connection %ld. . .", RPSIZEN, i));
+@
+
+
+1.7
+log
+@Initialize connection data pointer
+@
+text
+@d73 1
+a73 1
+      sa.numfds = 32;                 /* number of fds to consider         */
+d169 1
+a169 1
+         len = readn(tg, curfh, (char *)irp, RPSIZEN);
+@
+
+
+1.6
+log
+@Corrected parameter to connection closed mechanism.
+@
+text
+@d143 1
+@
+
+
+1.5
+log
+@Major cleanup.  Generally working.
+@
+text
+@d197 1
+a197 1
+            irp->rp.Arg1 = (LONG)irp->con;
+@
+
+
+1.4
+log
+@Correct multiple bugs associated with new version. Sessions are not supported yet.
+@
+text
+@d12 1
+a12 2
+#include "netinet.h"
+#include "proto.h"
+a13 7
+#ifdef BUGR
+#undef BUGR
+#endif
+#define BUGR(s)
+
+extern void *_socks[FD_SETSIZE];
+
+d50 4
+a53 3
+int SDNAccept(drglobal, rp)
+APTR drglobal;
+struct RPacket **rp;
+a54 1
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+a55 1
+   long selectmask;
+a65 2
+      selectmask = 1L << socket_sigio;
+
+d67 1
+a67 1
+      sa.socks  = _socks;             /* array of socket ptrs              */
+d72 1
+a72 1
+      sa.sigbit = socket_sigio;       /* signal to send when selecting     */
+d102 1
+a102 1
+      if ((irp = (struct INETRPacket *)SDNAllocRPacket(drglobal, NULL)) == NULL)
+d119 1
+a119 1
+         SDNFreeRPacket(drglobal, irp);
+d124 1
+a124 1
+         tg->connect[i].fh = accept(tg->sock, &tg->sin, &len);
+d128 1
+a128 1
+            SDNFreeRPacket(drglobal, irp);
+d154 1
+a154 1
+         if ((irp = (struct INETRPacket *)SDNAllocRPacket(drglobal, NULL)) == NULL)
+d168 1
+a168 1
+         len = readn(curfh, irp, RPSIZEN);
+d179 1
+a179 1
+              (readn(curfh, irp->rp.DataP, irp->rp.DLen) != irp->rp.DLen)))
+d184 1
+a184 1
+            close(curfh);
+d240 5
+a244 4
+int SDNReceive(drglobal, mask, rp)
+APTR drglobal;
+ULONG mask;
+struct RPacket **rp;
+a245 1
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+d255 1
+a255 1
+   rc = SDNAccept(drglobal, rp);
+@
+
+
+1.3
+log
+@Clean up include files.
+@
+text
+@d146 2
+a147 2
+            tg->connect[i].usage = NULL;
+            tg->connect[i].opack = NULL;
+@
+
+
+1.2
+log
+@First implementation
+@
+text
+@a11 1
+#include "server.h"
+d13 1
+d113 1
+a113 1
+      if ((irp = (struct INETRPacket *)SDNAllocRPacket(drglobal)) == NULL)
+d165 1
+a165 1
+         if ((irp = (struct INETRPacket *)SDNAllocRPacket(drglobal)) == NULL)
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d20 2
+d63 26
+a88 8
+#if 0
+SESSION * AcceptRPacket(global, RP)
+NGLOBAL global;
+struct RPacket *RP;
+{
+   INETGLOBAL tg = global->n.d.tg;
+   int len, nfound, size;
+   long i, j;
+d90 1
+a90 3
+   for(;;)
+   {     
+      while(tg->fhscurmask == 0)
+d92 4
+a95 1
+         tg->fhscurmask = tg->fhsmask;
+d97 34
+a130 10
+         /* First we wait for any outstanding activity */
+         if ((nfound = my_select(&tg->fhscurmask)) == -1)
+         {
+            BUGR("Select Failed");
+            return(1);
+         }
+         else if (nfound == 0)
+         {
+            tg->fhscurmask = 0;
+         }
+d132 1
+a132 5
+   
+      /* We have something that has happened on a connection               */
+      /* Find out what it is.  We will give first attack to anyone that    */
+      /* is establishing a new connection.                                 */
+      if (tg->fhscurmask & tg->sockmask)
+d134 3
+a136 5
+         /* Reset the flag to indicate that we have processed it           */
+         tg->fhscurmask &= ~tg->sockmask;
+         /* We have a new connection */
+         BUG(("Special event\n"));
+         if (tg->fhscount >= (MAXCONNECT-1))
+d138 2
+a139 1
+            BUG(("Too many connections, ignoring it\n"));
+d143 12
+a154 15
+            len = sizeof(&tg->sin);
+            tg->fhs[tg->fhscount] = accept(tg->sock, &tg->sin, &len);
+            if (tg->fhs[tg->fhscount] == -1)
+            {
+               BUGR("Accept Error");
+            }
+            else
+            {
+               tg->fhsmask |= INETMASK(tg->fhs[tg->fhscount]);
+               BUG(("New connection %ld on: port=%ld Addr=%08lx\n",
+                     tg->fhscount, tg->sin.sin_port, tg->sin.sin_addr.s_addr));
+               tg->ses[tg->fhscount] = NewSession(global);
+               tg->ses[tg->fhscount]->driver = (void *)tg->fhs[tg->fhscount];
+               tg->fhscount++;
+            }
+d157 1
+d159 5
+a163 2
+      /* No new connections, but someone came in with a request */
+      for(i = 0; i < tg->fhscount; i++)
+d165 26
+a190 1
+         if (tg->fhscurmask & INETMASK(tg->fhs[i]))
+d192 4
+a195 1
+            tg->curcon = tg->fhs[i];
+d197 13
+a209 76
+            /* This is the one that sent us a message */
+            /* Reset the flag so that we know that we have processed it    */
+            tg->fhscurmask &= ~INETMASK(tg->curcon);
+            BUG(("AcceptRPacket: reading %d from Connection %ld. . .", RPSIZEN, i));
+
+            RP->DataP[0] = '\0';
+            size = readn(tg->curcon, RP, RPSIZEN);
+            /* DO a sanity check on what we get.  If it is even slightly wrong  */
+            /* we should immediately terminate the connection.  If it was a     */
+            /* legitimate user, he will have to reestablish the connection.     */
+            /* Note that this will cause any outstanding locks or file handles  */
+            /* to be purged automatically.                                      */
+            if ((size != RPSIZEN)       ||
+                (RP->DLen > NETBUFSIZE) ||
+                (RP->DLen < 0)          ||
+                ((RP->DLen != 0) &&
+                 (readn(tg->curcon, RP->DataP, RP->DLen) != RP->DLen)))
+            {
+               /* Something is wrong here, assume that the connection */
+               /* is now closed and get rid of it.                    */
+               BUGR("Connection Closed");
+               tg->fhsmask ^= INETMASK(tg->curcon);
+               close(tg->curcon);
+               /* We need to return a packet indicating that the connection     */
+               /* has now been broken                                           */
+               RP->Type = ACTION_NETWORK_TERM;
+               RP->Arg1 = (BPTR)tg->ses[i];
+               RP->DLen = 0;
+               BUG(("Done\ntype %d, Args %lx %lx %lx %lx\n", RP->Type, 
+                    RP->Arg1, RP->Arg2, 
+                    RP->Arg3, RP->Arg4));
+               /* We also need to remove the dead connection from the table of  */
+               /* open connections.                                             */
+               tg->fhscount--;
+               for(j = i; j < tg->fhscount; j++)
+               {
+                  tg->fhs[j] = tg->fhs[j+1];
+                  tg->ses[j] = tg->ses[j+1];
+               }
+               return((SESSION *)RP->Arg1);
+            }
+            BUG(("Done\ntype %d, Args %lx %lx %lx %lx\n", RP->Type, 
+                 RP->Arg1, RP->Arg2, 
+                 RP->Arg3, RP->Arg4));
+
+            /* See if we have a monitor process to inform of the event          */
+            if(global->n.infoport)
+            {
+               struct Message *m;
+               while(m=GetMsg(global->n.ntirec.m.mn_ReplyPort))
+               {
+                  if(m == &global->n.ntirec.m)
+                     global->n.inuse_rec = 0;
+                  else
+                     global->n.inuse_trans = 0;
+               }
+               global->n.inf_rec += RPSIZEN + RP->DLen;
+                  
+               if(!global->n.inuse_rec)
+               {
+                  BUG(("AcceptRPacket: Writing status info to port %lx: RECEIVE %ld\n",
+                     global->n.infoport, global->n.inf_rec))
+         
+                  global->n.ntirec.nti_bytes = global->n.inf_rec;
+                  global->n.ntirec.nti_direction = NTI_RECEIVE;
+                  PutMsg(global->n.infoport, &global->n.ntirec.m);
+         
+                  global->n.inuse_rec = 1;
+                  global->n.inf_rec = 0;
+               }
+#if DEBUG
+               else
+                  BUG(("AcceptRPacket: Skipping status write, packet outstanding\n"))
+#endif
+            }
+            return(tg->ses[i]);
+d211 3
+a213 6
+      }
+
+      if (tg->fhscurmask)
+      {
+         BUGR("UNKNOWN HANDLE!");
+         tg->fhscurmask = 0;
+a215 2
+}
+#endif
+d257 2
+d260 10
+a269 1
+   return(SDN_NONE);
+@

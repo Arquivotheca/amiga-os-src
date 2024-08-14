@@ -1,0 +1,968 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.10
+date     91.04.05.08.26.18;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.02.03.10.35.13;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.01.22.39.36;  author J_Toebes;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     91.01.01.22.30.48;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.10.11.23.04.10;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.05.26.17.38.58;  author andy;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.05.25.15.30.26;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.05.25.14.24.50;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.03.12.20.18.19;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.03.01.19.53.12;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.38.38;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@SetDate command for cdos
+@
+
+
+1.10
+log
+@Added WEEKDAY entry to TEMPLATE, so SetDate can accept output of Date as
+input.  Also added Commodore Copyright notice, and updated Distillery
+BBS number in header.
+@
+text
+@; /*
+lc -d -j73 -O -o/obj/SetDate.o -i/include -v -csf SetDate
+blink /obj/SetDate.o to /bin/SetDate sc sd nd
+protect /bin/SetDate +p
+quit
+*/
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .	| || the authors:			      BBS: (919) 460-7430    */
+/* | o	| ||   Dave Baker      Alan Beale	  Jim Cooper		     */
+/* |  . |//    Jay Denebeim    Bruce Drake	  Gordon Keener 	     */
+/* ======      John Mainwaring Andy Mercier	  Jack Rouse		     */
+/*	       John Toebes     Mary Ellen Toebes  Doug Walker	Mike Witcher */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+**/
+
+/*---------------------------------------------------------------------------*/
+/* Command: SetDate							     */
+/* Author: James E. Cooper Jr.						     */
+/* Change History:							     */
+/*  Date    Person	  Action					     */
+/* -------  ------------- -----------------				     */
+/* 24APR89  Jim Cooper	  Initial Creation				     */
+/* 27APR89  Jim Cooper	  FINISHED!					     */
+/* 03SEP89  Jim Cooper	  Converted to 1.4 dos.library (I thought!)          */
+/* 30OCT89  Jim Cooper	  Conversion to 1.4 proceeding			     */
+/* 04NOV89  Jim Cooper	  Comments added, code cleaned up, FINISHED!	     */
+/* 08DEC89  Jim Cooper	  Rearranged code to allow more flexibility.	     */
+/* 12DEC89  Jim Cooper	  Added wildcard support!			     */
+/* 04MAR90  Jim Cooper	  Modified for loss of "AnchorPath.ap_Buf"...        */
+/* 11OCT90  Jim Cooper	  Corrected message printing for invalid date	     */
+/* 11OCT90  Jim Cooper	  Kludged around StrToDate() bug.                    */
+/* 17OCT90  Jim Cooper	  Fixed "multi volumes, same name" bug, bad msg bug. */
+/* 03FEB91  Jim Cooper	  Cleaned out some unnecessary code.  Fixed some     */
+/*			  code which may have caused an incorrect error      */
+/*			  message to be printed.			     */
+/* 05APR91  Jim Cooper	  Added new keyword to TEMPLATE -- WEEKDAY to make   */
+/*			  SetDate accept output of Date as input.	     */
+/* Notes:								     */
+/*---------------------------------------------------------------------------*/
+
+#include "internal/commands.h"
+#include "setdate_rev.h"
+
+#define MSG_SETDATE_FAILED    "SetDate failed"
+#define MSG_SETDATE_FAILED_DT ": Invalid DATE or TIME string!\n"
+
+#define TEMPLATE  "FILE/A,WEEKDAY,DATE,TIME,ALL/S" CMDREV
+#define OPT_FILE  0
+#define OPT_WKDAY 1
+#define OPT_DATE  2
+#define OPT_TIME  3
+#define OPT_ALL   4
+#define OPT_COUNT 5
+
+int cmd_setdate(void)
+{
+  struct Library *SysBase = (*((struct Library **) 4));
+  struct DosLibrary *DOSBase;
+  int temprc, rc, i;
+  long opts[OPT_COUNT];
+  struct DateTime datetime;
+  struct RDargs *rdargs;
+  struct AnchorPath *ua;
+  BPTR oldlock, curlock;
+
+  rc = RETURN_FAIL;
+  if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER))) {
+    memset((char *)opts, 0, sizeof(opts));
+    rdargs = ReadArgs(TEMPLATE, opts, NULL);
+
+    if (rdargs == NULL) {
+      PrintFault(IoErr(), NULL);
+    } else {
+
+      /*---------------------------------------------------------------------*/
+      /* Set up the DateTime structure, as per the datetime.h include file.  */
+      /*---------------------------------------------------------------------*/
+      DateStamp((struct DateStamp *)&datetime); /* get the current datestamp */
+      datetime.dat_Format  = FORMAT_DOS;      /* Use DOS format of dd-mmm-yy */
+      datetime.dat_Flags   = DTF_FUTURE;   /* Monday, etc. are in the future */
+
+      /*---------------------------------------------------------------------*/
+      /* In order to get the same functionality as the BCPL command, we have */
+      /* to try each string the user typed as both a date and a time.  This  */
+      /* gives the user the flexibility to put the options in any order.     */
+      /*---------------------------------------------------------------------*/
+      for (i=OPT_WKDAY; i<OPT_ALL; i++) {
+	if (opts[i]) {
+	    datetime.dat_StrDate = (char *)opts[i];
+	    datetime.dat_StrTime = NULL;
+	/*-------------------------------------------------------------------*/
+	/* Now call DOS to convert the string to a valid DateStamp.	     */
+	/*-------------------------------------------------------------------*/
+	    if (!StrToDate((struct DateTime *)&datetime)) {
+	      datetime.dat_StrTime = (char *)opts[i];
+	      datetime.dat_StrDate = NULL;
+	    if (!StrToDate(&datetime)) {
+#if IT_WERE_A_MORE_PERFECT_WORLD
+
+	      /*-------------------------------------------------------------*/
+	      /* If StrToDate() followed the rules, it would set an IoErr()! */
+	      /*-------------------------------------------------------------*/
+	      PrintFault(IoErr(), MSG_SETDATE_FAILED);
+#else
+	      /*-------------------------------------------------------------*/
+	      /* But since StrToDate() DOESN'T set an IoErr() code, we must  */
+	      /* simply print a non-informative string. 		     */
+	      /*-------------------------------------------------------------*/
+	      PutStr(MSG_SETDATE_FAILED);
+	      PutStr(MSG_SETDATE_FAILED_DT);
+#endif
+	      goto Cleanup2;
+	    }
+	  }
+	}
+      }
+
+      /*---------------------------------------------------------------------*/
+      /* First, try to allocate a chunk of memory to use with the pattern    */
+      /* match stuff.							     */
+      /*---------------------------------------------------------------------*/
+      if ((ua = AllocVec(sizeof(struct AnchorPath),
+			 MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+	PrintFault(IoErr(),NULL);
+      } else {
+
+	/*-------------------------------------------------------------------*/
+	/* Now we have to set up the pattern match structure.		     */
+	/*-------------------------------------------------------------------*/
+	/* Set the flag which tells the pattern matcher to decode wild	     */
+	/* cards.							     */
+	/*-------------------------------------------------------------------*/
+	ua->ap_Flags = APF_DOWILD;
+
+	/*-------------------------------------------------------------------*/
+	/* Tell the matcher to stop if the user presses Ctrl-C. 	     */
+	/*-------------------------------------------------------------------*/
+	ua->ap_BreakBits = SIGBREAKF_CTRL_C;
+
+	/*-------------------------------------------------------------------*/
+	/* Finally, call the matcher.					     */
+	/*-------------------------------------------------------------------*/
+	MatchFirst((char *)opts[OPT_FILE], ua);
+	temprc = IoErr();
+
+	/*-------------------------------------------------------------------*/
+	/* Process all matches returned.  If 'MatchFirst()' returned an      */
+	/* error, the 'while()' let's us skip all this and fall through the  */
+	/* exit code.							     */
+	/*-------------------------------------------------------------------*/
+	while (temprc == 0) {
+
+	  if (ua->ap_Info.fib_DirEntryType > 0 && opts[OPT_ALL]) {
+
+	    /*---------------------------------------------------------------*/
+	    /* The flag APF_DIDDIR tells us that we are 'backing out' of a   */
+	    /* subdirectory... in other words, we have processed all sub     */
+	    /* files of that directory and we are moving back to its	     */
+	    /* parent.	If this flag is set, we need to clear it.	     */
+	    /*---------------------------------------------------------------*/
+	    if (!(ua->ap_Flags & APF_DIDDIR)) {
+
+	      /*-------------------------------------------------------------*/
+	      /* If we are stamping ALL files, tell the matcher to enter     */
+	      /* this directory.					     */
+	      /*-------------------------------------------------------------*/
+	      ua->ap_Flags |= APF_DODIR;
+	    }
+	    ua->ap_Flags &= ~APF_DIDDIR;
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* If we have an error OTHER than that we are out of matches, we   */
+	  /* need to exit IMMEDIATELY!					     */
+	  /*-----------------------------------------------------------------*/
+	  if (temprc && (temprc != ERROR_NO_MORE_ENTRIES)) {
+	    break;
+	  }
+
+	  curlock = DupLock(ua->ap_Current->an_Lock);
+	  oldlock = CurrentDir(curlock);
+
+	  /*-----------------------------------------------------------------*/
+	  /* Now set the new datestamp on this file.			     */
+	  /*-----------------------------------------------------------------*/
+	  if (!(i = SetFileDate(ua->ap_Info.fib_FileName,
+			       (struct DateStamp *)&datetime.dat_Stamp))) {
+	    temprc = IoErr();
+	  }
+
+	  CurrentDir(oldlock);
+	  UnLock(curlock);
+
+	  if (!i) {
+
+	    /*---------------------------------------------------------------*/
+	    /* If 'SetFileDate()' returned an error, we have to get out and  */
+	    /* tell the user about it!					     */
+	    /*---------------------------------------------------------------*/
+	    break;
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Now get the next file which matches the given pattern.	     */
+	  /*-----------------------------------------------------------------*/
+	  MatchNext(ua);
+	  temprc = IoErr();
+	}
+
+	/*-------------------------------------------------------------------*/
+	/* If the only error we had was that we ran out of files to stamp,   */
+	/* we are doing fine!  Set the return code so the user knows	     */
+	/* everything went well.					     */
+	/*-------------------------------------------------------------------*/
+	if (temprc == ERROR_NO_MORE_ENTRIES) {
+	  rc = RETURN_OK;
+	} else {
+	  PrintFault(temprc,MSG_SETDATE_FAILED);
+
+	  /*-----------------------------------------------------------------*/
+	  /* If the user hit Ctrl-C, we have to warn him that he is being    */
+	  /* rude!							     */
+	  /*-----------------------------------------------------------------*/
+	  if (temprc == ERROR_BREAK) {
+	    rc = RETURN_WARN;
+	  } else {
+
+	  /*-----------------------------------------------------------------*/
+	  /* If there was any other error, FAIL!!!			     */
+	  /*-----------------------------------------------------------------*/
+	    rc = RETURN_FAIL;
+	  }
+
+	}
+Cleanup:
+	/*-------------------------------------------------------------------*/
+	/* We have to clean up after ourselves. 			     */
+	/*-------------------------------------------------------------------*/
+	MatchEnd(ua);
+      }
+      FreeVec(ua);
+Cleanup2:
+      FreeArgs(rdargs);
+    }
+    CloseLibrary((struct Library *)DOSBase);
+  } else {
+    OPENFAIL;
+  }
+  return(rc);
+}
+@
+
+
+1.9
+log
+@Cleaned out unnecessary code.  Fixed a possible bug in error message
+printing.
+@
+text
+@d11 1
+a11 1
+/* | .	| || the authors:			      BBS: (919) 382-8265    */
+d18 4
+d42 2
+d51 1
+a51 1
+#define MSG_SETDATE_FAILED_DT "SetDate failed: Invalid DATE or TIME string!\n"
+d53 1
+a53 1
+#define TEMPLATE  "FILE/A,DATE,TIME,ALL/S" CMDREV
+d55 5
+a59 4
+#define OPT_DATE  1
+#define OPT_TIME  2
+#define OPT_ALL   3
+#define OPT_COUNT 4
+d93 1
+a93 1
+      for (i=OPT_DATE; i<OPT_ALL; i++) {
+d115 1
+@
+
+
+1.8
+log
+@Fixed bad msg bug reported by Bill Hawes.  Also fixed multiple volumes, same
+name bug as in Delete.
+@
+text
+@d32 1
+a32 1
+/* 11OCT90  Jim Cooper    Corrected message printing for invalid date        */
+d35 3
+d63 1
+a63 2
+  char fname[ENVMAX];
+  BPTR oldlock, flock, curlock;
+d77 1
+a77 1
+      DateStamp((long *)&datetime);             /* get the current datestamp */
+d118 1
+a118 1
+      /* match stuff. 						             */
+d126 1
+a126 1
+	/* Now we have to set up the pattern match structure. 		     */
+d128 1
+a128 1
+	/* Set the flag which tells the pattern matcher to decode wild       */
+d134 1
+a134 1
+	/* Tell the matcher to stop if the user presses Ctrl-C.	             */
+d139 1
+a139 1
+	/* Finally, call the matcher. 				             */
+d147 1
+a147 1
+	/* exit code.						             */
+d157 1
+a157 1
+	    /* parent.  If this flag is set, we need to clear it.	     */
+d172 1
+a172 1
+	  /* need to exit IMMEDIATELY!				             */
+a179 1
+	  flock = Lock(ua->ap_Info.fib_FileName, ACCESS_READ);
+d182 1
+a182 1
+	  /* Make a copy of this file's name with full path.                 */
+d184 4
+a187 1
+	  NameFromLock(flock,fname,ENVMAX);
+a188 6
+	  /*-----------------------------------------------------------------*/
+	  /* Now set the new datestamp on this file.			     */
+	  /*-----------------------------------------------------------------*/
+	  i = SetFileDate(ua->ap_Info.fib_FileName,
+			  (struct DateStamp *)&datetime.dat_Stamp);
+	  UnLock(flock);
+d196 1
+a196 1
+	    /* tell the user about it!				             */
+a197 1
+	    temprc = IoErr();
+d235 1
+a235 1
+	/* We have to clean up after ourselves.			             */
+@
+
+
+1.7
+log
+@Fixed invalid date problems.
+@
+text
+@d34 1
+d41 2
+a42 5
+#if IT_WERE_A_MORE_PERFECT_WORLD
+#define MSG_SETDATE_FAILED "SetDate failed"
+#else
+#define MSG_SETDATE_FAILED "SetDate failed: Invalid DATE or TIME string!\n"
+#endif
+d61 1
+d85 1
+a85 1
+	if(opts[i]) {
+d106 1
+a106 1
+	      PutStr(MSG_SETDATE_FAILED);
+d176 4
+d183 1
+a183 2
+	  NameFromLock(ua->ap_Current->an_Lock,fname,ENVMAX);
+	  AddPart(fname,(char *)&ua->ap_Info.fib_FileName,ENVMAX);
+d188 7
+a194 1
+	  if (!SetFileDate(fname,(struct DateStamp *)&datetime.dat_Stamp)) {
+@
+
+
+1.6
+log
+@Corrected printing of date errors.
+@
+text
+@d33 1
+d55 1
+a55 1
+   struct Library *SysBase = (*((struct Library **) 4));
+d76 1
+a76 1
+      DateStamp((long *)&datetime.dat_Stamp);   /* get the current datestamp */
+d115 11
+d127 2
+a128 2
+	/* First, try to allocate a chunk of memory to use with the pattern  */
+	/* match stuff. 						     */
+d130 6
+a135 4
+	if ((ua = AllocVec(sizeof(struct AnchorPath),
+			   MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+	  PrintFault(IoErr(),NULL);
+	} else {
+d137 5
+a141 12
+	  /*-----------------------------------------------------------------*/
+	  /* Now we have to set up the pattern match structure. 	     */
+	  /*-----------------------------------------------------------------*/
+	  /* Set the flag which tells the pattern matcher to decode wild     */
+	  /* cards.							     */
+	  /*-----------------------------------------------------------------*/
+	  ua->ap_Flags = APF_DOWILD;
+
+	  /*-----------------------------------------------------------------*/
+	  /* Tell the matcher to stop if the user presses Ctrl-C.	     */
+	  /*-----------------------------------------------------------------*/
+	  ua->ap_BreakBits = SIGBREAKF_CTRL_C;
+d143 6
+a148 5
+	  /*-----------------------------------------------------------------*/
+	  /* Finally, call the matcher. 				     */
+	  /*-----------------------------------------------------------------*/
+	  MatchFirst((char *)opts[OPT_FILE], ua);
+	  temprc = IoErr();
+d150 1
+a150 25
+	  /*-----------------------------------------------------------------*/
+	  /* Process all matches returned.  If 'MatchFirst()' returned an    */
+	  /* error, the 'while()' let's us skip all this and fall through    */
+	  /* the exit code.						     */
+	  /*-----------------------------------------------------------------*/
+	  while (temprc == 0) {
+
+	    if (ua->ap_Info.fib_DirEntryType > 0 && opts[OPT_ALL]) {
+
+	      /*-------------------------------------------------------------*/
+	      /* The flag APF_DIDDIR tells us that we are 'backing out' of a */
+	      /* subdirectory... in other words, we have processed all sub   */
+	      /* files of that directory and we are moving back to its	     */
+	      /* parent.  If this flag is set, we need to clear it.	     */
+	      /*-------------------------------------------------------------*/
+	      if (!(ua->ap_Flags & APF_DIDDIR)) {
+
+		/*-----------------------------------------------------------*/
+		/* If we are stamping ALL files, tell the matcher to enter   */
+		/* this directory.					     */
+		/*-----------------------------------------------------------*/
+		ua->ap_Flags |= APF_DODIR;
+	      }
+	      ua->ap_Flags &= ~APF_DIDDIR;
+	    }
+d153 12
+a164 5
+	    /* If we have an error OTHER than that we are out of matches, we */
+	    /* need to exit IMMEDIATELY!				     */
+	    /*---------------------------------------------------------------*/
+	    if (temprc && (temprc != ERROR_NO_MORE_ENTRIES)) {
+	      break;
+d166 2
+d169 7
+a175 5
+	    /*---------------------------------------------------------------*/
+	    /* Make a copy of this file's name with full path.               */
+	    /*---------------------------------------------------------------*/
+	    NameFromLock(ua->ap_Current->an_Lock,fname,ENVMAX);
+	    AddPart(fname,(char *)&ua->ap_Info.fib_FileName,ENVMAX);
+d177 5
+a181 4
+	    /*---------------------------------------------------------------*/
+	    /* Now set the new datestamp on this file.			     */
+	    /*---------------------------------------------------------------*/
+	    if (!SetFileDate(fname,(struct DateStamp *)&datetime.dat_Stamp)) {
+d183 4
+a186 7
+	      /*-------------------------------------------------------------*/
+	      /* If 'SetFileDate()' returned an error, we have to get out    */
+	      /* and tell the user about it!				     */
+	      /*-------------------------------------------------------------*/
+	      temprc = IoErr();
+	      break;
+	    }
+d189 2
+a190 1
+	    /* Now get the next file which matches the given pattern.	     */
+a191 1
+	    MatchNext(ua);
+d193 1
+d197 1
+a197 3
+	  /* If the only error we had was that we ran out of files to stamp, */
+	  /* we are doing fine!  Set the return code so the user knows	     */
+	  /* everything went well.					     */
+d199 3
+a201 4
+	  if (temprc == ERROR_NO_MORE_ENTRIES) {
+	    rc = RETURN_OK;
+	  } else {
+	    PrintFault(temprc,MSG_SETDATE_FAILED);
+d203 9
+a211 7
+	    /*---------------------------------------------------------------*/
+	    /* If the user hit Ctrl-C, we have to warn him that he is being  */
+	    /* rude!							     */
+	    /*---------------------------------------------------------------*/
+	    if (temprc == ERROR_BREAK) {
+	      rc = RETURN_WARN;
+	    } else {
+d213 7
+a219 6
+	    /*---------------------------------------------------------------*/
+	    /* If there was any other error, FAIL!!!			     */
+	    /*---------------------------------------------------------------*/
+	      rc = RETURN_FAIL;
+	    }
+	  }
+a220 1
+Cleanup:
+d222 1
+a222 1
+	  /* We have to clean up after ourselves.			     */
+d224 3
+a226 1
+	  MatchEnd(ua);
+d228 7
+a234 1
+	  FreeVec(ua);
+a243 13
+
+#if 0
+int aprintf( fmt, args )
+char *fmt, *args;
+{
+struct Library *SysBase = (*((struct Library **) 4));
+   struct Library *DOSBase; 
+   DOSBase=OpenLibrary("dos.library",36);
+   VFPrintf( Output(), fmt, (LONG *)&args );
+   CloseLibrary(DOSBase);
+   return(0);
+}
+#endif
+@
+
+
+1.5
+log
+@now handles times
+@
+text
+@d32 1
+d39 1
+d41 3
+d94 15
+a108 1
+	      StrToDate((struct DateTime *)&datetime);
+d110 2
+a111 2
+/*	else if (IoErr()) break; */
+      	}
+a112 4
+      if (IoErr()) {
+	PrintFault(IoErr(), MSG_SETDATE_FAILED);
+      } 
+	else {
+d232 1
+d234 1
+a234 2
+	}
+      }
+@
+
+
+1.4
+log
+@uses SysBase stash for execbase
+@
+text
+@d80 3
+a82 2
+	datetime.dat_StrDate = (char *)opts[i];
+
+d86 7
+a92 6
+	if (StrToDate((struct DateTime *)&datetime) != NULL) {
+	  datetime.dat_StrTime = datetime.dat_StrDate;
+	  datetime.dat_StrDate = NULL;
+	  StrToDate((struct DateTime *)&datetime);
+	}
+	if (IoErr()) break;
+a93 1
+
+d96 2
+a97 1
+      } else {
+d228 13
+@
+
+
+1.3
+log
+@new version from Software Distillery
+corrections of return codes
+@
+text
+@d49 1
+@
+
+
+1.2
+log
+@JT update
+@
+text
+@d11 5
+a15 5
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker   Mike Witcher */
+d19 14
+a32 14
+/* Command: SetDate                                                          */
+/* Author: James E. Cooper Jr.                                               */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 24APR89  Jim Cooper    Initial Creation                                   */
+/* 27APR89  Jim Cooper    FINISHED!                                          */
+/* 03SEP89  Jim Cooper    Converted to 1.4 dos.library (I thought!)          */
+/* 30OCT89  Jim Cooper    Conversion to 1.4 proceeding                       */
+/* 04NOV89  Jim Cooper    Comments added, code cleaned up, FINISHED!         */
+/* 08DEC89  Jim Cooper    Rearranged code to allow more flexibility.         */
+/* 12DEC89  Jim Cooper    Added wildcard support!                            */
+/* 04MAR90  Jim Cooper    Modified for loss of "AnchorPath.ap_Buf"...        */
+/* Notes:                                                                    */
+d79 1
+a79 1
+        datetime.dat_StrDate = (char *)opts[i];
+d81 9
+a89 9
+        /*-------------------------------------------------------------------*/
+        /* Now call DOS to convert the string to a valid DateStamp.          */
+        /*-------------------------------------------------------------------*/
+        if (StrToDate((struct DateTime *)&datetime) != NULL) {
+          datetime.dat_StrTime = datetime.dat_StrDate;
+          datetime.dat_StrDate = NULL;
+          StrToDate((struct DateTime *)&datetime);
+        }
+        if (IoErr()) break;
+d93 1
+a93 1
+        PrintFault(IoErr(), MSG_SETDATE_FAILED);
+d96 112
+a207 111
+        /*-------------------------------------------------------------------*/
+        /* First, try to allocate a chunk of memory to use with the pattern  */
+        /* match stuff.                                                      */
+        /*-------------------------------------------------------------------*/
+        if ((ua = AllocVec(sizeof(struct AnchorPath),
+                           MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+          PrintFault(IoErr(),NULL);
+        } else {
+
+          /*-----------------------------------------------------------------*/
+          /* Now we have to set up the pattern match structure.              */
+          /*-----------------------------------------------------------------*/
+          /* Set the flag which tells the pattern matcher to decode wild     */
+          /* cards.                                                          */
+          /*-----------------------------------------------------------------*/
+          ua->ap_Flags = APF_DOWILD;
+
+          /*-----------------------------------------------------------------*/
+          /* Tell the matcher to stop if the user presses Ctrl-C.            */
+          /*-----------------------------------------------------------------*/
+          ua->ap_BreakBits = SIGBREAKF_CTRL_C;
+
+          /*-----------------------------------------------------------------*/
+          /* Finally, call the matcher.                                      */
+          /*-----------------------------------------------------------------*/
+          temprc = MatchFirst((char *)opts[OPT_FILE], ua);
+
+          /*-----------------------------------------------------------------*/
+          /* Process all matches returned.  If 'MatchFirst()' returned an    */
+          /* error, the 'while()' let's us skip all this and fall through    */
+          /* the exit code.                                                  */
+          /*-----------------------------------------------------------------*/
+          while (temprc == NULL) {
+
+            if (ua->ap_Info.fib_DirEntryType > 0 && opts[OPT_ALL]) {
+
+              /*-------------------------------------------------------------*/
+              /* The flag APF_DIDDIR tells us that we are 'backing out' of a */
+              /* subdirectory... in other words, we have processed all sub   */
+              /* files of that directory and we are moving back to its       */
+              /* parent.  If this flag is set, we need to clear it.          */
+              /*-------------------------------------------------------------*/
+              if (!(ua->ap_Flags & APF_DIDDIR)) {
+
+                /*-----------------------------------------------------------*/
+                /* If we are stamping ALL files, tell the matcher to enter   */
+                /* this directory.                                           */
+                /*-----------------------------------------------------------*/
+                ua->ap_Flags |= APF_DODIR;
+              }
+              ua->ap_Flags &= ~APF_DIDDIR;
+            }
+
+            /*---------------------------------------------------------------*/
+            /* If we have an error OTHER than that we are out of matches, we */
+            /* need to exit IMMEDIATELY!                                     */
+            /*---------------------------------------------------------------*/
+            if (temprc && (temprc != ERROR_NO_MORE_ENTRIES)) {
+              break;
+            }
+
+            /*---------------------------------------------------------------*/
+            /* Make a copy of this file's name with full path.               */
+            /*---------------------------------------------------------------*/
+            NameFromLock(ua->ap_Current->an_Lock,fname,ENVMAX);
+            AddPart(fname,(char *)&ua->ap_Info.fib_FileName,ENVMAX);
+
+            /*---------------------------------------------------------------*/
+            /* Now set the new datestamp on this file.                       */
+            /*---------------------------------------------------------------*/
+            if (!SetFileDate(fname,(struct DateStamp *)&datetime.dat_Stamp)) {
+
+              /*-------------------------------------------------------------*/
+              /* If 'SetFileDate()' returned an error, we have to get out    */
+              /* and tell the user about it!                                 */
+              /*-------------------------------------------------------------*/
+              temprc = IoErr();
+              break;
+            }
+
+            /*---------------------------------------------------------------*/
+            /* Now get the next file which matches the given pattern.        */
+            /*---------------------------------------------------------------*/
+            temprc = MatchNext(ua);
+
+          }
+
+          /*-----------------------------------------------------------------*/
+          /* If the only error we had was that we ran out of files to stamp, */
+          /* we are doing fine!  Set the return code so the user knows       */
+          /* everything went well.                                           */
+          /*-----------------------------------------------------------------*/
+          if (temprc == ERROR_NO_MORE_ENTRIES) {
+            rc = RETURN_OK;
+          } else {
+            PrintFault(temprc,MSG_SETDATE_FAILED);
+
+            /*---------------------------------------------------------------*/
+            /* If the user hit Ctrl-C, we have to warn him that he is being  */
+            /* rude!                                                         */
+            /*---------------------------------------------------------------*/
+            if (temprc == ERROR_BREAK) {
+              rc = RETURN_WARN;
+            } else {
+
+            /*---------------------------------------------------------------*/
+            /* If there was any other error, FAIL!!!                         */
+            /*---------------------------------------------------------------*/
+              rc = RETURN_FAIL;
+            }
+          }
+d210 6
+a215 6
+          /*-----------------------------------------------------------------*/
+          /* We have to clean up after ourselves.                            */
+          /*-----------------------------------------------------------------*/
+          MatchEnd(ua);
+          FreeVec(ua);
+        }
+@
+
+
+1.1
+log
+@version number update
+@
+text
+@d31 1
+d55 1
+d71 1
+a71 1
+      datetime.dat_Flags   = DTB_FUTURE;   /* Monday, etc. are in the future */
+d100 1
+a100 1
+        if ((ua = AllocVec(sizeof(struct AnchorPath)+255,
+a107 3
+          ua->ap_Strlen = 255;
+
+          /*-----------------------------------------------------------------*/
+d124 3
+a126 1
+          /* If the matcher says we're done, set the return code and exit.   */
+d128 1
+a128 4
+          if (temprc == ERROR_NO_MORE_ENTRIES) {
+            rc = RETURN_OK;
+            goto Cleanup;
+          }
+a129 21
+          /*-----------------------------------------------------------------*/
+          /* Matcher says the user hit Ctrl-C, let's quit!                   */
+          /*-----------------------------------------------------------------*/
+          if (temprc == ERROR_BREAK) {
+            PrintFault(temprc,NULL);
+            rc = RETURN_WARN;
+            goto Cleanup;
+          }
+
+          /*-----------------------------------------------------------------*/
+          /* If we got any other error code, tell the user about it and exit!*/
+          /*-----------------------------------------------------------------*/
+          if (temprc != NULL) {
+            PrintFault(temprc,MSG_SETDATE_FAILED);
+            goto Cleanup;
+          }
+
+          /*-----------------------------------------------------------------*/
+          /* Process all matches returned.                                   */
+          /*-----------------------------------------------------------------*/
+          do {
+d158 1
+a158 2
+            /* If we got this far, we can assume we are going to exit with a */
+            /* good return code.                                             */
+d160 2
+a161 1
+            rc = RETURN_OK;
+d166 1
+a166 2
+            if (!SetFileDate((char *)&ua->ap_Buf,
+                             (struct DateStamp *)&datetime.dat_Stamp)) {
+d169 2
+a170 7
+              /* Here's a tricky one.  If you type the name of a device, OR  */
+              /* your current directory is the ROOT of a device AND you use  */
+              /* "" and the ALL option, SetFileDate will return an unusual   */
+              /* error -- "ERROR_OBJECT_NOT_FOUND"!  Of course!  How do you  */
+              /* set the FILE date on a DEVICE???  We have to check for this */
+              /* here; the case of the user typing an invalid name was       */
+              /* already taken care of by MatchFirst/MatchNext.
+d172 2
+a173 4
+              if (IoErr() != ERROR_OBJECT_NOT_FOUND) {
+                PrintFault(IoErr(), (char *)&ua->ap_Info.fib_FileName);
+                rc = RETURN_ERROR;
+              }
+d181 1
+a181 1
+          } while (temprc == NULL);
+a188 1
+            temprc = NULL;
+d190 2
+a191 1
+          }
+d193 7
+a199 8
+          /*-----------------------------------------------------------------*/
+          /* If the user hit Ctrl-C, we have to warn him that he is being    */
+          /* rude!                                                           */
+          /*-----------------------------------------------------------------*/
+          if (temprc == ERROR_BREAK) {
+            PrintFault(temprc,NULL);
+            rc = RETURN_WARN;
+          }
+d201 5
+a205 6
+          /*-----------------------------------------------------------------*/
+          /* If there was any other error, tell the user about it and leave! */
+          /*-----------------------------------------------------------------*/
+          if (temprc != NULL) {
+            PrintFault(temprc,NULL);
+            rc = RETURN_FAIL;
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@@

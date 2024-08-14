@@ -1,0 +1,14 @@
+VERSION		EQU	35
+REVISION	EQU	11
+DATE	MACRO
+		dc.b	'25.7.92'
+	ENDM
+VERS	MACRO
+		dc.b	'canonbj10 35.11'
+	ENDM
+VSTRING	MACRO
+		dc.b	'canonbj10 35.11 (25.7.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: canonbj10 35.11 (25.7.92)',0
+	ENDM

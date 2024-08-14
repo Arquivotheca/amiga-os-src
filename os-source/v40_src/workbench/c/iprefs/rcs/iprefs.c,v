@@ -1,0 +1,971 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.7
+date     93.02.23.12.45.02;  author vertex;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.11.06.13.09.41;  author vertex;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.08.13.17.11.00;  author vertex;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.08.10.16.36.09;  author vertex;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.07.16.06.23;  author vertex;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.07.01.18.52.40;  author vertex;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.23.14.59.41;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@System preferences daemon
+@
+
+
+39.7
+log
+@Added beta alert support
+@
+text
+@
+/* includes */
+#include <exec/ports.h>
+#include <exec/libraries.h>
+#include <exec/tasks.h>
+#include <exec/lists.h>
+#include <exec/nodes.h>
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/execbase.h>
+#include <dos/notify.h>
+#include <dos/dostags.h>
+#include <dos/dosextens.h>
+#include <utility/tagitem.h>
+#include <libraries/locale.h>
+#include <prefs/sound.h>
+#include <prefs/icontrol.h>
+#include <internal/iprefs.h>
+#include <string.h>
+#include <dos.h>
+
+/* prototypes */
+#include <clib/dos_protos.h>
+#include <clib/exec_protos.h>
+#include <clib/locale_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/alib_protos.h>
+#include <clib/utility_protos.h>
+
+#define EXEC_PRIVATE_PRAGMAS
+
+/* direct ROM interface */
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/locale_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+/* application includes */
+#include "iprefs_rev.h"
+#include "iprefs.h"
+#include "sound.h"
+#include "eventloop.h"
+
+
+/*****************************************************************************/
+
+
+extern struct ExecBase *SysBase;
+extern struct Library  *IntuitionBase;
+extern struct Library  *GfxBase;
+extern struct Library  *DOSBase;
+extern struct Library  *UtilityBase;
+extern struct Library  *LayersBase;
+extern struct Library  *LocaleBase;
+
+
+/*****************************************************************************/
+
+
+#ifdef BETA_VERSION
+VOID BetaAlert(VOID);
+STRPTR TaggedOpenLibrary(LONG);
+#endif
+
+static VOID ProcessLoop(VOID);
+static struct Process *CreateNewProcess(ULONG tag1, ...);
+
+VOID far DisplayBeepPatch(VOID);
+VOID far OpenScreenPatch(VOID);
+VOID far CloseWorkBenchPatch(VOID);
+VOID far BackdropRender(VOID);
+
+
+/*****************************************************************************/
+
+
+#define NUM_PREFS_FILES 13
+
+
+/*****************************************************************************/
+
+
+/* from eventloop.c */
+extern struct MsgPort  audioPort;
+extern BOOL	       doResetWB;
+extern struct Task    *parentTask;
+extern struct Task    *iprefsTask;
+
+/* from sound.c */
+extern BOOL              doFlash;
+extern struct SoundPrefs sp;
+extern APTR              oldDisplayBeep;
+
+/* from backdrop.c */
+extern struct Hook            render;
+extern struct SignalSemaphore bl;
+extern APTR                   oldOpenScreen;
+extern APTR                   oldCloseWorkBench;
+
+
+/*****************************************************************************/
+
+
+LONG main(VOID)
+{
+BPTR *nextHunk;
+
+    geta4();
+
+    SysBase       = (*((struct ExecBase **) 4));
+    parentTask    = SysBase->ThisTask;
+
+    DOSBase       = OpenLibrary("dos.library" VERSTAG,39);
+    IntuitionBase = OpenLibrary("intuition.library",39);
+    GfxBase       = OpenLibrary("graphics.library",39);
+    UtilityBase   = OpenLibrary("utility.library",39);
+    LayersBase    = OpenLibrary("layers.library",39);
+
+    if (DOSBase && IntuitionBase && GfxBase && UtilityBase && LayersBase)
+    {
+        Forbid();
+
+        if (!FindTask(IPREFSNAME))
+        {
+            if (iprefsTask = (struct Task *)CreateNewProcess(NP_Entry,      ProcessLoop,
+                                                             NP_CurrentDir, NULL,
+                                                             NP_StackSize,  3500,
+                                                             NP_Name,       IPREFSNAME,
+                                                             NP_Priority,   0,
+                                                             NP_WindowPtr,  NULL,
+                                                             NP_HomeDir,    NULL,
+                                                             NP_CopyVars,   FALSE,
+                                                             TAG_DONE))
+            {
+                SetSignal(0,SIGF_CHILD);
+                Wait(SIGF_CHILD);
+
+                /* the following causes the first hunk of the load file to
+                 * remain attached to the shell (so it gets freed), while
+                 * all other hunks are detached and so stay in memory after
+                 * this process terminate
+                 */
+                nextHunk  = BADDR(Cli()->cli_Module);
+                *nextHunk = NULL;
+
+                parentTask = NULL;
+
+                Permit();
+
+                return(RETURN_OK);
+            }
+        }
+
+        Permit();
+    }
+
+    if (DOSBase)
+    {
+        CloseLibrary(DOSBase);
+        CloseLibrary(GfxBase);
+        CloseLibrary(IntuitionBase);
+        CloseLibrary(LayersBase);
+        CloseLibrary(UtilityBase);
+    }
+
+    return(RETURN_FAIL);
+}
+
+
+/*****************************************************************************/
+
+
+static struct Process *CreateNewProcess(ULONG tag1, ...)
+{
+    return(CreateNewProc((struct TagItem *)&tag1));
+}
+
+
+/*****************************************************************************/
+
+
+static VOID CheckLocale(VOID)
+{
+BPTR lock;
+
+    if (LocaleBase = OpenLibrary("locale.library",38))
+    {
+        if (lock = Lock("ENV:Sys/locale.prefs",ACCESS_READ))
+        {
+            UnLock(lock);
+        }
+        else
+        {
+            /* guaranteed to work */
+            CloseLocale(SetDefaultLocale(OpenLocale(NULL)));
+        }
+    }
+}
+
+
+/*****************************************************************************/
+
+
+static VOID MakeWBInterleaved(VOID)
+{
+struct IScreenModePrefs ismp;
+struct Preferences      prefs;
+ULONG                   mode;
+
+    GetPrefs(&prefs,sizeof(prefs));
+
+    mode = HIRES_KEY;
+    if (prefs.LaceWB)
+        mode = HIRESLACE_KEY;
+
+    ismp.ism_DisplayID = mode;
+    ismp.ism_Width     = (UWORD)-1;
+    ismp.ism_Height    = (UWORD)-1;
+    ismp.ism_Depth     = 2;
+    ismp.ism_Control   = WBINTERLEAVED;
+
+    SetIPrefs(&ismp, (LONG)sizeof ismp, (LONG)IP_SCREENMODE);
+}
+
+
+/*****************************************************************************/
+
+
+static VOID TurnOnPromotion(VOID)
+{
+struct IIControlPrefs icp;
+BPTR                  lock;
+
+    if (lock = Lock("ENV:Sys/icontrol.prefs",ACCESS_READ))
+    {
+        UnLock(lock);
+    }
+    else
+    {
+        icp.iic_TimeOut     = 50;
+        icp.iic_MetaDrag    = IEQUALIFIER_LCOMMAND;
+        icp.iic_ICFlags     = ICF_COERCE_LACE | ICF_STRGAD_FILTER | ICF_MENUSNAP | ICF_MODEPROMOTE;
+        icp.iic_WBtoFront   = 'N';
+        icp.iic_FrontToBack = 'M';
+        icp.iic_ReqTrue     = 'V';		/* CKey: Requester TRUE		*/
+        icp.iic_ReqFalse    = 'B';
+
+        SetIPrefs(&icp, (LONG)sizeof icp, (LONG)IP_ICONTROL);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID NewList(struct List *list)
+{
+    list->lh_Head     = (struct Node *)&list->lh_Tail;
+    list->lh_Tail     = NULL;
+    list->lh_TailPred = (struct Node *)list;
+}
+
+
+/*****************************************************************************/
+
+
+static VOID ProcessLoop(VOID)
+{
+struct NotifyRequest   nr[NUM_PREFS_FILES];
+struct MsgPort         notifyPort;
+UWORD                  i;
+char                   name[30];
+struct SignalSemaphore iprefsLock;
+
+    geta4();
+
+    memset(nr,0,sizeof(nr));
+
+    notifyPort.mp_SigTask      = iprefsTask;
+    notifyPort.mp_SigBit       = SIGBREAKB_CTRL_C;
+    notifyPort.mp_Flags        = PA_SIGNAL;
+    notifyPort.mp_Node.ln_Type = NT_MSGPORT;
+    NewList(&notifyPort.mp_MsgList);
+
+    audioPort.mp_SigTask      = iprefsTask;
+    audioPort.mp_SigBit       = SIGBREAKB_CTRL_D;
+    audioPort.mp_Flags        = PA_SIGNAL;
+    audioPort.mp_Node.ln_Type = NT_MSGPORT;
+    NewList(&audioPort.mp_MsgList);
+
+    CheckLocale();
+    MakeWBInterleaved();
+    TurnOnPromotion();
+
+    Forbid();
+
+    /* install the patch to DisplayBeep() */
+    doFlash             = TRUE;
+    sp.sop_DisplayQueue = TRUE;
+    sp.sop_AudioQueue   = FALSE;
+    oldDisplayBeep = (APTR)SetFunction(IntuitionBase,-96,(VOID *)DisplayBeepPatch);
+
+    /* install the patches to OpenScreenTagList() and CloseWorkBench() */
+    render.h_Entry = (APTR)BackdropRender;
+    InitSemaphore(&bl);
+    oldOpenScreen     = (APTR)SetFunction(IntuitionBase,-612,(VOID *)OpenScreenPatch);
+    oldCloseWorkBench = (APTR)SetFunction(IntuitionBase,-78,(VOID *)CloseWorkBenchPatch);
+
+    Permit();
+
+#ifdef BETA_VERSION
+    if (Strnicmp("Beta",TaggedOpenLibrary(-5),4) != 0)
+    {
+        BetaAlert();
+    }
+#endif
+
+    i = 0;
+    while (i < NUM_PREFS_FILES)
+    {
+        ExtractPrefsName(i,name);
+
+        nr[i].nr_Name                 = name;
+        nr[i].nr_UserData             = i;
+        nr[i].nr_stuff.nr_Msg.nr_Port = &notifyPort;
+        nr[i].nr_Flags                = NRF_SEND_MESSAGE|NRF_NOTIFY_INITIAL|NRF_WAIT_REPLY;
+
+        if (!StartNotify(&nr[i]))
+            break;
+
+        i++;
+    }
+
+    InitSemaphore(&iprefsLock);
+    iprefsLock.ss_Link.ln_Name = iprefsTask->tc_Node.ln_Name;
+    AddSemaphore(&iprefsLock);
+
+    doResetWB = FALSE;
+
+    EventLoop(&notifyPort,&iprefsLock);
+}
+@
+
+
+39.6
+log
+@Turns on promotion if there is no icontrol prefs file
+@
+text
+@d28 1
+d30 2
+d37 1
+d61 5
+d311 7
+@
+
+
+39.5
+log
+@Removed the tags to set the IO handles of the subprocess to NULL
+  DataTypes doesn't like that
+@
+text
+@d17 1
+d221 27
+d285 1
+@
+
+
+39.4
+log
+@Changes to support the new "split the seglist in half" trick.
+@
+text
+@a116 3
+                                                             NP_Input,      NULL,
+                                                             NP_Output,     NULL,
+                                                             NP_Error,      NULL,
+@
+
+
+39.3
+log
+@Now correctly clears out the "nr" array prior to use, was causing inconsistencies
+Pings Intuition to get it to do interleaved WB even when no screenmode.prefs file
+  is present
+@
+text
+@a13 2
+#include <intuition/intuition.h>
+#include <internal/iprefs.h>
+d16 2
+d24 1
+a25 1
+#include <clib/locale_protos.h>
+d31 1
+a32 1
+#include <pragmas/locale_pragmas.h>
+a36 2
+#include "resetwb.h"
+#include "pread.h"
+d38 1
+a38 2
+#include "backdrop.h"
+#include "texttable.h"
+d42 23
+a64 21
+
+
+struct ExecBase *SysBase;
+struct Library  *IntuitionBase;
+struct Library  *GfxBase;
+struct Library  *DOSBase;
+struct Library  *UtilityBase;
+struct Library  *LayersBase;
+struct Library  *WorkbenchBase;
+struct LIbrary  *IFFParseBase;
+struct Library  *LocaleBase;
+struct Library  *DataTypesBase = NULL;
+
+
+/*****************************************************************************/
+
+
+VOID ProcessLoop(VOID);
+VOID CheckLocale(VOID);
+
+
+a67 2
+/* must end with a | ! */
+#define PREFS_FILES     "screenmode|overscan|icontrol|printer|printergfx|serial|input|pointer|palette|locale|sound|font|wbpattern|"
+d74 16
+a89 5
+struct MsgPort  audioPort;
+WORD            notifyIndex;
+BOOL		doResetWB;
+struct Task    *parentTask;
+struct Task    *iprefsTask;
+d97 2
+d101 1
+a101 1
+    SysBase       = (*((struct SysBase **) 4));
+d116 12
+a127 9
+            if (iprefsTask = (struct Task *)CreateNewProcTags(NP_Entry,      ProcessLoop,
+                                                              NP_StackSize,  3500,
+                                                              NP_Name,       IPREFSNAME,
+                                                              NP_CopyVars,   FALSE,
+                                                              NP_WindowPtr,  NULL,
+                                                              NP_HomeDir,    NULL,
+                                                              NP_CurrentDir, NULL,
+                                                              NP_Priority,   0,
+                                                              TAG_DONE))
+d129 1
+d132 7
+a138 2
+                Cli()->cli_Module = NULL;
+                parentTask        = NULL;
+d140 2
+d143 1
+d167 1
+a167 1
+VOID ExtractPrefsName(UWORD index, STRPTR name)
+d169 2
+a170 20
+UWORD i,j,k;
+
+    i = 0;
+    j = 0;
+    while (TRUE)
+    {
+        strcpy(name,"ENV:Sys/");
+        k = 8;
+        while (PREFS_FILES[j] != '|')
+            name[k++] = PREFS_FILES[j++];
+        j++;
+        name[k] = 0;
+        strcat(name,".prefs");
+
+        if (i == index)
+            return;
+
+        i++;
+    }
+ }
+d176 1
+a176 1
+VOID CheckLocale()
+d198 1
+a198 1
+VOID MakeWBInterleaved(VOID)
+d211 2
+a212 2
+    ismp.ism_Width     = -1;
+    ismp.ism_Height    = -1;
+d223 12
+a234 1
+VOID ProcessLoop(VOID)
+a236 3
+struct NotifyMessage  *nmsg;
+ULONG                  sigs;
+BOOL                   didPrefs;
+a245 4
+    InitSemaphore(&iprefsLock);
+    iprefsLock.ss_Link.ln_Name = IPREFSNAME;
+    AddSemaphore(&iprefsLock);
+
+d261 15
+a275 2
+    InstallAudioPatch();
+    InstallBackdropPatch();
+d293 4
+a297 6
+    while (TRUE)
+    {
+        didPrefs = FALSE;
+	while (nmsg = (struct NotifyMsg *)GetMsg(&notifyPort))
+	{
+            ExtractPrefsName(nmsg->nm_NReq->nr_UserData,name);
+d299 1
+a299 24
+            ObtainSemaphore(&iprefsLock);
+	    ReadPrefsFile(name);
+	    ReleaseSemaphore(&iprefsLock);
+
+	    ReplyMsg(nmsg);
+	    didPrefs = TRUE;
+	}
+
+	if (doResetWB && didPrefs)
+    	    doResetWB = !ResetWB();
+
+	SignalParent();
+
+        sigs = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_D | SIGBREAKF_CTRL_E | SIGBREAKF_CTRL_F);
+
+        if (sigs & SIGBREAKF_CTRL_D)
+            CleanUpAudio();
+
+        if (sigs & SIGBREAKF_CTRL_F)
+            DoAudio();
+
+        if (sigs & SIGBREAKF_CTRL_E)
+            UpdateDTBackdrops();
+    }
+@
+
+
+39.2
+log
+@Removed support for QUIT/S command-line option
+Added support for WB backdrops
+Made a heck of a lot smaller
+@
+text
+@d15 1
+d194 25
+d232 2
+d251 1
+d260 1
+@
+
+
+39.1
+log
+@Initial V39 RCS checkin
+@
+text
+@a37 1
+#include "soundpatch.h"
+d39 1
+d47 8
+a54 7
+struct Library  *IntuitionBase = NULL;
+struct Library  *GfxBase       = NULL;
+struct Library  *DiskfontBase  = NULL;
+struct Library  *DOSBase       = NULL;
+struct Library  *IFFParseBase  = NULL;
+struct Library  *LocaleBase    = NULL;
+struct Library  *UtilityBase   = NULL;
+d61 1
+a61 13
+struct NotifyNode
+{
+    struct MinNode	 nn_Node;
+    struct NotifyRequest nn_NReq;
+};
+
+
+/*****************************************************************************/
+
+
+VOID CleanUp(AppStringsID string, STRPTR extra);
+VOID SetUpNotification(STRPTR fname, enum PrefsType type);
+LONG ProcessLoop(VOID);
+d68 3
+a70 3
+#define TEMPLATE  "QUIT/S" VERSTAG
+#define OPT_QUIT  0
+#define OPT_COUNT 1
+d73 8
+a80 29
+/*****************************************************************************/
+
+
+#define SMPREFSNAME		"ENV:Sys/screenmode.prefs"
+#define OSPREFSNAME		"ENV:Sys/overscan.prefs"
+#define ICTRLPREFSNAME		"ENV:Sys/icontrol.prefs"
+#define PRINTERPREFSNAME	"ENV:Sys/printer.prefs"
+#define PGFXPREFSNAME		"ENV:Sys/printergfx.prefs"
+#define SERIALPREFSNAME		"ENV:Sys/serial.prefs"
+#define INPUTPREFSNAME		"ENV:Sys/input.prefs"
+#define POINTERPREFSNAME	"ENV:Sys/pointer.prefs"
+#define PALETTEPREFSNAME	"ENV:Sys/palette.prefs"
+#define LOCALEPREFSNAME		"ENV:Sys/locale.prefs"
+#define SOUNDPREFSNAME	        "ENV:Sys/sound.prefs"
+#define FONTPREFSNAME	        "ENV:Sys/font.prefs"
+#define WBPATTERNPREFSNAME      "ENV:Sys/wbpattern.prefs"
+
+
+/*****************************************************************************/
+
+
+struct List	   notifyList;
+struct MsgPort     notifyPort;
+struct MsgPort     audioPort;
+BOOL               notifyError = FALSE;
+struct Preferences oprefs;
+BOOL		   doResetWB;
+struct Task       *parentTask;
+BPTR               parentSegment = NULL;
+d88 4
+a91 8
+BOOL                         quit;
+struct Task                 *task;
+LONG                         opts[OPT_COUNT];
+LONG                         error;
+struct RDArgs               *rdargs;
+struct TagItem               tags[6];
+struct Process              *process;
+struct CommandLineInterface *cli;
+d93 5
+a97 1
+    geta4();
+d99 3
+a101 1
+    SysBase = (*((struct SysBase **) 4));
+d103 16
+a118 1
+    NewList(&notifyList);
+d120 4
+a123 30
+    parentTask = SysBase->ThisTask;
+
+    if ((!(IntuitionBase = OpenLibrary("intuition.library",39))
+     || (!(GfxBase = OpenLibrary("graphics.library",39)))
+     || (!(UtilityBase = OpenLibrary("utility.library",39)))
+     || (!(DOSBase = OpenLibrary("dos.library",39)))))
+    {
+        CleanUp(MSG_NOTHING,NULL);
+	return(RETURN_FAIL);
+    }
+
+    memset(opts,0,sizeof(opts));
+    if (!(rdargs = ReadArgs(TEMPLATE,opts,NULL)))
+    {
+	error = IoErr();
+        OpenCat();
+        PrintFault(error,GetString(MSG_IP_ERROR));
+        CloseCat();
+        CleanUp(MSG_NOTHING,NULL);
+        return(RETURN_FAIL);
+    }
+
+    quit = (BOOL)opts[OPT_QUIT];
+    FreeArgs(rdargs);
+
+    Forbid();
+    if ((task = FindTask(IPREFSNAME)) || quit)
+    {
+        if ((quit) && (task))
+            Signal(task,SIGBREAKF_CTRL_C);
+d125 2
+a126 1
+	Permit();
+d128 7
+a134 9
+	if (quit)
+	{
+	    CleanUp(MSG_NOTHING,NULL);
+	}
+	else
+	{
+	    CleanUp(MSG_IP_ALREADY_RUNNING,NULL);
+	}
+	return(RETURN_OK);
+d137 6
+a142 1
+    InstallAudioPatch();
+d144 3
+a146 11
+    tags[0].ti_Tag  = NP_Entry;
+    tags[0].ti_Data = (ULONG)ProcessLoop;
+    tags[1].ti_Tag  = NP_StackSize;
+    tags[1].ti_Data = 3000;
+    tags[2].ti_Tag  = NP_Name;
+    tags[2].ti_Data = (ULONG)IPREFSNAME;
+    tags[3].ti_Tag  = NP_CopyVars;
+    tags[3].ti_Data = (ULONG)FALSE;
+    tags[4].ti_Tag  = NP_WindowPtr;
+    tags[4].ti_Data = NULL;
+    tags[5].ti_Tag  = TAG_END;
+d148 3
+a150 1
+    if (!CreateNewProc(tags))
+d152 12
+a163 3
+        Permit();
+        CleanUp(MSG_IP_ERROR_NO_MEMORY,NULL);
+        return(RETURN_FAIL);
+d165 2
+d168 2
+a169 9
+    Wait(SIGF_CHILD);
+
+    parentTask = NULL;
+    process    = (struct Process *)SysBase->ThisTask;
+    if (cli = (struct CommandLineInterface *)((ULONG)process->pr_CLI * 4))
+    {
+        parentSegment   = cli->cli_Module;
+        cli->cli_Module = NULL;
+    }
+d171 3
+a173 1
+    Permit();
+d175 12
+a186 1
+    return(RETURN_OK);
+d193 1
+a193 1
+LONG ProcessLoop(VOID)
+d195 8
+a202 5
+struct NotifyMessage *nmsg;
+struct NotifyRequest *nreq;
+ULONG                 sigs;
+ULONG                 notifyBit, audioBit;
+BOOL                  didPrefs;
+d206 6
+a211 2
+    notifyPort.mp_SigTask      = SysBase->ThisTask;
+    notifyPort.mp_SigBit       = AllocSignal(-1);
+d216 2
+a217 2
+    audioPort.mp_SigTask      = SysBase->ThisTask;
+    audioPort.mp_SigBit       = AllocSignal(-1);
+d222 1
+a222 2
+    notifyBit = 1L << notifyPort.mp_SigBit;
+    audioBit = 1L << audioPort.mp_SigBit;
+d224 2
+a225 1
+    CheckLocale();
+d227 2
+a228 15
+    SetUpNotification(SMPREFSNAME,          SMID);
+    SetUpNotification(OSPREFSNAME,          OSID);
+    SetUpNotification(ICTRLPREFSNAME,       ICID);
+    SetUpNotification(PRINTERPREFSNAME,     PTID);
+    SetUpNotification(PGFXPREFSNAME,        PGID);
+    SetUpNotification(SERIALPREFSNAME,      SRID);
+    SetUpNotification(INPUTPREFSNAME,       IPID);
+    SetUpNotification(POINTERPREFSNAME,     PPID);
+    SetUpNotification(PALETTEPREFSNAME,     PLID);
+    SetUpNotification(LOCALEPREFSNAME,      LPID);
+    SetUpNotification(SOUNDPREFSNAME,       SPID);
+    SetUpNotification(FONTPREFSNAME,        FPID);
+    SetUpNotification(WBPATTERNPREFSNAME,   WBID);
+
+    if (notifyError)
+d230 10
+a239 1
+        return(RETURN_FAIL);
+d248 6
+a253 2
+	    nreq = nmsg->nm_NReq;
+	    ReadPrefsFile(nreq->nr_Name,nreq->nr_UserData);
+d263 1
+a263 1
+        sigs = Wait(notifyBit | audioBit | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F);
+d265 1
+a265 4
+        if (sigs & SIGBREAKF_CTRL_C)
+            break;
+
+        if (sigs & audioBit)
+a269 37
+    }
+
+    CleanUpAudio();
+    RemoveAudioPatch();
+    CleanUp(MSG_IP_USER_ABORT,NULL);
+    return(RETURN_OK);
+}
+
+
+/*****************************************************************************/
+
+
+#pragma libcall LocaleBase SetDefaultLocale a8 801
+struct Locale *SetDefaultLocale(struct Locale *locale);
+
+VOID CheckLocale()
+{
+BPTR lock;
+
+    if (lock = Lock(LOCALEPREFSNAME,ACCESS_READ))
+    {
+        UnLock(lock);
+    }
+    else
+    {
+        if (LocaleBase = OpenLibrary("locale.library",38))
+        {
+            /* guaranteed to work */
+            CloseLocale(SetDefaultLocale(OpenLocale(NULL)));
+            CloseLibrary(LocaleBase);
+            LocaleBase = NULL;
+        }
+    }
+}
+
+
+/*****************************************************************************/
+d271 2
+a272 76
+
+VOID SetUpNotification(STRPTR fname, enum PrefsType type)
+{
+struct NotifyNode *nn;
+
+    if (!notifyError)
+    {
+        if (!(nn = AllocVec(sizeof(struct NotifyNode),MEMF_CLEAR|MEMF_PUBLIC)))
+        {
+            CleanUp(MSG_IP_ERROR_NO_MEMORY,NULL);
+            notifyError = TRUE;
+            return;
+        }
+
+        nn->nn_NReq.nr_Name                 = fname;
+        nn->nn_NReq.nr_UserData             = type;
+        nn->nn_NReq.nr_stuff.nr_Msg.nr_Port = &notifyPort;
+        nn->nn_NReq.nr_Flags                = NRF_SEND_MESSAGE|NRF_NOTIFY_INITIAL|NRF_WAIT_REPLY;
+
+        if (!StartNotify(&nn->nn_NReq))
+        {
+            FreeVec(nn);
+            CleanUp(MSG_IP_ERROR_NO_NOTIFICATION,fname);
+            notifyError = TRUE;
+            return;
+        }
+
+        AddTail(&notifyList,(struct Node *)nn);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID CleanUp(AppStringsID string, STRPTR extra)
+{
+struct EasyStruct  ez;
+struct NotifyNode *nn;
+
+    if (string != MSG_NOTHING)
+    {
+        OpenCat();
+        ez.es_StructSize   = sizeof(struct EasyStruct);
+        ez.es_Flags        = 0;
+        ez.es_Title        = GetString(MSG_IP_REQTITLE);
+        ez.es_TextFormat   = GetString(string);
+        ez.es_GadgetFormat = GetString(MSG_IP_EXIT_GADGET);
+
+        EasyRequestArgs(NULL,&ez,0,&extra);
+        CloseCat();
+    }
+
+    while (nn = (struct NotifyNode *) RemHead(&notifyList))
+    {
+    	EndNotify(&nn->nn_NReq);
+	FreeVec(nn);
+    }
+
+    SignalParent();
+    Delay(10); /* task switch to let parent run and exit if needed */
+
+/* !!! Before closing datatypes.library, we need to relinquish any objects
+ * that were allocated from it
+ * !!!
+ */
+
+    CloseLibrary(DataTypesBase);
+    CloseLibrary(IntuitionBase);
+    CloseLibrary(GfxBase);
+    CloseLibrary(UtilityBase);
+
+    if (parentSegment)
+    {
+        Forbid();
+        UnLoadSeg(parentSegment);
+a273 2
+
+    CloseLibrary(DOSBase);
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'6.3.92'
+	ENDM
+VERS	MACRO
+		dc.b	'battmem 39.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'battmem 39.2 (6.3.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: battmem 39.2 (6.3.92)',0
+	ENDM

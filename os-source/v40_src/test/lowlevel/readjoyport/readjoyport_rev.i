@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	16
+DATE	MACRO
+		dc.b	'24.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ReadJoyPort 1.16'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ReadJoyPort 1.16 (24.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ReadJoyPort 1.16 (24.5.93)',0
+	ENDM

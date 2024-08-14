@@ -1,0 +1,13 @@
+#pragma libcall HyperBase RLDispatch      1e             1002
+#pragma libcall HyperBase LockHyperBase   24              801
+#pragma libcall HyperBase UnlockHyperBase 2a              001
+#pragma libcall HyperBase ExpungeDataBases 30              001
+#pragma libcall HyperBase OpenHyper       36             9802
+#pragma libcall HyperBase OpenHyperAsync  3c             0802
+#pragma libcall HyperBase CloseHyper      42              801
+#pragma libcall HyperBase HyperSignal     48              801
+#pragma libcall HyperBase GetHyperMsg     4e              801
+#pragma libcall HyperBase ReplyHyperMsg   54              801
+#pragma libcall HyperBase SetHyperContext 5a            10803
+#pragma libcall HyperBase SendHyperContext 60             0802
+#pragma libcall HyperBase SendHyperCmd    66            10803

@@ -1,0 +1,382 @@
+head     36.12;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.12
+date     91.01.22.19.47.30;  author jesup;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     90.12.07.04.01.32;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.12.02.07.11.56;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.09.13.14.32.15;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.08.31.14.47.49;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.06.14.02.30.27;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.05.29.05.24.08;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     90.04.05.05.21.30;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     90.02.20.20.13.54;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.12.08.08.21.39;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.10.18.14.07.55;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.31.52;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.12
+log
+@Added notify on directory change
+DateStamp cast
+@
+text
+@/* create.c */
+
+#include "ram_includes.h"
+#include "ram.h"
+
+/********************************************************/
+/* ptr := create(dir,name,mode,is_dir)                  */
+/*                                                      */
+/* Create a new entry in the specified directory        */
+/* The entry is by default a directory.			*/
+/* Gives a lock on the object				*/
+/********************************************************/
+
+struct lock *
+create (lock,string,mode,is_dir)
+	struct lock *lock;
+	char *string;
+	LONG mode;		/* SHARED_LOCK or EXCLUSIVE_LOCK */
+	LONG is_dir;		/* true if creating a directory  */
+{
+	struct node *node;
+	struct node *dptr,*save;
+	char name[MAX_FILENAME+1];
+	char *comm = NULL;
+	LONG prot = 0;
+
+	DBUG1("Creating %s",(LONG)string);
+
+	dptr = checklock(lock);
+	if (dptr == NULL)
+		return NULL;
+
+	dptr = finddir(dptr,string,name);
+	if (dptr == NULL)
+		return NULL;
+	DBUG1("Found dir 0x%lx",(LONG)dptr);
+
+	if (!checkname(name))
+		return NULL;
+
+	/* save comment and protection fields */
+	if (findentry(dptr,name,TRUE))
+	{
+		if (is_dir || current_node->type == ST_USERDIR)
+		{
+			/* don't delete file on CreateDir! */
+			/* don't change dir into a file! */
+			fileerr = ERROR_OBJECT_EXISTS;
+			return NULL;
+		}
+
+		prot = current_node->prot;
+		comm = current_node->comment;
+		current_node->comment = NULL;	/* so delete won't free it */
+		save = current_node;
+	}
+
+	/* attempt to delete previous entry */
+	/* delete won't update the dir date if notify is FALSE */
+	if (!(delete(dptr,name,FALSE)) &&
+	    (fileerr != ERROR_OBJECT_NOT_FOUND))
+	{
+		/* restore comment since delete failed */
+		save->comment = comm;
+		return NULL;
+	}
+
+	DBUG("Removed previous entry");
+	node = getvec(sizeof(*node));
+	if (!node) {
+		/* ack!  couldn't allocate (very unlikely), but file	*/
+		/* is already gone.  Oh well.				*/
+		freevec(comm);
+		return NULL;
+	}
+
+	/* increment size used */
+	spaceused += 1;
+
+	/* Fill in next back type list size */
+	node->next  = dptr->list;
+	node->back  = dptr;
+	node->type  = ST_USERDIR;
+	node->list  = NULL;
+	node->firstlink = NULL;
+	node->size  = 0;
+	node->prot  = prot;
+	node->comment = comm;
+	NewList((struct List *) &(node->notify_list));
+	NewList((struct List *) &(node->record_list));
+	NewList((struct List *) &(node->rwait_list));
+
+	/* link in at head */
+	dptr->list = node;
+
+	/* set creation date */
+	DateStamp((struct DateStamp *) (node->date));
+
+	/* update root modified time (to,from) */
+	/* WHY????? */
+	/*copydate(root->date,node->date);*/		/* macro */
+
+	/* update parents date */
+	/* dptr cannot be null */
+	copydate(dptr->date,node->date);	/* macro */
+
+	/* notify anyone waiting that the directory has changed */
+	notifynode(dptr);
+
+	/* update directory archive, not that it's useful even on a real disk */
+	/* too useless for rom */
+	/*dptr->prot &= ~FIBF_ARCHIVE;*/
+
+	strcpy(node->name,name);
+
+	DBUG1("Returning lock on node 0x%lx",(LONG)node);
+
+	/* find notify requests, attach, don't notify yet */
+	find_notifies(node,FALSE);
+
+	/* get lock, mark file/dir as modified */
+	lock = getlock(node,mode);
+	if (lock)
+		lock->flags |= LOCK_MODIFY;
+	else {
+		/* Oops, tried to lock it, failed (probably low mem)    */
+		/* Since we're going to return failure, free the thing. */
+		/* Update dir change date, since the file is gone.	*/
+		delete(dptr,name,TRUE);	/* ignore return code */
+
+		/* we now return lock, which is NULL */
+	}
+
+	return lock;
+}
+@
+
+
+36.11
+log
+@save/restore comments, better error handling
+@
+text
+@d97 1
+a97 1
+	DateStamp(node->date);
+d106 7
+@
+
+
+36.10
+log
+@use faster routine
+@
+text
+@d22 1
+a22 1
+	struct node *dptr;
+d24 1
+a24 1
+	char *comm = FALSE;
+d54 2
+d62 3
+d66 1
+d70 4
+a73 1
+	if (!node)
+d75 1
+d118 8
+@
+
+
+36.9
+log
+@Commented out datestamp of root, removed useless conditional
+@
+text
+@d63 2
+a64 2
+	node = (struct node *) mygetvec(sizeof(*node));
+	if (node == NULL)
+@
+
+
+36.8
+log
+@Fixed "transforming file" problems
+@
+text
+@d57 1
+d86 1
+d90 2
+a91 1
+	copydate(root->date,node->date);		/* macro */
+d94 2
+a95 2
+	if (dptr != NULL)
+		copydate(dptr->date,node->date);	/* macro */
+@
+
+
+36.7
+log
+@Added mode parameter
+@
+text
+@d7 1
+a7 1
+/* ptr := create(dir,name,mode)                         */
+d15 1
+a15 1
+create (lock,string,mode)
+d19 1
+d42 1
+a42 1
+	if (findentry(dptr,name,TRUE))		/* fix? overwrite problems */
+d44 8
+@
+
+
+36.6
+log
+@changes for polymorph links
+@
+text
+@d7 1
+a7 1
+/* ptr := create(dir,name)                              */
+d11 1
+a11 1
+/* Gives an exclusive lock on the object		*/
+d15 1
+a15 1
+create (lock,string)
+d18 1
+d93 1
+a93 1
+	lock = getlock(node,EXCLUSIVE_LOCK);
+@
+
+
+36.5
+log
+@for rcs 4.x header change
+@
+text
+@d64 1
+a64 1
+	node->links = 0;
+@
+
+
+36.4
+log
+@getvec changes, new dos calls
+@
+text
+@@
+
+
+36.3
+log
+@Newlists for the new lists
+@
+text
+@d52 1
+a52 1
+	node = (struct node *) mygetvec((sizeof(*node)+3) >> 2);
+d75 1
+a75 1
+	datstamp(node->date);
+@
+
+
+36.2
+log
+@added links field, soft link mods
+@
+text
+@d68 3
+a70 1
+	NewList(&(node->notify_list));
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d11 1
+d40 1
+a40 1
+	if (findentry(dptr,name))
+d60 7
+a66 6
+	node->next = dptr->list;
+	node->back = dptr;
+	node->type = ST_USERDIR;
+	node->list = NULL;
+	node->size = 0;
+	node->prot = prot;
+@

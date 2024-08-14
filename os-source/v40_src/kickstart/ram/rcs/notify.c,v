@@ -1,0 +1,691 @@
+head     36.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.11
+date     90.08.31.14.51.41;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.06.13.02.46.57;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.05.30.18.07.32;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.04.05.05.22.34;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.03.18.15.47.38;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.02.20.20.32.04;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     89.12.08.08.24.42;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     89.10.18.14.16.47;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.10.06.00.38.30;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.09.18.23.04.54;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.32.19;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.11
+log
+@removed references to COPY_DATA
+@
+text
+@/* notify.c */
+
+#include "ram_includes.h"
+#include "ram.h"
+
+#define AllocNew(x)	((struct x *) AllocMem(sizeof(struct x),MEMF_CLEAR))
+
+/* Currently requires nr_Private to be COMPLETE path back to root! */
+/* We ignore nr_Name.  Dos sets up nr_Private to be the full path for us */
+/* FIX!? */
+
+/* #define NRF_COPY_DATA 4 */
+
+LONG
+addnotify (req)
+	struct NotifyRequest *req;
+{
+	struct notify *notify;
+	struct node *node;
+
+	/* make sure we get memory */
+	notify = AllocNew(notify);
+	if (!notify)
+		return FALSE;
+
+	notify->Req	  = req;	/* returned when notify removed */
+	req->nr_MsgCount  = 0;
+
+	/* notify->node is NULL */
+
+	/* set up name pointer to last part of name - for use in orphans */
+	notify->Name = tail(req->nr_FullName);
+
+	/* see if there's a node to attach it to */
+	if (node = exists(req->nr_FullName))
+	{
+		/* YES! add it to the list of waiting notifies */
+		AddHead((struct List *)
+			&(current_node->notify_list),(struct Node *) notify);
+
+		notify->node = current_node;
+
+		/* deal with NOTIFY_INITIAL - notify if it exists */
+		if (req->nr_Flags & NRF_NOTIFY_INITIAL)
+			do_notify(notify);
+
+		return DOS_TRUE;
+	}
+
+	/* failure - add to orphaned list */
+	/* For a real fs, we might want to attach it as far down the */
+	/* directory tree as possible, to reduce the number of times we */
+	/* have to check it.  This would imply having an orphan list with */
+	/* each directory in memory (or associated with the disk key of */
+	/* the directory entry more likely). */
+
+	AddHead((struct List *) &orphaned,(struct Node *) notify);
+
+	return DOS_TRUE;
+}
+
+/* remove a notify request */
+
+LONG
+remnotify (req)
+	struct NotifyRequest *req;
+{
+	struct notify *notify;
+	struct node *node;
+
+	if (node = exists(req->nr_FullName))
+	{
+		/* YES! it MUST be in the list */
+		notify = (struct notify *) node->notify_list.mlh_Head;
+	} else {
+		notify = (struct notify *) orphaned.mlh_Head;
+	}
+
+
+	for ( ; notify->Succ; notify = notify->Succ)
+	{
+		if (notify->Req == req)
+		{
+			/* GOT IT */
+			req = notify->Req;
+
+			/* deal with WAIT_REPLY, so we're safe */
+			/* careful! */
+#ifdef USE_COPY_DATA
+			if ((req->nr_Flags & (NRF_WAIT_REPLY|NRF_COPY_DATA)) &&
+			    req->nr_MsgCount)
+#else
+			if ((req->nr_Flags & NRF_WAIT_REPLY) &&
+			    req->nr_MsgCount)
+#endif
+				notify->msg->nm_DoNotTouch &= ~NRF_WAIT_REPLY;
+
+			Remove((struct Node *) notify);
+			FreeMem((char *)notify,sizeof(*notify));
+
+			return DOS_TRUE;
+		}
+	}
+
+	return NULL;
+}
+
+/* support routine for above */
+struct node *
+exists (file)
+	char *file;
+{
+	return findnode(root,file,TRUE);
+}
+
+/* notify all interested parties about change to locked object */
+
+void
+notify (lock)
+	struct lock *lock;
+{
+	lock->flags &= ~LOCK_MODIFY;
+
+	/* assume lock is valid */
+	notifynode((struct node *) lock->lock.fl_Key);
+}
+
+void
+notifynode (node)
+	struct node *node;
+{
+	struct notify *notify;
+
+	for (notify = (struct notify *) node->notify_list.mlh_Head;
+	     notify->Succ;
+	     notify = notify->Succ)
+	{
+		do_notify(notify);
+	}
+}
+
+/* notify someone */
+
+void
+do_notify (notify)
+	struct notify *notify;
+{
+	struct NotifyMessage *msg;
+	struct NotifyRequest *req;
+#ifdef USE_COPY_DATA
+	struct lock *lock;
+#endif
+
+	req = notify->Req;
+
+	/* check for outstanding message */
+#ifdef USE_COPY_DATA
+	if ((req->nr_Flags & (NRF_WAIT_REPLY | NRF_COPY_DATA)) &&
+	    req->nr_MsgCount > 0)
+#else
+	if ((req->nr_Flags & NRF_WAIT_REPLY) &&
+	    req->nr_MsgCount > 0)
+#endif
+	{
+		req->nr_Flags |= NRF_MAGIC; /* so we can do delayed notify */
+		return;
+	}
+
+#ifdef USE_COPY_DATA
+	/* COPY_DATA implies WAIT_REPLY! */
+
+	if ((req->nr_Flags & NRF_COPY_DATA) &&
+	    (notify->node->type == ST_FILE))
+	{
+		/* get lock */
+		lock = getlock(notify->node,SHARED_LOCK);
+		if (!lock)
+			return;	/* must be under exclusive write lock - FIX? */
+
+		/* equivalent to openmakefile */
+		lock->block  = (struct data *) (notify->node->list);
+		/* rest of the lock fields are set up already */
+
+		/* transfer the data */
+		req->nr_Actual = read(lock,req->nr_Data+4,req->nr_Length);
+		req->nr_FileSize = notify->node->size;
+
+		freelock(lock);
+		/* often used with messages or signals */
+	}
+#endif
+
+	if (req->nr_Flags & NRF_SEND_SIGNAL)
+	{
+		Signal(req->nr_stuff.nr_Signal.nr_Task,
+		       (1L << req->nr_stuff.nr_Signal.nr_SignalNum));
+	}
+
+	if ((req->nr_Flags & NRF_SEND_MESSAGE) && 
+	    ((msg = FindMsg()) != NULL))
+	{
+/* use jimm's method! FIX */
+		msg->nm_ExecMessage.mn_ReplyPort = MyReplyPort;
+		msg->nm_Class       = NOTIFY_CLASS;	/* FIX */
+		msg->nm_Code        = NOTIFY_CODE;		/* FIX */
+		msg->nm_NReq	    = req;
+#ifdef USE_COPY_DATA
+		msg->nm_DoNotTouch  = (req->nr_Flags &
+					    (NRF_WAIT_REPLY | NRF_COPY_DATA)) ?
+				      NRF_WAIT_REPLY : 0;
+#else
+		msg->nm_DoNotTouch  = req->nr_Flags & NRF_WAIT_REPLY;
+#endif
+		msg->nm_DoNotTouch2 = (LONG) notify;
+
+		PutMsg(req->nr_stuff.nr_Msg.nr_Port,&(msg->nm_ExecMessage));
+
+		req->nr_MsgCount++;
+		notify->msg      =  msg;
+	}
+}
+
+/* take a node, and attach any orphaned notifications to it */
+
+void
+find_notifies (node,flag)
+	struct node *node;
+	long flag;
+{
+	char filename[MAX_FILENAME+1];
+
+	struct node *dptr;
+	struct notify *notify,*next;
+
+	for (notify = (struct notify *) orphaned.mlh_Head;
+	     notify->Succ;
+	     notify = next)
+	{
+		/* we may change what list notify is in */
+		next = notify->Succ;
+
+		/* do filenames match? */
+		if (stricmp(notify->Name,node->name) == SAME)
+		{
+			/* now we really have to check directories */
+			dptr = finddir(root,(char *) notify->Req->nr_FullName,
+				       filename);
+			if (dptr == node->back)
+			{
+				/* got it! */
+				Remove((struct Node *) notify);
+				AddHead((struct List *) &(node->notify_list),
+					(struct Node *) notify);
+
+				notify->node = node;
+
+				/* tell person about it */
+				if (flag)
+					do_notify(notify);
+			}
+		}
+	}
+}
+
+/* find or create a NotifyMessage */
+
+struct NotifyMessage *
+FindMsg ()
+{
+	struct NotifyMessage *msg;
+
+	if (!(((struct Node *) FreeMessages.mlh_Head)->ln_Succ))
+	{
+		/* no free messages, create one */
+		return AllocNew(NotifyMessage);
+	}
+
+	msg = (struct NotifyMessage *) FreeMessages.mlh_Head;
+	Remove(&(msg->nm_ExecMessage.mn_Node));	/* remove from Message list */
+
+	return msg;
+}
+
+void
+rem_notifies (node,flag)
+	struct node *node;
+	long flag;
+{
+	struct notify *notify,*next;
+
+	/* move notifynodes from node to the orphaned list and notify */
+	/* note we MUST remove it first, in case of data in notify    */
+
+	for (notify = (struct notify *) node->notify_list.mlh_Head;
+	     notify->Succ;
+	     notify = next)
+	{
+		/* careful, must get next link before removing. */
+		next = notify->Succ;
+
+		Remove((struct Node *) notify);
+		AddHead((struct List *) &orphaned,(struct Node *) notify);
+		notify->node = NULL;
+
+		if (flag)
+			do_notify(notify);
+	}
+}
+
+void
+AddFreeMsg (msg)
+	struct NotifyMessage *msg;
+{
+	struct NotifyRequest *req;
+
+	/* WAIT_REPLY is cleared by remnotify */
+	if (msg->nm_DoNotTouch & NRF_WAIT_REPLY)
+	{
+		req = msg->nm_NReq;
+		req->nr_MsgCount--;
+
+		/* if it was modified, notify again */
+		if (req->nr_Flags & NRF_MAGIC)
+		{
+			do_notify((struct notify *) msg->nm_DoNotTouch2);
+			req->nr_Flags &= ~NRF_MAGIC;
+		}
+	}
+	AddHead((struct List *) &FreeMessages,(struct Node *) msg);
+}
+
+/* return ptr to last file component */
+
+char *
+tail (str)
+	char *str;
+{
+	char *end;
+
+	end = str + strlen(str);
+	while (end > str)
+	{
+		end--;
+		if (*end == '/' || *end == ':')
+		{
+			end++; /* past separator */
+			break;
+		}
+	}
+	return end;
+}
+@
+
+
+36.10
+log
+@->block type
+@
+text
+@d12 1
+a12 1
+#define NRF_COPY_DATA 4
+d89 1
+d92 4
+d150 1
+d152 1
+d157 1
+d160 4
+d169 1
+d191 1
+d207 1
+d211 3
+@
+
+
+36.9
+log
+@use findnode instead of a custom version
+@
+text
+@d168 1
+a168 1
+		lock->block  = notify->node->list;
+@
+
+
+36.8
+log
+@for rcs 4.x header change
+@
+text
+@d108 1
+a108 19
+	char name[MAX_FILENAME+1];
+	struct node *node;
+
+	node = finddir(root,file,name);
+	if (node)
+	{
+		if (!name[0])
+		{
+			/* notify on root */
+			return node;
+		}
+		/* we have the dir, what about the file (actually can be dir) */
+		if (!findentry(node,name,TRUE))
+			return NULL;
+
+		node = current_node;
+	}
+
+	return node;
+@
+
+
+36.7
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+36.6
+log
+@transfer->read
+@
+text
+@d12 2
+@
+
+
+36.5
+log
+@*** empty log message ***
+@
+text
+@d188 1
+a188 2
+		req->nr_Actual =
+			    transfer(lock,req->nr_Data+4,req->nr_Length,TRUE);
+@
+
+
+36.4
+log
+@Many structure names changed, also all flag names changed.
+NRF_COPY_DATA now implies NRF_WAIT_REPLY
+@
+text
+@d36 2
+a37 1
+		AddHead(&(current_node->notify_list),(struct Node *) notify);
+d55 1
+a55 1
+	AddHead(&orphaned,(struct Node *) notify);
+d72 1
+a72 1
+		notify = (struct notify *) node->notify_list.lh_Head;
+d74 1
+a74 1
+		notify = (struct notify *) orphaned.lh_Head;
+d145 1
+a145 1
+	for (notify = (struct notify *) node->notify_list.lh_Head;
+d234 1
+a234 1
+	for (notify = (struct notify *) orphaned.lh_Head;
+d251 1
+a251 1
+				AddHead(&(node->notify_list),
+d271 1
+a271 1
+	if (!(((struct Node *) FreeMessages.lh_Head)->ln_Succ))
+d277 1
+a277 1
+	msg = (struct NotifyMessage *) FreeMessages.lh_Head;
+d293 1
+a293 1
+	for (notify = (struct notify *) node->notify_list.lh_Head;
+d301 1
+a301 1
+		AddHead(&orphaned,(struct Node *) notify);
+d328 1
+a328 1
+	AddHead(&FreeMessages,(struct Node *) msg);
+@
+
+
+36.3
+log
+@Fixed bug in rem_notifies - bad list handling.
+@
+text
+@d25 1
+a25 1
+	req->nr_Internal  = 0;
+d30 1
+a30 1
+	notify->Name = tail((char *) req->nr_Private);
+d33 1
+a33 1
+	if (node = exists((char *) req->nr_Private))
+d41 1
+a41 1
+		if (req->nr_Flags & NOTIFY_INITIAL)
+d68 1
+a68 1
+	if (node = exists((char *) req->nr_Private))
+d86 3
+a88 3
+			if ((req->nr_Flags & WAIT_REPLY) &&
+			    (req->nr_Internal & MESSAGE_SENT))
+				notify->msg->DoNotTouch &= ~WAIT_REPLY;
+d117 1
+a117 1
+		if (!findentry(node,name))
+d165 2
+a166 2
+	if ((req->nr_Flags & WAIT_REPLY) &&
+	    (req->nr_Internal & MESSAGE_SENT))
+d168 1
+a168 1
+		req->nr_Internal |= MODIFIED; /* so we can do delayed notify */
+d172 3
+a174 1
+	if ((req->nr_Flags & COPY_DATA) &&
+d184 1
+a184 3
+		lock->offset = FIRSTBUFFPOS;
+		lock->cpos   = 0;
+		lock->flags  = 0;
+d187 3
+a189 1
+		transfer(lock,req->nr_Data,req->nr_Length,TRUE);
+d195 1
+a195 1
+	if (req->nr_Flags & SEND_SIGNAL)
+d197 2
+a198 1
+		Signal(req->nr_Task,(1L << req->nr_SignalNum));
+d201 1
+a201 1
+	if ((req->nr_Flags & SEND_MESSAGE) && 
+d205 8
+a212 6
+		msg->ExecMessage.mn_ReplyPort = MyReplyPort;
+		msg->Class       = NOTIFY_CLASS;	/* FIX */
+		msg->Code        = NOTIFY_CODE;		/* FIX */
+		msg->NReq	 = req;
+		msg->DoNotTouch  = req->nr_Flags & WAIT_REPLY;
+		msg->DoNotTouch2 = (LONG) notify;
+d214 1
+a214 1
+		PutMsg(req->nr_Port,&(msg->ExecMessage));
+d216 1
+a216 1
+		req->nr_Internal |= MESSAGE_SENT;
+d244 1
+a244 1
+			dptr = finddir(root,(char *) notify->Req->nr_Private,
+d277 1
+a277 1
+	Remove(&(msg->ExecMessage.mn_Node));	/* remove from Message list */
+d315 1
+a315 1
+	if (msg->DoNotTouch & WAIT_REPLY)
+d317 2
+a318 2
+		req = msg->NReq;
+		req->nr_Internal &= ~MESSAGE_SENT;
+d321 1
+a321 1
+		if (req->nr_Internal & MODIFIED)
+d323 2
+a324 2
+			do_notify((struct notify *) msg->DoNotTouch2);
+			req->nr_Internal &= ~MODIFIED;
+@
+
+
+36.2
+log
+@
+@
+text
+@d282 1
+a282 1
+	struct notify *notify;
+d289 1
+a289 1
+	     notify = notify->Succ)
+d291 3
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@a34 1
+kprintf("Found node! (0x%lx)\n",node);
+a46 1
+kprintf("orphaned...\n");
+a107 1
+kprintf("exists: %s\n",file);
+a110 1
+kprintf("Found dir %s (%s)! (0x%lx)\n",&(node->name),name,node);
+a120 1
+kprintf("found file %s! (0x%lx)\n",&(node->name),node);
+a143 2
+kprintf("changes for %s\n",&(node->name));
+
+a162 2
+
+kprintf("Notify for %s\n",(char *) req->nr_Private);
+@

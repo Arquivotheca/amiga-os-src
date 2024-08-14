@@ -1,0 +1,21 @@
+Äà∫Ä∫à∏å"exec/ports.h"á
+ÉIORequest{
+ÉØio_Message;
+ÉDevice*io_Device;
+ÉUnit*io_Unit;
+âio_Command;
+äio_Flags;
+öio_Error;
+};
+ÉIOStdReq{
+ÉØio_Message;
+ÉDevice*io_Device;
+ÉUnit*io_Unit;
+âio_Command;
+äio_Flags;
+öio_Error;
+óio_Actual;
+óio_Length;
+îio_Data;
+óio_Offset;
+};ÄDEV_BEGINIO (-30)ÄDEV_ABORTIO (-36)ÄIOB_QUICK 0ÄIOF_QUICK (1<<0)ÄCMD_INVALID 0ÄCMD_RESET 1ÄCMD_READ 2ÄCMD_WRITE 3ÄCMD_UPDATE 4ÄCMD_CLEAR 5ÄCMD_STOP 6ÄCMD_START 7ÄCMD_FLUSH 8ÄCMD_NONSTD 9á

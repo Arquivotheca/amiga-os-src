@@ -1,0 +1,509 @@
+CALLSYS macro   *
+	jsr     LVO\1(A6)
+	endm
+
+CIB_ENABLE	EQU	0
+CIB_FREEZE	EQU	1
+CIB_ENTRY	EQU	2
+CIB_CLEAR	EQU	3
+CIB_BURST	EQU	4
+
+CDB_ENABLE	EQU	8
+CDB_FREEZE	EQU	9
+CDB_ENTRY	EQU	10
+CDB_CLEAR	EQU	11
+CDB_BURST	EQU	12
+CDB_WALLOC	EQU	13
+
+AFB_68010	EQU	0
+AFB_68020	EQU	1
+AFB_68030	EQU	2
+
+ATNFLGS		EQU	$129
+
+LVOSupervisor	EQU	-30
+LVOFindTask	EQU	-294
+LVOAllocTrap	EQU	-342
+LVOFreeTrap	EQU	-348
+
+NOLIST
+	include "exec/execbase.i"
+	include "exec/tasks.i"
+LIST
+
+;	section text,code
+	section firstsection
+
+	XDEF	_GetCPUType	; ID the CPU
+	XDEF	_GetCACR	; Get 020/030 CACR register
+
+;======================================================================
+;
+;	This function returns the type of the CPU in the system as a
+;	longword: 68000, 68010, 68020, or 68030.  The testing must be done
+;	in reverse order, in that any higher CPU also has the bits set for
+;	a lower CPU.  Also, since 1.3 doesn't recognize the 68030, if I
+;	find the 68020 bit set, I always check for the presence of a 
+;	68030.
+;
+;	This routine should be the first test routine called under 1.2
+;	and 1.3.
+;
+;	ULONG GetCPUType();
+;
+;======================================================================
+
+_GetCPUType:
+	movem.l	a4/a5,-(sp)		; Save this register
+	move.l	4,a6			; Get ExecBase
+	btst.b	#AFB_68030,ATNFLGS(a6)	; Does the OS think an '030 is here?
+	beq	0$
+	move.l	#68030,d0		; Sure does...
+	movem.l	(sp)+,a4/a5
+	rts
+0$
+	btst.b	#AFB_68020,ATNFLGS(a6)	; Maybe a 68020
+	bne	2$
+	btst.b	#AFB_68010,ATNFLGS(a6)	; Maybe a 68010?
+	bne	1$
+	move.l	#68000,d0		; Just a measley '000
+	movem.l	(sp)+,a4/a5
+	rts
+1$
+	move.l	#68010,d0		; Yup, we're an '010
+	movem.l	(sp)+,a4/a5
+	rts
+2$
+	move.l	#68020,d0		; Assume we're an '020
+	lea	3$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	movem.l	(sp)+,a4/a5
+	rts
+3$
+	movec	cacr,d1			; Get the cache register
+	move.l	d1,a4			; Save it for a minute
+	bset.l	#CIB_BURST,d1		; Set the inst burst bit
+	bclr.l	#CIB_ENABLE,d1		; Clear the inst cache bit
+	movec	d1,cacr			; Try to set the CACR
+	movec	cacr,d1
+	btst.l	#CIB_BURST,d1		; Do we have a set burst bit?
+	beq	4$
+	move.l	#68030,d0		; It's a 68030
+	bset.b	#AFB_68030,ATNFLGS(a6)
+4$
+	move.l	a4,d1			; Restore the original CACR
+	movec	d1,cacr
+	rte
+
+;======================================================================
+;
+;	This function returns the 68020/68030 CACR register.  It assumes
+;	a 68020 or 68030 based system.
+;
+;	ULONG GetCACR()
+;
+;======================================================================
+
+_GetCACR:
+	move.l	4,a6			; Get ExecBase
+	btst.b	#AFB_68020,ATNFLGS(a6)	; Does the OS think an '020 is here?
+	bne	1$
+	moveq.l	#0,d0			; No CACR here, pal
+	rts
+1$
+	move.l	a5,-(sp)		; Save this register
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp)+,a5		; Give back registers
+	rts
+2$
+	movec	cacr,d0			; Make CACR the return value
+	rte
+
+
+;**********************************************************************
+;
+;	This section contains functions that identify and operate on
+;	MMU things.  Unfortunately, there aren't any MMU op-codes in
+;	the Manx assembler yet, so I have to fudge them here.
+;
+;**********************************************************************
+
+	XDEF	_GetMMUType	; Returns the type of MMU
+	XDEF	_GetCRP		; Gets MMU CRP register
+	XDEF	_GetSRP		; Gets MMU SRP register
+	XDEF	_GetTC		; Gets MMU TC register
+	XDEF	_GetTT0
+	XDEF	_GetTT1
+
+;======================================================================
+;
+;	This function returns 0L if the system contains no MMU, 
+;	68851L if the system does contain an 68851, or 68030L if the
+;	system contains a 68030.
+;
+;	This routine seems to lock up on at least some CSA 68020 
+;	boards, though it runs just fine on those from Ronin and 
+;	Commodore, as well as all 68030 boards it's been tested on.
+;
+;	ULONG GetMMUType()
+;
+;======================================================================
+
+_GetMMUType:
+	move.l	4,a6			; Get ExecBase
+	movem.l	a3/a4/a5,-(sp)		; Save this stuff
+	move.l	#0,a1	
+	CALLSYS	FindTask		; Call FindTask(0L)
+	move.l	d0,a3
+
+	move.l	TC_TRAPCODE(a3),a4	; Change the exception vector
+	move.l	#2$,TC_TRAPCODE(a3)
+	
+	subq.l	#4,sp			; Let's try an MMU instruction
+	dc.w	$f017			; Slimey PMOVE tc,(sp)
+	dc.w	$4200
+	cmpi	#0,d0			; Any MMU here?
+	beq	1$
+	btst.b	#AFB_68030,ATNFLGS(a6)	; Does the OS think an '030 is here?
+	beq	1$
+	move.l	#68030,d0
+
+1$
+	addq.l	#4,sp			; Return that local
+	move.l	a4,TC_TRAPCODE(a3)	; Reset exception stuff
+	movem.l	(sp)+,a3/a4/a5		; and return the registers
+	rts
+
+	; This is the exception code.  No matter what machine we're on,
+	; we get an exception.  If the MMU's in place, we should get a
+	; privilige violation; if not, an F-Line emulation exception.
+2$
+	move.l	(sp)+,d0		; Get Amiga supplied exception #
+	cmpi	#11,d0			; Is it an F-Line?
+	beq	3$			; If so, go to the fail routine
+	move.l	#68851,d0		; We have MMU
+	addq.l	#4,2(sp)		; Skip the MMU instruction
+	rte
+3$
+	moveq.l	#0,d0			; It dinna woik,
+	addq.l	#4,2(sp)		; Skip the MMU instruction
+	rte
+
+;======================================================================
+;
+;	This function returns the MMU CRP register.  It assumes a 68020 
+;	system with MMU, or a 68030 based system (eg, test for MMU before
+;	you call this, or you wind up in The Guru Zone).  Note that the
+;	CRP register is two longwords long.
+;
+;	void GetCRP(ULONG *)
+;
+;======================================================================
+
+_GetCRP:
+	move.l	4(sp),a0		; Pointer to the CRP storage area
+	move.l	4,a6			; Get ExecBase
+	move.l	a5,-(sp)
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp)+,a5
+	rts
+2$
+	dc.w	$f010			; PMOVE CRP,(a0)
+	dc.w	$4e00
+	rte
+
+
+;======================================================================
+;
+;	This function returns the MMU SRP register.  It assumes a 68020 
+;	system with MMU, or a 68030 based system (eg, test for MMU before
+;	you call this, or you wind up in The Guru Zone).  Note that the
+;	CRP register is two longwords long.
+;
+;	void GetSRP(ULONG *)
+;
+;======================================================================
+
+_GetSRP:
+	move.l	4(sp),a0		; Pointer to the CRP storage area
+	move.l	4,a6			; Get ExecBase
+	move.l	a5,-(sp)
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp)+,a5
+	rts
+2$
+	pmove	SRP,(a0)
+	rte
+
+
+;======================================================================
+;
+;	This function returns the MMU TC register.  It assumes a 68020 
+;	system with MMU, or a 68030 based system (eg, test for MMU before
+;	you call this, or you wind up in The Guru Zone).  
+;
+;	ULONG GetTC()
+;
+;======================================================================
+
+_GetTC:
+	move.l	4,a6			; Get ExecBase
+	move.l	a5,-(sp)
+	subq.l	#4,sp			; Make a place to dump TC
+	move.l	sp,a0
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp),d0			; Here's the result
+	addq.l	#4,sp
+	move.l	(sp)+,a5
+	rts
+2$
+	dc.w	$f010			; PMOVE TC,(a0)
+	dc.w	$4200
+	rte
+
+
+;======================================================================
+;
+;	This function returns the MMU TT0 register.  It assumes a 68030 
+;	system.
+;
+;	ULONG GetTT0()
+;
+;======================================================================
+
+_GetTT0:
+	move.l	4,a6			; Get ExecBase
+	move.l	a5,-(sp)
+	subq.l	#4,sp			; Make a place to dump TC
+	move.l	sp,a0
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp),d0			; Here's the result
+	addq.l	#4,sp
+	move.l	(sp)+,a5
+	rts
+2$
+	pmove	TT0,(a0)
+;	dc.w	$f010			; PMOVE TC,(a0)
+;	dc.w	$4200
+	rte
+
+;======================================================================
+;
+;	This function returns the MMU TT1 register.  It assumes a 68030 
+;	system.
+;
+;	ULONG GetTT1()
+;
+;======================================================================
+
+_GetTT1:
+	move.l	4,a6			; Get ExecBase
+	move.l	a5,-(sp)
+	subq.l	#4,sp			; Make a place to dump TC
+	move.l	sp,a0
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp),d0			; Here's the result
+	addq.l	#4,sp
+	move.l	(sp)+,a5
+	rts
+2$
+	pmove	TT1,(a0)
+	rte
+
+
+
+;**********************************************************************
+;
+;	This section contains functions that identify and operate on
+;	FPU things.  
+;
+;**********************************************************************
+
+	XDEF	_GetFPUType	; Gets the FPU type
+
+;======================================================================
+;
+;	This function returns the type of the FPU in the system as a
+;	longword: 0 (no FPU), 68881, or 68882.
+;
+;	ULONG GetFPUType();
+;
+;======================================================================
+
+_GetFPUType:
+	move.l	a5,-(sp)		; Save this register
+	move.l	4,a6			; Get ExecBase
+	btst.b	#AFB_68881,ATNFLGS(a6)	; Does the OS think an FPU is here?
+	bne	1$	
+	moveq.l	#0,d0			; No FPU here, dude
+	move.l	(sp)+,a5		; Give back the register
+	rts
+1$
+	lea	2$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	move.l	(sp)+,a5		; Give back registers
+	rts
+2$
+	move.l	#68881,d0		; Assume we're a 68881
+	fsave	-(sp)			; Test and check
+	moveq.l	#0,d1
+	move.b	1(sp),d1		; Size of this frame
+	cmpi	#$18,d1
+	beq 3$
+	move.l	#68882,d0		; It's a 68882
+3$
+	frestore (sp)+			; Restore the stack
+	rte
+
+
+;======================================================================
+;
+;	This function puts the processor into supervisor state. Beware,
+;	A7 henceforth contains the Supervisor Stack Pointer rather than
+;	the User Stack Pointer. Make sure your compiler does not allocate
+;	local variables on the stack. Lattice C uses the LINK instruction
+;	to allocate space on the stack, and then references that space
+;	through register A5. That is allowed. 
+;
+;	If you call this function from supervisor state, you will end 
+;	up meditating about it.
+;
+;	void SuperState();
+;
+;====================================================================
+
+_SuperState:
+	movem.l	a5/a6,-(sp)		; Save these registers
+	move.l	4,a6			; Get ExecBase
+	lea.l	0$,a5			; Get start of the supervisor code
+	CALLSYS	Supervisor
+0$
+	jsr	_DiscardStackFrame
+	move.l	USP,a0			; Get user stack pointer
+	movem.l	(a0)+,a5/a6		; Restore registers
+	move.l	(a0)+,-(sp)		; Transfer return address
+	move.l	a0,USP			; Put back user stack pointer
+	rts
+
+;======================================================================
+;
+;	This function puts the CPU into user state. Remember, use
+;	SuperState and UserState within function boundaries, or you
+;	will die. Call only from supervisor state, or else.
+;
+;	void UserState();
+;
+;======================================================================
+
+_UserState:
+	move.l	4,a0			; Get ExecBase
+	btst.b	#AFB_68010,ATNFLGS(a0)	; Does the OS think an '010 is here?
+	bne	0$			; Yes,...
+	btst.b	#AFB_68020,ATNFLGS(a0)	; Does the OS think an '020 is here?
+	bne	0$
+
+; Since our processor is a 68000, lets build a stack frame for it and
+; execute an RTE. So we push a return address and a status register on
+; the stack.
+
+2$
+	move.l	1$,-(sp)		; Put return address on stack
+	move.w	sr,d0			; Get current status register
+	andi.l	#%1101111111111111,d0	; Zero S bit
+	movem.w d0,-(sp)		; Put it on the stack
+	rte
+1$
+	rts
+
+; For the 680x0, the construction of the stack frame is slightly
+; different. We have to say what type of frame we have.
+	
+0$
+	move.w	#0,-(sp)
+	jmp	2$	
+	
+
+;======================================================================
+;
+;	This function simply 'erases' the exception stack frame located
+;	on top of the supervisor stack. If it is a 68000 bus error stack
+;	frame, then do not try to erase it. Call from assembler only.
+;
+;	nonexistent DiscardStackFrame();
+;
+;======================================================================
+
+_DiscardStackFrame:
+
+	move.l	4,a0			; Get ExecBase
+	btst.b	#AFB_68010,ATNFLGS(a0)	; Does the OS think an '010 is here?
+	bne	Not_68000
+	btst.b	#AFB_68020,ATNFLGS(a0)	; Does the OS think an '020 is here?
+	bne	Not_68000
+	move.l	(sp),d0			; Save return address
+	addq	 #6,sp			; Erase stack frame
+	move.l	d0,(sp)			; Restore return address
+	rts
+
+; Hmmm, the processor is not a 68000. It is therefore a 680x0. Let's get
+; the exception stack frame type and thus determine how many bytes to take
+; away from the stack frame.
+
+Not_68000
+	move.l	(sp),d1			; Save return address
+	move.l	$8(sp),d0		; Get stack frame type
+	lsr.w	#8,d0
+	lsr.w	#4,d0
+	and.l	#$000F,d0
+	cmpi.b	#%0000,d0		; Normal 4 word stack frame?
+	bne	0$
+	addq	#8,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+0$
+	cmpi.b	#%0001,d0		; Throwaway 4 word stack frame?
+	bne	1$
+	addq	#8,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+1$
+	cmpi.b	#%0010,d0		; Instruction exception? (6 words)
+	bne	2$
+	add.l	#12,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+2$
+	cmpi.b	#%1000,d0		; MC68010 Bus Fault (29 words)
+	bne	3$
+	add.l	#58,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+3$
+	cmpi.b	#%1001,d0		; Coprocessor Mid-Instruction? (10)
+	bne	4$
+	add.l	#20,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+4$
+	cmpi.b	#%1010,d0		; Short bus cycle fault? (16 words)
+	bne	5$
+	add.l	#32,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+5$
+	cmpi.b	#%1011,d0		; Long bus cycle fault? (46 words)
+	bne	error
+	add.l	#92,sp			; Erase stack frame
+	move.l	d1,(sp)			; Restore return address
+	rts
+error:
+	reset				; Unrecognized stack frame type
+
+	end
+

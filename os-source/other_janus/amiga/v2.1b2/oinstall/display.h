@@ -1,0 +1,11 @@
+#define SWIDTH		640
+#define SHEIGHT		200
+
+#define WTOPEDGE	11
+#define WWIDTH		SWIDTH
+#define WHEIGHT		(SHEIGHT - WTOPEDGE)
+
+#define TOPOFFSET	(10 + 12)
+
+#define CHARYOFFSET	(TOPOFFSET + 2 + 6)
+#define CHARXOFFSET	2

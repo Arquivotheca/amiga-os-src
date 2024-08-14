@@ -1,0 +1,8 @@
+* $Id: tokens.i,v 1.3 91/04/24 20:54:52 peter Exp $
+TKN_END		equ	$80
+TKN_ERROR	equ	TKN_END+1
+TKN_SYMBOL	equ	TKN_ERROR+1
+TKN_NUM		equ	TKN_SYMBOL+1
+TKN_STRING	equ	TKN_NUM+1
+TKN_CHAR	equ	TKN_STRING+1
+

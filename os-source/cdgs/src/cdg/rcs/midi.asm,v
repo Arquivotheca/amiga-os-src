@@ -1,0 +1,1405 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+1.11
+date     92.04.02.18.47.40;  author darren;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     92.04.02.18.45.56;  author darren;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.03.02.13.36.56;  author darren;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.02.24.18.27.04;  author darren;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.02.24.16.35.41;  author darren;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.02.24.11.41.29;  author darren;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.02.21.18.32.06;  author darren;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.02.21.16.54.05;  author darren;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.21.16.18.56;  author darren;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.02.20.19.33.44;  author darren;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.02.19.16.59.04;  author darren;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Initial check-in of midi handling code.
+@
+
+
+1.11
+log
+@Remove debug TRAP
+@
+text
+@**
+**	$Id: midi.asm,v 1.10 92/04/02 18:45:56 darren Exp Locker: darren $
+**
+**	CDTV CD+G -- midi.asm (midi specific code)
+**
+**	(C) Copyright 1992 Commodore-Amiga, Inc.
+**	    All Rights Reserved
+**
+**	
+**
+
+** Includes
+
+		INCLUDE	"cdgbase.i"
+		INCLUDE "cdgprefs.i"
+		INCLUDE	"debug.i"
+
+** Exports
+		SECTION	cdg
+
+		XDEF	CDGMidiQuiet
+		XDEF	CDGAllNotesOff
+
+		XDEF	CDGInitMidiOut
+		XDEF	CDGFreeMidiOut
+
+		XDEF	CDGMidiPack
+**Imports
+
+		XREF	cdgname
+
+		XREF	_custom		;amiga.lib
+		XREF	_intena
+		XREF	_intenar
+		XREF	_intreq
+		XREF	_serdat
+		XREF	_serdatr
+		XREF	_ciab
+** Equates
+
+** Assumptions
+
+** Notes
+
+*****i* cdg.library/CDGAllNotesOff ************************************
+*
+*   NAME
+*	CDGAllNotesOff -- Tell MIDI devices to turn off all notes
+*   
+*   SYNOPSIS
+*	VOID CDGAllNotesOff( VOID );
+*
+*	VOID CDGAllNotesOff( VOID );
+*
+*   FUNCTION
+*	Private function for telling MIDI devices to be quiet.
+*	Takes library base pointer in A6, and preserves ALL registers.
+*
+*	This function is meant to be used when the CD has stopped,
+*	paused, etc., so that we don't leave a note hanging.
+*
+*	This function checks if the disk is +MIDI, else it doesn't
+*	bother sending anything (and not only must it be a +MIDI
+*	disk, but we must have also obtained the resource serial
+*	bits, and port).
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*	PRESERVES ALL REGISTERS - not a time critical function
+*
+***********************************************************************
+
+**
+** Private entry; takes library base in A6, fetches, and sends ALL notes
+** off if, and only if this disk has been recognized as a +MIDI disk,
+** and then only if we could obtain the resource bits
+**
+
+CDGAllNotesOff:
+
+		move.l	a6,-(sp)
+
+	; obtain pointer to data
+
+		move.l	cdg_BaseData(a6),a6
+
+	; check IF midi disk
+
+		btst	#CDGB_MIDI,cdd_TypeLights(a6)
+		beq.s	CDGNotesOff
+
+	; check IF we have sent any midi data since last time this function
+	; was called
+
+		bclr	#EF2B_NEWMIDI,cdd_ExtraFlags2(a6)
+		beq.s	CDGNotesOff
+
+		movem.l	d0-d1/a0-a1,-(sp)
+		bsr.s	CDGMidiQuiet
+		movem.l	(sp)+,d0-d1/a0-a1
+
+CDGNotesOff:
+		move.l	(sp)+,a6
+		rts
+
+		
+*****i* cdg.library/CDGMidiQuiet **************************************
+*
+*   NAME
+*	CDGMidiQuiet -- Tell MIDI devices to be quiet
+*   
+*   SYNOPSIS
+*	VOID CDGMidiQuiet( data );
+*			    A6
+*
+*	VOID CDGMidiQuiet( struct CDGData * );
+*
+*   FUNCTION
+*	Routine to get connected MIDI devices to be quiet.  MIDI
+*	codes, and sequencing information borrowed from cdg.classic
+*	CDGDISPATCH.ASM (and orginally based on information
+*	provided by Scott Etherton -- see cdg.classic source code).
+*
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*
+***********************************************************************
+
+
+	;;;
+	;;; The following equates, and code is borrowed from cdg.classic,
+	;;; based on information provided by Scott Etherton.
+	;;;
+	;;; However I've rewritten it to be more efficient, and to use
+	;;; serial interrupts, not wasteful kprintf() style busy loop
+	;;; code like cdg.classic.
+	;;;
+
+STAT_CONTROLLER		EQU	-80	; $B0
+STAT_AFTERTOUCH		EQU	-48	; $D0
+STAT_PITCHBEND		EQU	-32	; $E0
+
+SUSTAIN_PEDAL		EQU	$40
+MOD_WHEEL		EQU	$01
+BREATH_CONTROL		EQU	$02
+
+RESET_ALL		EQU	$79
+ALLNOTESOFF		EQU	$7B
+
+
+CDGMidiQuiet:
+
+	PRINTF	DBG_ENTRY,<'CDG--CDGMidiQuiet()'>
+
+		moveq	#15,d1
+
+quietloop:
+		moveq	#STAT_CONTROLLER,d0
+		or.b	d1,d0
+		bsr.s	CDGAddMidiByte
+		moveq	#RESET_ALL,d0
+		bsr.s	CDGAddMidiWord
+
+		moveq	#SUSTAIN_PEDAL,d0
+		bsr.s	CDGAddMidiWord
+
+		moveq	#MOD_WHEEL,d0
+		bsr.s	CDGAddMidiWord
+
+		moveq	#BREATH_CONTROL,d0
+		bsr.s	CDGAddMidiWord
+
+		moveq	#ALLNOTESOFF,d0
+		bsr.s	CDGAddMidiWord
+
+		moveq	#STAT_PITCHBEND,d0
+		or.b	d1,d0
+		bsr.s	CDGAddMidiByte
+		moveq	#0,d0
+		bsr.s	CDGAddMidiWord		;send 2 0's per original code
+
+		moveq	#STAT_AFTERTOUCH,d0
+		or.b	d1,d0
+		bsr.s	CDGAddMidiWord
+
+	; Wake TBE interrupt once per loop - the TBE interrupt will
+	; take care of itself unless it runs out of characters to
+	; send, so this may or may not generate a spurious TBE
+	; interrupt depending on whats going on in the system
+
+		move.l	cdd_ExecLib(a6),a0
+		lea	_custom,a1
+		move.w	#INTF_SETCLR!INTF_TBE,d0
+
+		DISABLE	A0,NOFETCH
+
+		move.w	d0,intreq(a1)
+		move.w	d0,intena(a1)
+
+		ENABLE	A0,NOFETCH
+
+		dbf	d1,quietloop
+
+		rts
+
+*****i* cdg.library/CDGAddMidiByte ************************************
+*
+*   NAME
+*	CDGAddMidiByte -- Add a byte to the circular midi output buffer
+*   
+*   SYNOPSIS
+*	VOID CDGAddMidiByte( data, byte );
+*		              A6    D0
+*
+*	VOID CDGAddMidiByte( struct CDGData *, UBYTE );
+*
+*   FUNCTION
+*	Stuff a byte in the circular midi buffer.
+*
+*   RETURNS
+*	TRUE if the byte could be added to the midi output buffer.
+*	FALSE if the buffer is already full.
+*
+*   NOTES
+*	PRESERVE D1/A1 for some optimization speed
+*
+***********************************************************************
+
+**
+** Adds a word to the circular midi buffer; a0 is trashed
+** The first byte is in D0, and the second byte is always a NULL byte
+**
+
+CDGAddMidiWord:
+		bsr.s	CDGAddMidiByte
+		moveq	#00,d0
+
+	; fall through
+**
+** Adds a byte to the circular midi buffer; a0 is trashed
+**
+
+CDGAddMidiByte:
+
+		move.l	cdd_PutMidiByte(a6),a0
+		cmp.l	cdd_MaxMidiByte(a6),a0
+		bne.s	CDGAMB_Add
+		lea	cdd_MidiBytes(a6),a0
+
+CDGAMB_Add:
+		move.b	d0,(a0)+
+		move.l	a0,cdd_PutMidiByte(a6)
+
+		rts
+
+*****i* cdg.library/CDGMidiPack ***************************************
+*
+*   NAME
+*	CDGMidiPack -- Decode a MIDI PACK
+*   
+*   SYNOPSIS
+*	VOID CDGMidiPack( data, pack, enabled );
+*	                   A6    A4     D3
+*
+*	VOID CDGMidiPack( struct CDGData *, struct CDGPack *, ULONG );
+*
+*   FUNCTION
+*	Decode a +MIDI pack, and send MIDI bytes.  MIDI bytes
+*	are stored as 8 bit bytes in 6 bit symbols.  This means
+*	shifting/masking operations.  4 6 bit symbols equals 3
+*	midi bytes, except it is important to note that the
+*	total number of bytes in the pack may be any number from
+*	0-12.
+*
+*	The specification indicates a maximum data rate of 3125
+*	bytes per second per the MIDI specification, so there is
+*	an implied maximum of no more than 125 midi bytes per 12
+*	consecutive packs.  Infact the spec recommends no more than
+*	110 bytes per 12 consecutive packs be sent.
+*	number
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*	Checks if +MIDI enabled before actually sending any data
+*
+***********************************************************************
+CDGMidiPack:
+
+		move.b	cdp_Instruction(a4),d1	;# of bytes
+
+	; Only T->W are valid, and if the total bytes is 0,
+	; we are done.  Use D1 here for some speed since I've
+	; purposely set-up the send character routines to preserve
+	; D1 & A1.
+
+
+		and.b	#(SYMF_T!SYMF_U!SYMF_V!SYMF_W),d1
+		beq	CDGMidiPack_Exit
+
+		cmp.b	#12,d1		;sanity check
+		bhi	CDGMidiPack_Exit
+
+	; mark is +MIDI (and turn on light maybe [if at least 4 packs in one track ])
+
+		subq.b	#1,cdd_MPackCount(a6)
+		bpl.s	CDGM_NoMidiLight
+
+		bset	#CDGB_MIDI,cdd_TypeLights(a6)
+
+		clr.b	cdd_MPackCount(a6)
+
+CDGM_NoMidiLight:
+
+		btst	#CDGB_MIDI,d3
+		beq.s	CDGMidiPack_Exit
+
+	; if midi data has not been sent, init bps rate
+
+		bset	#EF2B_BAUDSET,cdd_ExtraFlags2(a6)
+		beq.s	CDGSetBPS
+		
+CDGMP_ISFirst:
+
+	; indicate new midi data sent
+
+		bset	#EF2B_NEWMIDI,cdd_ExtraFlags2(a6)
+
+	; decode # of bytes in d1
+
+		lea	cdp_Data(a4),a1
+
+	; Inline code for efficiency - most of this code is free, in
+	; that it is interleaved with serial data output running
+	; at the same time (unless we take an interrupt, or task
+	; switch)
+
+CDGAddMidiPack_Loop:
+
+		move.b	(a1)+,d0
+		lsl.w	#6,d0
+		or.b	(a1)+,d0
+		lsl.l	#6,d0
+		or.b	(a1)+,d0
+		lsl.l	#6,d0
+		or.b	(a1)+,d0
+
+		swap	d0
+
+		bsr.s	CDGAddMidiByte
+
+		subq.b	#1,d1
+		beq.s	CDGMidiPack_Done
+
+		rol.l	#8,d0		;get next byte
+
+		bsr.s	CDGAddMidiByte
+
+		subq.b	#1,d1
+		beq.s	CDGMidiPack_Done
+
+		rol.l	#8,d0		;get next byte
+
+		bsr.s	CDGAddMidiByte
+
+		subq.b	#1,d1
+		bne.s	CDGAddMidiPack_Loop
+
+CDGMidiPack_Done:
+
+	; Wake TBE interrupt, and start work on next PACK.  The
+	; TBE interrupt will take care of itself until it runs
+	; out of data.
+
+		move.l	cdd_ExecLib(a6),a0
+		lea	_custom,a1
+		move.w	#INTF_SETCLR!INTF_TBE,d0
+
+		DISABLE	A0,NOFETCH
+
+		move.w	d0,intreq(a1)
+		move.w	d0,intena(a1)
+
+		ENABLE	A0,NOFETCH
+
+CDGMidiPack_Exit:
+
+		rts
+
+
+	; Precalc 31500 bps for PAL/NTSC machine.  Based on the
+	; numbers given in the Hardware manual -
+	;
+	; Per Hardware docs -
+	;
+	; NTSC	112.6 = ((3,579,545/31500)-1)
+	;
+	; PAL   111.6 = ((3,546,895/31500)-1)
+	;
+	; Because the difference is less than 1%, for now I will use
+	; a constant of 112, which is the average of the two numbers.
+	;
+	; Doesn't set serper until first MIDI pack is received
+	;
+
+CDGSetBPS:
+		nop
+		move.w	_custom+serdatr,d0
+		btst	#12,d0				;TSR Empty?
+		beq.s	CDGSetBPS			;wait for pending output
+
+		move.w	#112,_custom+serper		;set baud rate
+
+		bra	CDGMP_ISFirst
+
+*****i* cdg.library/CDGInitMidiOut ************************************
+*
+*   NAME
+*	CDGInitMidiOut -- Initialize serial port for midi output
+*   
+*   SYNOPSIS
+*	VOID CDGInitMidiOut( data );
+*			      A4
+*
+*	VOID CDGAInitMidiOut( struct CDGData * );
+*
+*   FUNCTION
+*	Private function
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*	MUST PRESERVE ALL REGISTERS!!
+*
+***********************************************************************
+
+PARREGBITS	SET	(CIAF_PRTRSEL!CIAF_PRTRPOUT!CIAF_PRTRBUSY)
+SERREGBITS	SET	(~(PARREGBITS))
+
+CDGInitMidiOut:
+
+	PRINTF	DBG_ENTRY,<'CDInitMidiOut()'>
+
+		movem.l	d0-d1/a0-a1/a6,-(sp)
+
+	; initialize the interrupt structure
+
+		lea	cdd_MidiInt(a4),a1
+
+		move.b	#NT_INTERRUPT,LN_TYPE(a1)
+
+		move.l	#cdgname,LN_NAME(a1)
+
+		move.l	a4,IS_DATA(a1)
+
+		move.l	#CDGMidiOutInt,IS_CODE(a1)
+
+		move.l	cdd_ExecLib(a4),a6
+
+		moveq	#INTB_TBE,d0
+
+		JSRLIB	SetIntVector
+
+		move.l	d0,cdd_PrevTBEVec(a4)
+
+		lea	_ciab,a0
+
+		DISABLE
+
+PARREGBITS	SET	(CIAF_PRTRSEL!CIAF_PRTRPOUT!CIAF_PRTRBUSY)
+SERREGBITS	SET	(~(PARREGBITS))
+
+
+	; cache previous values of DDRA, and PRA
+
+		move.b	ciaddra(a0),cdd_CacheDDRA(a4)
+
+	; and initialize ddra, and pra bits which belong to serial
+
+		and.b	#PARREGBITS,ciaddra(a0)
+
+		move.b	ciapra(a0),cdd_CachePRA(a4)
+
+		or.b	#(CIAF_COMDTR!CIAF_COMRTS),ciaddra(a0)
+
+		and.b	#((~(CIAF_COMRTS!CIAF_COMDTR!CIAF_COMCD))&$ff),ciapra(a0)
+		and.b	#(~(CIAF_COMCTS!CIAF_COMDSR!CIAF_COMCD)),ciaddra(a0)
+
+	;;; Disable TBE interrupts
+	;;;
+		move.w	#INTF_TBE,_intena	;disable TBE ints for now
+
+		ENABLE
+
+		movem.l	(sp)+,d0-d1/a0-a1/a6
+
+		rts
+
+*****i* cdg.library/CDGFreeMidiOut ************************************
+*
+*   NAME
+*	CDGFreeMidiOut -- Restore previous ciab/serial port settings
+*   
+*   SYNOPSIS
+*	VOID CDGFreeMidiOut( data );
+*			      A4
+*
+*	VOID CDGFreeMidiOut( struct CDGData * );
+*
+*   FUNCTION
+*	Private function.
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*	MUST PRESERVE ALL REGISTERS!!
+*
+***********************************************************************
+CDGFreeMidiOut:
+
+	PRINTF	DBG_ENTRY,<'CDGFreeMidiOut()'>
+
+		movem.l	d0-d2/a0-a1/a6,-(sp)
+
+	; If data is still being sent, then we can spin for a bit
+	; waiting for the last of the data to be sent.  This is
+	; a little bit kludgy, but it is intended to make sure
+	; that when CDGEnd() is called, that we finish sending any
+	; final info to midi devices (such as ALLNOTESOFF!!)
+	;
+	; For example, someone can call CDGStop(), CDGEnd(), and
+	; easily do so before pending midi data has been sent.
+	;
+	; On the other hand, maybe there is some fundamental problem,
+	; so there is an arbitrary time-out implied of approx 60
+	; calls to WaitTOF() - about 1+ second, after which we
+	; give up
+
+
+		moveq	#59,d2
+
+CDGRemMI_Spin:
+		move.l	cdd_ExecLib(a4),a0
+
+		move.l	cdd_PutMidiByte(a4),d0
+
+		lea	_ciab,a1
+
+	; Simple restoration of baud rate to 9600 bps for NTSC/PAL machines.
+	;
+	; Ideally this would get preferences, and use that, but I don't
+	; want to open Intuition.library, nor did I want to add the
+	; code needed to search to see if it has been opened yet.
+	;
+	; I could have just left it at 31500 even, but this seemed
+	; a little more friendly.
+	;
+
+		move.w	#371,d1			;default NTSC 9600 bps
+		cmp.b	#50,cdd_VBlankRate(a4)
+		bne.s	CDGRemMI_NTSC
+		move.w	#368,d1			;PAL 9600 bps
+
+CDGRemMI_NTSC:
+		DISABLE	A0,NOFETCH
+
+		cmp.l	cdd_GetMidiByte(a4),d0
+		beq.s	CDGRemMI_OK
+
+		ENABLE	A0,NOFETCH
+
+		move.l	cdd_GfxLib(a4),a6
+		JSRLIB	WaitTOF			;sleep for a bit
+
+		dbf	d2,CDGRemMI_Spin
+
+CDGRemMI_OK:
+
+	; disable TBE interrupts
+
+		move.w	#INTF_TBE,_intena
+
+	; 9600 bps NTSC = 371.9 / 9600 bps PAL = 368.4
+
+		move.w	d1,_custom+serper	;reset baud rate (9600 bps)
+
+PARREGBITS	SET	(CIAF_PRTRSEL!CIAF_PRTRPOUT!CIAF_PRTRBUSY)
+SERREGBITS	SET	(~(PARREGBITS))
+
+	; restore CIAB DDRA and PRA
+
+		move.b	ciaddra(a1),d0
+		and.b	#PARREGBITS,d0		;don't change parallel bits
+		or.b	#SERREGBITS,d0		;Do change these bits
+		move.b	d0,ciaddra(a1)		;set ddr
+
+		move.b	ciapra(a1),d0
+		move.b	cdd_CachePRA(a4),d1
+		and.b	#SERREGBITS,d1
+		and.b	#PARREGBITS,d0
+		or.b	d1,d0
+		move.b	d0,ciapra(a1)
+
+		move.b	ciaddra(a1),d0		;read ddr
+		and.b	#PARREGBITS,d0		;don't change parallel bits
+		move.b	cdd_CacheDDRA(a4),d1	;read old ddr
+		and.b	#SERREGBITS,d1		;only use serial bits
+		or.b	d1,d0
+		move.b	d0,ciaddra(a1)		;restore serial bits in ddr
+
+		ENABLE	A0,NOFETCH
+
+	; now restore the previous vector
+
+		move.l	cdd_ExecLib(a4),a6
+		move.l	cdd_PrevTBEVec(a4),a1
+		moveq	#INTB_TBE,d0
+
+		JSRLIB	SetIntVector
+
+		movem.l	(sp)+,d0-d2/a0-a1/a6
+
+		rts
+
+*****i* cdg.library/CDGMidiOutInt *************************************
+*
+*   NAME
+*	CDGMidiOutInt -- Level 1 interrupt for midi output
+*   
+*   SYNOPSIS
+*	VOID CDGMidiOutInt( data, custom );
+*			      A1  A0
+*
+*	VOID CDGMidiOutInt( struct CDGData *, struct custom * );
+*
+*   FUNCTION
+*	Private functions - interrupt when ready to send next character
+*
+*   RETURNS
+*	N/A
+*
+*   NOTES
+*
+***********************************************************************
+CDGMidiOutInt:
+
+
+		move.w	#INTF_TBE,intreq(a0)	;clear interrupt
+
+	;
+	; Determine if this is a real TBE interrupt, or just NOISE (e.g.,
+	; woken by task) by checking to see if the TBE is empty.
+	; 
+		move.w	serdatr(a0),d0
+		btst	#13,d0
+		beq.s	CDGMOI_NotTBE
+
+		move.l	cdd_GetMidiByte(a1),a5
+		cmp.l	cdd_PutMidiByte(a1),a5
+		beq.s	CDGMOI_Empty		;any more to send?
+
+		cmp.l	cdd_MaxMidiByte(a1),a5
+		bne.s	CDGMidiOut_SendNext
+
+		lea	cdd_MidiBytes(a1),a5
+
+CDGMidiOut_SendNext:
+
+		move.w	#$100,d0
+		move.b	(a5)+,d0
+		move.l	a5,cdd_GetMidiByte(a1)
+		move.w	d0,serdat(a0)
+
+CDGMOI_NotTBE:
+		rts
+
+CDGMOI_Empty:
+		move.w	#INTB_TBE,intena(a0)	;disable TBE again
+		rts
+
+		END@
+
+
+1.10
+log
+@Only set +MIDI after 4 valid +MIDI packs, +MIDI enabled
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.9 92/03/02 13:36:56 darren Exp Locker: darren $
+a308 2
+
+	move.w	#$91,$00
+@
+
+
+1.9
+log
+@Move check for +MIDI enable to function which does the work -
+allows me to do sanity checking before marking as +MIDI.
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.8 92/02/24 18:27:04 darren Exp Locker: darren $
+d310 1
+a310 1
+	; mark is +MIDI
+d312 1
+a312 2
+		bset	#CDGB_MIDI,cdd_TypeLights(a6)
+		bne.s	CDGMP_NFirst
+d314 2
+a315 2
+		btst	#CDGB_MIDI,d3
+		beq.s	CDGMidiPack_Exit
+d317 1
+a317 14
+	; Precalc 31500 bps for PAL/NTSC machine.  Based on the
+	; numbers given in the Hardware manual -
+	;
+	; Per Hardware docs -
+	;
+	; NTSC	112.6 = ((3,579,545/31500)-1)
+	;
+	; PAL   111.6 = ((3,546,895/31500)-1)
+	;
+	; Because the difference is less than 1%, for now I will use
+	; a constant of 112, which is the average of the two numbers.
+	;
+	; Doesn't set serper until first MIDI pack is received
+	;
+d319 1
+a319 5
+CDGSetBPS:
+		nop
+		move.w	_custom+serdatr,d0
+		btst	#12,d0				;TSR Empty?
+		beq.s	CDGSetBPS			;wait for pending output
+d321 1
+a321 1
+		move.w	#112,_custom+serper		;set baud rate
+d323 2
+d326 1
+a326 1
+CDGMP_NFirst:
+d328 4
+a331 2
+		btst	#CDGB_MIDI,d3
+		beq.s	CDGMidiPack_Exit
+d398 25
+@
+
+
+1.8
+log
+@Fix code which restores DDRA
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.7 92/02/24 16:35:41 darren Exp $
+d267 2
+a268 2
+*	VOID CDGMidiPack( data, pack );
+*	                   A6    A4
+d270 1
+a270 1
+*	VOID CDGMidiPack( struct CDGData *, struct CDGPack * );
+d291 2
+a292 1
+*	
+d305 11
+d318 28
+a345 2
+		cmp.b	#12,d1		;sanity check
+		bhi.s	CDGMidiPack_Exit
+@
+
+
+1.7
+log
+@Delay setting SERPER until first MIDI PACK
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.6 92/02/24 11:41:29 darren Exp Locker: darren $
+d567 1
+a567 1
+		move.b	cdd_CachePRA(a4),d1	;read old ddr
+@
+
+
+1.6
+log
+@Cache/Restore CIAB/DDRA/PRA bits.  Document selection of #112
+for SERPER, and calc 9600 bps when removing the TBE interrupt.
+Track if we sent any +MIDI data, and use this info to decide if
+we really need to send ALLNOTESOFF.  Don't bother if no +MIDI
+data transmitted.
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.5 92/02/21 18:32:06 darren Exp Locker: darren $
+d307 1
+a307 1
+		bhi.s	CDGMidiPack_Error
+d372 1
+a372 5
+	; Mark is +MIDI (assumes data size of 0 is valid per spec)
+
+		bset	#CDGB_MIDI,cdd_TypeLights(a6)
+
+CDGMidiPack_Error:
+a373 1
+		rts
+a427 13
+	; Precalc 31500 bps for PAL/NTSC machine.  Based on the
+	; numbers given in the Hardware manual -
+	;
+	; Per Hardware docs -
+	;
+	; NTSC	112.6 = ((3,579,545/31500)-1)
+	;
+	; PAL   111.6 = ((3,546,895/31500)-1)
+	;
+	; Because the difference is less than 1%, for now I will use
+	; a constant of 112, which is the average of the two numbers.
+	;
+
+a447 2
+
+		move.w	#112,_custom+serper		;set baud rate
+@
+
+
+1.5
+log
+@Code to enable/disable TBE interrupts so others can use
+KPRINTF's when midi is not being output.
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.4 92/02/21 16:54:05 darren Exp Locker: darren $
+d89 2
+d94 6
+d196 3
+a198 2
+		lea	_custom,a0
+		move.l	cdd_ExecLib(a6),a1
+d200 1
+a200 1
+		DISABLE	A1,NOFETCH
+d202 2
+a203 2
+		move.w	#INTF_SETCLR!INTF_TBE,intena(a0)	;enable TBE ints
+		move.w	#INTF_SETCLR!INTF_TBE,intreq(a0)	;cause a TBE int
+d205 1
+a205 1
+		ENABLE	A1,NOFETCH
+d307 1
+a307 1
+		bhi.s	CDGMidiPack_Exit
+d309 4
+d320 1
+a320 1
+	; switch
+d359 3
+a361 2
+		move.w	#INTF_SETCLR!INTF_TBE,d1
+		lea	_custom,a0
+d363 1
+a363 1
+		move.l	cdd_ExecLib(a6),a1
+d365 2
+a366 4
+		DISABLE	A1,NOFETCH
+
+		move.w	d1,intena(a0)	;enable TBE ints
+		move.w	d1,intreq(a0)	;cause a TBE int
+d368 1
+a368 1
+		ENABLE	A1,NOFETCH
+d372 6
+d431 15
+d452 4
+d458 1
+a458 2
+		and.b	#PARREGBITS,_ciab+ciaddra
+		or.b	#(CIAF_COMDTR!CIAF_COMRTS),_ciab+ciaddra
+d460 1
+a460 2
+		and.b	#((~(CIAF_COMRTS!CIAF_COMDTR!CIAF_COMCD))&$ff),_ciab+ciapra
+		and.b	#(~(CIAF_COMCTS!CIAF_COMDSR!CIAF_COMCD)),_ciab+ciaddra
+d462 6
+a467 1
+		move.w	#112,_custom+serper		;set baud rate (31500/NTSC)
+d469 1
+d471 1
+a471 4
+	;;; Enable as needed
+	;;;
+	;;;
+	;;;	move.w	#INTF_SETCLR!INTF_TBE,_intena	;enable TBE ints
+d516 1
+a516 1
+	; so there is an arbitrary time-out implied of approx 60+
+d521 1
+a521 1
+		moveq	#60,d2			;spin for 1 second max???
+d528 18
+d564 27
+a590 1
+		move.w	#371,_custom+serper	;reset baud rate (9600 bps)
+d631 5
+a635 1
+		move.w	serdatr(a0),d0		;Is TBE interrupt, or just noise?
+a655 1
+
+d658 2
+a659 3
+	; buffer is empty - disable TBE interrupts for now
+
+CDGMOI_Empty:	move.w	#INTF_TBE,intena(a0)
+@
+
+
+1.4
+log
+@Aha!  This one works, and its super efficient!
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.1 92/02/19 16:59:04 darren Exp Locker: darren $
+d183 4
+a186 1
+	; wake interrupt
+d188 7
+a194 1
+		move.w	#INTF_SETCLR!INTF_TBE,_intreq
+d196 2
+d342 15
+a356 1
+		move.w	#INTF_SETCLR!INTF_TBE,_intreq
+d429 5
+a433 1
+		move.w	#INTF_SETCLR!INTF_TBE,_intena	;enable TBE ints
+d555 1
+a555 1
+		beq.s	CDGMOI_NotTBE		;any more to send?
+d570 1
+d573 4
+@
+
+
+1.3
+log
+@Check in while working
+@
+text
+@d302 1
+a302 1
+		add.b	(a1)+,d0
+d304 1
+a304 1
+		add.b	(a1)+,d0
+d306 1
+a306 2
+		add.b	(a1)+,d0
+		lsl.l	#6,d0
+@
+
+
+1.2
+log
+@First use of interrupt mechanism for serial out, but ACK, what sucks
+is that its a wash when looked at on the analyzer.  At midi rates
+the system spends enough time in exec's level 1 interrupt chain
+that now I'm inclined to believe its maybe even a loss on a 68K
+machine (CDTV!!)
+@
+text
+@d24 2
+a25 2
+		XDEF	CDGAddMidiInt
+		XDEF	CDGRemMidiInt
+d37 1
+d43 1
+a43 72
+******* cdg.library/CDGSendMidi ***************************************
+*
+*   NAME
+*	CDGSendMidi -- Send bytes to midi port
+*   
+*   SYNOPSIS
+*	actual = CDGSendMidi( data, count );
+*	D0                     A1    D1
+*
+*	USHORT CDGSendMidi( UBYTE *, UWORD count );
+*
+*   FUNCTION
+*	This function is intended for programmers who want to send
+*	their own bytes out the midi port.  For example, an application
+*	using the cdg.library may need to send a special sequence of
+*	data when a CD+MIDI disk is stopped, paused, etc.
+*	
+*	The bytes are added to a queue, and this function may
+*	return before all the data has actually been transmitted.
+*	Subsequent calls to this function will append more data
+*	to the queue.
+*
+*   INPUTS
+*
+*	data - A pointer to a byte, or stream of bytes to send.
+*
+*	count - The number of bytes to send.
+*
+*	The value of count should be reasonable; generally no more
+*	than 256.  A large value may fill the output queue, so if a
+*	CD+MIDI disk is playing, CD+MIDI data may be lost because the
+*	queue is already full.
+*	
+*   RETURNS
+*	actual - The actual number of bytes sent.
+*
+*	The actual number of bytes may be less than 'count' if the
+*	output queue is full.
+*
+*	A return of -1 indicates that the midi port is not available
+*	(most likely because the cdg.library could not obtain the
+*	necessary serial resource bits).
+*
+*   NOTES
+*	
+*	bother sending anything (and not only must it be a +MIDI
+*	disk, but we must have also obtained the resource serial
+*	bits, and port).
+*
+*
+***********************************************************************
+CDGSendMidi:
+		movem.l	d2/a6,-(sp)
+		move.l	cdg_BaseData(a6),a5
+
+		moveq	#-1,d2			;actual
+
+		tst.l	cdd_MiscResource(a6)
+		beq.s	CDGSendMidi_Exit
+
+		moveq	#00,d2			;actual
+
+		subq.w	#1,d1			;0 for count??
+		bmi.s	CDGSendMidi_Exit
+
+CDGSendMidi_Loop:
+
+		move.b	(a1)+,d0
+		bsr	CDGAddMidiByte		;preserves A1/D1
+
+		tst.w	d0
+		beq.s	CDGSendMidi_Exit
+a44 7
+		addq.w	#1,d2			;increment actual
+		dbf	d1,CDGSendMidi_Loop
+
+CDGSendMidi_Exit:
+		movem.l	(sp)+,d2/a6
+		rts
+
+a160 1
+
+d183 4
+d197 2
+a198 2
+*	success = CDGAddMidiByte( data, byte );
+*	D0	                  A6    D0
+d200 1
+a200 1
+*	BOOL CDGAddMidiByte( struct CDGData *, UBYTE );
+d232 2
+a233 1
+		bne.s	CDGAMB_Byte
+d235 1
+a235 3
+		lea	cdd_MidiByteData(a6),a0		
+CDGAMB_Byte:
+
+a236 16
+
+	; output
+
+		move.l	a1,-(sp)
+
+		move.l	cdd_ExecLib(a6),a1
+
+		moveq	#INTF_TBE,d0
+
+		DISABLE	A1,NOFETCH
+
+	; check for overrun - if going to overrun, return an error
+
+		cmp.l	cdd_GetMidiByte(a6),a0
+		beq.s	CDGAMB_Overrun
+
+a238 24
+	; check if TBE interrupts are already enabled
+
+		and.w	_intenar,d0
+		bne.s	CDGAMB_Busy
+
+	; if not, enable them, and cause one
+
+		move.w	#INTF_SETCLR!INTF_TBE,d0
+		move.w	d0,_intena
+		move.w	d0,_intreq
+
+CDGAMB_Busy:
+		
+		ENABLE	A1,NOFETCH
+
+		move.l	(sp)+,a1	;restore
+		rts
+
+
+CDGAMB_Overrun:
+		ENABLE	A1,NOFETCH
+
+		moveq	#00,d0		;FALSE
+		move.l	(sp)+,a1
+d271 1
+a271 1
+*
+a290 2
+		movem.l	d2-d3,-(sp)
+
+d293 4
+a296 1
+	; inline decoding for speed
+d301 9
+a309 5
+		lsl.b	#2,d0		;P-U <- R-W
+		move.b	(a1)+,d2
+		move.b	d2,d3
+		lsr.b	#4,d2		;R-S -> V-W
+		or.b	d2,d0
+d311 1
+a311 1
+		bsr	CDGAddMidiByte
+d316 1
+a316 6
+		lsl.b	#4,d3		;P-Q <- T-W
+		move.b	d3,d0
+		move.b	(a1)+,d2
+		move.b	d2,d3
+		lsr.b	#2,d2		;R-U -> T-W
+		or.b	d2,d0
+d318 1
+a318 1
+		bsr	CDGAddMidiByte
+d323 1
+a323 3
+		lsl.b	#6,d3		;P-Q <- V-W
+		move.b	d3,d0
+		or.b	(a1)+,d0	;R-W -> R-W
+d325 1
+a325 1
+		bsr	CDGAddMidiByte
+d331 2
+a332 2
+		
+		movem.l	(sp)+,d2-d3
+d338 1
+a338 1
+*****i* cdg.library/CDGAddMidiInt *************************************
+d341 1
+a341 1
+*	CDGAddMidiInt -- Add the level 1 TBE interrupt handler
+d344 1
+a344 1
+*	VOID CDGAddMidiPort( data );
+d347 1
+a347 1
+*	VOID CDGAddMidiPort( struct CDGData * );
+d350 1
+a350 1
+*	Private functions - adds a level 1 TBE interrupt handler
+d359 3
+a361 1
+CDGAddMidiInt:
+d363 1
+a363 1
+	PRINTF	DBG_ENTRY,<'CDGAddMidiInt()'>
+d365 2
+d403 3
+a405 1
+		move.w	#112,_custom+serper	;set baud rate (31500/NTSC)
+a410 2
+	PRINTF	DBG_EXIT,<'Exit CDGAddMidiInt()'>
+
+d413 1
+a413 1
+*****i* cdg.library/CDGRemMidiInt *************************************
+d416 1
+a416 1
+*	CDGRemMidiInt -- Remove the level 1 TBE interrupt
+d419 1
+a419 1
+*	VOID CDGRemMidiInt( data );
+d422 1
+a422 1
+*	VOID CDGRemMidiInt( struct CDGData * );
+d425 1
+a425 1
+*	Private functions - removes the level 1 TBE interrupt
+d434 3
+a436 2
+CDGRemMidiInt:
+	PRINTF	DBG_ENTRY,<'CDGRemMidiInt()'>
+d460 1
+a460 1
+		moveq	#INTF_TBE,d0
+d464 1
+a464 1
+		and.w	_intenar,d0
+a493 2
+	PRINTF	DBG_EXIT,<'Exit CDGRemMidiInt()'>
+
+d502 2
+a503 2
+*	VOID CDGMidiOutInt( data );
+*			      A1
+d505 1
+a505 1
+*	VOID CDGMidiOutInt( struct CDGData * );
+d519 1
+a519 1
+		move.w	#INTF_TBE,_intreq	;clear interrupt
+d521 7
+a527 3
+		move.l	cdd_GetMidiByte(a1),a0
+		cmp.l	cdd_PutMidiByte(a1),a0
+		beq.s	CDGMidiOut_Empty
+d529 1
+a529 1
+		cmp.l	cdd_MaxMidiByte(a1),a0
+d532 1
+a532 1
+		lea	cdd_MidiByteData(a1),a0
+d537 3
+a539 9
+		move.b	(a0)+,d0
+
+		move.w	#INTF_SETCLR!INTF_TBE,_intena
+		move.w	d0,_serdat
+		move.l	a0,cdd_GetMidiByte(a1)
+		rts
+
+CDGMidiOut_Empty:
+		move.w	#INTF_TBE,_intena	;disable interrupt
+d541 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+**	$Id: midi.asm,v 1.0 92/02/19 16:00:00 darren Exp $
+a17 2
+DEBUG_DETAIL	SET	DBG_ALL
+
+d27 1
+d42 80
+d271 2
+a272 2
+*	VOID CDGAddMidiByte( data, byte );
+*			      A6    D0
+d274 1
+a274 1
+*	VOID CDGAddMidiByte( struct CDGData *, UBYTE );
+d280 2
+a281 1
+*	N/A
+d284 1
+a311 1
+		move.l	a0,cdd_PutMidiByte(a6)
+d315 3
+a317 1
+		move.l	cdd_ExecLib(a6),a0
+d321 1
+a321 1
+		DISABLE	a0,NOFETCH
+d323 7
+d340 1
+d343 109
+a451 1
+		ENABLE	a0,NOFETCH
+d516 1
+a516 3
+	; finally set baud rate
+
+	;	move.w	#133,_custom+serper
+d550 37
+a586 1
+		movem.l	d0-d1/a0-a1/a6,-(sp)
+d592 4
+d604 1
+a604 1
+		movem.l	(sp)+,d0-d1/a0-a1/a6
+a630 1
+	DEBUG_TRAP	$99
+d648 1
+d656 1
+d658 1
+@

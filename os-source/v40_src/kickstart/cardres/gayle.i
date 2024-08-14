@@ -1,0 +1,104 @@
+	IFND	HARDWARE_GAYLE_I
+HARDWARE_GAYLE_I	SET	1
+**
+**	$Id: gayle.i,v 1.2 91/10/22 14:50:21 darren Exp $
+**
+**	Gayle hardware
+**
+**	(C) Copyright 1991 Commodore-Amiga, Inc.
+**	    All Rights Reserved
+**
+**	
+**
+
+	IFND	EXEC_TYPES_I
+	INCLUDE	"exec/types.i"
+	ENDC
+
+GAYLE_HARDWARE	EQU	1
+
+	IFNE	GAYLE_HARDWARE
+
+gaylestatus	EQU	$DA8000
+gaylechange	EQU	$DA9000
+gayleint	EQU	$DAA000
+gaylecontrol	EQU	$DAB000
+gaylehedley	EQU	$A40000
+
+**
+** We have agreed that the GAYLE ID register should ONLY be
+** accessed FROM A TASK, and w/r operations must be surrounded
+** by at least a FORBID (or DISABLE if convienent).
+** 
+** This register requires a write operation followed by 8 successive
+** reads from the register examining the ID bit - which should equal
+** the following bit pattern 1-1-0-1-0-0-0-0
+**
+** I've decided to use the first 4 bits to indicate GAYLE VERSION, and the
+** last 4 to indicate GAYLE REVISION.  In theory all REVISIONS will be
+** compatable with earlier REVISIONS (if any).
+**
+
+gayleregid	EQU	$DE1000
+
+
+	; ID Register
+
+	BITDEF	GAYLE,ID,7
+
+GAYLE_ID	EQU	%11010000
+
+	; Status register
+
+	BITDEF	GAYLE,STATUS_IDEINT,7
+	BITDEF	GAYLE,STATUS_CCDET,6
+	BITDEF	GAYLE,STATUS_BVD1,5
+	BITDEF	GAYLE,STATUS_SC,5
+	BITDEF	GAYLE,STATUS_BVD2,4
+	BITDEF	GAYLE,STATUS_DA,4
+	BITDEF	GAYLE,STATUS_WR,3
+	BITDEF	GAYLE,STATUS_BSYIRQ,2
+	BITDEF	GAYLE,STATUS_DIGAUDIO,1
+	BITDEF	GAYLE,STATUS_CCDISABLE,0
+
+	; Change detect register
+
+	BITDEF	GAYLE,CHANGE_IDEINT,7
+	BITDEF	GAYLE,CHANGE_CCDET,6
+	BITDEF	GAYLE,CHANGE_BVD1,5
+	BITDEF	GAYLE,CHANGE_SC,5
+	BITDEF	GAYLE,CHANGE_BVD2,4
+	BITDEF	GAYLE,CHANGE_DA,4
+	BITDEF	GAYLE,CHANGE_WR,3
+	BITDEF	GAYLE,CHANGE_BSYIRQ,2
+
+	BITDEF	GAYLE,DETRESET,1
+	BITDEF	GAYLE,DETBERR,0
+
+	; Interrupt control register
+
+	BITDEF	GAYLE,INT_IDEINT,7
+	BITDEF	GAYLE,INT_CCDET,6
+	BITDEF	GAYLE,INT_BVD1,5
+	BITDEF	GAYLE,INT_SC,5
+	BITDEF	GAYLE,INT_BVD2,4
+	BITDEF	GAYLE,INT_DA,4
+	BITDEF	GAYLE,INT_WR,3
+	BITDEF	GAYLE,INT_BSYIRQ,2
+
+	BITDEF	GAYLE,LEVEL_BVD,1
+	BITDEF	GAYLE,LEVEL_DA,1
+	BITDEF	GAYLE,LEVEL_SC,1
+
+	BITDEF	GAYLE,LEVEL_BSYIRQ,0
+
+	; Control register
+
+	BITDEF	GAYLE,MEMORY_SPEED1,3
+	BITDEF	GAYLE,MEMORY_SPEED0,2
+	BITDEF	GAYLE,PROGRAM_12V,1
+	BITDEF	GAYLE,PROGRAM_5V,0
+
+	ENDC	; GAYLE_HARDWARE
+
+	ENDC	; HARDWARE_GAYLE_I

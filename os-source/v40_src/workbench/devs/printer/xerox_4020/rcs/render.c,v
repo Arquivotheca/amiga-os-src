@@ -1,0 +1,888 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  V36_45:1.9 L35_40:1.9 L35_39:1.9 L35_33:1.8 L35_32:1.8 L35_30:1.6 L35_29:1.6;
+locks    ; strict;
+comment  @ * @;
+
+
+1.11
+date     92.01.16.14.57.46;  author davidj;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.04.09.09.15.01;  author daveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     88.06.05.18.32.41;  author daveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     88.04.15.17.44.09;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.04.15.17.26.16;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     88.01.15.15.50.52;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     87.11.17.13.10.02;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     87.10.28.13.16.58;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.10.27.15.50.16;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.10.01.09.29.48;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.08.20.11.34.03;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 2
+@
+
+
+1.11
+log
+@Add European paper size support
+@
+text
+@/*
+	Xerox-4020 driver.
+	David Berezowski - October/87.
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/printer.h"
+#include "../printer/prtbase.h"
+
+#define NUMSTARTCMD	7	/* # of cmd bytes before binary data */
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define NUMTOTALCMD 	(NUMSTARTCMD + NUMENDCMD)	/* total of above */
+#define NUMLFCMD	9	/* # of cmd bytes for linefeed */
+#define MAXCOLORBUFS	16	/* max # of color buffers */
+
+#define RLEMAX		136
+#define RLENUMSTARTCMD	3	/* # of cmd bytes before binary data */
+#define RLENUMENDCMD	1	/* # of cmd bytes after binary data */
+#define RLENUMTOTALCMD 	(RLENUMSTARTCMD + RLENUMENDCMD)	/* total of above */
+#define RLESAFETY	10	/* extra room for overwrites */
+
+#define PMODE		15	/* index into StartBuf for print mode */
+#define STARTLEN	16	/* length of start buffer */
+
+extern UBYTE MargBuf[];
+
+/* (30.5cm/ft) * (10mm/cm)					*/
+#define MMPERFT		305
+
+/* Margins: minus 1/2" width, minus 1" height (== US diffs)	*/
+/*								*/
+/* Left            Right           Top           Bottom		*/
+/* 50/300 = 1/6    100/300 = 1/3   60/300 = 1/5  60/300 = 1/5	*/
+/* 								*/
+
+/* Half inches per ft */
+#define HALFINCHPERFT 24
+
+/* Inches per ft */
+#define INCHPERFT 12
+
+/* MM per 1/2 inch (round up [12.7->13]) */
+#define HALFINCH ((MMPERFT + INCHPERFT)/HALFINCHPERFT)
+
+/* MM per inch (round up) 25.4 */
+#define INCH ((MMPERFT + INCHPERFT)/INCHPERFT)
+
+/* Sparse table for paper sizes - offset constant */
+#define PSIZE_OFFSET 16
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	static UWORD RowSize, ColorSize, BufSize, TotalBufSize, dataoffset;
+	static UWORD colors[MAXCOLORBUFS]; /* color indexes */
+	static UWORD color_order[] =
+		{0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15};
+	static UWORD huns, tens, ones; /* used to program buffer size */
+	static UWORD NumColorBufs; /* actually # of color buffers */
+	/*
+		00-02	\033F0		set 10 cpi
+		03-07	\033l05\r	set left margin to .5 inches
+		09-12	\033r95\r	set right margin to 9.5 inches
+		13-15	\033we		select standard (e) or
+					enhanced (f) graphics mode.
+	*/
+	static UBYTE stdmode, StartBuf[STARTLEN] =
+		"\033F0\033l05\r\033r95\r\033we";
+	UBYTE *ptr, *ptrstart, *ptr2, *ptr2start;
+	int i, err;
+
+	static UWORD RLEBufSize, rledataoffset;
+	static UBYTE *RLEBuf;
+	UBYTE *rleptrstart, *rleptr, *rleptrmark, rledata;
+	int rlesize, rlecount, j;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+			/* calc # of bytes of row data */
+			RowSize = (x + 7) / 8;
+			/* size of each color buf */
+			ColorSize = RowSize + NUMTOTALCMD;
+			huns = RowSize / 100;
+			tens = (RowSize - huns * 100) / 10;
+			ones = RowSize % 10;
+			if (PD->pd_Preferences.PrintShade == SHADE_COLOR) {
+				NumColorBufs = MAXCOLORBUFS;
+			}
+			else {
+				NumColorBufs = 4;
+			}
+			BufSize = ColorSize * NumColorBufs + NUMLFCMD;
+			TotalBufSize = BufSize * 2;
+			RLEBufSize = BufSize + RLESAFETY;
+			TotalBufSize += RLEBufSize * 2;
+			/*
+				My color order:		B, Y, M, C
+				Xerox's color order:	B, M, Y, C
+			*/
+			for (i=0; i<NumColorBufs; i++) {
+				colors[color_order[i]] = ColorSize * i;
+			}
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				dataoffset = NUMSTARTCMD;
+				err = (*(PD->pd_PWrite))(StartBuf, STARTLEN);
+				RLEBuf = &PD->pd_PrintBuf[BufSize * 2];
+				rledataoffset = RLENUMSTARTCMD;
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- 0.
+				y	- row # (0 to Height - 1).
+			*/
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], colors);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+			/* Run-Length Encode (rle) the data */
+			rleptrstart = rleptr =
+				&RLEBuf[rledataoffset - RLENUMSTARTCMD];
+			/* ptr to data */
+			ptrstart = &PD->pd_PrintBuf[dataoffset];
+			for (ct=0; ct<NumColorBufs;
+				ct++, ptrstart += ColorSize) {
+				/* save start posn for this color */
+				rleptrmark = rleptr;
+				*rleptr++ = 27; /* rle start cmd */
+				*rleptr++ = 'h';
+				*rleptr++ = ct | '0'; /* color code */
+				ptr = ptrstart; /* get ptr to bytes to rle */
+				j = RowSize - 1; /* # of bytes left to rle */
+				do {
+					/* first do repeating bytes */
+					/* get goal (repeating) byte */
+					rledata = *ptr++;
+					/* this many repetitions left to go*/
+					i = RLEMAX - 1;
+					/* while repeating and not too many
+						and more to do */
+					while (*ptr == rledata && i > 0 &&
+						j > 0) {
+						i--; /* one more rle byte */
+						/* advance ptr to next byte */
+						ptr++;
+						/* one less byte to look at */
+						j--;
+					}
+					/* calc repeating byte count */
+					if ((rlecount = RLEMAX - i) == 1) {
+						/* if only 1 then no repeat */
+						rlecount = 0;
+					}
+					else {
+						/* dont forget the goal byte */
+						j--;
+					}
+					/* if there was repeat data */
+					if (rlecount != 0) {
+						/* save repeat count */
+						*rleptr++ = rlecount;
+						/* save repeat byte */
+						*rleptr++ = rledata;
+						/* get non-repeat goal byte */
+						rledata = *ptr++;
+					}
+					/* now do non-repeating data */
+					/* no non-repeating bytes yet */
+					rlecount = 0;
+					if (*ptr != rledata && j >= 0) {
+						/* non-repeat data follows */
+						*rleptr++ = 0x00;
+					}
+					/* while non-repeating and more to do */
+					while (*ptr != rledata && j >= 0) {
+						/* save byte */
+						*rleptr++ = rledata;
+						/* if byte same as terminator */
+						if (rledata == 0xfe) {
+							/* save byte (again) */
+							*rleptr++ = rledata;
+						}
+						/* one more non-repeat byte */
+						rlecount++;
+						/* get goal byte */
+						rledata = *ptr++;
+						/* one less byte to look at */
+						j--;
+					}
+					if (rlecount != 0) {
+						/* end of non-repeating bytes */
+						*rleptr++ = 0xfe;
+					}
+					if (j > 0) { /* if more data to do */
+						/* set ptr back to start
+							of repeat bytes */
+						ptr--;
+					}
+					if (rleptr - rleptrstart > BufSize) {
+						/* abort: too many rle bytes */
+						break;
+					}
+				} while (j > 0); /* while more bytes to rle */
+
+				/* if didnt abort && no non-repeating data */
+				if (j < 1 && rlecount == 0) {
+					/* check for trailing white space */
+					/* line ends in trailing 0 */
+					if (*(rleptr - 1) == 0x00) {
+						/* ptr back to repeat count */
+						rleptr -= 2;
+					}
+				}
+				/* if line is just the cmd bytes */
+				/* line null */
+				if (rleptr - rleptrmark == RLENUMSTARTCMD) {
+					/* reset ptr to start */
+					rleptr = rleptrmark;
+				}
+				else {
+					*rleptr++ = 0xff; /* end of rle line */
+				}
+			}
+			i = rleptr - rleptrstart; /* calc size of rlebuf */
+			/* if rle data is more send non-rle data */
+			if (i > BufSize) {
+				ptrstart = &PD->pd_PrintBuf[dataoffset -
+					NUMSTARTCMD];
+				ptr = ptrstart + BufSize - NUMLFCMD;
+				/* if standard print mode and any black
+					in this micro-line */
+				if (stdmode && *(ptrstart + 2) < '4') {
+					*ptr++ = 27;
+					*ptr++ = 'k';
+					*ptr++ = '0';	/* cr */
+					*ptr++ = 27;
+					*ptr++ = 'w';
+					*ptr++ = 'B';	/* repeat black */
+				}
+				*ptr++ = 27;
+				*ptr++ = 'k';
+				*ptr++ = '1';		/* cr/lf */
+				err = (*(PD->pd_PWrite))
+					(ptrstart, ptr - ptrstart);
+			}
+			else { /* send rle data */
+				/* if any black in this micro-line */
+				if (rleptr - rleptrstart > 0 &&
+					*(rleptrstart + 2) < '4') {
+					*rleptr++ = 27;
+					*rleptr++ = 'k';
+					*rleptr++ = '0'; /* cr */
+					*rleptr++ = 27;
+					*rleptr++ = 'w';
+					*rleptr++ = 'B'; /* repeat black */
+				}
+				*rleptr++ = 27;
+				*rleptr++ = 'k';
+				*rleptr++ = '1';	/* cr/lf */
+				i = rleptr - rleptrstart; /* size of rlebuf */
+				err = (*(PD->pd_PWrite))(rleptrstart, i);
+			}
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NUMSTARTCMD ?
+					BufSize : 0) + NUMSTARTCMD;
+				rledataoffset = (rledataoffset ==
+					RLENUMSTARTCMD ? RLEBufSize : 0) +
+					RLENUMSTARTCMD;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = BufSize - NUMTOTALCMD - NUMLFCMD;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			for (ct=0; ct<NumColorBufs; ct++) {
+				ptr = &PD->pd_PrintBuf[dataoffset -
+					NUMSTARTCMD + ct * ColorSize];
+				*ptr++ = 27;
+				*ptr++ = 'g';
+				*ptr++ = ct + '0';	/* color */
+				*ptr++ = huns | '0';
+				*ptr++ = tens | '0';
+				*ptr++ = ones | '0';	/* printout width */
+				*ptr = ',';		/* terminator */
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+			/* if user did not cancel print */
+			if (ct != PDERR_CANCEL) {
+				/* restore preferences pitch and margins */
+				i = CalcMarg(PD->pd_Preferences.PrintLeftMargin
+					, PD->pd_Preferences.PrintRightMargin);
+				err = (*(PD->pd_PWrite))(MargBuf, i);
+			}
+			/* wait for both buffers to empty */
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 5 : /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+
+			StartBuf[PMODE - 1] = 'w';
+			if ((x & SPECIAL_DENSITYMASK) < SPECIAL_DENSITY2) {
+				/* standard graphics mode */
+				StartBuf[PMODE] = 'e';
+				stdmode = 1;
+			}
+			else {
+				/* enhanced graphics mode */
+				StartBuf[PMODE] = 'f';
+				stdmode = 0;
+			}
+#if 1
+			{
+				/* Paper sizes in inches */
+				static int PaperXSizes[] = {
+					80,			/* US_LETTER 8.0 x 10.0 */
+					80,			/* US_LEGAL  8.0 x 13.0 */
+					80,			/* N_TRACTOR == LETTER */
+					90,			/* W_TRACTOR == 9.0 x  10.0 */
+					80,			/* CUSTOM    == LETTER */
+				/* Euro Ax sizes follow		*/
+				/* Paper size in millimeters - 1/2 inch */
+					841 - HALFINCH,		/* A0	*/
+					594 - HALFINCH,		/* A1	*/
+					420 - HALFINCH,		/* A2	*/
+					297 - HALFINCH,		/* A3	*/
+					210 - HALFINCH,		/* A4	*/
+					148 - HALFINCH,		/* A5	*/
+					105 - HALFINCH,		/* A6	*/
+					74  - HALFINCH,		/* A7	*/
+					52  - HALFINCH,		/* A8	*/
+					};
+
+				/* Calculate max dots based on paper size selection */
+				UWORD psize;
+			        ULONG maxwidth;
+
+				psize = PD->pd_Preferences.PaperSize;
+				maxwidth =  (ULONG)PaperXSizes[psize/PSIZE_OFFSET];
+				if(psize <= CUSTOM)
+				{
+					PED->ped_MaxColumns = maxwidth;
+					PED->ped_MaxXDots = maxwidth * PED->ped_XDotsInch / 10;
+				}
+				else
+				{
+					PED->ped_MaxColumns = maxwidth * 100 / 254;
+					PED->ped_MaxXDots = (maxwidth * INCHPERFT * PED->ped_XDotsInch) / MMPERFT;
+				}
+			}
+#else
+			PED->ped_MaxColumns = PD->pd_Preferences.PaperSize == W_TRACTOR ? 90 : 80;
+			/* def is 80 chars (8.0 in.), W_TRACTOR is 90 chars (9.0 in.) */
+			PED->ped_MaxXDots = (PED->ped_XDotsInch * PED->ped_MaxColumns) / 10;
+#endif
+
+			/*
+			The manual says that the printer has 1088 dots BUT I
+			could never get more than 1080 out of it.  This kludge
+			is here as '121 * 90 / 10 = 1089' which is > 1080.
+			*/
+			if (PED->ped_MaxXDots > 1080) {
+	 			PED->ped_MaxXDots = 1080;
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.10
+log
+@for rcs 4.x header change
+@
+text
+@d30 24
+d348 1
+d360 45
+a404 6
+			PED->ped_MaxColumns = PD->pd_Preferences.PaperSize ==
+				W_TRACTOR ? 90 : 80;
+			/* def is 80 chars (8.0 in.),
+				W_TRACTOR is 90 chars (9.0 in.) */
+			PED->ped_MaxXDots = (PED->ped_XDotsInch *
+				PED->ped_MaxColumns) / 10;
+@
+
+
+1.9
+log
+@V1.3 Gamma 15        
+@
+text
+@@
+
+
+1.8
+log
+@find . -name core -print
+fixed docs for devcon
+V1.3 Gamma 13
+@
+text
+@d25 2
+a26 2
+#define PMODE_START	11	/* index into start_buf for print mode */
+#define START_LEN	12	/* length of start buffer */
+d28 2
+d44 5
+a48 7
+		The start_buf commands are :
+		command		length	description
+		\033l5\r	4	set left margin to .5 inches
+		\033r95\r	5	set right margin to 9.5 inches
+		\033we		3	select standard (e) or
+				--		enhanced (f) graphics mode.
+				12
+d50 2
+a51 2
+	static UBYTE stdmode, start_buf[START_LEN] =
+		"\033l5\r\033r95\r\033we";
+d97 1
+a97 3
+		/* lmarg = .5 inch, rmarg = 9.5 inches, select gfx mode */
+				err = (*(PD->pd_PWrite))
+					(start_buf, START_LEN);
+d303 7
+d324 1
+d327 1
+a327 1
+				start_buf[PMODE_START] = 'e';
+d332 1
+a332 1
+				start_buf[PMODE_START] = 'f';
+@
+
+
+1.7
+log
+@fixed docs for devcon 
+V1.3 Gamma 13
+@
+text
+@d29 1
+a29 1
+long ct, x, y, status
+d50 2
+a51 1
+	static UBYTE stdmode, start_buf[START_LEN] = "\033l5\r\033r95\r\033we";
+d98 2
+a99 1
+				err = (*(PD->pd_PWrite))(start_buf, START_LEN);
+d302 1
+a302 1
+				x	- io_Special flag from IODRPReq struct.
+d316 1
+a316 1
+				x	- io_Special flag from IODRPReq struct.
+@
+
+
+1.6
+log
+@changed right gfx margin from 9.0 to 9.5 inches
+put in check to limit max print dots to 1080
+V1.3 Gamma 6 release
+@
+text
+@d3 1
+a3 1
+	David Berezowski - October/87
+d13 2
+a14 2
+#define NUMSTARTCMD		7	/* # of cmd bytes before binary data */
+#define NUMENDCMD		0	/* # of cmd bytes after binary data */
+d16 1
+a16 1
+#define NUMLFCMD		9	/* # of cmd bytes for linefeed */
+d19 1
+a19 1
+#define RLEMAX			136
+d23 1
+a23 1
+#define RLESAFETY		10	/* extra room for overwrites */
+d25 2
+a26 2
+#define PMODE_START		11	/* index into start_buf for print mode */
+#define START_LEN		12	/* length of start buffer */
+d29 1
+a29 3
+long ct;
+long x, y;
+long status;
+d43 6
+a48 6
+		command	 length	  description
+		\033l5\r	4		set left margin to .5 inches
+		\033r95\r	5		set right margin to 9.5 inches
+		\033we		3		select standard (e) or enhanced (f) graphics mode.
+				   --
+				   12
+d62 1
+a62 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d66 4
+a69 2
+			RowSize = (x + 7) / 8; /* calc # of bytes of row data */
+			ColorSize = RowSize + NUMTOTALCMD; /* size of each color buf */
+d84 2
+a85 2
+				My color order			Black, Yellow, Magenta, Cyan.
+				Xerox's color order		Black, Magenta, Yellow, Cyan.
+d92 1
+a92 1
+				err = PDERR_BUFFERMEMORY; /* couldn't get the memory */
+d96 1
+a96 1
+				/* lmarg = .5 inch, rmarg = 9.5 inches, select gfx mode */
+d106 2
+a107 2
+				x	- NA
+				y	- row.
+d115 3
+a117 3
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+d120 8
+a127 4
+			rleptrstart = rleptr = &RLEBuf[rledataoffset - RLENUMSTARTCMD];
+			ptrstart = &PD->pd_PrintBuf[dataoffset]; /* ptr to data */
+			for (ct=0; ct<NumColorBufs; ct++, ptrstart += ColorSize) {
+				rleptrmark = rleptr; /* save start posn for this color */
+d135 8
+a142 4
+					rledata = *ptr++; /* get goal (repeating) byte */
+					i = RLEMAX - 1; /* this many repetitions left to go*/
+					/* while repeating and not too many and more to do */
+					while (*ptr == rledata && i > 0 && j > 0) {
+d144 4
+a147 2
+						ptr++; /* advance ptr to next byte */
+						j--; /* one less byte to look at */
+d151 2
+a152 1
+						rlecount = 0; /* if one occurrence then no repeat */
+d155 2
+a156 1
+						j--; /* dont forget the goal byte */
+d158 8
+a165 4
+					if (rlecount != 0) { /* if there was repeat data */
+						*rleptr++ = rlecount; /* save repeat count */
+						*rleptr++ = rledata; /* save repeat byte */
+						rledata = *ptr++; /* get (non-repeat) goal byte */
+d168 2
+a169 1
+					rlecount = 0; /* no non-repeating bytes yet */
+d171 2
+a172 1
+						*rleptr++ = 0x00;/* non-repeat data follows */
+d176 2
+a177 1
+						*rleptr++ = rledata; /* save byte */
+d180 2
+a181 1
+							*rleptr++ = rledata; /* save byte (again) */
+d183 6
+a188 3
+						rlecount++; /* one more non-repeat byte */
+						rledata = *ptr++; /* get goal byte */
+						j--; /* one less byte to look at */
+d191 2
+a192 1
+						*rleptr++ = 0xfe; /* end of non-repeating bytes */
+d195 3
+a197 1
+						ptr--; /* set ptr back to start of repeat bytes */
+d200 2
+a201 1
+						break; /* abort if too much rle bytes */
+d208 4
+a211 2
+					if (*(rleptr - 1) == 0x00) { /* line ends in trailing 0 */
+						rleptr -= 2; /* bump ptr back to repeat count */
+d215 4
+a218 2
+				if (rleptr - rleptrmark == RLENUMSTARTCMD) { /* line null */
+					rleptr = rleptrmark; /* reset ptr to start */
+d221 1
+a221 1
+					*rleptr++ = 0xff;	/* end of rle line */
+d227 2
+a228 1
+				ptrstart = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD];
+d230 2
+a231 1
+				/* if standard print mode and any black in this micro-line */
+d243 2
+a244 1
+				err = (*(PD->pd_PWrite))(ptrstart, ptr - ptrstart);
+d248 2
+a249 1
+				if (rleptr - rleptrstart > 0 && *(rleptrstart + 2) < '4') {
+d252 1
+a252 1
+					*rleptr++ = '0';	/* cr */
+d255 1
+a255 1
+					*rleptr++ = 'B';	/* repeat black */
+d260 1
+a260 1
+				i = rleptr - rleptrstart; /* calc size of rlebuf */
+d264 5
+a268 5
+				dataoffset = 
+					(dataoffset == NUMSTARTCMD ? BufSize : 0) + NUMSTARTCMD;
+				rledataoffset = 
+					(rledataoffset == RLENUMSTARTCMD ? RLEBufSize : 0) +
+						RLENUMSTARTCMD;
+d274 3
+a276 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d284 2
+a285 2
+				ptr = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD +
+					ct * ColorSize];
+d288 1
+a288 1
+				*ptr++ = ct + '0';		/* color */
+d292 1
+a292 1
+				*ptr = ',';				/* terminator */
+d300 2
+a301 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d303 2
+a304 1
+			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+d306 1
+a306 1
+				FreeMem(PD->pd_PrintBuf, TotalBufSize); /* free memory */
+d313 3
+a315 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d318 2
+a319 1
+				start_buf[PMODE_START] = 'e'; /* standard graphics mode */
+d323 2
+a324 1
+				start_buf[PMODE_START] = 'f'; /* enhanced graphics mode */
+d327 6
+a332 5
+			PED->ped_MaxColumns = 
+				PD->pd_Preferences.PaperSize == W_TRACTOR ? 90 : 80;
+			/* def is 80 chars (8.0 in.), W_TRACTOR is 90 chars (9.0 in.) */
+			PED->ped_MaxXDots =
+				(PED->ped_XDotsInch * PED->ped_MaxColumns) / 10;
+d334 3
+a336 3
+				The manual says that the printer has 1088 dots BUT I
+				could never get more than 1080 out of it.  This kludge
+				is here as '121 * 90 / 10 = 1089' which is > 1080.
+@
+
+
+1.5
+log
+@V1.3 Gamma 3 release
+@
+text
+@d47 1
+a47 1
+		\033r90\r	5		set right margin to 9.0 inches
+d52 1
+a52 1
+	static UBYTE stdmode, start_buf[START_LEN] = "\033l5\r\033r90\r\033we";
+d96 1
+a96 1
+				/* lmarg = .5 inch, rmarg = 9 inches, select gfx mode */
+d294 8
+@
+
+
+1.4
+log
+@added support for narrow and wide paper
+V1.3 Gamma 1 check-in
+@
+text
+@d117 1
+a117 1
+				y	- # of rows sent.
+@
+
+
+1.3
+log
+@V1.3 gamma 1 check-in
+@
+text
+@d35 1
+d289 5
+@
+
+
+1.2
+log
+@fixed BufSize bug
+@
+text
+@d3 1
+a3 1
+	David Berezowski - April/87
+a12 2
+#define DEBUG5	0
+
+a241 1
+/*			(*(PD->pd_PBothReady))();  /* wait for both buffers to empty */
+a280 3
+#if DEBUG5
+				kprintf("5: standard graphics mode\n");
+#endif DEBUG5
+a284 3
+#if DEBUG5
+				kprintf("5: enhanced graphics mode\n");
+#endif DEBUG5
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a11 1
+#include "../printer/prtprivate.h"
+d13 2
+d18 1
+a18 1
+#define NUMLFCMD		3	/* # of cmd bytes for linefeed */
+a19 1
+#define NUMEXTRACMD		6	/* extra cmd space required */
+d27 3
+d44 10
+d81 1
+a81 1
+			TotalBufSize = (BufSize + NUMEXTRACMD) * 2;
+d97 2
+a98 2
+				/* lmarg=.5 inch, rmarg=9 inches, std gfx mode */
+				err = (*(PD->pd_PWrite))("\033l5\r\033r90\r\033we", 12);
+d199 2
+a200 2
+				/* if any black in this micro-line */
+				if (*(ptrstart + 2) < '4') { /* if any black */
+d244 1
+d283 14
+@

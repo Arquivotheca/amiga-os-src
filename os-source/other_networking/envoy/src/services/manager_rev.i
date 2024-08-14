@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	11
+DATE	MACRO
+		dc.b	'16.2.93'
+	ENDM
+VERS	MACRO
+		dc.b	'manager 37.11'
+	ENDM
+VSTRING	MACRO
+		dc.b	'manager 37.11 (16.2.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: manager 37.11 (16.2.93)',0
+	ENDM

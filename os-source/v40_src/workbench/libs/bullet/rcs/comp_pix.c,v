@@ -1,0 +1,930 @@
+head     7.0;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+7.0
+date     91.03.19.18.35.47;  author kodiak;  state Exp;
+branches ;
+next     6.0;
+
+6.0
+date     91.03.18.15.25.57;  author kodiak;  state Exp;
+branches ;
+next     3.0;
+
+3.0
+date     90.11.09.17.08.17;  author kodiak;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     90.10.10.04.15.35;  author kodiak;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.10.10.03.12.00;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+7.0
+log
+@after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+@
+text
+@/*
+**	$Id: comp_pix.c,v 6.0 91/03/18 15:25:57 kodiak Exp $
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	$Log:	comp_pix.c,v $
+ * Revision 6.0  91/03/18  15:25:57  kodiak
+ * folded in Bullet 1.30
+ * 
+ * Revision 3.0  90/11/09  17:08:17  kodiak
+ * Kodiak's Alpha 1
+ * 
+*/
+/*  comp_pix.c  */
+/* Copyright (C) Agfa Compugraphic, 1989. All rights reserved. */
+/*-----------------------------------------------------------------
+  20-Mar-90  jfd  Added check for tangent already computed
+                  in routine COMP_PIX()
+  05-May-90  awr  Added landscape. Set new variable d.quadrant to indicate
+                  rotation type. Eliminated rotate_on. Swap x and y
+                  resolution and spot size for 90 and 270 degree rotation.
+  07-Jul-90  awr  removed above swapping.
+  10-Sep-90  awr  changed computations for arbitrary rotation and shear to
+                  produce a rotated pixel size and spot size.
+  25-Sep-90  dET  made 'fpix' and 'fnew_pix' MLOCAL to prevent protection
+                  violations under windows 3.0. This is an obscure bug!
+  11-Nov-90  dET  Added check in comp_pix to limit  ( -45 < shear < 45 )
+                  as does IF 2.2.
+
+---------------------------------------------------------------------------*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include "debug.h"
+#include "port.h"
+#include "imath.h"
+#include "cgif.h"
+#include "if_type.h"
+#include "segments.h"
+#include "ix.h"
+#include "fmath.h"
+
+#define CON_SIZE 2
+
+/* nxt_pt.c */
+EXTERN UWORD     quality;
+/* if_init.c */
+EXTERN IF_DATA   d;
+EXTERN FACE      face;
+
+EXTERN pixel_align();
+EXTERN struct {
+                  WORD value;
+                  WORD grid_line;
+              } pixel_aligned;
+
+GLOBAL  MATRIX   tran;
+
+MLOCAL  FIXED fpix;
+MLOCAL  FIXED fnew_pix;
+ 
+
+/*--------------------*/
+/*   shift_left       */
+/*--------------------*/
+/*  Shift the ULONG val left as far as possible; until bit 31, the
+ *  "sign bit" is 1. Return the shifted val. Add the number of
+ *  bits shifted to *shift.
+ */
+MLOCAL ULONG
+shift_left(val, shift)
+    ULONG  val;
+    WORD *shift;
+{
+    while (val < 0x80000000)
+    {
+        val <<= 1;
+        (*shift)++;
+    }
+    return val;
+}
+
+
+/*--------------------*/
+/*   fill_in_data     */
+/*--------------------*/
+MLOCAL VOID
+fill_in_data(xy, grid_shift, t, s, spot, bold, fixed_pix)
+    COORD_DATA *xy;
+    WORD        grid_shift;
+    ULONG       t;          /* precise pixel size = t >> s */
+    WORD        s;
+    FIXED       spot;
+    WORD        bold;
+    FIXED       fixed_pix;
+{
+    WORD new_pix, mask;
+    WORD i;
+    LONG  bias;
+    LONG  phpix;
+
+    new_pix = 1;
+    mask    = 0xffff;
+    for(i=0; i < grid_shift; i++)
+    {
+        new_pix <<= 1;
+        mask    <<= 1;
+    }
+
+    xy->pixel_size = new_pix;
+    xy->grid_shift = grid_shift;
+    xy->grid_align = mask;
+    xy->half_pixel = new_pix >> 1;
+
+
+    DBG2("    pixel_size = %ld  half_pixel = %ld\n",xy->pixel_size,
+                                                  xy->half_pixel);
+    DBG2("    grid_align = %x  grid_shift = %ld\n", xy->grid_align,
+                                                   xy->grid_shift);
+
+  /*  Constrained dimension limit = actual pixel size * CON_SIZE.
+   *  (CON_SIZE = 2)
+   */
+
+    xy->con_size = (WORD)((t * (LONG)CON_SIZE) >> s);
+
+  /* Fractional pixel values used in skeletal processing */
+
+    xy->p_pixel    = (WORD)t;
+    phpix          = t >> 1;      /* precise half pixel */
+    xy->p_half_pix = (WORD)phpix;
+    xy->bin_places = s;
+
+    bias = (fmul(fixed_pix, spot - F_ONE) >> (16-s))  - ((LONG)bold << s);
+
+
+    xy->round[0] = phpix - bias;
+    xy->round[1] = phpix + bias;
+    xy->round[2] = phpix;
+    xy->round[3] = phpix;
+    DBG4("    round  %ld  %ld  %ld  %ld\n", xy->round[0], xy->round[1],
+                                            xy->round[2], xy->round[3]);
+    DBG2("    p_pixel = %ld  bin_places = %ld\n", xy->p_pixel, xy->bin_places);
+    DBG1("    con_size = %ld\n", xy->con_size);
+
+  /* Standard dimension */
+
+    xy->stand_value = 0;   /* to indicate that it must be recomputed */
+}
+
+
+
+
+/*--------------------*/
+/* fill_in_rot_data   */
+/*--------------------*/
+MLOCAL VOID
+fill_in_rot_data(xy, fpixel, bold, overhang)
+    COORD_DATA *xy;
+    FIXED fpixel;
+    WORD  bold;
+    FIXED overhang;
+{
+    ULONG t;
+    WORD  s;
+    LONG  bias;
+    LONG  phpix;
+
+    t = fpixel;
+    s = 16;
+    while ( t >= 0x8000 )  /* shift till < 32K */
+    {
+        t >>= 1;
+        s--;
+    }
+
+  /*  Constrained dimension limit = actual pixel size * CON_SIZE.
+   *  (CON_SIZE = 2)
+   */
+
+    xy->con_size = (WORD)((t * (LONG)CON_SIZE) >> s);
+
+  /* Fractional pixel values used in skeletal processing */
+
+    xy->p_pixel    = (WORD)t;
+    phpix          = t >> 1;      /* precise half pixel */
+    xy->p_half_pix = (WORD)phpix;
+    xy->bin_places = s;
+
+    bias = (overhang >> (16-s))  - ((LONG)bold << s);
+
+
+    xy->round[0] = phpix - bias;
+    xy->round[1] = phpix + bias;
+    xy->round[2] = phpix;
+    xy->round[3] = phpix;
+    DBG4("    round  %ld  %ld  %ld  %ld\n", xy->round[0], xy->round[1],
+                                            xy->round[2], xy->round[3]);
+    DBG2("    p_pixel = %ld  bin_places = %ld\n", xy->p_pixel, xy->bin_places);
+    DBG1("    con_size = %ld\n", xy->con_size);
+
+  /* Standard dimension */
+
+    xy->stand_value = 0;   /* to indicate that it must be recomputed */
+}
+
+
+
+/*--------------------*/
+/*   rotate_pixel     */
+/*--------------------*/
+MLOCAL BOOLEAN
+rotate_pixel(set, pnt, abscos, abssin, p, q, ho, vo, xbold, ybold)
+    FIXED set, pnt;
+    FIXED abscos, abssin;  /* absolute values of cos and sin */
+    FIXED p, q;            /* pixel size just after rotate- actual size    */
+    FIXED ho, vo;
+    WORD  xbold, ybold;
+{
+    FIXED ver, hor;        /* pixel size just before rotate                */
+    FIXED xpixel, ypixel;  /* pixel size in original design space          */
+    FIXED dho, dvo;
+
+  /* Compute pixel size just before rotation */
+
+    ver = fmul(q, abscos) + fmul(p, abssin);
+    hor = fdiv(fmul(p, q), ver);
+
+  /* Compute pixel size in original design space */
+
+    xpixel = fdiv(hor, set);
+    ypixel = fdiv(ver, pnt);
+
+  /* Compute spot overhang in original design space */
+
+    dho = fdiv(fmul(ho, abscos) + fmul(vo, abssin), set);
+    dvo = fdiv(fmul(vo, abscos) + fmul(ho, abssin), pnt);
+
+    DBG4("    hor ver %ld.%04ld %ld.%04ld\n", DBINT(hor), DBFRAC(hor),
+	    DBINT(ver), DBFRAC(ver));
+    DBG4("    xpixel ypixel %ld.%04ld %ld.%04ld\n", DBINT(xpixel),
+	    DBFRAC(xpixel), DBINT(ypixel), DBFRAC(ypixel));
+    DBG4("    dho dvo %ld.%04ld %ld.%04ld\n", DBINT(dho), DBFRAC(dho),
+	    DBINT(dvo), DBFRAC(dvo));
+
+    if(fmath_error)
+    {
+        DBG("***** fmath_error ***** \n");
+        return FALSE;
+    }
+
+    fill_in_rot_data(&d.x, xpixel, xbold, dho);
+    fill_in_rot_data(&d.y, ypixel, ybold, dvo);
+
+    return TRUE;
+}
+
+
+
+
+
+/*--------------------*/
+/*   rpix_calc        */
+/*--------------------*/
+/*  This function performs three functions:
+ *
+ *    1. Fills in the skeletal processing pixel data to handle psuedo
+ *       bold for rotated/sheared characters.
+ *    2. Fills in the power of two pixel data for rasterization.
+ *    3. Computes the final scaling transform that must be
+ *       appended to the transform matrix to scale to the the power of
+ *       two working space. These scaling factors are refered to
+ *       as sx and sy in the design notes. These values are returned.
+ */
+
+MLOCAL FIXED
+r_pix_calc(xy, scan_res, out_res, rs, bold, spot, pq, hvo)
+    COORD_DATA  *xy;
+    ULONG scan_res, out_res;
+    FIXED rs;
+    WORD  bold;
+    FIXED spot;
+    FIXED *pq;                 /* returned pixel size in actual size space,
+                                * just after rotation.
+                                */
+    FIXED *hvo;                /* returned spot size overlap in actual size
+                                * space
+                                */
+{
+    UWORD shft;
+    WORD  grid_shift;
+
+    DBG4("\nr_pix_calc(scan_res = %ld, out_res = %ld, rs = %ld.%04ld,\n",
+	    scan_res, out_res, DBINT(rs), DBFRAC(rs));
+    DBG3("                   bold = %ld, spot = %ld.04ld)\n",
+            bold, DBINT(spot), DBFRAC(spot));
+
+
+  /* Pixel size */
+
+    shft = 0;
+    fpix = (FIXED)(shift_left(scan_res, &shft) / out_res);
+    if(shft<16) fpix <<= (16-shft);    /* convert to FIXED format */
+           else fpix >>= (shft-16);
+
+    *pq = fpix;                       /* Pixel size in actual size space,
+                                       * just after rotation.
+                                       */
+    *hvo = fmul(fpix, spot - F_ONE);  /* overhang in above space */
+
+    fpix = fdiv(fpix,rs);             /* Actual pixel size in design space
+                                       * after all transforms except final
+                                       * scaling to working space.
+                                       */
+
+    xy->orig_pixel = F2I(fpix);
+
+  /* power of two pixel size in working space */
+
+    fnew_pix = F_ONE;
+    grid_shift = 0;
+    while(fnew_pix <= fpix)
+    {
+        fnew_pix <<= 1;
+        grid_shift ++;
+    }
+    fnew_pix >>= 1;
+    grid_shift--;
+
+  /* Divide power of two pixel size by 4 */
+
+    fnew_pix  >>= 2;
+    grid_shift -= 2;
+
+  /*  Fractional pixel values used in skeletal processing. Hard wire
+   *  to some very small value so we don't distort the character by
+   *  aligning much. Ignore spot size- assume it is set to 1.
+   */
+
+    fill_in_data(xy, grid_shift, 32000L, 10, F_ONE, bold, F_ONE);
+
+    return fdiv(fnew_pix, fpix);   /* scaing factor sx or sy */
+}
+
+
+
+
+/*--------------------*/
+/*   pix_calc         */
+/*--------------------*/
+/*  Compute pixel data for x or y.
+ *
+ *  Actual pixel size in design units = (masterpt * scanres) /(size * outres)
+ *  This pixel size is rounded up to the nearest power of two. All input
+ *  data is eventually scaled to conform to this new pixel size.
+ *
+ *  This function computes
+ *
+ *      p_size        original pixel size in binary fraction
+ *      pixel_size    new pixel size, power of 2
+ *      half_pixel    pixel_size / 2
+ *      grid_shift    ammount to shift x to obtain x/pixel_size
+ *      grid_align    x & grid_align is a whole number of pixels
+ *
+ *      p_size is the original pixal size shifted left to obtain
+ *             as much precision as possible.
+ *
+ *             original pixel size = p_size/(2**s)
+ *             where s is determined so that  16K <= p_size < 32K
+ */
+
+MLOCAL VOID
+pix_calc (xy, masterpt, scanres, outres, size, spot, bold)
+        COORD_DATA  *xy;
+        ULONG         masterpt;
+        ULONG         scanres;
+        ULONG         outres;
+        ULONG         size;
+        FIXED         spot;
+        WORD          bold;
+{
+    ULONG t;
+    WORD  s;
+    FIXED fixed_pix;
+
+    s = 0;
+
+    t = shift_left((ULONG)(masterpt * scanres), &s);
+    t = shift_left((ULONG)(t/outres), &s);
+    t = shift_left(t / size, &s);
+
+    fixed_pix = t >> (s - 16);   /* convert to FIXED for later */
+
+    while ( t >= 0x8000 )  /* shift till < 32K */
+    {
+        t >>= 1;
+        s--;
+    }
+
+  /*  Original pixel size with no fractional precision. Used to
+   *  compare with type face or on threshold.
+   */
+
+    xy->orig_pixel = (WORD)(t >> s);
+
+  /*  Fill in power of two pixel values and fractional values used
+   *  in skeletal processing.
+   */
+
+    fill_in_data(xy, 12-s, t, s, spot, bold, fixed_pix);
+                  /* 12-s = grid_shift */
+
+  /* Grid aligned max design coordiante */
+
+    pixel_align(MAX_DESIGN, xy, 2);
+    xy->max_des = pixel_aligned.value;
+    DBG1("    grid aligned max_des %ld\n", xy->max_des);
+}
+
+/*--------------------*/
+/*     comp_pix       */
+/*--------------------*/
+/*  Computes the scaling paramters */
+
+GLOBAL BOOLEAN
+comp_pix(fc, bucket)
+    FONTCONTEXT  *fc;
+    BUCKET       *bucket;
+{
+  /* Rotate and Shear */
+
+    FIXED fmasterpt;
+    FIXED set, pnt;
+    FIXED cos, sin, tan;
+    FIXED scos, ssin;
+    FIXED m0, m1, m2, m3;
+    FIXED r, s;            /* scale facter from rotated actual size to 16K */
+    FIXED sx, sy;          /* scale facter to go to fractioanl pixel space */
+    FIXED p, q;            /* pixel size just after rotate- actual size    */
+    FIXED ho, vo;
+
+  /* Scan resolution */
+
+    ULONG mastpt;
+    ULONG x_scan_meter;
+    ULONG y_scan_meter;
+
+    WORD  min_pix;
+
+    DISPLAY  *display;
+
+    DBG("\ncomp_pix()\n");
+
+    display = bucket->pdisplay;  /* recover DISPLAY ptr */
+
+  /*  Convert FAIS scans per inch into scans per meter.
+   *
+   *       scans_per_meter = (10,000 * scans_per_inch)/254
+   */
+
+    x_scan_meter = (10000L * (ULONG)display->scanResolutionX)/254L;
+    y_scan_meter = (10000L * (ULONG)display->scanResolutionY)/254L;
+
+
+  /*  Rotation and shear  */
+
+    cos  = fc->rotate.x;        /*  rotation */
+    sin  = fc->rotate.y;
+    scos = fc->shear.y;         /*  shear    */
+    ssin = fc->shear.x;
+    tan = face.glob_ital_tan;
+
+
+  /* Check for special 90 degree rotations */
+
+    if(ssin != 0 || scos != F_ONE ||     /* shear is like arb rotation */
+           tan != NO_TANGENT)     /* 20-Mar-90 jfd */
+
+        d.quadrant = 0;
+    else if(cos == F_ONE && sin == 0)    /* no rotation        */
+        d.quadrant = ROT0;
+    else if(cos == 0 && sin ==F_ONE)     /* rotate 90 degrees  */
+        d.quadrant = ROT90;
+    else if(cos == -F_ONE && sin == 0)   /* rotate 180 degrees */
+        d.quadrant = ROT180;
+    else if(cos == 0 && sin == -F_ONE)    /* rotate 270 degrees */
+        d.quadrant = ROT270;
+    else
+        d.quadrant = 0;                   /* arbitrary rotation */
+
+    DBG1("    d.quadrant = %ld\n", d.quadrant);
+
+    if(!d.quadrant)
+    {
+      /* Arbitrary rotation */
+
+        fmath_error = FALSE;          /* fmath error flag */
+
+        fmasterpt = I2F((WORD)display->masterPointSize);
+
+        if (tan == NO_TANGENT)   /* 20-Mar-90 jfd */
+           tan = fdiv(ssin, scos);
+
+        if(tan < -F_ONE || tan > F_ONE)  /* 11-19-90 dET */
+           return FALSE;
+
+        set = fdiv( I2F(fc->set_size),    fmasterpt);
+        pnt = fdiv( I2F(fc->point_size),  fmasterpt);
+
+        DBG2("    fmasterpt %ld.%04ld\n", DBINT(fmasterpt), DBFRAC(fmasterpt));
+        DBG4("    cos  %ld.%04ld   sin  %ld.%04ld\n", DBINT(cos), DBFRAC(cos),
+                                        DBINT(sin), DBFRAC(sin));
+        DBG2("    tan %ld.%04ld\n", DBINT(tan), DBFRAC(tan));
+        DBG4("    set  %ld.%04ld   pnt  %ld.%04ld\n", DBINT(set), DBFRAC(set),
+                                        DBINT(pnt), DBFRAC(pnt));
+        if(fmath_error)
+        {
+            DBG("***** fmath_error ***** tan, set, pnt compute\n");
+            return FALSE;
+        }
+
+        m0 = fmul(cos, set);
+        m1 = fmul(sin, set);
+        m2 = fmul(pnt, fmul(cos, tan) - sin);
+        m3 = fmul(pnt, fmul(sin, tan) + cos);
+
+        r = MAX( LABS(m0+m2), LABS(m0-m2));
+        s = MAX( LABS(m1+m3), LABS(m1-m3));
+
+        DBG4("    m0 m1  %ld.%04ld  %ld.%04ld\n", DBINT(m0), DBFRAC(m0), DBINT(m1), DBFRAC(m1));
+        DBG4("    m2 m3  %ld.%04ld  %ld.%04ld\n", DBINT(m2), DBFRAC(m2), DBINT(m3), DBFRAC(m3));
+        DBG4("    r  s   %ld.%04ld  %ld.%04ld\n", DBINT(r ), DBFRAC(r ), DBINT(s ), DBFRAC(s ));
+
+        if(fmath_error)
+        {
+            DBG("***** fmath_error ***** mi compute\n");
+            return FALSE;
+        }
+
+        sx = r_pix_calc(&d.x, x_scan_meter, fc->xres, r, fc->xbold,
+                                                         fc->xspot, &p, &ho);
+        sy = r_pix_calc(&d.y, y_scan_meter, fc->yres, s, fc->ybold,
+                                                         fc->yspot, &q, &vo);
+        DBG4("    sx sy  %ld.%04ld  %ld.%04ld\n", DBINT(sx), DBFRAC(sx), DBINT(sy), DBFRAC(sy));
+        DBG4("    p  q   %ld.%04ld  %ld.%04ld\n", DBINT(p ), DBFRAC(p ), DBINT(q ), DBFRAC(q ));
+        DBG4("    ho vo  %ld.%04ld  %ld.%04ld\n", DBINT(ho), DBFRAC(ho), DBINT(vo), DBFRAC(vo));
+        if(fmath_error)
+        {
+            DBG("***** fmath_error ***** r_pix_calc()\n");
+            return FALSE;
+        }
+
+        tran[0] = fmul(sx, fdiv(m0, r));     tran[1] = fmul(sy, fdiv(m1, s));
+        tran[2] = fmul(sx, fdiv(m2, r));     tran[3] = fmul(sy, fdiv(m3, s));
+        tran[4] = fmul(sx, fmul(0x20000000, F_ONE - fdiv(m0+m2, r)));
+        tran[5] = fmul(sy, fmul(0x20000000, F_ONE - fdiv(m1+m3, s)));
+        DBG("    tran[]\n");
+        DBG4("        %ld.%04ld  %ld.%04ld\n", DBINT(tran[0]), DBFRAC(tran[0]),
+                                 DBINT(tran[1]), DBFRAC(tran[1]));
+        DBG4("        %ld.%04ld  %ld.%04ld\n", DBINT(tran[2]), DBFRAC(tran[2]),
+                                 DBINT(tran[3]), DBFRAC(tran[3]));
+        DBG4("        %ld.%04ld  %ld.%04ld\n", DBINT(tran[4]), DBFRAC(tran[4]),
+                                 DBINT(tran[5]), DBFRAC(tran[5]));
+
+
+        if(fmath_error)
+        {
+            DBG("***** fmath_error ***** tran[i] compute\n");
+            return FALSE;
+        }
+
+        if(!rotate_pixel(set, pnt, LABS(cos), LABS(sin), p, q,
+                                     ho, vo, fc->xbold, fc->ybold))
+            return FALSE;
+    }
+    else
+    {
+      /* set up pixel size data */
+
+        mastpt = (ULONG)display->masterPointSize;
+        DBG1("master point size %ld\n", mastpt);
+
+        DBG2("xres = %ld    set_size = %ld\n", fc->xres, fc->set_size);
+        pix_calc (&d.x, mastpt, x_scan_meter, fc->xres,
+                   (ULONG)fc->set_size, fc->xspot, fc->xbold);
+
+        DBG2("yres = %ld    point_size = %ld\n", fc->yres, fc->point_size);
+        pix_calc (&d.y, mastpt, y_scan_meter, fc->yres,
+                   (ULONG)fc->point_size, fc->yspot, fc->ybold);
+    }
+
+    if(d.quadrant == ROT0 || d.quadrant == ROT180)
+    {
+        d.px = &d.x;
+        d.py = &d.y;
+    }
+    else
+    {
+        d.px = &d.y;
+        d.py = &d.x;
+    }
+
+      /* compute baseline */
+        d.origBaseline = display->baselinePosition;
+
+      /* Grid aligned baseline in design space */
+        pixel_align(d.origBaseline, d.py, 2);
+        d.aBaselnVal  = pixel_aligned.value;
+
+        DBG1("    orig baseline = %ld\n", d.origBaseline);
+        DBG1("    grid aligned in design space: %ld \n", d.aBaselnVal);
+
+  /* Set quality level */
+
+    if(d.x.orig_pixel < d.y.orig_pixel)
+        min_pix = d.x.orig_pixel;
+    else
+        min_pix = d.y.orig_pixel;
+
+    quality = fc->format >> 14;
+    if(!quality)
+    {
+        if(min_pix < 66)        quality = 3;     /*   > 30 pt at 300dpi  */
+        else if(min_pix < 211)  quality = 2;     /* between 10 and 30 pt */
+        else                    quality = 1;     /*      < 10 pt         */
+    }
+
+    DBG2("    quality = %ld (min_pix %ld)\n", quality, min_pix);
+    return TRUE;
+}
+@
+
+
+6.0
+log
+@folded in Bullet 1.30
+@
+text
+@d2 1
+a2 1
+**	$Id: comp_pix.c,v 3.0 90/11/09 17:08:17 kodiak Exp $
+d8 3
+d33 2
+a45 2
+/* mem.c */
+EXTERN BYTE     *MEMptr();
+d455 1
+a455 1
+    display = (DISPLAY*)MEMptr(bucket->hdisplay);  /* recover DISPLAY ptr */
+@
+
+
+3.0
+log
+@Kodiak's Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d7 4
+a10 1
+**	$Log$
+d25 2
+d501 3
+@
+
+
+2.0
+log
+@from AGFA Bullet 1.20Beta, 02-Oct-90
+@
+text
+@d1 8
+a24 2
+
+#include <stdio.h>
+d109 1
+a109 1
+    DBG2("    pixel_size = %d  half_pixel = %d\n",xy->pixel_size,
+d111 1
+a111 1
+    DBG2("    grid_align = %x  grid_shift = %d\n", xy->grid_align,
+d136 2
+a137 2
+    DBG2("    p_pixel = %d  bin_places = %d\n", xy->p_pixel, xy->bin_places);
+    DBG1("    con_size = %d\n", xy->con_size);
+d192 2
+a193 2
+    DBG2("    p_pixel = %d  bin_places = %d\n", xy->p_pixel, xy->bin_places);
+    DBG1("    con_size = %d\n", xy->con_size);
+d232 6
+a237 6
+    DBG2("    hor ver  %e  %e\n",
+                       (double)hor /65536.0, (double)ver /65536.0);
+    DBG2("    xpixel  ypixel   %e  %e\n",
+                      (double)xpixel /65536.0, (double)ypixel /65536.0);
+    DBG2("    dho dvo  %e  %e\n",
+                      (double)dho /65536.0, (double)dvo /65536.0);
+d286 4
+a289 4
+    DBG3("\nr_pix_calc(scan_res = %ld, out_res = %ld, rs = %e,\n",
+                                    scan_res, out_res, (double)rs/65536.0);
+    DBG2("                   bold = %d, spot = %e)\n",
+              bold, (double)spot/65536.0);
+a376 1
+    LONG  long_pix;
+d410 1
+a410 1
+    DBG1("    grid aligned max_des %d\n", xy->max_des);
+d484 1
+a484 1
+    DBG1("    d.quadrant = %d\n", d.quadrant);
+d500 6
+a505 6
+        DBG1("    fmasterpt %e\n", (double)fmasterpt/65536.0);
+        DBG2("    cos  %e   sin  %e\n", (double)cos/65536.0,
+                                        (double)sin/65536.0);
+        DBG1("    tan %e\n", (double)tan/65536.0);
+        DBG2("    set  %e   pnt  %e\n", (double)set/65536.0,
+                                        (double)pnt/65536.0);
+d520 3
+a522 3
+        DBG2("    m0 m1  %e  %e\n", (double)m0/65536.0, (double)m1/65536.0);
+        DBG2("    m2 m3  %e  %e\n", (double)m2/65536.0, (double)m3/65536.0);
+        DBG2("    r  s   %e  %e\n", (double)r /65536.0, (double)s /65536.0);
+d534 3
+a536 3
+        DBG2("    sx sy  %e  %e\n", (double)sx/65536.0, (double)sy/65536.0);
+        DBG2("    p  q   %e  %e\n", (double)p /65536.0, (double)q /65536.0);
+        DBG2("    ho vo  %e  %e\n", (double)ho/65536.0, (double)vo/65536.0);
+d548 6
+a553 6
+        DBG2("        %e  %e\n", (double)tran[0]/65536.0,
+                                 (double)tran[1]/65536.0);
+        DBG2("        %e  %e\n", (double)tran[2]/65536.0,
+                                 (double)tran[3]/65536.0);
+        DBG2("        %e  %e\n", (double)tran[4]/65536.0,
+                                 (double)tran[5]/65536.0);
+d571 1
+a571 1
+        DBG1("master point size %u\n", mastpt);
+d573 1
+a573 1
+        DBG2("xres = %lu    set_size = %d\n", fc->xres, fc->set_size);
+d577 1
+a577 1
+        DBG2("yres = %lu    point_size = %d\n", fc->yres, fc->point_size);
+d600 2
+a601 2
+        DBG1("    orig baseline = %d\n", d.origBaseline);
+        DBG1("    grid aligned in design space: %d \n", d.aBaselnVal);
+d618 1
+a618 1
+    DBG1("    quality = %d\n", quality);
+@
+
+
+1.0
+log
+@from AGFA Bullet 1.10, 30-Mar-90
+@
+text
+@d3 11
+d15 3
+d36 1
+a43 1
+GLOBAL  BOOLEAN  rotate_on;
+d46 3
+a49 1
+
+d139 110
+d264 1
+a264 1
+r_pix_calc(xy, scan_res, out_res, rs, bold)
+d269 7
+a277 2
+    FIXED fpix;
+    FIXED fnew_pix;
+d280 4
+a283 2
+    DBG4("r_pix_calc(xy, %ld, %ld, %e, %d)\n", scan_res, out_res,
+                                       (double)rs/65536.0, bold);
+d293 9
+a301 4
+    fpix = fdiv(fpix,rs);         /* Actual pixel size in design space
+                                   * after all transforms except final
+                                   * scaling to working space.
+                                   */
+d333 2
+a356 33
+ *
+ *  Define  pixel_size = 2**(14-s)
+ *          grid_shift = 14 - s
+ *
+ *  Then from above
+ *
+ *          2**14 <= p_size < 2**15
+ * 
+ *  so that
+ *
+ *          2**(14-s) <= p_size/(2**s) < 2**(15-s)
+ *          pixel_size <= original pixel size < 2*pixel_size
+ *
+ *  Since pixel_size is a WORD, it must be < 2**15 so that we must have
+ *  s >=  0. Since
+ *          (original pixel size) * (2**s) = p_size < 32K
+ *  this implies that we must have
+ *          original pixel size < 32K
+ *
+ *  To scale a coordinate x in design units to the coordinate space
+ *  using the new power of two pixel size:
+ *
+ *      x ----->   (new pixel size/original pixel size) * x
+ *               = { [2**(14-s)] / [p_size/(2**s)] } * x
+ *               = [ (2**14)/p_size ] * x
+ *
+ *  Scaling Range:
+ *
+ *    Since 2**14 <= p_size < 2**15
+ *    1/2 = 2**14 / 2**15 < 2**14 /p_size <= 2**14 / 2**14 = 1
+ *    so
+ *       x is scaled by a number between 1/2 and 1.
+ *
+a397 1
+/*    fill_in_data(xy, 14-s, t, s, spot, bold, fixed_pix);*/
+d399 7
+a405 1
+                  /* 14-s = grid_shift */
+d425 4
+a428 2
+    FIXED r, s;
+    FIXED sx, sy;
+d435 1
+d455 1
+a455 1
+    cos  = fc->rotate.x;
+d457 1
+a457 1
+    scos = fc->shear.y;
+d459 21
+d481 1
+a481 1
+    if(cos != F_ONE || sin != 0 || ssin != 0 || scos != F_ONE)
+d483 1
+a483 1
+        rotate_on = TRUE;
+d488 4
+a491 1
+        tan = fdiv(ssin, scos);
+d496 2
+d525 4
+a528 2
+        sx = r_pix_calc(&d.x, x_scan_meter, fc->xres, r, fc->xbold);
+        sy = r_pix_calc(&d.y, y_scan_meter, fc->yres, s, fc->ybold);
+d530 2
+d556 4
+a562 2
+        rotate_on = FALSE;
+
+d575 1
+d577 10
+a586 2
+/**********rotate bold test **********/
+}
+d590 3
+a592 2
+        /* Grid aligned baseline in design space */
+        pixel_align(d.origBaseline, &d.y, 2);
+a593 1
+        d.aBaselnGrid = pixel_aligned.grid_line;
+d595 2
+a596 10
+        /* in power of two working space */
+        d.newBaseline = ty(display->baselinePosition);
+        DBG2("    orig baseline = %d,  new baseline = %d\n",
+                         d.origBaseline, d.newBaseline);
+        DBG2("    grid aligned in design space: %d %d\n",
+                          d.aBaselnVal, d.aBaselnGrid);
+/**************rotate bold test********
+    }
+********************/
+
+a615 1
+
+@

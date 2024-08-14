@@ -1,0 +1,33 @@
+€ˆLIBRARIES_DOSEXTENS_HŒ<libraries/dosextens.h>‡
+ƒDosLibrary* ;
+¡Open(„*,);
+‹Close(¡);
+Read(¡,„*,);
+Write(¡,„*,);
+¡Input(‹);
+¡Output(‹);
+Seek(¡,,);
+DeleteFile(„*);
+Rename(„*,„*);
+¡Lock(„*,);
+‹UnLock(¡);
+¡DupLock(¡);
+Examine(¡,ƒFileInfoBlock*);
+ExNext(¡,ƒFileInfoBlock*);
+Info(¡,ƒInfoData*);
+¡CreateDir(„*);
+¡CurrentDir(¡);
+IoErr(‹);
+ƒ©*CreateProc(„*,,¡,);
+‹Exit();
+¡LoadSeg(„*);
+‹UnLoadSeg(¡);
+ƒ©*DeviceProc(„*);
+SetComment(„*,„*);
+SetProtection(„*,);
+*DateStamp(*);
+‹Delay();
+WaitForChar(¡,);
+¡ParentDir(¡);
+IsInteractive(¡);
+Execute(„*,¡,¡);ˆNO_PRAGMAS…† Open 1e 2102…† Close 24 101…† Read 2a 32103…† Write 30 32103…† Input 36 0…† Output 3c 0…† Seek 42 32103…† DeleteFile 48 101…† Rename 4e 2102…† Lock 54 2102…† UnLock 5a 101…† DupLock 60 101…† Examine 66 2102…† ExNext 6c 2102…† Info 72 2102…† CreateDir 78 101…† CurrentDir 7e 101…† IoErr 84 0…† CreateProc 8a 432104…† Exit 90 101…† LoadSeg 96 101…† UnLoadSeg 9c 101…† DeviceProc ae 101…† SetComment b4 2102…† SetProtection ba 2102…† DateStamp c0 101…† Delay c6 101…† WaitForChar cc 2102…† ParentDir d2 101…† IsInteractive d8 101…† Execute de 32103‡

@@ -1,0 +1,14 @@
+VERSION		EQU	42
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'16.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'iffparse 42.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'iffparse 42.2 (16.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: iffparse 42.2 (16.8.93)',0
+	ENDM

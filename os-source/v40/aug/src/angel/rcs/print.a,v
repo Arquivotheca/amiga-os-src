@@ -1,0 +1,444 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    chrisg:1.1; strict;
+comment  @@;
+
+
+1.1
+date     91.02.26.18.09.23;  author peter;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     91.02.22.14.18.19;  author peter;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Initial RCS check-in.
+@
+
+
+1.1
+log
+@Added crude stack-backtrace printout.
+@
+text
+@	include "exec/types.i"
+	include "exec/nodes.i"
+	include "exec/execbase.i"
+	include "libraries/dosextens.i"
+;	include "asmsupp.i"
+
+	OPT	p=68030
+
+	XREF	_AbsExecBase
+	XREF	_LVOAlert
+	XREF	_LVOSupervisor
+	XREF	_LVORawDoFmt
+	XREF	_LVORawPutChar
+	XREF	_Base
+	XREF	Complete
+
+	XDEF	_PrintFrame
+	XDEF	_PrintPipeStageB
+	XDEF	_PrintPipeStageC
+	XDEF	_PrintDataFault
+	XDEF	_PrintBusError
+	XDEF	_PrintLimitViolation
+	XDEF	_PrintSupervisorOnly
+	XDEF	_PrintWriteProtected
+	XDEF	_PrintInvalid
+	XDEF	_PrintAccessLevel
+	XDEF	_PrintNotPMMU
+	XDEF	_PrintCompleting
+
+;
+; Put a message to the serial port at 9600 baud.  Used as so:
+;
+;     PUTMSG   30,<'%s/Init: called'>
+;
+; Parameters can be printed out by pushing them on the stack and
+; adding the appropriate C printf-style % formatting commands.
+
+		XREF	KPutFmt
+PUTMSG: 	MACRO	* level,msg
+
+;		PEA	subSysName(PC)
+		MOVEM.L A0/A1/D0/D1,-(SP)
+		LEA	msg\@@(pc),A0    ;Point to static format string
+		LEA	4*4(SP),A1      ;Point to args
+
+		jsr	PutFmt
+
+		MOVEM.L (SP)+,D0/D1/A0/A1
+;		ADDQ.L	#4,SP
+		BRA.S	end\@@
+
+msg\@@		DC.B	\2
+		DC.B	10
+		DC.B	0
+		DS.W	0
+end\@@
+		ENDM
+
+DUMPMSG: 	MACRO	* level,msg
+
+;		PEA	subSysName(PC)
+		MOVEM.L A0/A1/D0/D1,-(SP)
+		LEA	msg\@@(pc),A0    ;Point to static format string
+		LEA	4*4(SP),A1      ;Point to args
+
+		jsr	PutFmt
+
+		MOVEM.L (SP)+,D0/D1/A0/A1
+;		ADDQ.L	#4,SP
+		BRA.S	end\@@
+
+msg\@@		DC.B	\2
+		DC.B	0
+		DC.B	0
+		DS.W	0
+end\@@
+		ENDM
+
+
+	section text,code
+
+PutChar:
+	MOVE.L	0004(A7),D0
+Char:
+	MOVE.L	A6,-(A7)
+	MOVEA.L	_Base,A6
+	JSR	_LVORawPutChar(A6)
+	MOVEA.L	(A7)+,A6
+	RTS
+
+
+PutFmt:
+	movem.l	a2,-(a7)
+	lea	Char(pc),a2
+	bsr.b	0$
+	movem.l	(a7)+,a2
+	rts
+0$
+	move.l	a6,-(a7)
+	movea.l	_Base,a6
+	jsr	_LVORawDoFmt(a6)
+	movea.l	(a7)+,a6
+	rts
+
+
+subSysName:
+	dc.b	"",0
+
+STK	EQU	$3C				; =60 decimal
+
+
+	CNOP	0,4
+
+_PrintFrame:
+
+;	move.l	a0,-(sp)
+;	lea.l	temp,a0			; Turn off MMU
+;	pmove.l	tc,(a0)
+;	and.l	#$7fffffff,(a0)
+;	pmove.l	(a0),tc
+;	move.l	(sp)+,a0
+
+	;---- Check whether interrupts are disabled
+
+	move.l	a6,-(sp)		; Save this resgister
+	move.l	4,a6			; Get ExecBase
+	tst.b	$0126(a6)		; Are interrupts disabled?
+	blt	not_disabled		; Branch if no
+	DUMPMSG	0,<'(Disable() in effect)'>
+not_disabled:
+	move.l	(sp)+,a6		; Restore this register
+
+	;---- Check whether multitasking is forbidden
+
+	move.l	a6,-(sp)		; Save this register
+	move.l	4,a6			; Get ExecBase
+	tst.b	$0127(a6)		; Is task switching enabled?
+	BLT	not_forbidden		; No? Eat a beacon, lettuce & tomato
+	DUMPMSG	0,<'(Forbid() in effect)'>
+not_forbidden:
+	move.l	(sp)+,a6		; Restore this register
+
+	PUTMSG	0,<' '>			; Insert a return
+
+	PUTMSG	0,<'+--------------------------------------------------------------------'>
+
+	move.l	a0,-(sp)
+	DUMPMSG	0,<'| Fault Address:      %8lx     '>
+	addq.l	#4,sp
+
+	move.l	STK+6(sp),-(sp)
+	PUTMSG	0,<'Program Counter (maybe):  %lx'>
+	addq.l	#4,sp
+
+	move.l	a0,-(sp)
+	movec.l	usp,a0
+	move.l	a0,-(sp)
+	DUMPMSG	0,<'| User Stack Pointer: %8lx     '>
+	addq.l	#4,sp
+	move.l	(sp)+,a0
+
+	clr.l	-(sp)
+	move.w	STK+8(sp),2(sp)
+	PUTMSG	0,<'Status Register (word):   %04lx'>
+	addq.l	#4,sp
+
+	movem.l	d0/a6,-(sp)			; Save these registers
+
+	move.l	_Base,a6
+	move.l	ThisTask(a6),-(sp)
+	DUMPMSG	0,<'| TCB: $%lx '>
+	move.l	(sp)+,a6
+
+	move.l	LN_NAME(a6),-(sp)
+	DUMPMSG	0,<'"%s", '>
+	addq.l	#4,sp
+
+	cmpi.b	#NT_PROCESS,LN_TYPE(a6)		; Is this a process
+	bne	pf_end				; Branch if not
+
+	move.l	pr_CLI(a6),d0			; Get CLI BPTR pointer
+	asl.l	#2,d0				; Make an APTR out of it
+	beq	pf_end				; Branch if NULL
+	move.l	d0,a6
+	move.l	cli_CommandName(a6),d0		; Get command name
+	asl.l	#2,d0				; Make an APTR out of it
+	beq	pf_end				; Branch if no command (NULL)
+	addq.l	#1,d0				; Get rid of preceding RETURN
+	move.l	d0,-(sp)
+	DUMPMSG	0,<'Cli Command: %s'>
+	addq.l	#4,sp
+pf_end:
+	PUTMSG	0,<' '>				; Insert a return
+	movem.l	(sp)+,d0/a6			; Restore these registers
+
+
+
+	move.l	a7,a0
+	addq.l	#4,a0
+	movem.l	(a0),d0-d7/a0-a6
+
+	movem.l	d0-d3,-(sp)
+	DUMPMSG	0,<'| D0-D7: %08lx %08lx %08lx %08lx '>
+	movem.l	d4-d7,-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx %08lx'>
+	movem.l	a0-a3,-(sp)
+	DUMPMSG	0,<'| A0-A6: %08lx %08lx %08lx %08lx '>
+	movem.l	a4-a6,-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx'>
+	add.l	#60,sp
+
+
+;	Let's see a stack dump.  (I apologize if this code is
+;	cheezy.  It's not supposed to be good assembler, but rather
+;	it's supposed to be functional assembler. --Peter)
+
+	move.l	a0,-(sp)
+
+	movec.l	usp,a0
+
+	move.l	12(a0),-(sp)
+	move.l	8(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	DUMPMSG	0,<'| STACK: %08lx %08lx %08lx %08lx '>
+	add.l	#16,sp
+	lea	16(a0),a0
+	move.l	12(a0),-(sp)
+	move.l	9(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx %08lx'>
+	add.l	#16,sp
+	lea	16(a0),a0
+
+	move.l	12(a0),-(sp)
+	move.l	8(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	DUMPMSG	0,<'|      : %08lx %08lx %08lx %08lx '>
+	add.l	#16,sp
+	lea	16(a0),a0
+	move.l	12(a0),-(sp)
+	move.l	9(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx %08lx'>
+	add.l	#16,sp
+	lea	16(a0),a0
+
+	move.l	12(a0),-(sp)
+	move.l	8(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	DUMPMSG	0,<'|      : %08lx %08lx %08lx %08lx '>
+	add.l	#16,sp
+	lea	16(a0),a0
+	move.l	12(a0),-(sp)
+	move.l	9(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx %08lx'>
+	add.l	#16,sp
+	lea	16(a0),a0
+
+	move.l	12(a0),-(sp)
+	move.l	8(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	DUMPMSG	0,<'|      : %08lx %08lx %08lx %08lx '>
+	add.l	#16,sp
+	lea	16(a0),a0
+	move.l	12(a0),-(sp)
+	move.l	9(a0),-(sp)
+	move.l	4(a0),-(sp)
+	move.l	(a0),-(sp)
+	PUTMSG	0,<'%08lx %08lx %08lx %08lx'>
+	add.l	#16,sp
+	lea	16(a0),a0
+
+	move.l	(sp)+,a0
+
+
+
+
+;	clr.l	-(sp)
+;	move.w	STK+$e(sp),2(sp)
+;	PUTMSG	0,<'| Frame and Vector (word):  %lx'>
+;	addq.l	#4,sp
+;
+;	clr.l	-(sp)
+;	move.w	STK+$12(sp),2(sp)
+;	PUTMSG	0,<'| Spec Status Reg (word):   %04lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$14(sp),-(sp)
+;	PUTMSG	0,<'| Data Cycle Fault Address: %lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$1c(sp),-(sp)
+;	PUTMSG	0,<'| Data Output Buffer:       %lx'>
+;	addq.l	#4,sp
+;
+;	move.l	STK+$30(sp),-(sp)
+;	PUTMSG	0,<'| Data Input Buffer:        %lx'>
+;	addq.l	#4,sp
+
+;	movem.l	d0/a6,-(sp)			; Save these registers
+;
+;	move.l	_Base,a6
+;	move.l	ThisTask(a6),-(sp)
+;	PUTMSG	0,<'| Task Pointer:       %lx'>
+;	move.l	(sp)+,a6
+;
+;	move.l	LN_NAME(a6),-(sp)
+;	DUMPMSG	0,<'| Task Name: %s, '>
+;	addq.l	#4,sp
+;
+;	cmpi.b	#NT_PROCESS,LN_TYPE(a6)		; Is this a process
+;	bne.s	pf_end				; Branch if not
+;
+;	move.l	pr_CLI(a6),d0			; Get CLI BPTR pointer
+;	asl.l	#2,d0				; Make an APTR out of it
+;	beq.s	pf_end				; Branch if NULL
+;	move.l	d0,a6
+;	move.l	cli_CommandName(a6),d0		; Get command name
+;	asl.l	#2,d0				; Make an APTR out of it
+;	beq.s	pf_end				; Branch if no command (NULL)
+;	addq.l	#1,d0				; Get rid of preceding RETURN
+;	move.l	d0,-(sp)
+;	PUTMSG	0,<'Cli Command: %s'>
+;	addq.l	#4,sp
+;pf_end:
+;	movem.l	(sp)+,d0/a6			; Restore these registers
+
+	PUTMSG	0,<'            '>
+
+;	lea.l	temp,a0			; Turn on MMU
+;	pmove.l	tc,(a0)
+;	or.l	#$80000000,(a0)
+;	pmove.l	(a0),tc
+
+	rts
+
+
+_PrintPipeStageC:
+	DUMPMSG	0,<'| Pipe Stage C Error,  '>
+	rts
+
+_PrintPipeStageB:
+	DUMPMSG	0,<'| Pipe Stage B Error,  '>
+	rts
+
+_PrintDataFault:
+	btst.b	#6,STK+$f(sp)		; Was it a read or write?
+	beq.s	pdf_write		; Branch if write
+	DUMPMSG	0,<'| Read Data Cycle Fault, '>
+	bra	pdf_cont
+pdf_write:
+	DUMPMSG	0,<'| Write Data Cycle Fault, '>
+pdf_cont:
+	rts
+
+
+
+_PrintBusError:
+	DUMPMSG	0,<'Bus Error (hardware?)    '>
+	rts
+
+_PrintLimitViolation:
+	DUMPMSG	0,<'Limit Violation    '>
+	rts
+
+_PrintSupervisorOnly:
+	DUMPMSG	0,<'Supervisor Only Violation    '>
+	rts
+
+_PrintAccessLevel:
+	DUMPMSG	0,<'Access Level Violation    '>
+	rts
+
+_PrintWriteProtected:
+	DUMPMSG	0,<'Write Protected Page    '>
+	rts
+
+_PrintInvalid:
+	DUMPMSG	0,<'Invalid Memory Access    '>
+	rts
+
+_PrintNotPMMU:
+	DUMPMSG	0,<'Not PMMU fault (hardware?)    '>
+	rts
+
+_PrintCompleting:
+	PUTMSG	0,<'Completing'>
+	rts
+
+temp:	dc.l	0		; Temporary storage space
+
+	END
+@
+
+
+1.0
+log
+@Initial revision
+@
+text
+@d206 1
+a206 1
+	movem.l	a0-a4,-(sp)
+d210 73
+a282 1
+	add.l	#64,sp
+@

@@ -1,0 +1,1437 @@
+head     1.13;
+branch   ;
+access   ;
+symbols  V36_56:1.10 L35_54:1.9 L35_53:1.8 L35_51:1.7 L35_50:1.6 L35_49:1.6 L35_45:1.6 L35_44:1.4;
+locks    ; strict;
+comment  @ * @;
+
+
+1.13
+date     92.01.15.15.58.08;  author davidj;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.01.15.14.31.23;  author davidj;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     90.04.06.19.31.52;  author daveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     88.10.24.14.18.00;  author daveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     88.07.01.10.49.23;  author daveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     88.06.26.15.02.48;  author daveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     88.06.05.20.00.53;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     88.04.06.09.24.04;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     88.04.04.21.09.49;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     88.01.15.15.54.25;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     87.11.17.13.16.07;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.10.01.09.11.40;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.08.19.20.10.07;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs
+V1.3 beta 2
+@
+
+
+1.13
+log
+@removed wayward kprintf
+@
+text
+@/*
+	CALCOMP ColorMaster driver.
+	David Berezowski - July/87
+*/
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/memory.h>
+#include "../printer/prtbase.h"
+#include "../printer/printer.h"
+
+#define NUMENDCMD	0	/* # of cmd bytes after binary data */
+#define STARTLEN	4	/* # of start cmd bytes */
+#define ORGLEN		7	/* # of origin cmd bytes */
+
+#define DEBUG0	0
+#define DEBUG1	0
+#define DEBUG2	0
+#define DEBUG3	0
+#define DEBUG4	0
+#define DEBUG5	0
+#define DEBUG6	0
+#define DEBUG7	0
+
+Render(ct, x, y, status)
+long ct, x, y, status;
+{
+	extern void *AllocMem(), FreeMem();
+
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+
+	static UWORD RowSize, BufSize, TotalBufSize, dataoffset, YOrg;
+	static UWORD NumStartCmd, NumTotalCmd, NumDiscardCmd, Aspect;
+	static UWORD oldprintaspect, oldxdpi, oldydpi;
+	static ULONG oldxmax, oldymax;
+	/*
+		00-00	\002	enter raster gfx mode
+		01-01	\000	required padding after cmd byte
+		02-02	\000	enter landscape/portrait raster gfx mode
+		03-03	\000	required padding after cmd byte
+	*/
+	static UBYTE StartCmd[STARTLEN] = "\002\000\000\000";
+	/*
+		00-01	\033\117	set origin
+		02-03	\000\000	y origin
+		04-05	\000\000	x origin
+		06-06	\000		required padding after cmd byte
+	*/
+	static UBYTE OrgCmd[ORGLEN] = "\033\117\000\000\000\000\000";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+#if DEBUG0
+			kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+			kprintf("0: PrintAspect=%ld, Aspect=%ld\n", PD->pd_Preferences.PrintAspect, Aspect);
+#endif DEBUG0
+			StartCmd[2] = (Aspect == ASPECT_HORIZ) ? 0x50 : 0x4c;
+			if (Aspect != ASPECT_HORIZ) {
+				NumDiscardCmd = 0;
+			}
+			NumStartCmd = 4 + NumDiscardCmd;
+			NumTotalCmd = NumStartCmd + NUMENDCMD;
+			RowSize = (x + 7) / 8;
+			BufSize = RowSize + NumTotalCmd;
+			TotalBufSize = BufSize * 2;
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				ptr = PD->pd_PrintBuf;
+				*ptr++ = 27;
+				*ptr = 'K';	/* raster data follows */
+				ptr = &PD->pd_PrintBuf[BufSize];
+				*ptr++ = 27;
+				*ptr = 'K';	/* raster data follows */
+				dataoffset = NumStartCmd;
+				if (YOrg == 0) { /* if first dump */
+					PrinterReady();
+					/* enter raster graphics mode */
+					err = (*(PD->pd_PWrite))(StartCmd,
+						STARTLEN);
+					PrinterReady();
+				}
+				else { /* not first, set origin for succs. */
+					/* set origin */
+					OrgCmd[2] = YOrg / 256;
+					OrgCmd[3] = YOrg & 255;
+					PrinterReady();
+					err = (*(PD->pd_PWrite))(OrgCmd,
+						ORGLEN);
+					PrinterReady();
+				}
+				YOrg += y;
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- color code.
+				y	- row # (0 to Height - 1).
+			*/
+#if DEBUG1
+			kprintf("1: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG1
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], x);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+#if DEBUG2
+			kprintf("2: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG2
+			i = RowSize;
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NumStartCmd];
+			ptr = ptrstart + NumStartCmd + i - 1;
+			while (i > 0 && *ptr == 0) {
+				i--;
+				ptr--;
+			}
+			if (i == 0) {
+				PrinterReady();
+				/* linefeed */
+				err = (*(PD->pd_PWrite))("\012\000", 2);
+				PrinterReady();
+			}
+			else {
+				ptr = ptrstart + 2;
+				/* set printout width */
+				*ptr++ = (i + NumDiscardCmd) >> 8;
+				*ptr++ = (i + NumDiscardCmd) & 0xff;
+				PrinterReady();
+				err = (*(PD->pd_PWrite))
+					(ptrstart, i + NumTotalCmd);
+				PrinterReady();
+			}
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NumStartCmd ?
+					BufSize : 0) + NumStartCmd;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG3
+			kprintf("3: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG3
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = RowSize;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+#if DEBUG4
+			kprintf("4: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG4
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print */
+			if (ct != PDERR_CANCEL) {
+				/* if do not want to unload paper */
+				if (x & SPECIAL_NOFORMFEED) {
+					if (PD->pd_Preferences.PrintShade ==
+						SHADE_COLOR) { /* color */
+						PrinterReady();
+						/* Advance Color Panel */
+						err = (*(PD->pd_PWrite))
+							("\014\000", 2);
+						PrinterReady();
+					}
+				}
+				else { /* eject paper */
+					YOrg = 0;
+					PrinterReady();
+					/* End of Transmission */
+					err = (*(PD->pd_PWrite))("\004\000",
+						2);
+					PrinterReady();
+				}
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+#if DEBUG5
+			kprintf("5: ct=%08lx, x=%08lx, y=%ld\n", ct, x, y);
+#endif DEBUG5
+			if (ct != 0) { /* if not case 5 open */
+				/* save original values */
+				oldprintaspect =
+					PD->pd_Preferences.PrintAspect;
+				oldxmax = PED->ped_MaxXDots;
+				oldymax = PED->ped_MaxYDots;
+				oldxdpi = PED->ped_XDotsInch;
+				oldydpi = PED->ped_YDotsInch;
+
+				if ((Aspect = PD->pd_Preferences.PrintAspect)
+					== ASPECT_VERT) { /* if sideways */
+					/*
+					   This is a neat trick we play.
+					   Horizontal printing is MUCH
+					   faster than vertical printing
+					   since the printer device uses
+					   the blitter to read an entire
+					   row of pixel data.  This printer
+					   has the ability to take a
+					   horizontally oriented picture
+					   and print it vertically.  So
+					   we fool the printer device into
+					   thinking that we are doing a
+					   horizontal printout by temporarily
+					   changing the PrintAspect to
+					   ASPECT_HORIZ.  We then tell the
+					   printer to print the image
+					   vertically.  We MUST put code in
+					   case 7 to undo what we've done
+					   here to keep things in sync.
+					*/
+					PD->pd_Preferences.PrintAspect =
+						ASPECT_HORIZ; /* force horz */
+					/* swap x and y stuff */
+					PED->ped_MaxXDots = oldymax;
+					PED->ped_MaxYDots = oldxmax;
+					PED->ped_XDotsInch = oldydpi;
+					PED->ped_YDotsInch = oldxdpi;
+				}
+			}
+			else { /* case 5 open */
+				YOrg = 0;
+				if (PD->pd_Preferences.PaperSize ==
+					W_TRACTOR) {
+					/* CalComp_ColorView-5912 */
+					/* 11 x 17 inch paper (B/A3 size) */
+					PED->ped_MaxXDots = 2048;
+					PED->ped_MaxYDots = 3200;
+					NumDiscardCmd = 0;
+				}
+				else {
+					/* 8.5 x 11 inch paper (A/A4 size) */
+					PED->ped_MaxXDots = 1600;
+					PED->ped_MaxYDots = 2000;
+					NumDiscardCmd = 8;
+				}
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 6 : /* Switch to Next Color */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG6
+			kprintf("6: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG6
+			PrinterReady();
+			/* Advance Color Panel */
+			err = (*(PD->pd_PWrite))("\014\000", 2);
+			PrinterReady();
+			break;
+
+		/*
+			This is a NEW case that was added after the offical
+			V1.3 release of the printer device and this driver.
+			Although this driver will work with the official
+			V1.3 printer device (version 35.562); it may not
+			print full size vertical pictures correctly since
+			it does not contain a 'case 7' call.  The printer
+			device version 35.564 (and beyond) contains a
+			'case 7' call.
+		*/
+		case 7 : /* Restore any values we may have temp. changed */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+#if DEBUG7
+			kprintf("7: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+#endif DEBUG7
+			/* restore what we may have altered in case 5 */
+			PD->pd_Preferences.PrintAspect = oldprintaspect;
+			PED->ped_MaxXDots = oldxmax;
+			PED->ped_MaxYDots = oldymax;
+			PED->ped_XDotsInch = oldxdpi;
+			PED->ped_YDotsInch = oldydpi;
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+}
+@
+
+
+1.12
+log
+@took out wayward kprintf
+@
+text
+@d29 1
+a29 1
+    extern void *AllocMem(), FreeMem();
+d31 2
+a32 2
+    extern struct PrinterData *PD;
+    extern struct PrinterExtendedData *PED;
+d34 28
+a61 30
+    static UWORD RowSize, BufSize, TotalBufSize, dataoffset, YOrg;
+    static UWORD NumStartCmd, NumTotalCmd, NumDiscardCmd, Aspect;
+    static UWORD oldprintaspect, oldxdpi, oldydpi;
+    static ULONG oldxmax, oldymax;
+    /*
+            00-00   \002    enter raster gfx mode
+            01-01   \000    required padding after cmd byte
+            02-02   \000    enter landscape/portrait raster gfx mode
+            03-03   \000    required padding after cmd byte
+    */
+    static UBYTE StartCmd[STARTLEN] = "\002\000\000\000";
+    /*
+            00-01   \033\117        set origin
+            02-03   \000\000        y origin
+            04-05   \000\000        x origin
+            06-06   \000            required padding after cmd byte
+    */
+    static UBYTE OrgCmd[ORGLEN] = "\033\117\000\000\000\000\000";
+    UBYTE *ptr, *ptrstart;
+    int i, err;
+
+    switch(status)
+    {
+	/* Master Initialization */
+        case 0 :
+                /*
+                        ct      - pointer to IODRPReq structure.
+                        x       - width of printed picture in pixels.
+                        y       - height of printed picture in pixels.
+                */
+d63 2
+a64 2
+                kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+                kprintf("0: PrintAspect=%ld, Aspect=%ld\n", PD->pd_Preferences.PrintAspect, Aspect);
+d66 47
+a112 46
+                StartCmd[2] = (Aspect == ASPECT_HORIZ) ? 0x50 : 0x4c;
+                if (Aspect != ASPECT_HORIZ) {
+                        NumDiscardCmd = 0;
+                }
+                NumStartCmd = 4 + NumDiscardCmd;
+                NumTotalCmd = NumStartCmd + NUMENDCMD;
+                RowSize = (x + 7) / 8;
+                BufSize = RowSize + NumTotalCmd;
+                TotalBufSize = BufSize * 2;
+                PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+                if (PD->pd_PrintBuf == NULL) {
+                        err = PDERR_BUFFERMEMORY; /* no mem */
+                }
+                else {
+                        ptr = PD->pd_PrintBuf;
+                        *ptr++ = 27;
+                        *ptr = 'K';     /* raster data follows */
+                        ptr = &PD->pd_PrintBuf[BufSize];
+                        *ptr++ = 27;
+                        *ptr = 'K';     /* raster data follows */
+                        dataoffset = NumStartCmd;
+                        if (YOrg == 0) { /* if first dump */
+                                PrinterReady();
+                                /* enter raster graphics mode */
+                                err = (*(PD->pd_PWrite))(StartCmd, STARTLEN);
+                                PrinterReady();
+                        }
+                        else { /* not first, set origin for succs. */
+                                /* set origin */
+                                OrgCmd[2] = YOrg / 256;
+                                OrgCmd[3] = YOrg & 255;
+                                PrinterReady();
+                                err = (*(PD->pd_PWrite))(OrgCmd, ORGLEN);
+                                PrinterReady();
+                        }
+                        YOrg += y;
+                }
+                break;
+
+	/* Scale, Dither and Render */
+        case 1 :
+                /*
+                        ct      - pointer to PrtInfo structure.
+                        x       - color code.
+                        y       - row # (0 to Height - 1).
+                */
+d114 1
+a114 1
+                kprintf("1: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d116 3
+a118 3
+                Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], x);
+                err = PDERR_NOERR; /* all ok */
+                break;
+d120 6
+a125 6
+        case 2 : /* Dump Buffer to Printer */
+                /*
+                        ct      - 0.
+                        x       - 0.
+                        y       - # of rows sent (1 to NumRows).
+                */
+d127 1
+a127 1
+                kprintf("2: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d129 35
+a163 35
+                i = RowSize;
+                ptrstart = &PD->pd_PrintBuf[dataoffset - NumStartCmd];
+                ptr = ptrstart + NumStartCmd + i - 1;
+                while (i > 0 && *ptr == 0) {
+                        i--;
+                        ptr--;
+                }
+                if (i == 0) {
+                        PrinterReady();
+                        /* linefeed */
+                        err = (*(PD->pd_PWrite))("\012\000", 2);
+                        PrinterReady();
+                }
+                else {
+                        ptr = ptrstart + 2;
+                        /* set printout width */
+                        *ptr++ = (i + NumDiscardCmd) >> 8;
+                        *ptr++ = (i + NumDiscardCmd) & 0xff;
+                        PrinterReady();
+                        err = (*(PD->pd_PWrite))
+                                (ptrstart, i + NumTotalCmd);
+                        PrinterReady();
+                }
+                if (err == PDERR_NOERR) {
+                        dataoffset = (dataoffset == NumStartCmd ?
+                                BufSize : 0) + NumStartCmd;
+                }
+                break;
+
+        case 3 : /* Clear and Init Buffer */
+                /*
+                        ct      - 0.
+                        x       - 0.
+                        y       - 0.
+                */
+d165 1
+a165 1
+                kprintf("3: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d167 14
+a180 14
+                ptr = &PD->pd_PrintBuf[dataoffset];
+                i = RowSize;
+                do {
+                        *ptr++ = 0;
+                } while (--i);
+                err = PDERR_NOERR; /* all ok */
+                break;
+
+        case 4 : /* Close Down */
+                /*
+                        ct      - error code.
+                        x       - io_Special flag from IODRPReq.
+                        y       - 0.
+                */
+d182 1
+a182 1
+                kprintf("4: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d184 35
+a218 35
+                err = PDERR_NOERR; /* assume all ok */
+                /* if user did not cancel the print */
+                if (ct != PDERR_CANCEL) {
+                        /* if do not want to unload paper */
+                        if (x & SPECIAL_NOFORMFEED) {
+                                if (PD->pd_Preferences.PrintShade ==
+                                        SHADE_COLOR) { /* color */
+                                        PrinterReady();
+                                        /* Advance Color Panel */
+                                        err = (*(PD->pd_PWrite))
+                                                ("\014\000", 2);
+                                        PrinterReady();
+                                }
+                        }
+                        else { /* eject paper */
+                                YOrg = 0;
+                                PrinterReady();
+                                /* End of Transmission */
+                                err = (*(PD->pd_PWrite))("\004\000",
+                                        2);
+                                PrinterReady();
+                        }
+                }
+                (*(PD->pd_PBothReady))();
+                if (PD->pd_PrintBuf != NULL) {
+                        FreeMem(PD->pd_PrintBuf, TotalBufSize);
+                }
+                break;
+
+        case 5 :  /* Pre-Master Initialization */
+                /*
+                        ct      - 0 or pointer to IODRPReq structure.
+                        x       - io_Special flag from IODRPReq.
+                        y       - 0.
+                */
+d220 1
+a220 1
+                kprintf("5: ct=%08lx, x=%08lx, y=%ld\n", ct, x, y);
+d222 66
+a287 174
+                if (ct != 0) { /* if not case 5 open (Printer open) */
+                        /* save original values */
+                        oldprintaspect = PD->pd_Preferences.PrintAspect;
+                        oldxmax = PED->ped_MaxXDots;
+                        oldymax = PED->ped_MaxYDots;
+                        oldxdpi = PED->ped_XDotsInch;
+                        oldydpi = PED->ped_YDotsInch;
+
+                        /* If sideways */
+                        if ((Aspect = PD->pd_Preferences.PrintAspect) == ASPECT_VERT)
+                        {
+                                /*
+                                   This is a neat trick we play.
+                                   Horizontal printing is MUCH
+                                   faster than vertical printing
+                                   since the printer device uses
+                                   the blitter to read an entire
+                                   row of pixel data.  This printer
+                                   has the ability to take a
+                                   horizontally oriented picture
+                                   and print it vertically.  So
+                                   we fool the printer device into
+                                   thinking that we are doing a
+                                   horizontal printout by temporarily
+                                   changing the PrintAspect to
+                                   ASPECT_HORIZ.  We then tell the
+                                   printer to print the image
+                                   vertically.  We MUST put code in
+                                   case 7 to undo what we've done
+                                   here to keep things in sync.
+                                */
+                                PD->pd_Preferences.PrintAspect = ASPECT_HORIZ; /* force horz */
+                                /* swap x and y stuff */
+                                PED->ped_MaxXDots = oldymax;
+                                PED->ped_MaxYDots = oldxmax;
+                                PED->ped_XDotsInch = oldydpi;
+                                PED->ped_YDotsInch = oldxdpi;
+                        }
+                }
+                else { /* case 5 open */
+                        YOrg = 0;
+#if 0
+
+/* (30.5cm/ft) * (10mm/cm)					*/
+#define MMPERFT		305
+
+/* Margins: minus 1/2" width, minus 1" height (== US diffs)	*/
+/*								*/
+/* Left            Right           Top           Bottom		*/
+/* 50/300 = 1/6    100/300 = 1/3   60/300 = 1/5  60/300 = 1/5	*/
+/* 								*/
+
+/* Half inches per ft						*/
+#define HALFINCHPERFT 24
+
+/* Inches per ft						*/
+#define INCHPERFT 12
+
+/* MM per 1/2 inch (round up [12.7->13])			*/
+#define HALFINCH ((MMPERFT + INCHPERFT)/HALFINCHPERFT)
+
+/* MM per inch (round up)					*/
+#define INCH ((MMPERFT + INCHPERFT)/INCHPERFT)
+
+/* Sparse table for paper sizes - offset constant		*/
+#define PSIZE_OFFSET 16
+
+			{
+                            /* SPECIAL_DENSITY     0   1   2    3    4    5    6    7 */
+                            static int XDPI[8] = {203,203,203, 203, 203, 203, 203, 203};
+
+                            /* Paper sizes in inches        */
+                            static int PaperXSizes[] = {
+                                    8,                      /* US_LETTER 8.0 x 10.0*/
+                                    8,                      /* US_LEGAL  8.0 x 13.0*/
+                                    8,                      /* N_TRACTOR == LETTER */
+                                    8,                      /* W_TRACTOR == LETTER */
+                                    8,                      /* CUSTOM    == LETTER */
+
+                            /* Euro Ax sizes follow         */
+                            /* Paper size in millimeters - 1/2 inch */
+                                    841 - HALFINCH,         /* A0   */
+                                    594 - HALFINCH,         /* A1   */
+                                    420 - HALFINCH,         /* A2   */
+                                    297 - HALFINCH,         /* A3   */
+                                    210 - HALFINCH,         /* A4   */
+                                    148 - HALFINCH,         /* A5   */
+                                    105 - HALFINCH,         /* A6   */
+                                    74  - HALFINCH,         /* A7   */
+                                    52  - HALFINCH,         /* A8   */
+                                    };
+
+                            /* Paper sizes in inches        */
+                            static int PaperYSizes[] = {
+                                    10,                     /* US_LETTER 8.0 x 10.0*/
+                                    13,                     /* US_LEGAL  8.0 x 13.0*/
+                                    10,                     /* N_TRACTOR == LETTER */
+                                    10,                     /* W_TRACTOR == LETTER */
+                                    10,                     /* CUSTOM    == LETTER */
+
+                            /* Euro Ax sizes follow         */
+                            /* Paper size in millimeters - 1 inch */
+                                    1189 - INCH,            /* A0   */
+                                    841  - INCH,            /* A1   */
+                                    594  - INCH,            /* A2   */
+                                    420  - INCH,            /* A3   */
+                                    297  - INCH,            /* A4   */
+                                    210  - INCH,            /* A5   */
+                                    148  - INCH,            /* A6   */
+                                    105  - INCH,            /* A7   */
+                                    74   - INCH,            /* A8   */
+                                    };
+
+                            /* Calculate max dots based on paper size selection */
+                            UWORD psize;
+                            ULONG maxwidth,maxheight;
+
+                            /* reference array (constant steps of 16) */
+                            /* Any new in-between sizes will be rounded down */
+                            psize = PD->pd_Preferences.PaperSize;
+
+                            maxwidth =  (ULONG)PaperXSizes[psize/PSIZE_OFFSET];
+                            maxheight = (ULONG)PaperYSizes[psize/PSIZE_OFFSET];
+
+                            /* Math - be precise as possible!  No change in precision for   */
+                            /* existing INCH specified paper sizes                          */
+                            density_code /= SPECIAL_DENSITY1;
+
+                            /* Inches:  Inches * DPI                                        */
+                            if(psize <= CUSTOM)
+                            {
+                                    PED->ped_MaxXDots = maxwidth * XDPI[density_code];
+                                    PED->ped_MaxYDots = maxheight * XDPI[density_code];
+                            }
+
+                            /* Millimeters:                                                 */
+                            /*                                                              */
+                            /* (X mm) * 12 inches/ft * dots/inch                            */
+                            /* ------------------------------ = Dots                        */
+                            /* 305 mm/ft                                                    */
+                            else
+                            {
+                                    PED->ped_MaxXDots = (maxwidth  * INCHPERFT * XDPI[density_code])/MMPERFT;
+                                    PED->ped_MaxYDots = (maxheight * INCHPERFT * XDPI[density_code])/MMPERFT;
+                            }
+                            PED->ped_XDotsInch = PED->ped_YDotsInch = XDPI[density_code];
+			}
+#else
+                        if (PD->pd_Preferences.PaperSize == W_TRACTOR)
+                        {
+                                /* CalComp_ColorView-5912 */
+                                /* 11 x 17 inch paper (B/A3 size) */
+                                PED->ped_MaxXDots = 2048;
+                                PED->ped_MaxYDots = 3200;
+                                NumDiscardCmd = 0;
+                        }
+                        else
+                        {
+                                /* 8.5 x 11 inch paper (A/A4 size) */
+                                PED->ped_MaxXDots = 1600;
+                                PED->ped_MaxYDots = 2000;
+                                NumDiscardCmd = 8;
+                        }
+#endif
+                }
+                err = PDERR_NOERR; /* all ok */
+                break;
+
+        case 6 : /* Switch to Next Color */
+                /*
+                        ct      - 0.
+                        x       - 0.
+                        y       - 0.
+                */
+d289 1
+a289 1
+                kprintf("6: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d291 22
+a312 22
+                PrinterReady();
+                /* Advance Color Panel */
+                err = (*(PD->pd_PWrite))("\014\000", 2);
+                PrinterReady();
+                break;
+
+        /*
+                This is a NEW case that was added after the offical
+                V1.3 release of the printer device and this driver.
+                Although this driver will work with the official
+                V1.3 printer device (version 35.562); it may not
+                print full size vertical pictures correctly since
+                it does not contain a 'case 7' call.  The printer
+                device version 35.564 (and beyond) contains a
+                'case 7' call.
+        */
+        case 7 : /* Restore any values we may have temp. changed */
+                /*
+                        ct      - 0.
+                        x       - 0.
+                        y       - 0.
+                */
+d314 1
+a314 1
+                kprintf("7: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d316 10
+a325 11
+                /* restore what we may have altered in case 5 */
+                PD->pd_Preferences.PrintAspect = oldprintaspect;
+                PED->ped_MaxXDots = oldxmax;
+                PED->ped_MaxYDots = oldymax;
+                PED->ped_XDotsInch = oldxdpi;
+                PED->ped_YDotsInch = oldydpi;
+                err = PDERR_NOERR; /* all ok */
+                break;
+    }
+
+    return(err);
+@
+
+
+1.11
+log
+@for rcs 4.x header change
+@
+text
+@d29 1
+a29 1
+	extern void *AllocMem(), FreeMem();
+d31 2
+a32 2
+	extern struct PrinterData *PD;
+	extern struct PrinterExtendedData *PED;
+d34 30
+a63 28
+	static UWORD RowSize, BufSize, TotalBufSize, dataoffset, YOrg;
+	static UWORD NumStartCmd, NumTotalCmd, NumDiscardCmd, Aspect;
+	static UWORD oldprintaspect, oldxdpi, oldydpi;
+	static ULONG oldxmax, oldymax;
+	/*
+		00-00	\002	enter raster gfx mode
+		01-01	\000	required padding after cmd byte
+		02-02	\000	enter landscape/portrait raster gfx mode
+		03-03	\000	required padding after cmd byte
+	*/
+	static UBYTE StartCmd[STARTLEN] = "\002\000\000\000";
+	/*
+		00-01	\033\117	set origin
+		02-03	\000\000	y origin
+		04-05	\000\000	x origin
+		06-06	\000		required padding after cmd byte
+	*/
+	static UBYTE OrgCmd[ORGLEN] = "\033\117\000\000\000\000\000";
+	UBYTE *ptr, *ptrstart;
+	int i, err;
+
+	switch(status) {
+		case 0 : /* Master Initialization */
+			/*
+				ct	- pointer to IODRPReq structure.
+				x	- width of printed picture in pixels.
+				y	- height of printed picture in pixels.
+			*/
+d65 2
+a66 1
+			kprintf("0: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d68 46
+a113 49
+kprintf("0: PrintAspect=%ld, Aspect=%ld\n",
+PD->pd_Preferences.PrintAspect, Aspect);
+			StartCmd[2] = (Aspect == ASPECT_HORIZ) ? 0x50 : 0x4c;
+			if (Aspect != ASPECT_HORIZ) {
+				NumDiscardCmd = 0;
+			}
+			NumStartCmd = 4 + NumDiscardCmd;
+			NumTotalCmd = NumStartCmd + NUMENDCMD;
+			RowSize = (x + 7) / 8;
+			BufSize = RowSize + NumTotalCmd;
+			TotalBufSize = BufSize * 2;
+			PD->pd_PrintBuf = AllocMem(TotalBufSize, MEMF_PUBLIC);
+			if (PD->pd_PrintBuf == NULL) {
+				err = PDERR_BUFFERMEMORY; /* no mem */
+			}
+			else {
+				ptr = PD->pd_PrintBuf;
+				*ptr++ = 27;
+				*ptr = 'K';	/* raster data follows */
+				ptr = &PD->pd_PrintBuf[BufSize];
+				*ptr++ = 27;
+				*ptr = 'K';	/* raster data follows */
+				dataoffset = NumStartCmd;
+				if (YOrg == 0) { /* if first dump */
+					PrinterReady();
+					/* enter raster graphics mode */
+					err = (*(PD->pd_PWrite))(StartCmd,
+						STARTLEN);
+					PrinterReady();
+				}
+				else { /* not first, set origin for succs. */
+					/* set origin */
+					OrgCmd[2] = YOrg / 256;
+					OrgCmd[3] = YOrg & 255;
+					PrinterReady();
+					err = (*(PD->pd_PWrite))(OrgCmd,
+						ORGLEN);
+					PrinterReady();
+				}
+				YOrg += y;
+			}
+			break;
+
+		case 1 : /* Scale, Dither and Render */
+			/*
+				ct	- pointer to PrtInfo structure.
+				x	- color code.
+				y	- row # (0 to Height - 1).
+			*/
+d115 1
+a115 1
+			kprintf("1: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d117 3
+a119 3
+			Transfer(ct, y, &PD->pd_PrintBuf[dataoffset], x);
+			err = PDERR_NOERR; /* all ok */
+			break;
+d121 6
+a126 6
+		case 2 : /* Dump Buffer to Printer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- # of rows sent (1 to NumRows).
+			*/
+d128 1
+a128 1
+			kprintf("2: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d130 35
+a164 35
+			i = RowSize;
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NumStartCmd];
+			ptr = ptrstart + NumStartCmd + i - 1;
+			while (i > 0 && *ptr == 0) {
+				i--;
+				ptr--;
+			}
+			if (i == 0) {
+				PrinterReady();
+				/* linefeed */
+				err = (*(PD->pd_PWrite))("\012\000", 2);
+				PrinterReady();
+			}
+			else {
+				ptr = ptrstart + 2;
+				/* set printout width */
+				*ptr++ = (i + NumDiscardCmd) >> 8;
+				*ptr++ = (i + NumDiscardCmd) & 0xff;
+				PrinterReady();
+				err = (*(PD->pd_PWrite))
+					(ptrstart, i + NumTotalCmd);
+				PrinterReady();
+			}
+			if (err == PDERR_NOERR) {
+				dataoffset = (dataoffset == NumStartCmd ?
+					BufSize : 0) + NumStartCmd;
+			}
+			break;
+
+		case 3 : /* Clear and Init Buffer */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+d166 1
+a166 1
+			kprintf("3: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d168 14
+a181 14
+			ptr = &PD->pd_PrintBuf[dataoffset];
+			i = RowSize;
+			do {
+				*ptr++ = 0;
+			} while (--i);
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 4 : /* Close Down */
+			/*
+				ct	- error code.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+d183 1
+a183 1
+			kprintf("4: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d185 35
+a219 35
+			err = PDERR_NOERR; /* assume all ok */
+			/* if user did not cancel the print */
+			if (ct != PDERR_CANCEL) {
+				/* if do not want to unload paper */
+				if (x & SPECIAL_NOFORMFEED) {
+					if (PD->pd_Preferences.PrintShade ==
+						SHADE_COLOR) { /* color */
+						PrinterReady();
+						/* Advance Color Panel */
+						err = (*(PD->pd_PWrite))
+							("\014\000", 2);
+						PrinterReady();
+					}
+				}
+				else { /* eject paper */
+					YOrg = 0;
+					PrinterReady();
+					/* End of Transmission */
+					err = (*(PD->pd_PWrite))("\004\000",
+						2);
+					PrinterReady();
+				}
+			}
+			(*(PD->pd_PBothReady))();
+			if (PD->pd_PrintBuf != NULL) {
+				FreeMem(PD->pd_PrintBuf, TotalBufSize);
+			}
+			break;
+
+		case 5 :  /* Pre-Master Initialization */
+			/*
+				ct	- 0 or pointer to IODRPReq structure.
+				x	- io_Special flag from IODRPReq.
+				y	- 0.
+			*/
+d221 1
+a221 1
+			kprintf("5: ct=%08lx, x=%08lx, y=%ld\n", ct, x, y);
+d223 174
+a396 66
+			if (ct != 0) { /* if not case 5 open */
+				/* save original values */
+				oldprintaspect =
+					PD->pd_Preferences.PrintAspect;
+				oldxmax = PED->ped_MaxXDots;
+				oldymax = PED->ped_MaxYDots;
+				oldxdpi = PED->ped_XDotsInch;
+				oldydpi = PED->ped_YDotsInch;
+
+				if ((Aspect = PD->pd_Preferences.PrintAspect)
+					== ASPECT_VERT) { /* if sideways */
+					/*
+					   This is a neat trick we play.
+					   Horizontal printing is MUCH
+					   faster than vertical printing
+					   since the printer device uses
+					   the blitter to read an entire
+					   row of pixel data.  This printer
+					   has the ability to take a
+					   horizontally oriented picture
+					   and print it vertically.  So
+					   we fool the printer device into
+					   thinking that we are doing a
+					   horizontal printout by temporarily
+					   changing the PrintAspect to
+					   ASPECT_HORIZ.  We then tell the
+					   printer to print the image
+					   vertically.  We MUST put code in
+					   case 7 to undo what we've done
+					   here to keep things in sync.
+					*/
+					PD->pd_Preferences.PrintAspect =
+						ASPECT_HORIZ; /* force horz */
+					/* swap x and y stuff */
+					PED->ped_MaxXDots = oldymax;
+					PED->ped_MaxYDots = oldxmax;
+					PED->ped_XDotsInch = oldydpi;
+					PED->ped_YDotsInch = oldxdpi;
+				}
+			}
+			else { /* case 5 open */
+				YOrg = 0;
+				if (PD->pd_Preferences.PaperSize ==
+					W_TRACTOR) {
+					/* CalComp_ColorView-5912 */
+					/* 11 x 17 inch paper (B/A3 size) */
+					PED->ped_MaxXDots = 2048;
+					PED->ped_MaxYDots = 3200;
+					NumDiscardCmd = 0;
+				}
+				else {
+					/* 8.5 x 11 inch paper (A/A4 size) */
+					PED->ped_MaxXDots = 1600;
+					PED->ped_MaxYDots = 2000;
+					NumDiscardCmd = 8;
+				}
+			}
+			err = PDERR_NOERR; /* all ok */
+			break;
+
+		case 6 : /* Switch to Next Color */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+d398 1
+a398 1
+			kprintf("6: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d400 22
+a421 22
+			PrinterReady();
+			/* Advance Color Panel */
+			err = (*(PD->pd_PWrite))("\014\000", 2);
+			PrinterReady();
+			break;
+
+		/*
+			This is a NEW case that was added after the offical
+			V1.3 release of the printer device and this driver.
+			Although this driver will work with the official
+			V1.3 printer device (version 35.562); it may not
+			print full size vertical pictures correctly since
+			it does not contain a 'case 7' call.  The printer
+			device version 35.564 (and beyond) contains a
+			'case 7' call.
+		*/
+		case 7 : /* Restore any values we may have temp. changed */
+			/*
+				ct	- 0.
+				x	- 0.
+				y	- 0.
+			*/
+d423 1
+a423 1
+			kprintf("7: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d425 11
+a435 10
+			/* restore what we may have altered in case 5 */
+			PD->pd_Preferences.PrintAspect = oldprintaspect;
+			PED->ped_MaxXDots = oldxmax;
+			PED->ped_MaxYDots = oldymax;
+			PED->ped_XDotsInch = oldxdpi;
+			PED->ped_YDotsInch = oldydpi;
+			err = PDERR_NOERR; /* all ok */
+			break;
+	}
+	return(err);
+@
+
+
+1.10
+log
+@added code to fix problem with printing full size pictures sideways.
+This includes the code for the new 'case 7' call.
+@
+text
+@@
+
+
+1.9
+log
+@Set NumDiscardCmd to 0 for ColorView-5912.
+V1.3 Gamma 20
+@
+text
+@d24 1
+d36 2
+d65 2
+d221 1
+a221 1
+			kprintf("5: ct=%lx, x=%ld, y=%ld\n", ct, x, y);
+d224 8
+d234 20
+d256 5
+d263 1
+a263 1
+			else {
+d265 14
+a279 13
+			if (PD->pd_Preferences.PaperSize == W_TRACTOR) {
+				/* CalComp_ColorView-5912 */
+				/* 11 x 17 inch paper (B/A3 size) */
+				PED->ped_MaxXDots = 2048;
+				PED->ped_MaxYDots = 3200;
+				NumDiscardCmd = 0;
+			}
+			else {
+				/* 8.5 x 11 inch paper (A/A4 size) */
+				PED->ped_MaxXDots = 1600;
+				PED->ped_MaxYDots = 2000;
+				NumDiscardCmd = 8;
+			}
+d296 28
+@
+
+
+1.8
+log
+@added support for B/A3 size paper
+V1.3 Gamma 20
+@
+text
+@d63 3
+a65 1
+			NumDiscardCmd = (Aspect == ASPECT_HORIZ) ? 8 : 0;
+d229 1
+d233 1
+d239 1
+@
+
+
+1.7
+log
+@V1.3 Gamma 15
+@
+text
+@d226 10
+@
+
+
+1.6
+log
+@added Landscape/Portrait mode support
+added SPECIAL_NOFORMFEED support
+@
+text
+@d183 8
+a190 1
+					/* do nothing */
+@
+
+
+1.5
+log
+@V1.3 Gamma 10 release
+@
+text
+@a12 1
+#define NUMSTARTCMD	12	/* # of cmd bytes before binary data */
+d14 2
+a15 1
+#define NUMTOTALCMD (NUMSTARTCMD + NUMENDCMD)	/* total of above */
+d33 16
+a48 1
+	static UWORD RowSize, BufSize, TotalBufSize, dataoffset;
+d55 1
+a55 1
+				ct	- pointer to IODRPReq structure (use with caution!).
+d62 4
+d67 1
+a67 1
+			BufSize = RowSize + NUMTOTALCMD;
+d71 1
+a71 1
+				err = PDERR_BUFFERMEMORY; /* could not get memory */
+d76 1
+a76 1
+				*ptr = 'K';			/* raster data follows */
+d79 19
+a97 6
+				*ptr = 'K';			/* raster data follows */
+				dataoffset = NUMSTARTCMD;
+				PrinterReady(); /* make sure prt ready before writing */
+				/* enter raster graphics mode */
+				err = (*(PD->pd_PWrite))("\002\000", 2);
+				PrinterReady(); /* make sure prt ready after writing */
+d105 1
+a105 1
+				y	- row #.
+d116 3
+a118 6
+				ct	- NA.
+				x	- NA.
+				y	- # of rows sent (1 to PED->ped_NumRows).
+
+				White-space strip.  Scan backwards through the buffer for
+				the first non-zero data byte.  Send up to this point only.
+d124 2
+a125 2
+			ptrstart = &PD->pd_PrintBuf[dataoffset - NUMSTARTCMD];
+			ptr = ptrstart + NUMSTARTCMD + i - 1;
+d131 4
+a134 3
+				PrinterReady(); /* make sure prt ready before writing */
+				err = (*(PD->pd_PWrite))("\012", 1); /* lf */
+				PrinterReady(); /* make sure prt ready after writing */
+d137 8
+a144 7
+				ptr = ptrstart + 2; /* get ptr to width info */
+				/* printer ignores first 8 bytes */
+				*ptr++ = (i + 8) >> 8;
+				*ptr++ = (i + 8) & 0xff; /* set printout width */
+				PrinterReady(); /* make sure prt ready before writing */
+				err = (*(PD->pd_PWrite))(ptrstart, i + NUMTOTALCMD);
+				PrinterReady(); /* make sure prt ready after writing */
+d147 2
+a148 2
+				dataoffset =
+					(dataoffset == NUMSTARTCMD ? BufSize : 0) + NUMSTARTCMD;
+d154 3
+a156 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d172 2
+a173 2
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d179 2
+a180 1
+			if (ct != PDERR_CANCEL) { /* if user did not cancel the print */
+d183 1
+a183 4
+					PrinterReady(); /* make sure prt ready before writing */
+					/* Advance Color Panel (does not eject paper) */
+					err = (*(PD->pd_PWrite))("\014\000", 2);
+					PrinterReady(); /* make sure prt ready after writing */
+d185 7
+a191 5
+				else {
+					PrinterReady(); /* make sure prt ready before writing */
+					/* End of Transmission (ejects paper) */
+					err = (*(PD->pd_PWrite))("\004\000", 2);
+					PrinterReady(); /* make sure prt ready after writing */
+d194 1
+a194 1
+			(*(PD->pd_PBothReady))(); /* wait for both buffers to empty */
+d202 3
+a204 3
+				ct	- NA.
+				x	- io_Special flag from IODRPReq structure.
+				y	- NA.
+d209 10
+d224 3
+a226 3
+				ct	- NA.
+				x	- NA.
+				y	- NA.
+d231 4
+a234 3
+			PrinterReady(); /* make sure prt ready before writing */
+			err = (*(PD->pd_PWrite))("\014\000", 2); /* Advance Color Panel */
+			PrinterReady(); /* make sure prt ready after writing */
+@
+
+
+1.4
+log
+@fixed multiple dump bug by sending a NULL after the command bytes
+and putting in code to check if the printer port is ready before
+and after each PWrite.
+V1.3 Gamma 6 release
+@
+text
+@@
+
+
+1.3
+log
+@V1.3 Gamma 3 release
+@
+text
+@d17 8
+d44 3
+d62 1
+d64 2
+a65 1
+				err = (*(PD->pd_PWrite))("\002", 1);
+d75 3
+d91 3
+d102 1
+d104 1
+d111 1
+d113 1
+d127 3
+d144 3
+d151 1
+d153 2
+a154 1
+					err = (*(PD->pd_PWrite))("\014", 1);
+d157 1
+d159 2
+a160 1
+					err = (*(PD->pd_PWrite))("\004", 1);
+d175 3
+d187 6
+a192 1
+			err = (*(PD->pd_PWrite))("\014", 1); /* Advance Color Panel */
+@
+
+
+1.2
+log
+@V1.3 beta 4 check-in
+@
+text
+@d70 1
+a70 1
+				y	- # of rows sent.
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a11 1
+#include "../printer/prtprivate.h"
+@

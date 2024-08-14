@@ -1,0 +1,1093 @@
+head     2.5;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+2.5
+date     94.03.24.21.54.02;  author jesup;  state Exp;
+branches ;
+next     2.4;
+
+2.4
+date     92.12.09.16.08.31;  author bj;  state Exp;
+branches ;
+next     2.3;
+
+2.3
+date     92.12.08.17.33.16;  author bj;  state Exp;
+branches ;
+next     2.2;
+
+2.2
+date     92.10.30.16.16.41;  author bj;  state Exp;
+branches ;
+next     2.1;
+
+2.1
+date     92.10.30.11.27.51;  author bj;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     92.07.20.14.06.27;  author bj;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.06.18.05.35;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@main.c for FTP (Manx 3.6)
+@
+
+
+2.5
+log
+@BJ didn't check this in
+@
+text
+@/* -----------------------------------------------------------------------
+ * main.c  SAS C for ftp (as225 R2)
+ *
+ * $Locker:  $
+ *
+ * $Id: main.c,v 2.4 92/12/09 16:08:31 bj Exp $
+ *
+ * $Revision: 2.4 $
+ *
+ * $Log:	main.c,v $
+ * Revision 2.4  92/12/09  16:08:31  bj
+ * Binary 2.8
+ * 
+ * Changed the new getcommand() function to use FGets instead
+ * of an FGetC loop. The tradeoff is FGetC() gives you control
+ * over an _immediate_ control-C at the command prompt while
+ * FGets requires you to hit 'return' after the control-C
+ * for it to take effect.  On the other hand, FGets() gives you
+ * command history with the cursor keys while FGetC() does not.
+ * 
+ * Revision 2.3  92/12/08  17:33:16  bj
+ * binary 2.7
+ * 
+ * Added the function "getcommand()" that allows us to handle
+ * control-C entries at the command prompt. 
+ * 
+ * Revision 2.2  92/10/30  16:16:41  bj
+ * Binary 2.5
+ * 
+ * Fixed bug where init_sock() was being called without checking it's
+ * return value. Init_sock() opens the socket.library so failure leads
+ * to enforcer hits.
+ * 
+ * Euro bug report.
+ * 
+ * Revision 2.1  92/10/30  11:27:51  bj
+ * Binary 2.3
+ * 
+ * Removed extra copyright notices
+ * 
+ * Revision 2.0  92/07/20  14:06:27  bj
+ * Complete rewrite for V2.0. For as225 release 2.
+ * MH source.
+ * 
+ *
+ * $Header: AS225:src/c/ftp/RCS/main.c,v 2.4 92/12/09 16:08:31 bj Exp $
+ *
+ *------------------------------------------------------------------------
+ */
+/*
+ * Copyright (c) 1985, 1989 Regents of the University of California.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. All advertising materials mentioning features or use of this software
+ *    must display the following acknowledgement:
+ *	This product includes software developed by the University of
+ *	California, Berkeley and its contributors.
+ * 4. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+//#define DEBUG 1
+#ifdef DEBUG
+	#define DB(x) kprintf(x)
+#else
+	#define DB(x) ;
+#endif
+
+/*
+ * FTP User Program -- Command Interface.
+ */
+#include <sys/types.h>
+#include "ftp.h"
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+
+#include <arpa/ftp.h>
+
+#include <signal.h>
+#include <stdio.h>
+#include <errno.h>
+#include <ctype.h>
+#include <netdb.h>
+#include <pwd.h>
+
+//extern int (*_ONBREAK)();
+//extern int ftp_break();
+
+/* local function prototypes */
+int main(int, char **);
+void intr(void);
+void lostpeer(void);
+void cmdscanner(int top);
+struct cmd *getcmd(register char *name);
+void makeargv(void);
+char *slurpstring(void);
+int help(int, char **);
+
+int isatty( int fd ) ;
+int getcommand(int fromatty, char *line) ;
+
+extern	char *home;
+char	*getlogin();
+long save_dir(void);
+
+long StartDir=0;
+
+#include "ftp_rev.h"
+static char version[] = VERSTAG;
+
+
+main(argc, argv)
+	char *argv[];
+{
+	register char *cp;
+	int top;
+	struct passwd *pw = NULL;
+	char homedir[MAXPATHLEN];
+
+	if(init_sock() == -1)
+	{
+		fprintf(stderr, "ftp: couldn't open socket.library.\n") ;
+		exit(1) ;
+	}
+
+	(void) signal(SIGINT, exit);
+	StartDir = save_dir();
+
+	sp = getservbyname("ftp", "tcp");
+	if (sp == 0) {
+		fprintf(stderr, "ftp: ftp/tcp: unknown service\n");
+		exit(1);
+	}
+	doglob = 1;
+	interactive = 1;
+	autologin = 1;
+	argc--, argv++;
+	while (argc > 0 && **argv == '-') {
+		for (cp = *argv + 1; *cp; cp++)
+			switch (*cp) {
+
+			case 'd':
+				options |= SO_DEBUG;
+				debug++;
+				break;
+			
+			case 'v':
+				verbose++;
+				break;
+
+			case 't':
+				trace++;
+				break;
+
+			case 'i':
+				interactive = 0;
+				break;
+
+			case 'n':
+				autologin = 0;
+				break;
+
+			case 'g':
+				doglob = 0;
+				break;
+
+			default:
+				fprintf(stdout,
+				  "ftp: %c: unknown option\n", *cp);
+				exit(1);
+			}
+		argc--, argv++;
+	}
+	fromatty = isatty(fileno(stdin));
+	if (fromatty)
+		verbose++;
+	cpend = 0;	/* no pending replies */
+	proxy = 0;	/* proxy not active */
+	crflag = 1;	/* strip c.r. on ascii gets */
+	sendport = -1;	/* not using ports */
+	/*
+	 * Set up the home directory in case we're globbing.
+	 */
+	cp = getlogin();
+	if (cp != NULL) {
+		pw = getpwnam(cp);
+	}
+	if (pw == NULL)
+		pw = getpwuid(getuid());
+	if (pw != NULL) {
+		home = homedir;
+		(void) strcpy(home, pw->pw_dir);
+	}
+
+	if (argc > 0) {
+		if (setjmp(toplevel))
+			exit(0);
+
+//		(void) signal(SIGINT, intr);
+//		(void) signal(SIGPIPE, lostpeer);
+		setpeer(argc + 1, argv - 1);
+	}
+	top = setjmp(toplevel) == 0;
+	if (top) {
+//		(void) signal(SIGINT, intr);
+//		(void) signal(SIGPIPE, lostpeer);
+	}
+	FGets(Input(), line, sizeof(line)) ;
+	for (;;) {
+		cmdscanner(top);
+		top = 1;
+	}
+}
+
+void
+intr()
+{
+
+	longjmp(toplevel, 1);
+}
+
+void
+lostpeer()
+{
+	extern FILE *cout;
+	extern int data;
+
+	if (connected) {
+		if (cout != NULL) {
+			(void) shutdown(fileno(cout), 1+1);
+			(void) fclose(cout);
+			cout = NULL;
+		}
+		if (data >= 0) {
+			(void) shutdown(data, 1+1);
+			(void) close(data);
+			data = -1;
+		}
+		connected = 0;
+	}
+	pswitch(1);
+	if (connected) {
+		if (cout != NULL) {
+			(void) shutdown(fileno(cout), 1+1);
+			(void) fclose(cout);
+			cout = NULL;
+		}
+		connected = 0;
+	}
+	proxflag = 0;
+	pswitch(0);
+}
+
+
+/*
+ * Command parser.
+ */
+void cmdscanner(int top)
+{
+	register struct cmd *c;
+	register int l;
+	struct cmd *getcmd();
+
+	if (!top)
+		(void) putchar('\n');
+	for (;;) {
+		getcommand(fromatty, line) ;
+		if(SetSignal(0L,0L) & SIGBREAKF_CTRL_C)
+		{
+			quit() ;
+		}
+//		if (fromatty) {
+//			printf("ftp> ");
+//			(void) fflush(stdout);
+//		}
+//		if (fgets(line, sizeof line, stdin) == NULL)
+//			quit();
+		l = strlen(line);
+		if (l == 0)
+			break;
+		if (line[--l] == '\n') {
+			if (l == 0)
+				break;
+			line[l] = '\0';
+		} else if (l == sizeof(line) - 2) {
+			printf("sorry, input line too long\n");
+			while ((l = getchar()) != '\n' && l != EOF)
+				/* void */;
+			break;
+		} /* else it was a line without a newline */
+		makeargv();
+		if (margc == 0) {
+			continue;
+		}
+		c = getcmd(margv[0]);
+		if (c == (struct cmd *)-1) {
+			printf("?Ambiguous command\n");
+			continue;
+		}
+		if (c == 0) {
+			printf("?Invalid command\n");
+			continue;
+		}
+		if (c->c_conn && !connected) {
+			printf("Not connected.\n");
+			continue;
+		}
+		(*c->c_handler)(margc, margv);
+		if (bell && c->c_bell)
+			(void) putchar('\007');
+		if (c->c_handler != help)
+			break;
+	}
+//	(void) signal(SIGINT, intr);
+//	(void) signal(SIGPIPE, lostpeer);
+}
+
+struct cmd *
+getcmd(name)
+	register char *name;
+{
+	extern struct cmd cmdtab[];
+	register char *p, *q;
+	register struct cmd *c, *found;
+	register int nmatches, longest;
+
+	longest = 0;
+	nmatches = 0;
+	found = 0;
+	for (c = cmdtab; p = c->c_name; c++) {
+		for (q = name; *q == *p++; q++)
+			if (*q == 0)		/* exact match? */
+				return (c);
+		if (!*q) {			/* the name was a prefix */
+			if (q - name > longest) {
+				longest = q - name;
+				nmatches = 1;
+				found = c;
+			} else if (q - name == longest)
+				nmatches++;
+		}
+	}
+	if (nmatches > 1)
+		return ((struct cmd *)-1);
+	return (found);
+}
+
+/*
+ * Slice a string up into argc/argv.
+ */
+
+int slrflag;
+
+void makeargv()
+{
+	char **argp;
+
+	margc = 0;
+	argp = margv;
+	stringbase = line;		/* scan from first of buffer */
+	argbase = argbuf;		/* store from first of buffer */
+	slrflag = 0;
+	while (*argp++ = slurpstring())
+		margc++;
+}
+
+/*
+ * Parse string into argbuf;
+ * implemented with FSM to
+ * handle quoting and strings
+ */
+char *
+slurpstring()
+{
+	int got_one = 0;
+	register char *sb = stringbase;
+	register char *ap = argbase;
+	char *tmp = argbase;		/* will return this if token found */
+
+	if (*sb == '!' || *sb == '$') {	/* recognize ! as a token for shell */
+		switch (slrflag) {	/* and $ as token for macro invoke */
+			case 0:
+				slrflag++;
+				stringbase++;
+				return ((*sb == '!') ? "!" : "$");
+				/* NOTREACHED */
+			case 1:
+				slrflag++;
+				altarg = stringbase;
+				break;
+			default:
+				break;
+		}
+	}
+
+S0:
+	switch (*sb) {
+
+	case '\0':
+		goto OUT;
+
+	case ' ':
+	case '\t':
+		sb++; goto S0;
+
+	default:
+		switch (slrflag) {
+			case 0:
+				slrflag++;
+				break;
+			case 1:
+				slrflag++;
+				altarg = sb;
+				break;
+			default:
+				break;
+		}
+		goto S1;
+	}
+
+S1:
+	switch (*sb) {
+
+	case ' ':
+	case '\t':
+	case '\0':
+		goto OUT;	/* end of token */
+
+	case '\\':
+		sb++; goto S2;	/* slurp next character */
+
+	case '"':
+		sb++; goto S3;	/* slurp quoted string */
+
+	default:
+		*ap++ = *sb++;	/* add character to token */
+		got_one = 1;
+		goto S1;
+	}
+
+S2:
+	switch (*sb) {
+
+	case '\0':
+		goto OUT;
+
+	default:
+		*ap++ = *sb++;
+		got_one = 1;
+		goto S1;
+	}
+
+S3:
+	switch (*sb) {
+
+	case '\0':
+		goto OUT;
+
+	case '"':
+		sb++; goto S1;
+
+	default:
+		*ap++ = *sb++;
+		got_one = 1;
+		goto S3;
+	}
+
+OUT:
+	if (got_one)
+		*ap++ = '\0';
+	argbase = ap;			/* update storage pointer */
+	stringbase = sb;		/* update scan pointer */
+	if (got_one) {
+		return(tmp);
+	}
+	switch (slrflag) {
+		case 0:
+			slrflag++;
+			break;
+		case 1:
+			slrflag++;
+			altarg = (char *) 0;
+			break;
+		default:
+			break;
+	}
+	return((char *)0);
+}
+
+#define HELPINDENT (sizeof ("directory"))
+
+/*
+ * Help command.
+ * Call each command handler with argc == 0 and argv[0] == name.
+ */
+int help(argc, argv)
+	int argc;
+	char *argv[];
+{
+	extern struct cmd cmdtab[];
+	register struct cmd *c;
+
+	if (argc == 1) {
+		register int i, j, w, k;
+		int columns, width = 0, lines;
+		extern int NCMDS;
+
+		printf("Commands may be abbreviated.  Commands are:\n\n");
+		for (c = cmdtab; c < &cmdtab[NCMDS]; c++) {
+			int len = strlen(c->c_name);
+
+			if (len > width)
+				width = len;
+		}
+		width = (width + 8) &~ 7;
+		columns = 80 / width;
+		if (columns == 0)
+			columns = 1;
+		lines = (NCMDS + columns - 1) / columns;
+		for (i = 0; i < lines; i++) {
+			for (j = 0; j < columns; j++) {
+				c = cmdtab + j * lines + i;
+				if (c->c_name && (!proxy || c->c_proxy)) {
+					printf("%s", c->c_name);
+				}
+				else if (c->c_name) {
+					for (k=0; k < strlen(c->c_name); k++) {
+						(void) putchar(' ');
+					}
+				}
+				if (c + lines >= &cmdtab[NCMDS]) {
+					printf("\n");
+					break;
+				}
+				w = strlen(c->c_name);
+				while (w < width) {
+					w = (w + 8) &~ 7;
+					(void) putchar('\t');
+				}
+			}
+		}
+		return 0;
+	}
+	while (--argc > 0) {
+		register char *arg;
+		arg = *++argv;
+		c = getcmd(arg);
+		if (c == (struct cmd *)-1)
+			printf("?Ambiguous help command %s\n", arg);
+		else if (c == (struct cmd *)0)
+			printf("?Invalid help command %s\n", arg);
+		else
+			printf("%-*s\t%s\n", HELPINDENT,
+				c->c_name, c->c_help);
+	}
+	return 0;
+}
+
+
+long save_dir()
+{
+	return((long)DupLock(((struct Process*)FindTask(0))->pr_CurrentDir));
+}
+
+void restore_dir(long dir)
+{
+	BPTR oldlock;
+	oldlock = CurrentDir((BPTR)dir);
+	UnLock(oldlock);
+}
+
+int chkabort(void)
+{
+	return(0) ;
+}
+
+#define PROMPT "ftp> "
+                             
+BPTR console_fh = NULL ;
+
+int getcommand(int fromatty, char *line)
+{
+	BPTR fout = Output() ;
+	BPTR fin  = Input() ;
+
+	if( fromatty)
+	{
+		FPuts(fout, PROMPT) ;
+		Flush(fout) ;
+	}
+	return((int)FGets(fin, line, 200L)) ;
+}
+	@
+
+
+2.4
+log
+@Binary 2.8
+
+Changed the new getcommand() function to use FGets instead
+of an FGetC loop. The tradeoff is FGetC() gives you control
+over an _immediate_ control-C at the command prompt while
+FGets requires you to hit 'return' after the control-C
+for it to take effect.  On the other hand, FGets() gives you
+command history with the cursor keys while FGetC() does not.
+@
+text
+@d4 1
+a4 1
+ * $Locker: bj $
+d6 1
+a6 1
+ * $Id: main.c,v 2.3 92/12/08 17:33:16 bj Exp Locker: bj $
+d8 1
+a8 1
+ * $Revision: 2.3 $
+d11 10
+d46 1
+a46 1
+ * $Header: AS225:src/c/ftp/RCS/main.c,v 2.3 92/12/08 17:33:16 bj Exp Locker: bj $
+d93 1
+a96 1
+#include <sys/types.h>
+@
+
+
+2.3
+log
+@binary 2.7
+
+Added the function "getcommand()" that allows us to handle
+control-C entries at the command prompt. 
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: main.c,v 2.2 92/10/30 16:16:41 bj Exp $
+d8 1
+a8 1
+ * $Revision: 2.2 $
+d11 6
+d36 1
+a36 1
+ * $Header: AS225:src/c/ftp/RCS/main.c,v 2.2 92/10/30 16:16:41 bj Exp $
+d73 6
+d219 1
+d278 3
+a280 1
+		if(getcommand(fromatty, line) == -1)
+d282 1
+a587 20
+#ifdef FOOBAR
+#include <exec/types.h>
+#include <stdio.h>
+#include <libraries/dosextens.h>
+#include <string.h>
+#include <stdio.h>
+
+#include <proto/dos.h>
+#include <proto/intuition.h>
+#include <proto/utility.h>
+#include <proto/exec.h>
+
+#endif
+#define BUFFSIZE 200L
+
+#ifdef NULL
+#undef NULL
+#endif
+#define NULL ((BYTE *)0L)
+
+d594 4
+a597 8
+	REGISTER BPTR fh ;
+	REGISTER int charcount = 0 ;
+	REGISTER int retval = 0 ;
+	REGISTER BYTE *p ;
+	BYTE hbuf[BUFFSIZE] ;
+	LONG c ;
+		
+	if(fh = Open("CONSOLE:", MODE_NEWFILE))
+d599 2
+a600 61
+		console_fh = fh ;
+		p = hbuf ;
+		memset(p, 0, BUFFSIZE) ;
+		SetMode(fh, 1L) ;
+		if( fromatty)
+		{
+			Write(fh,PROMPT,sizeof(PROMPT)) ;
+		}
+		while((c = (LONG)FGetC(fh)) != -1L)
+		{
+			if( c == 13L || c == 10L ) 
+			{
+				FPutC(fh, 10L) ;
+				Flush(fh) ;
+//				kprintf("ftp: got LF\n") ;
+				break ;
+			}
+
+			if( c == 3 )  // ctrl-c hit while entering command
+			{
+//				kprintf("ftp: got CTRL-C\n") ;
+				Flush(fh) ;
+				SetMode(fh, 0L) ;
+				Close(fh) ;
+				console_fh = NULL ;
+				return(-1) ;
+			}
+
+			if( c == 8 && charcount > 0 ) /* backspace */
+			{
+				FPutC(fh,8L) ;
+				FPutC(fh,32L) ;
+				FPutC(fh,8L) ;
+				Flush(fh) ;
+//				kprintf("ftp: backspace\n") ;
+				charcount-- ;
+				p-- ;
+				*p = '\0' ;
+			}
+			if( c >= ' ' && c <= '~' )
+			{
+//				kprintf("go ok char %03d\n", c) ;
+				if( charcount > BUFFSIZE -2 )
+				{
+					DisplayBeep(NULL) ;
+				}
+				else
+				{
+					*p = (BYTE)c ;
+					p++ ;
+					charcount++ ;
+					FPutC(fh, c) ;
+					Flush(fh) ;
+				}
+			}				
+		}
+		*p = '\0' ;
+		strcpy( line, hbuf ) ;
+		SetMode(fh, 0L) ;
+		Close(fh) ;
+		console_fh = NULL ;
+d602 1
+a602 1
+	return(0) ;
+d604 1
+a604 1
+						
+@
+
+
+2.2
+log
+@Binary 2.5
+
+Fixed bug where init_sock() was being called without checking it's
+return value. Init_sock() opens the socket.library so failure leads
+to enforcer hits.
+
+Euro bug report.
+@
+text
+@d6 1
+a6 1
+ * $Id: main.c,v 2.1 92/10/30 11:27:51 bj Exp $
+d8 1
+a8 1
+ * $Revision: 2.1 $
+d11 9
+d30 1
+a30 1
+ * $Header: AS225:src/c/ftp/RCS/main.c,v 2.1 92/10/30 11:27:51 bj Exp $
+d99 1
+d265 8
+a272 6
+		if (fromatty) {
+			printf("ftp> ");
+			(void) fflush(stdout);
+		}
+		if (fgets(line, sizeof line, stdin) == NULL)
+			quit();
+d566 106
+@
+
+
+2.1
+log
+@Binary 2.3
+
+Removed extra copyright notices
+@
+text
+@d6 1
+a6 1
+ * $Id: main.c,v 2.0 92/07/20 14:06:27 bj Exp $
+d8 1
+a8 1
+ * $Revision: 2.0 $
+d11 5
+d21 1
+a21 1
+ * $Header: AS225:src/c/ftp/RCS/main.c,v 2.0 92/07/20 14:06:27 bj Exp $
+d89 2
+d109 6
+a114 1
+	init_sock();
+@
+
+
+2.0
+log
+@Complete rewrite for V2.0. For as225 release 2.
+MH source.
+@
+text
+@d4 1
+a4 1
+ * $Locker:$
+d6 1
+a6 1
+ * $Id:$
+d8 7
+a14 1
+ * $Revision:$
+d16 1
+a16 1
+ * $Log:$
+a17 2
+ * $Header:$
+ *
+a52 9
+#ifndef lint
+char copyright[] =
+"@@(#) Copyright (c) 1985, 1989 Regents of the University of California.\n\
+ All rights reserved.\n";
+#endif /* not lint */
+
+#ifndef lint
+static char sccsid[] = "@@(#)main.c	5.18 (Berkeley) 3/1/91";
+#endif /* not lint */
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 2
+a2 2
+/* ---------------------------------------------------------------------------------
+ * main.c (ftp)  (Manx 3.6)
+d4 1
+a4 1
+ * $Locker$
+d6 7
+a12 1
+ * $Id$
+d14 1
+a14 5
+ * $Revision$
+ *
+ * $Header$
+ *
+ *-----------------------------------------------------------------------------------
+d16 2
+a17 6
+
+
+
+
+/*                            
+ * Copyright (c) 1985 Regents of the University of California.
+d20 38
+a57 13
+ * Redistribution and use in source and binary forms are permitted
+ * provided that the above copyright notice and this paragraph are
+ * duplicated in all such forms and that any documentation,
+ * advertising materials, and other materials related to such
+ * distribution and use acknowledge that the software was developed
+ * by the University of California, Berkeley.  The name of the
+ * University may not be used to endorse or promote products derived
+ * from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+d62 1
+a62 1
+#include "ftp_var.h"
+d76 12
+a87 1
+#include <libraries/dosextens.h>
+a88 3
+uid_t	getuid();
+int	intr();
+int	lostpeer();
+d91 1
+d93 1
+a93 2
+struct FileLock *CurrentDir() ;
+struct FileLock *originaldir = NULL ;
+d95 4
+d107 3
+a109 1
+	originaldir = CurrentDir( NULL ) ;
+a151 1
+				if( originaldir ) CurrentDir( originaldir ) ;  
+a156 8
+	/*
+	 * Set up defaults for FTP.
+	 */
+	(void) strcpy(typename, "ascii"), type = TYPE_A;
+	(void) strcpy(formname, "non-print"), form = FORM_N;
+	(void) strcpy(modename, "stream"), mode = MODE_S;
+	(void) strcpy(structname, "file"), stru = STRU_F;
+	(void) strcpy(bytename, "8"), bytesize = 8;
+d159 1
+a159 1
+	cpend = 0;           /* no pending replies */
+d161 2
+a162 1
+	crflag = 1;    /* strip c.r. on ascii gets */
+d176 1
+d178 1
+a178 3
+		if (setjmp(	toplevel)) {
+			printf("ftp exits via setjmp()\n") ;
+			if( originaldir) CurrentDir( originaldir ) ;
+d180 3
+a182 3
+			}
+		(void) signal(SIGINT, intr);
+		(void) signal(SIGPIPE, lostpeer);
+d187 2
+a188 2
+		(void) signal(SIGINT, intr);
+		(void) signal(SIGPIPE, lostpeer);
+d196 1
+d203 1
+d235 1
+a235 17
+/*char *
+tail(filename)
+	char *filename;
+{
+	register char *s;
+	
+	while (*filename) {
+		s = rindex(filename, '/');
+		if (s == NULL)
+			break;
+		if (s[1])
+			return (s + 1);
+		*s = '\0';
+	}
+	return (filename);
+}
+*/
+d239 1
+a239 2
+cmdscanner(top)
+	int top;
+d242 1
+a243 1
+	extern int help();
+d252 4
+a255 3
+		if (gets(line) == 0) {
+			if (feof(stdin) || ferror(stdin))
+				quit();
+d257 8
+a264 2
+		}
+		if (line[0] == 0)
+d266 1
+d281 1
+a281 1
+			printf ("Not connected.\n");
+d290 2
+a291 2
+	(void) signal(SIGINT, intr);
+	(void) signal(SIGPIPE, lostpeer);
+d330 1
+a330 1
+makeargv()
+a332 1
+	char *slurpstring();
+d472 1
+a472 1
+help(argc, argv)
+d518 1
+a518 1
+		return;
+d532 1
+a534 10
+/*
+ * Call routine with argc, argv set from args (terminated by 0).
+ */
+/*VARARGS1*/
+call(routine, args)
+	int (*routine)();
+	int args;
+{
+	register int *argp;
+	register int argc;
+d536 10
+a545 3
+	for (argc = 0, argp = &args; *argp++ != 0; argc++)
+		;
+	(*routine)(argc, &args);
+@

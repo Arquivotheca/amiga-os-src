@@ -1,0 +1,22 @@
+€InitCLPool(,);
+AllocCList();
+‹FreeCList();
+‹FlushCList();
+SizeCList();
+PutCLChar(,);
+GetCLChar();
+UnGetCLChar(,);
+UnPutCLChar();
+PutCLWord(,);
+GetCLWord();
+UnGetCLWord(,);
+UnPutCLWord();
+PutCLBuf(,„*,);
+GetCLBuf(,„*,);
+MarkCList(,);
+IncrCLMark();
+PeekCLMark();
+SplitCList();
+CopyCList();
+SubCList(,,);
+ConcatCList();ˆNO_PRAGMAS…†¨InitCLPool 1e´…†¨AllocCList 24…†¨FreeCList 2a‘…†¨FlushCList 30‘…†¨SizeCList 36‘…†¨PutCLChar 3c´…†¨GetCLChar 42‘…†¨UnGetCLChar 48´…†¨UnPutCLChar 4e‘…†¨PutCLWord 54´…†¨GetCLWord 5a‘…†¨UnGetCLWord 60´…†¨UnPutCLWord 66‘…†¨PutCLBuf 6c 19803…†¨GetCLBuf 72 19803…†¨MarkCList 78´…†¨IncrCLMark 7e‘…†¨PeekCLMark 84‘…†¨SplitCList 8a‘…†¨CopyCList 90‘…†¨SubCList 96 10803…†¨ConcatCList 9c³‡

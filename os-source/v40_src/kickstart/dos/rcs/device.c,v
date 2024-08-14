@@ -1,0 +1,1427 @@
+head     36.25;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.25
+date     92.12.04.17.22.44;  author jesup;  state Exp;
+branches ;
+next     36.24;
+
+36.24
+date     91.04.25.01.45.30;  author jesup;  state Exp;
+branches ;
+next     36.23;
+
+36.23
+date     91.04.20.02.53.58;  author jesup;  state Exp;
+branches ;
+next     36.22;
+
+36.22
+date     91.04.10.19.24.47;  author jesup;  state Exp;
+branches ;
+next     36.21;
+
+36.21
+date     91.03.01.18.59.23;  author jesup;  state Exp;
+branches ;
+next     36.20;
+
+36.20
+date     91.02.25.17.01.55;  author jesup;  state Exp;
+branches ;
+next     36.19;
+
+36.19
+date     91.02.13.19.00.46;  author jesup;  state Exp;
+branches ;
+next     36.18;
+
+36.18
+date     91.01.24.16.04.44;  author jesup;  state Exp;
+branches ;
+next     36.17;
+
+36.17
+date     90.12.17.22.28.21;  author jesup;  state Exp;
+branches ;
+next     36.16;
+
+36.16
+date     90.12.16.04.04.50;  author jesup;  state Exp;
+branches ;
+next     36.15;
+
+36.15
+date     90.11.30.03.36.42;  author jesup;  state Exp;
+branches ;
+next     36.14;
+
+36.14
+date     90.11.21.02.19.46;  author jesup;  state Exp;
+branches ;
+next     36.13;
+
+36.13
+date     90.08.30.23.44.31;  author jesup;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     90.06.18.21.18.46;  author jesup;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     90.05.09.02.06.58;  author jesup;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     90.04.03.05.05.30;  author jesup;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     90.04.03.04.42.43;  author jesup;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     90.03.19.17.08.18;  author jesup;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     90.02.16.22.17.13;  author jesup;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     90.01.17.21.47.43;  author jesup;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     89.12.09.01.47.21;  author jesup;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     89.11.14.01.23.26;  author jesup;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     89.10.18.04.18.34;  author jesup;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     89.10.03.17.58.02;  author jesup;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     89.09.16.22.06.39;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.25
+log
+@Fixed AttemptLockDosList return value for failure.
+Fixed RemAssignList to remove the first entry
+@
+text
+@/* device.c */
+
+#include <exec/types.h>
+#include <exec/io.h>
+#include <exec/memory.h>
+#include "dos/dos.h"
+#include "dos/dosextens.h"
+#include "dos/filehandler.h"
+#include <string.h>
+
+#include "libhdr.h"
+
+#include <clib/exec_protos.h>
+#include <pragmas/exec_old_pragmas.h>
+#include "device_protos.h"
+#include "klib_protos.h"
+#include "blib_protos.h"
+
+#define TOBPTR(x)	(((LONG) (x)) >> 2)
+#define SAME		0
+
+
+struct DosList * ASM
+LockDosList (REG(d1) ULONG flags)
+{
+	return InternalLockDosList(flags,TRUE);
+}
+
+struct DosList * ASM
+AttemptLockDosList (REG(d1) ULONG flags)
+{
+	return InternalLockDosList(flags,FALSE);
+}
+
+struct DosList * __regargs
+lockit (struct DosList *dl, struct SignalSemaphore *sem,
+	ULONG flags, ULONG synch)
+{
+	if (synch) {
+		if (flags & LDF_WRITE)
+			ObtainSemaphore(sem);
+		else
+			ObtainSemaphoreShared(sem);
+	} else {
+		/* FIX! shared? */
+		if (!AttemptSemaphore(sem))
+			return NULL;
+	}
+	return dl;
+}
+
+struct DosList * ASM
+InternalLockDosList (REG(d1) ULONG flags,REG(d2) LONG synch)
+{
+	struct DosInfo *di;
+	struct DosList *dl;
+	LONG rw;
+
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+	dl = (struct DosList *) BADDR(di->di_DevInfo);
+
+	/* did they specify one of READ or WRITE? */
+	rw = flags & (LDF_READ|LDF_WRITE);
+	if (!rw || rw == (LDF_READ|LDF_WRITE))
+		return NULL;				/* error */
+
+	/* check if flags are valid (unknown flags == error) */
+	if (flags & ~(LDF_DELETE|LDF_ENTRY|LDF_ALL|LDF_READ|LDF_WRITE))
+		return NULL; 				/* error */
+
+	/* first lock device list if asked */
+	if (flags & LDF_ALL)	/* any one of devices, volumes, assigns */
+		dl = lockit(dl,&(di->di_DevLock),flags,synch);
+
+	/* now lock entry if asked */
+	if (flags & LDF_ENTRY)
+		dl = lockit(dl,&(di->di_EntryLock),flags,synch);
+
+	/* now lock entry if asked */
+	if (flags & LDF_DELETE)
+		dl = lockit(dl,&(di->di_DeleteLock),flags,synch);
+
+	/* FIX! remove in 1.5!!!!!!! */
+	if (dl) {
+		Forbid();
+		/* return INVALID ptr to indicate he hasn't examined the 1st */
+		return (struct DosList *) (((LONG) dl) + 1);
+	}
+	return NULL; // failure
+}
+
+void ASM
+UnLockDosList (REG(d1) ULONG flags)
+{
+	struct SignalSemaphore *s;
+	struct DosInfo *di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+
+	if (flags & LDF_ALL)
+	{
+		s = &(di->di_DevLock);
+		ReleaseSemaphore(s);
+	}
+
+	if (flags & LDF_ENTRY)
+	{
+		s = &(di->di_EntryLock);
+		ReleaseSemaphore(s);
+	}
+
+	if (flags & LDF_DELETE)
+	{
+		s = &(di->di_DeleteLock);
+		ReleaseSemaphore(s);
+	}
+
+	/* FIX! remove in 1.5!!!!!!! */
+	Permit();
+}
+
+/* assumes doslist is locked exclusive! */
+
+LONG ASM
+RemDosEntry (REG(d1) struct DosList *dlist)
+{
+	struct DosInfo *di;
+	struct DosList *dl;
+	LONG success = DOSTRUE;
+
+	/* make sure no one is mucking with a node (perhaps this node!)  */
+	/* see GetDeviceProc notes... 					 */
+	/* Delete requires that NO handler be starting up.  Add doesn't, */
+	/* just that no one is traversing the list.			 */
+	/* Handler startup MUST grab a read-lock on LDF_DELETE OR	 */
+	/* a write-lock on LDF_ENTRY.					 */
+	/* we grab write-locks on both.					 */
+	LockDosList(LDF_DELETE|LDF_ENTRY | LDF_WRITE);
+
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+	dl = (struct DosList *) BADDR(di->di_DevInfo);
+
+	if (dl == dlist)	/* head case */
+		di->di_DevInfo = dl->dol_Next;
+	else {
+		/* make sure it's in the device list, and find parent */
+		while (dl->dol_Next && BADDR(dl->dol_Next) != (APTR) dlist)
+			dl = (struct DosList *) BADDR(dl->dol_Next);
+
+		/* did we find it in the list? */
+		if (dl->dol_Next)
+			dl->dol_Next = dlist->dol_Next;
+		else
+			success = FALSE;
+	}
+
+	UnLockDosList(LDF_DELETE|LDF_ENTRY | LDF_WRITE);
+
+	return success;
+}
+
+/* does NOT require the DosList to be locked! */
+LONG ASM
+AddDosEntry (REG(d1) struct DosList *dlist)
+{
+	struct DosInfo *di;
+	struct DosList *dl;
+	char *name;
+	LONG success = DOSTRUE;
+
+	/* first, lock the device list for writing */
+	/* deal with funny returned ptr!!!         */
+	/* safe to add things while handlers are starting... */
+
+	dl = LockDosList(LDF_ALL|LDF_WRITE);
+	dl = (struct DosList *) (((LONG) dl) - 1);
+
+	/* now, search for duplicates if not DLT_VOLUME */
+	name = (char *) BADDR(dlist->dol_Name);
+	for (; dl; dl = (struct DosList *) BADDR(dl->dol_Next))
+	{
+		/* dol_Name is null-terminated BSTR */
+		if (mystricmp((char *) BADDR(dl->dol_Name),name) ==
+		    SAME)
+		{
+			/* CONFLICT! */
+			if (dl->dol_Type == DLT_VOLUME)
+			{
+			    /* volumes conflict with volumes IF they      */
+			    /* have the same dates.			  */
+			    /* non-volumes conflict with existing volumes */
+			    if (dlist->dol_Type != DLT_VOLUME ||
+				CompareDates(
+				    &(dl->dol_misc.dol_volume.dol_VolumeDate),
+				 &(dlist->dol_misc.dol_volume.dol_VolumeDate))
+				 == SAME)
+				{
+				  /* don't allow two vols of the same date! */
+					goto err;
+				}
+			} else {
+				/* this conflicts with a non-volume */
+				if (dlist->dol_Type != DLT_VOLUME)
+				{
+				  /* if we're adding anything but a volume */
+err:					success = FALSE;
+					setresult2(ERROR_OBJECT_EXISTS);
+					goto add_error;
+				}  /* volumes can conflict with non-volumes */
+			}
+		}
+	}
+
+	/* now add it at head */
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+	dlist->dol_Next = di->di_DevInfo;
+	di->di_DevInfo  = TOBPTR(dlist);
+
+add_error:
+	UnLockDosList(LDF_ALL|LDF_WRITE);	/* FIX? LDF_EXCLUSIVE? */
+	return success;
+}
+
+/* array for converting dol_Type to a LDF_xxx flag for checking. */
+/* array is offset by one for DLT_PRIVATE. */
+/* all current values fit in a UBYTE 	   */
+static UBYTE dlt_to_ldf[] = {
+	0,		/* DLT_PRIVATE (-1) */
+	LDF_DEVICES,	/* DLT_DEVICE       */
+	LDF_ASSIGNS,	/* DLT_DIRECTORY    */
+	LDF_VOLUMES,	/* DLT_VOLUME       */
+	LDF_ASSIGNS,	/* DLT_LATE         */
+	LDF_ASSIGNS,	/* DLT_NONBINDING   */
+};
+
+/* DOWNCODE! */
+/* list must be locked shared or exclusive */
+
+struct DosList * ASM
+FindDosEntry (REG(d1) struct DosList *dlist, REG(d2) UBYTE *name,
+	      REG(d3) ULONG flags)
+{
+	/* if he hasn't used NextDosEntry this is needed */
+	if (((LONG) dlist) & 1)
+		dlist = (struct DosList *) (((LONG) dlist) - 1);
+
+	while (dlist)
+	{
+		/* if name == NULL, don't check it */
+		if ((((ULONG) dlt_to_ldf[dlist->dol_Type + 1]) & flags) &&
+		    (!name ||
+		     (mystricmp(((char *) BADDR(dlist->dol_Name)) + 1,name) ==
+		      SAME)))
+		{
+			/* found it! */
+			break;
+		}
+		dlist = (struct DosList *) BADDR(dlist->dol_Next);
+	}
+	return dlist;
+}
+
+/* internal for ErrorReport - locks list for you */
+
+struct DosList * __regargs
+FindDosEntryByTask (struct MsgPort *port)
+{
+	struct DosList *dlist;
+
+	dlist = LockDosList(LDF_ALL|LDF_READ);
+	dlist = (struct DosList *) (((LONG) dlist) - 1);
+
+	while (dlist)
+	{
+		if (dlist->dol_Type == DLT_DEVICE &&
+		    dlist->dol_Task == port)
+		{
+			/* found it! */
+			break;
+		}
+		dlist = (struct DosList *) BADDR(dlist->dol_Next);
+	}
+
+	/* leaves list locked for read!!!! */
+	return dlist;
+}
+
+#define SAMEDEVICE
+#ifdef SAMEDEVICE
+/* return if two locks are on partitions of the same device */
+LONG ASM
+SameDevice (REG(d1) BPTR lock1, REG(d2) BPTR lock2)
+{
+	struct FileLock *lock;
+	struct DosList *vol1, *vol2;
+	struct DosList *dev1, *dev2;
+	struct FileSysStartupMsg *fs1, *fs2;
+	LONG rc = FALSE;
+
+	lock = BADDR(lock1);
+	vol1 = BADDR(lock->fl_Volume);
+	lock = BADDR(lock2);
+	vol2 = BADDR(lock->fl_Volume);
+
+	if (vol1 == vol2 || vol1->dol_Task == vol2->dol_Task)
+		return DOSTRUE;
+
+	dev1 = FindDosEntryByTask(vol1->dol_Task);
+	if (!dev1)
+		goto cleanup2;
+
+	dev2 = FindDosEntryByTask(vol2->dol_Task);
+	if (!dev2)
+		goto cleanup;
+
+	/* we have two devices, check startups */
+	/* FIX! use symbol for minimum valid startup! */
+	if (dev1->dol_misc.dol_handler.dol_Startup < 64 ||
+	    dev2->dol_misc.dol_handler.dol_Startup < 64)
+		goto cleanup;				/* no device */
+
+	fs1 = BADDR(dev1->dol_misc.dol_handler.dol_Startup);
+	fs2 = BADDR(dev2->dol_misc.dol_handler.dol_Startup);
+
+	if ((fs1->fssm_Unit == fs2->fssm_Unit) &&
+	    (strcmp(BADDR(fs1->fssm_Device),BADDR(fs2->fssm_Device)) == SAME))
+	{
+		rc = DOSTRUE;
+	}
+cleanup:
+	UnLockDosList(LDF_ALL|LDF_READ);
+cleanup2:
+	UnLockDosList(LDF_ALL|LDF_READ);
+
+	return rc;
+}
+#endif
+
+/* DOWNCODE! */
+/* list must be locked shared or exclusive */
+
+struct DosList * ASM
+NextDosEntry (REG(d1) struct DosList *dlist, REG(d2) ULONG flags)
+{
+	/* if he hasn't used NextDosEntry this is needed */
+	if (((LONG) dlist) & 1)
+		dlist = (struct DosList *) (((LONG) dlist) - 1);
+	else
+		dlist = (struct DosList *) BADDR(dlist->dol_Next);
+
+	return FindDosEntry(dlist,NULL,flags);
+}
+
+struct DosList * ASM
+MakeDosEntry (REG(d1) UBYTE *name, REG(d2) LONG type)
+{
+	struct DosList *devslot;
+	LONG len;
+	char *devname;
+
+	/* sizeof(struct DeviceList) MUST be an integral number of LONGS! */
+	devslot = (struct DosList *)
+		  AllocVecPubClear(sizeof(struct DosList));
+
+	/* volumename MUST be null-terminated BSTR! */
+	len = strlen(name);
+	devname = AllocVecPub(len+2);		/* 1 for length, 1 for null */
+	if (!devslot || !devname)
+	{
+		/* freeVec(0) is safe */
+		freeVec(devslot);
+		freeVec(devname);
+		return NULL;
+	}
+	/* must produce null-terminated BSTR, null not included in count!!! */
+	strcpy(devname+1,name);
+	*devname = len;
+
+	devslot->dol_Name = (BSTR) TOBPTR(devname);
+	devslot->dol_Type = type;
+
+	/* dol_Task = 0, which is good			*/
+	/* dol_Lock = 0, which is good			*/
+	/* the union is all 0, which is good		*/
+
+	return devslot;
+}
+
+/* The entry MUST have been removed from the DosList! */
+
+void ASM
+FreeDosEntry (REG(d1) struct DosList *dlist)
+{
+	if (dlist) {
+		freeVec(BADDR(dlist->dol_Name));
+		freeVec(dlist);
+	}
+}
+
+/* should really be called under forbid, so caller can set things up */
+/* FIX! should be called under LockDosList! */
+
+struct DosList * ASM
+adddevice (REG(d1) char *name)		/* CSTR */
+{
+	struct DosList *devslot;
+
+	devslot = MakeDosEntry(name,DLT_DEVICE);
+	if (devslot)
+		if (!AddDosEntry(devslot))
+		{
+			FreeDosEntry(devslot);
+			return NULL;
+		}
+	return devslot;
+}
+
+/* DOWNCODE next 3! */
+/* assign name: to lock.  Should kick off DISKINSERTED! FIX!  */
+/* aka AssignLock */
+
+LONG ASM
+assign (REG(d1) char *name, REG(d2) BPTR lock)
+{
+	return assigncommon(name,lock,DLT_DIRECTORY);
+}
+
+/* assign name: to string, late-binding.  Should kick off DISKINSERTED! FIX!  */
+
+LONG ASM
+assignlate (REG(d1) char *name, REG(d2) UBYTE *string)
+{
+	char *str;
+
+	str = AllocVecPub(strlen(string)+1);
+	if (!str)
+		return FALSE;
+
+	strcpy(str,string);
+	return assigncommon(name,(BPTR) str,DLT_LATE);
+}
+
+/* assign name: to string, non-binding.  Should kick off DISKINSERTED! FIX!  */
+
+LONG ASM
+assignstring (REG(d1) char *name, REG(d2) UBYTE *string)
+{
+	char *str;
+
+	str = AllocVecPub(strlen(string)+1);
+	if (!str)
+		return FALSE;
+
+	strcpy(str,string);
+	return assigncommon(name,(BPTR) str,DLT_NONBINDING);
+}
+
+/* 'lock' may be CSTR for dlt_late */
+
+LONG ASM
+assigncommon (REG(d1) char *name, REG(d2) BPTR lock, REG(d3) LONG type)
+{
+	struct DosList *dl;
+	LONG rc = FALSE;
+
+	if (strlen(name) > 30)	/* FIX! make a constant! */
+	{
+		setresult2(ERROR_INVALID_COMPONENT_NAME);
+		return FALSE;
+	}
+
+	dl = LockDosList(LDF_ASSIGNS|LDF_WRITE);
+	dl = FindDosEntry(dl,name,LDF_ASSIGNS);
+	if (dl)
+	{
+		/* it's an assign - undo previous value */
+		if (dl->dol_Type != DLT_DIRECTORY)
+			freeVec(dl->dol_misc.dol_assign.dol_AssignName);
+		freeobj(dl->dol_Lock);
+		freelocklist(dl->dol_misc.dol_assign.dol_List);
+		dl->dol_misc.dol_assign.dol_List = NULL;
+
+	} else {
+		if (lock == NULL)
+		{
+			/* assign never existed or already gone */
+			goto ass_success;
+		}
+		/* make new entry - locks nest! */
+		/* adddevice will fail if it conflicts with a device/volume */
+		dl = adddevice(name);
+		if (!dl)
+			goto ass_exit;
+	}
+
+	if (lock == NULL)
+	{
+		/* remove assign (list is locked) */
+		if (RemDosEntry(dl))
+		{
+			FreeDosEntry(dl);
+			goto ass_success;
+		} else
+			goto ass_exit;
+	}
+
+	/* got a device, node, now set it up */
+	dl->dol_Type = type;
+
+	if (type == DLT_DIRECTORY)
+	{
+		dl->dol_Lock = lock;
+		/* apparently some people rely on dol_Task, try to help them */
+		dl->dol_Task = ((struct FileLock *) BADDR(lock))->fl_Task;
+	} else {
+		dl->dol_Lock = NULL;
+		dl->dol_Task = NULL;
+		dl->dol_misc.dol_assign.dol_AssignName = (UBYTE *) lock;
+	}
+
+ass_success:
+	rc = DOSTRUE;
+
+ass_exit:
+	UnLockDosList(LDF_ASSIGNS|LDF_WRITE);
+	return rc;
+}
+
+void __regargs
+freelocklist (struct AssignList *list)
+{
+	struct AssignList *next;
+
+	while (list)
+	{
+		next = list->al_Next;
+		freeobj(list->al_Lock);
+		freeVec(list);
+		list = next;
+	}
+}
+
+/* only works for regular assigns!!!!! */
+
+LONG ASM
+addassign (REG(d1) char *name, REG(d2) BPTR lock)
+{
+	struct DosList *dl;
+	LONG rc = FALSE;
+	struct AssignList *al,*t;
+
+	dl = LockDosList(LDF_ASSIGNS|LDF_WRITE);
+	dl = FindDosEntry(dl,name,LDF_ASSIGNS);
+	if (dl)
+	{
+		/* found assign of that name - is it a regular assign? */
+		if (dl->dol_Type != DLT_DIRECTORY)
+		{
+			/* error - name refers to late or non-binding assign */
+			goto ass_add_exit;
+		}
+
+		/* got it.  Add to list */
+		al = AllocVecPubClear(sizeof(struct AssignList));
+		if (!al)
+			goto ass_add_exit;
+
+		/* adding at the end makes more sense */
+		if (!(t = dl->dol_misc.dol_assign.dol_List))
+		{
+			/* empty list */
+			dl->dol_misc.dol_assign.dol_List = al;
+		} else {
+			for (/* t already set */ ; t->al_Next; t = t->al_Next)
+				; /* NULL */
+
+			t->al_Next = al;
+		}
+			
+		/* al_Next is NULL already - allocated PubClear */
+		al->al_Lock = lock;
+
+		rc = DOSTRUE;
+	}
+
+ass_add_exit:
+	UnLockDosList(LDF_ASSIGNS|LDF_WRITE);
+	return rc;
+}
+
+/* remove lock for which SameLock() returns LOCK_SAME. */
+LONG ASM
+remaddassign (REG(d1) char *name, REG(d2) BPTR lock)
+{
+	struct DosList *dl;
+	LONG rc = FALSE;
+	struct AssignList *al,*nextal;
+
+	dl = LockDosList(LDF_ASSIGNS|LDF_WRITE);
+	dl = FindDosEntry(dl,name,LDF_ASSIGNS);
+	if (dl)
+	{
+		/* found assign of that name - is it a regular assign? */
+		if (dl->dol_Type != DLT_DIRECTORY)
+		{
+			/* error - name refers to late or non-binding assign */
+			/* FIX!? */
+			goto ass_rem_exit;
+		}
+
+		if (SameLock(dl->dol_Lock,lock) == LOCK_SAME)
+		{
+			// master entry is to be removed.  Morph first entry.
+			freeobj(dl->dol_Lock);
+			if ((al = dl->dol_misc.dol_assign.dol_List) == NULL)
+			{
+				if (RemDosEntry(dl))	// already locked
+				{
+					FreeDosEntry(dl);
+					rc = DOSTRUE;
+				}
+			} else {
+				// turn first entry on list into master
+				dl->dol_Lock = al->al_Lock;
+				dl->dol_misc.dol_assign.dol_List = al->al_Next;
+				freeVec(al);
+				rc = DOSTRUE;
+			}
+			goto ass_rem_exit;
+		}
+
+		/* got it.  search list for correct entry */
+		al = dl->dol_misc.dol_assign.dol_List;
+		if (!al)
+			goto ass_rem_exit;
+
+		if (SameLock(al->al_Lock,lock) == LOCK_SAME)
+		{
+			/* the first entry is to be removed.  bump others up */
+			nextal = al;
+			dl->dol_misc.dol_assign.dol_List = al->al_Next;
+		} else {
+			while (nextal = al->al_Next)
+			{
+				if (SameLock(nextal->al_Lock,lock) == LOCK_SAME)
+				{
+					al->al_Next = nextal->al_Next;
+					goto got_al;
+				}
+				al = nextal;
+			}
+
+			/* didn't find it */
+			goto ass_rem_exit;
+		}
+
+		/* nextal has node to remove */
+got_al:		freeobj(nextal->al_Lock);
+		freeVec(nextal);
+		     
+		rc = DOSTRUE;
+	}
+
+ass_rem_exit:
+	UnLockDosList(LDF_ASSIGNS|LDF_WRITE);
+	return rc;
+}
+@
+
+
+36.24
+log
+@Added secondary error to AddDosEntry
+@
+text
+@d84 1
+a84 1
+	if (dl)
+d86 4
+a89 3
+
+	/* return INVALID ptr to indicate that he hasn't examined the first */
+	return (struct DosList *) (((LONG) dl) + 1);
+d606 21
+@
+
+
+36.23
+log
+@Fixed AddDosEntry (tricky to get right - 5 different cases of conflicts
+@
+text
+@d186 2
+a187 2
+			    /* volumes can conflict with volumes IF they */
+			    /* have different dates.			 */
+d204 1
+@
+
+
+36.22
+log
+@Check dates on volume node adds
+@
+text
+@d184 1
+a184 1
+			if (dl->dol_Type != DLT_VOLUME)
+d186 5
+a190 4
+err:				success = FALSE;
+				goto add_error;
+			} else {
+				if (CompareDates(
+d197 9
+a205 1
+				}					
+@
+
+
+36.21
+log
+@FreeDosEntry handles NULL dlist now
+@
+text
+@d176 2
+a177 1
+	if (dlist->dol_Type != DLT_VOLUME)
+d179 3
+a181 2
+		name = (char *) BADDR(dlist->dol_Name);
+		for (; dl; dl = (struct DosList *) BADDR(dl->dol_Next))
+d183 2
+a184 3
+			/* dol_Name is null-terminated BSTR */
+			if (mystricmp((char *) BADDR(dl->dol_Name),name) ==
+			    SAME)
+d186 7
+a192 2
+				/* CONFLICT! */
+				if (dl->dol_Type != DLT_VOLUME)
+d194 3
+a196 3
+					success = FALSE;
+					goto add_error;
+				}
+@
+
+
+36.20
+log
+@Added delete entry
+@
+text
+@d375 4
+a378 2
+	freeVec(BADDR(dlist->dol_Name));
+	freeVec(dlist);
+@
+
+
+36.19
+log
+@added some unneeded ifdefs
+@
+text
+@d35 17
+d59 3
+d68 1
+a68 1
+	if (flags & ~(LDF_ENTRY|LDF_ALL|LDF_READ|LDF_WRITE))
+a70 3
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+	dl = (struct DosList *) BADDR(di->di_DevInfo);
+
+d72 2
+a73 13
+	if (flags & LDF_ALL)
+	{
+		if (synch) {
+			if (flags & LDF_WRITE)
+				ObtainSemaphore(&(di->di_DevLock));
+			else
+				ObtainSemaphoreShared(&(di->di_DevLock));
+		} else {
+			/* FIX! shared? */
+			if (!AttemptSemaphore(&(di->di_DevLock)))
+				dl = NULL;
+		}
+	}
+d77 5
+a81 18
+	{
+/*
+kprintf("Locking dos_entry, ");
+if (flags&LDF_WRITE) kprintf("WRITE...");
+else kprintf("READ...");
+*/
+		if (synch) {
+			if (flags & LDF_WRITE)
+				ObtainSemaphore(&(di->di_EntryLock));
+			else
+				ObtainSemaphoreShared(&(di->di_EntryLock));
+		} else {
+			/* FIX! shared? */
+			if (!AttemptSemaphore(&(di->di_EntryLock)))
+				dl = NULL;
+		}
+/*kprintf("Got entry lock\n");*/
+	}
+d107 6
+a112 1
+/*kprintf("Freed entry lock\n");*/
+d128 8
+a135 3
+	/* make sure no one is mucking with a node (perhaps this node!) */
+	/* see GetDeviceProc notes... */
+	LockDosList(LDF_ENTRY | LDF_WRITE);
+d154 1
+a154 1
+	UnLockDosList(LDF_ENTRY | LDF_WRITE);
+d170 3
+a172 1
+	dl = LockDosList(LDF_ALL|LDF_WRITE);  /* FIX! handlers */
+a174 2
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+
+d196 1
+d207 2
+a208 1
+LONG dlt_to_ldf[] = {
+d231 1
+a231 1
+		if ((dlt_to_ldf[dlist->dol_Type + 1] & flags) &&
+@
+
+
+36.18
+log
+@Added SameDevice call
+@
+text
+@d264 2
+d313 1
+@
+
+
+36.17
+log
+@FreeVec->freeVec (space saving)
+@
+text
+@d8 1
+d262 48
+@
+
+
+36.16
+log
+@exec_old_pragmas.h
+@
+text
+@d294 3
+a296 3
+		/* FreeVec(0) is safe */
+		FreeVec(devslot);
+		FreeVec(devname);
+d318 2
+a319 2
+	FreeVec(BADDR(dlist->dol_Name));
+	FreeVec(dlist);
+d400 1
+a400 1
+			FreeVec(dl->dol_misc.dol_assign.dol_AssignName);
+d460 1
+a460 1
+		FreeVec(list);
+d560 1
+a560 1
+		FreeVec(nextal);
+@
+
+
+36.15
+log
+@Added length check for assign names, added silly error return to assigncommon
+@
+text
+@d13 1
+a13 1
+#include <pragmas/exec_pragmas.h>
+@
+
+
+36.14
+log
+@Set dol_Task (because we used to)
+@
+text
+@d388 6
+d421 6
+a426 3
+		RemDosEntry(dl);
+		FreeDosEntry(dl);
+		goto ass_success;
+@
+
+
+36.13
+log
+@Fixed RemAssignList/whatever.  It didn't check the results of SameLock correctly.
+Made AddAssign add to end of list, not beginning.
+@
+text
+@d426 2
+d430 1
+@
+
+
+36.12
+log
+@comment changes
+@
+text
+@d460 1
+a460 1
+	struct AssignList *al;
+d474 1
+a474 1
+		al = AllocVecPub(sizeof(struct AssignList));
+d478 13
+a490 1
+		al->al_Next = dl->dol_misc.dol_assign.dol_List;
+a492 1
+		dl->dol_misc.dol_assign.dol_List = al;
+d501 1
+a501 1
+/* remove lock for which SameLock() returns true. */
+d526 1
+a526 1
+		if (SameLock(al->al_Lock,lock))
+d528 1
+d534 1
+a534 1
+				if (SameLock(nextal->al_Lock,lock))
+@
+
+
+36.11
+log
+@PubClear
+@
+text
+@d165 1
+a165 1
+	/* deal with funny returned ptr!!!         */ /* FIX? LDF_EXCLUSIVE? */
+d191 1
+a191 1
+	/* now add it */
+@
+
+
+36.10
+log
+@Made Entry stuff part of LockDosList, use real shared semaphores
+@
+text
+@d211 1
+d263 1
+d287 1
+a287 1
+		  AllocVec(sizeof(struct DosList),MEMF_PUBLIC|MEMF_CLEAR);
+d291 1
+a291 1
+	devname = AllocVecPub(len+1+1);		/* 1 for length, 1 for null */
+d303 1
+a304 1
+	devslot->dol_Name = (BSTR) TOBPTR(devname);
+d340 1
+@
+
+
+36.9
+log
+@for rcs 4.x header change
+@
+text
+@d47 1
+a47 1
+	if (flags & ~(LDF_DEVICES|LDF_VOLUMES|LDF_ASSIGNS|LDF_READ|LDF_WRITE))
+d52 14
+a65 9
+	if (synch) {
+		if (flags & LDF_WRITE)
+			ObtainSemaphore(&(di->di_DevLock));
+		else
+			ObtainSemaphoreShared(&(di->di_DevLock));
+	} else {
+		/* FIX! shared? */
+		if (!AttemptSemaphore(&(di->di_DevLock)))
+			dl = NULL;
+d68 21
+d101 1
+d103 5
+a107 2
+	s = &(((struct DosInfo *) BADDR(rootstruct()->rn_Info))->di_DevLock);
+	ReleaseSemaphore(s);
+d109 7
+a119 29
+/* The next two calls lock out changes (load/start task) to the device list. */
+/* Only one person can modify nodes at a time.  You _must_ have a shared lock*/
+/* on the list (and only a shared lock).  Filesystems are NOT required to    */
+/* use this lock to modify their nodes.					     */
+/* We take a dlist parmameter in case we want to go to a sem/node later.     */
+
+/* master list must be locked already (shared!) */
+void ASM
+LockDosEntries (REG(d1) struct DosList *dlist, REG(d2) LONG flags)
+{
+	struct SignalSemaphore *s;
+
+	s = &(((struct DosInfo *) BADDR(rootstruct()->rn_Info))->di_EntryLock);
+	/* FIX! check for valid flags */
+	if (flags & LDF_WRITE)
+		ObtainSemaphore(s);
+	else 
+		ObtainSemaphoreShared(s);
+}
+
+void ASM
+UnLockDosEntries (REG(d1) ULONG flags)
+{
+	struct SignalSemaphore *s;
+
+	s = &(((struct DosInfo *) BADDR(rootstruct()->rn_Info))->di_EntryLock);
+	ReleaseSemaphore(s);
+}
+
+d129 4
+d149 3
+@
+
+
+36.8
+log
+@Use shared semaphore
+@
+text
+@@
+
+
+36.7
+log
+@getvec->AllocVec, fixed assumption of extra long being available from getvec
+@
+text
+@a21 4
+/* FIX!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
+#define ObtainSemaphoreShared(s)	ObtainSemaphore(s)
+
+
+a33 1
+/* FIX! should use many-reader semaphore! */
+@
+
+
+36.6
+log
+@Added second semaphore to complete locking algorithm (see blib.c:finddev)
+@
+text
+@d12 2
+a13 2
+#ifdef LATTICE
+#include "proto/exec.h"
+a16 1
+#endif
+d275 1
+a275 1
+		  getmem(sizeof(struct DosList) >> 2,MEMF_PUBLIC|MEMF_CLEAR);
+d277 1
+a277 1
+	/* volumename MUST be null-terminated! */
+d279 1
+a279 1
+	devname = getvec((len+1+3) >> 2);
+d282 3
+a284 3
+		/* freevec(0) is safe */
+		freevec(devslot);
+		freevec(devname);
+d306 2
+a307 2
+	freevec(BADDR(dlist->dol_Name));
+	freevec(dlist);
+d344 1
+a344 1
+	str = getvec((strlen(string)+1+3) >> 2);
+d359 1
+a359 1
+	str = getvec((strlen(string)+1+3) >> 2);
+d381 1
+a381 1
+			freevec(dl->dol_misc.dol_assign.dol_AssignName);
+d435 1
+a435 1
+		freevec(list);
+d461 1
+a461 2
+		al = getvec(sizeof(struct AssignList) >> 2);
+						/* al is multiple of 4! */
+d523 1
+a523 1
+		freevec(nextal);
+@
+
+
+36.5
+log
+@*** empty log message ***
+@
+text
+@d22 5
+d52 1
+a52 1
+	/* check if flags are valid */
+a55 1
+	/* FIX! many-readers! */
+d59 4
+a62 1
+		ObtainSemaphore(&(di->di_DevLock));
+d64 1
+a76 1
+/* FIX! multi-readers! */
+d80 1
+a80 1
+	struct DosInfo *di;
+d82 2
+a83 3
+	/* FIX! many-readers! */
+	di = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+	ReleaseSemaphore(&(di->di_DevLock));
+d89 31
+a119 1
+/* assumes doslist is locked! */
+d156 2
+a157 2
+	/* deal with funny returned ptr!!!         */
+	dl = LockDosList(LDF_ALL|LDF_WRITE);
+d187 1
+a187 1
+	UnLockDosList(LDF_ALL|LDF_WRITE);
+d202 2
+d252 2
+@
+
+
+36.4
+log
+@Make LockDosList really return funny ptr (non-usable).  Fixed random
+bugs.  Added RemAssignList.
+@
+text
+@d6 2
+a7 2
+#include "libraries/dos.h"
+#include "libraries/dosextens.h"
+@
+
+
+36.3
+log
+@fixed some allocations based on strlen.
+@
+text
+@d65 2
+a66 1
+	return dl;
+d120 1
+d122 1
+d155 2
+a156 2
+/* array for converting dol_Type to a LDF_xxx flag for checking */
+/* array is offset by one for DLT_PRIVATE */
+d170 4
+d198 1
+d218 7
+a224 2
+	return FindDosEntry((struct DosList *) BADDR(dlist->dol_Next),
+			    NULL,flags);
+d290 1
+d348 5
+d360 8
+d379 1
+d422 2
+a423 1
+		al = getvec(sizeof(*al) >> 2);	/* al is multiple of 4 */
+d435 56
+@
+
+
+36.2
+log
+@Added a bunch of dos list locking calls.
+Modified adddevice, etc to use locking calls.
+@
+text
+@d227 1
+a227 1
+	devname = getvec((len+3 + 1) >> 2);
+d291 1
+a291 1
+	str = getvec((strlen(string)+4) >> 2);
+d306 1
+a306 1
+	str = getvec((strlen(string)+4) >> 2);
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d20 1
+d22 5
+a26 1
+/* should really be called under forbid, so caller can set things up */
+d29 1
+a29 1
+adddevice (REG(d1) char *name)		/* CSTR */
+d31 186
+a216 1
+	struct DosInfo *devinfo;
+a221 1
+	devinfo = (struct DosInfo *) BADDR(rootstruct()->rn_Info);
+d231 1
+a231 1
+		freevec((char *) devslot);
+d239 1
+d241 1
+a241 1
+	/* dol_Type = 0, which happens to be DLT_DEVICE */
+d246 2
+a247 5
+	/* insert into devlist (forbid locking) */
+	Forbid();					 /* FIX! */
+	devslot->dol_Next   = devinfo->di_DevInfo;
+	devinfo->di_DevInfo = TOBPTR(devslot);
+	Permit();					 /* FIX! */
+d249 24
+d322 2
+a323 2
+	Forbid(); /* FIX! */
+	dl = finddev(name,0);
+a325 9
+		/* found something of that name - is it an assign? */
+		if (dl->dol_Type != DLT_DIRECTORY &&
+		    dl->dol_Type != DLT_NONBINDING &&
+		    dl->dol_Type != DLT_LATE)
+		{
+			/* error - name refers to volume or device */
+			goto ass_exit;
+		}
+
+d334 2
+a335 1
+		/* make new entry */
+d355 1
+a355 1
+	Permit();	/* FIX! */
+d382 2
+a383 2
+	Forbid(); /* FIX! */
+	dl = finddev(name,0);
+d386 1
+a386 1
+		/* found something of that name - is it an assign? */
+d389 1
+a389 1
+			/* error - name refers to volume or device */
+d406 1
+a406 1
+	Permit();
+@

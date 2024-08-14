@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	30
+DATE	MACRO
+		dc.b	'15.3.94'
+	ENDM
+VERS	MACRO
+		dc.b	'mpegrom 40.30'
+	ENDM
+VSTRING	MACRO
+		dc.b	'mpegrom 40.30 (15.3.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: mpegrom 40.30 (15.3.94)',0
+	ENDM

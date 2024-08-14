@@ -1,0 +1,1302 @@
+head     1.16;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.16
+date     92.08.25.00.55.23;  author jesup;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     92.08.03.00.53.09;  author jesup;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.05.22.14.15.36;  author jesup;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.04.29.16.18.38;  author jesup;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.04.09.00.58.58;  author jesup;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     91.02.22.14.07.02;  author steveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.01.08.14.30.19;  author steveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.09.20.17.37.56;  author steveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.06.13.09.49.47;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.06.05.13.03.06;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.04.06.15.15.11;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     89.12.08.01.05.21;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.12.06.10.54.44;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.06.26.15.07.48;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.03.13.16.59.52;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.13.16.46.21;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@1.3.1
+@
+
+
+1.16
+log
+@Made the data block grabbing code conditional (still in)
+commented out a bunch of debugs
+@
+text
+@		SECTION	filesystem,CODE
+
+		NOLIST
+		INCLUDE	"exec/types.i"
+		INCLUDE	"exec/io.i"
+		INCLUDE	"exec/lists.i"
+
+		INCLUDE	"globals.i"
+		INCLUDE	"private.i"
+		INCLUDE	"printf.mac"
+		LIST
+
+;		DEBUGENABLE
+
+		XREF	WaitCo,ResumeCo,CallCo,FreeBuffer
+		XREF	EnQueue,DeQueue,FindHash,AddHash,UnHash,SendTimer
+		XREF	ClearWaiting
+
+		XDEF	GetBlock,FreeBlock,ReadBlock,Fetch,WriteBlock,WaitFor
+		XDEF	QueueBehind
+
+;==============================================================================
+; buffer = WaitForPend(buffer)
+;   d0			a0
+;
+; Sticks a buffer onto the pending queue and then waits for it to be ready.
+; The buffer MUST already be on the hash table if it is required there.
+; Must be able to handle the buffer being returned being different than
+; the buffer passed in!  (see WriteBlock)
+;==============================================================================
+WaitForPend	movea.l	a0,a1			buffer to a1 for ADDTAIL
+		move.w	#HASHPENDING,cb_QueueType(a1)	change the type
+		lea.l	PendingQueue(a5),a0	queue to append to
+		ADDTAIL				append to the pending queue
+		movea.l	a1,a0			need buffer again
+; ***** drop through to WaitFor to wait for the buffer to be processed *****
+;==============================================================================
+; buffer = WaitFor(buffer)
+;   d0		     a0
+;
+; Waits for a buffer on the pending queue to complete its action and then
+; returns the buffer to the caller.  Doesn't save the owning co-routine!!
+; Must be able to handle the buffer being returned being different than
+; the buffer passed in!  (see WriteBlock)
+;==============================================================================
+WaitFor		move.l	CurrentCo(a5),cb_CoPkt(a0)	we own it now!!
+		bra.s	Fetch			tell us when it's ready
+
+;==============================================================================
+; QueueBehind( buffer )
+;		 a0
+;
+; Waits for a buffer when another co-routine is also waiting on it.  Really
+; weird this one, but it works.  We don't actually get possession of the buffer
+; but we do get to know when the other waiting co-routine finishes with it.
+; Careful with the buffer, it may change (see WaitFor).
+;==============================================================================
+QueueBehind	move.l	cb_CoPkt(a0),-(sp)	save the current waiter
+		bsr.s	WaitFor			wait for it ourselves
+		movea.l	d0,a1			WaitFor returned d0=buffer
+		movea.l	(sp)+,a0		get back previous co-routine
+		move.l	a0,cb_CoPkt(a1)		just to be tidy
+		bra	CallCo			call the other waiter (d0=buf)
+
+;==============================================================================
+; Buffer = Fetch()
+;   d0
+;
+; Starts up the disk co-routine or waitco's if it is already running.  The
+; cache buffer we want fetched will have our cobase in it so disk will call
+; us when the buffer has been read.  Caller of this routine must have put the
+; buffer onto the pending queue for this to work.  Disk will put buffer in d0.
+; Remember: the whole world will have changed when we get back from this.
+;==============================================================================
+Fetch		tst.w	DiskRunning(a5)		is disk co-routine going?
+		bne	WaitCo			yes, so wait back to parent
+		movea.l	DiskCo(a5),a0		disk isn't running
+		bra	ResumeCo		so start it up
+
+;==============================================================================
+; buffer = GetBlock()
+;   d0
+;
+; The main cache buffer allocation routine.  Handles the following things:-
+; 1.	Write pending blocks on waiting queue should not hog buffers.
+; 2.	Data blocks are less useful than file headers and directories.
+; 3.	Blocks in the pending queue must not hog buffers.
+;==============================================================================
+GetBlock
+;	IFD DEBUG_CODE
+;		XREF	CountBuffers
+;		bsr	CountBuffers
+;		printf <'%ld buffers'>,d0
+;	ENDC
+		move.l	FreeBufferQueue(a5),d0	any free buffers available
+		beq.s	FirstPending		no, try the next thing
+;	printf <'Got Free buffer $%lx'>,d0
+		movea.l	d0,a0			yes, unlink from the list
+		move.l	(a0),FreeBufferQueue(a5)
+		clr.l	cb_Header(a0)		not associated with anything
+		rts				and return buffer in d0
+
+; Second, see if a block would be available if we waited for the first pending
+; block to be written out.
+; The rationale is (I think) that if something is using the disk, we might
+; as well wait since we're not going to be able to read anything until
+; it's finished anyways.  However, I'm not sure how well this holds up
+; in the case of allocating blocks (creating files, writing, etc where we
+; don't have to read the block).  Perhaps we should have some sort of "why
+; do we need this block" flag to know if we want to wait on the pending
+; queue or try to steal valid blocks first.			REJ
+FirstPending	lea.l	PendingQueue(a5),a0	anything on the queue
+		TSTLIST	a0
+		beq.s	WaitData		nope, so cant do anything here
+		movea.l	(a0),a0			yes, fetch first node
+		tst.l	cb_CoPkt(a0)		anyone waiting for this block
+		bne.s	WaitData		yes, so forget it.
+		tst.l	cb_Size(a0)		is it block sized ?
+		bne.s	WaitData		nope, so we can't use it!
+; it used to grab any block, now it only does this to a data block
+; if it's not a data block, we probably will want to keep it (most recently
+; used, after all).  Look for something else first.
+;		bgt.s	WaitData		nope, so we can't use it!
+		tst.w	cb_QueueType(a0)	has this been invalidated?
+		beq.s	WaitData		yes, WriteBlock killed it
+;	printf <'waiting for head pending buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		clr.l	cb_Header(a0)
+		bra	WaitFor			yep, wait for this buffer
+
+; New addition because bitmaps et al are very important and should hang around
+; on the waiting queue for as long as possible.  First, try to steal any data
+; block off the waiting queue (consider this option 2.5).
+;FindWaitData	tst.b	DiskType+3(a5)		only do this for FFS
+;		beq.s	WaitData		nope, do OFS thing
+;		move.l	WaitingQueue(a5),d0
+;10$		movea.l	d0,a1
+;		move.l	(a1),d0			lookahead to next node
+;		beq.s	StealData
+;		tst.l	cb_Size(a1)		is it a data block ?
+;		bne.s	10$			nope, look for the next
+;		move.l	a1,d0			save cache buffer pointer
+;		REMOVE				remove from WaitingQueue
+;		movea.l	d0,a0
+;		bra	WaitForPend		add to pending and wait
+
+; Third, try the waiting queue and if there is more than one block with data
+; waiting to be written then write the first one out. (Only data blocks).  This
+; stops us stealing a data buffer that is in the process of being filled a
+; little bit at a time.  If there's two the least recently used one will be
+; near the head of the list and we'll find that one first.
+;
+; actually only hits of the _first_ block on the waiting queue is a data block!
+; and it doesn't check if there's a second data block, just a second block
+; - REJ
+WaitData	lea.l	WaitingQueue(a5),a0	anything on the queue ?
+		TSTLIST	a0
+		beq.s	StealData		nope, so that won't work
+		movea.l	MLH_HEAD(a0),a1		fetch the first node
+		tst.l	cb_Size(a1)		is it a data block ?
+		bne.s	StealData		no, so don't bother
+		movea.l	LN_SUCC(a1),a1		lookahead to next node
+		tst.l	LN_SUCC(a1)		is it the end of the list ?
+		beq.s	StealData		yes, only one buffer waiting
+		REMHEAD				remove the first cache buffer
+		movea.l	d0,a0			returns d0 = buffer
+		clr.l	cb_Header(a0)
+;	printf <'moved to pending buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bra	WaitForPend		and make it pending
+
+; Third point five, try to steal data blocks off the valid queue.  This
+; should fix any thrashing problems when writing disks in oldfs format.  I've
+; disabled this check for FFS format because it's pretty expensive to scan the
+; whole valid queue on larger disks (with more buffers) every time we need a
+; new cache buffer.  Larger disks tend to be FFS format, not oldFS.
+;
+; This means that data blocks on the valid queue rarely remain there! 
+; Basically, data blocks on valid get rolled over instantly for anything else.
+; This has major negative impacts - basically data blocks aren't cached - REJ
+StealData
+STEAL_DATA	EQU	1
+	IFD STEAL_DATA
+		lea.l	ValidBufferQueue(a5),a0	don't try if no valid buffers
+		TSTLIST	a0
+		beq.s	StealWaiting		nothing on valid queue!
+; the FFS test had been commented out by steve...  wonder why - we'll try it
+		btst.b	#0,DiskType+3(a5)
+		bne.s	StealValid		only try this for oldfs disks
+		move.l	(a0),d0			fetch the first entry
+10$		movea.l	d0,a1			node pointer to a1
+		move.l	(a1),d0			look ahead to next node
+		beq.s	StealValid		end of list, steal anything
+		tst.l	cb_Size(a1)		is this a data block
+		bne.s	10$			nope, look for the next
+		move.l	a1,d0			save cache buffer pointer
+		REMOVE				remove from Valid Queue
+		movea.l	d0,a0			also remove from hash table
+		clr.l	cb_Header(a0)
+;	printf <'grabbed from valid buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bra	UnHash			returns d0=block
+	ENDC
+
+; Fourth, ANY damn block from the valid queue will do, direct buffs not on here.
+;
+; modified - don't steal last valid block here.  Instead, try to find a waiting
+; block to punt over into pending.  We'll hit the last valid block later.  This
+; _should_ help with ping-pong dircache thrashing.  - REJ
+StealValid	lea.l	ValidBufferQueue(a5),a0	already set up
+	IFND STEAL_DATA
+		TSTLIST	a0			needed if we remove stealdata
+		beq.s	StealWaiting
+	ENDC
+		move.l	MLH_HEAD(a0),a1		first entry
+		move.l	LN_SUCC(a1),a1		second entry (if there)
+		tst.l	LN_SUCC(a1)		is it really there?
+		beq.s	StealWaiting		no, try waiting queue first
+		REMHEAD				remove first valid buffer
+		movea.l	d0,a0			also unlink from hash table
+		clr.l	cb_Header(a0)
+;	printf <'grabbed from valid buffer (any) $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bra	UnHash			rts with d0=buffer
+
+; Fifth, least recently used block on waiting queue.  This will take some time!
+; No need to worry about large transfers here, they always go on pending queue.
+;
+; Since with dircache we have a tendency to thrash if there's only one entry
+; in the valid queue, I think we'll throw a second buffer into the pending
+; queue (if available).  This will avoid simple ping-pong effects.  3-item
+; circles will still thrash, but those are far less common.  REJ
+;
+; Hmm.  Let's try ClearWaiting here.  Move ALL waiting blocks to the pending
+; queue if we have no valid blocks.
+StealWaiting	lea.l	WaitingQueue(a5),a0	anything on this list ?
+		TSTLIST	a0
+		beq.s	StealLastValid		no
+		bsr	ClearWaiting		move all waiting to pending...
+		bra.s	AnyBlock		wait on first free pending blk
+
+; 5.5, grab last valid block in case we passed it up already (should only
+; happen if there is one valid block and no waiting blocks)  - Added, REJ
+StealLastValid	lea.l	ValidBufferQueue(a5),a0	already set up
+		TSTLIST	a0
+		beq.s	AnyBlock		empty
+		REMTAIL				remove only valid buffer
+		movea.l	d0,a0			also unlink from hash table
+		clr.l	cb_Header(a0)
+;	printf <'grabbed from valid buffer (last) $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bra	UnHash			rts with d0=buffer
+
+; Sixth, try any other block on the pending queue which is data block sized
+; and is not being waited for by another co-routine.  This will take ages!
+; The first entry may have been looked at earlier.
+AnyBlock	move.l	PendingQueue+MLH_HEAD(a5),d0	fetch the first node
+10$		movea.l	d0,a0			node pointer to a0
+		move.l	LN_SUCC(a0),d0		look ahead to next node
+		beq.s	AnyPending		end of list
+		tst.l	cb_Size(a0)		is it data block sized
+		bgt.s	10$			nope, don't bother
+		tst.l	cb_CoPkt(a0)		anyone else waiting for it
+		bne.s	10$			yep, we can't have it
+		tst.w	cb_QueueType(a0)	is this buffer invalid?
+		beq.s	10$			can only be the first buffer
+		clr.l	cb_Header(a0)
+;	printf <'wait for pend (any) buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bra	WaitFor			wait for the buffer then rts
+
+; PANIC! PANIC! PANIC!  Any block sized buffer will do when it's free.  All we
+; do now is wait for the first entry on the pending queue to be completed and
+; then we go all the way through the whole routine again in the hope that some
+; cache buffer got freed up in the process (though we could fail again too).
+AnyPending	movea.l	PendingQueue(a5),a0	queue behind the first buffer
+		tst.w	cb_QueueType(a0)	has this been invalidated?
+		bne.s	10$			no
+		move.l	(a0),a0			yes, wait on second pending
+		; yes, there must be another pending entry, or WriteBlock
+		; couldn't have invalidated the first entry.  There's nothing
+		; (block-sized) on valid or waiting, and all PendingQueue
+		; entries (except the first) already have waiters.
+10$	printf <'wait for pend (behind) buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+		bsr	QueueBehind
+		bra	GetBlock		do the whole thing again
+
+; Got a block to be used in d0.  Send it back to the caller
+GotBlock	rts
+
+;==============================================================================
+; FreeBlock( buffer, state )
+;	       a0      d0
+;
+; Takes a buffer and put's it back into the appropriate queue. State is type of
+; buffer we are dealing with.  -1 (TRUE) means a valid buffer that can be used
+; for subsequent reads, 0 (FALSE) means an invalid buffer that can be freed.
+; Possible queueing options are :
+;	QUEUE IS			WHEN
+;	========			====
+;	WaitingQueue	=	state=TRUE  AND cb_State=CMD_WRITE
+;	ValidQueue	=	state=TRUE  AND cb_State=CMD_READ
+;	FreeQueue	=	state=FALSE AND cb_State=?
+;
+; Entries for any queue have thier cb_QueueType set up appropriately and they
+; are also added into the current hash table.  Read buffers which have an error
+; condition set are scrapped and thrown on the free queue regardless of the
+; given state value (this allows other code to do a LooseBlock call even when
+; an error occured).
+;==============================================================================
+FreeBlock	cmpa.w	#0,a0
+		beq.s	6$			nothing to do, had an error
+;	printf <'Freeing buffer 0x%lx, state %ld\n'>,a0,d0
+		tst.w	cb_Error+2(a0)		did we get an error ?
+		bne.s	5$			yes, trash this block
+		tst.l	d0			is this to be freed ?
+		bne.s	10$			nope, valid or waiting
+5$		clr.w	cb_QueueType(a0)	yes, put on the free queue
+		move.l	FreeBufferQueue(a5),(a0)  link at head of free queue
+		move.l	a0,FreeBufferQueue(a5)	no need to append it!!!
+6$		rts
+
+10$		bsr	AddHash
+		movea.l	a0,a1			returns a0=buffer
+		lea.l	ValidBufferQueue(a5),a0	assume it's a valid buffer
+		move.w	#HASHVALID,cb_QueueType(a1)
+		move.w	cb_State(a1),d1		get current command for buffer
+		cmpi.w	#CMD_READ,d1		was it a read
+		beq.s	30$			yes, so it's valid now
+		lea.l	WaitingQueue(a5),a0	not valid so must be waiting
+		move.w	#HASHWAITING,cb_QueueType(a1)
+30$		ADDTAIL
+		rts
+
+;==============================================================================
+; buffer = ReadBlock(key,snatch,type)
+;  d0		     d0	   d1    d2
+;
+; Reads a block and returns a pointer to the cache buffer containing this block
+; Type refers to the block as looked at by Disk (-2,-1,0 or >0) and has the
+; following meanings :-
+;
+;	-2	bitmap, read one block to cache buffer and checksum (but the
+;		checksum goes in a different place to normal file headers).
+;		This read is done in a special way too.  Since bitmap allocation
+;		used to be an atomic operation we should keep the new bitmap
+;		schemes working the same way.  This means the read scheme
+;		must be modified to stop other operations happening before
+;		the block is read from disk.
+; 	-1	file header so read one block to cache buffer and checksum it.
+;	 0	data block, read one block to cache buffer.  If running under
+;		FFS format then don't checksum it.  If OFS then do checksum.
+;	>0	direct transfer, read this many bytes to given buffer (cb_Buff)
+;		and don't checksum it.  Only FFS mode uses this value.
+;
+; Snatch really only refers to blocks being written and allows us to snatch
+; blocks off the waiting queue to examine them before they are written out.
+; Snatch=TRUE means snatch it immediately else wait for it to write out first.
+;
+; One quick search of the cache is done using a hashing algorithm, if the block
+; is not found then we must really read it from disk.  If it is found then we
+; use the cb_QueueType field to determine what to do with the snagged buffer.
+;==============================================================================
+ReadBlock	movem.l	d3-d4,-(sp)
+	printf <'Reading block %ld, snatch %ld, type %ld\n'>,d0,d1,d2
+		move.l	d0,d3			stash the key
+		move.l	d1,d4			and the snatch flag
+
+; First search the hash table to see if we have this block hanging around.
+ReReadBlock	move.l	d3,d0			see if the block's in a buffer
+		bsr	FindHash
+		movea.l	d0,a1
+		move.l	a1,d0			did we find it
+		beq.s	ReallyRead		nope, must read it from disk
+
+; we found a buffer, if it belongs on the valid queue snatch it right now
+		cmpi.w	#HASHVALID,cb_QueueType(a1)
+		bne.s	5$			not on the valid queue
+		REMOVE				take from valid
+		movea.l	d0,a0
+		bsr	UnHash			and out of the hash table
+		bra	BlockRead		buffer in d0
+
+; next see if the block is about to be written out and either wait or snatch it
+5$		cmpi.w	#HASHWAITING,cb_QueueType(a1)
+		bne.s	10$			not on the waiting queue
+		REMOVE				remove from waiting queue
+		movea.l	d0,a0
+
+; we got the buffer but can we snatch it straight away or must we wait ?
+		tst.l	d4			test snatch
+		beq.s	6$			we must wait for it
+		bsr	UnHash			snatch, remove from hash table
+		bra	BlockRead		and return d0 = buffer
+6$		bsr	WaitForPend		so put it on pending and wait
+		bra	BlockRead		d0=buffer
+
+; The block must exist on the pending queue because it wouldn't have been in
+; the hash table if it wasn't block sized or waiting to be written/read
+; we found the block, check if another co-routine is already waiting for it
+10$		tst.l	cb_CoPkt(a1)		any owning co-routine ?
+		beq.s	20$			nobody waiting for this block
+		movea.l	a1,a0
+		bsr	QueueBehind		wait until other is complete
+		bra	ReReadBlock		go search again (must be there)
+
+; no-one is waiting for this block, see if we can snatch it now.  If it's the
+; very first entry on the Pending queue then we can't touch it because it's
+; currently in use by the Disk co-routine.  If we're not snatching then we'll
+; wait for it to complete it's operation and come off the pending queue first.
+20$		tst.l	d4			snatch true ?
+		beq.s	30$			nope, just wait for it
+		cmpa.l	PendingQueue(a5),a1	can't snatch the first one
+		beq.s	30$			because it's in use NOW!
+		REMOVE				remove from pending queue
+		movea.l	d0,a0			unlink from hash table too
+		bsr	UnHash
+		bra.s	BlockRead		buffer in d0
+
+; either snatch was false or this buffer is in use right now, so wait for it
+30$		movea.l	a1,a0
+		bsr	WaitFor			wait for this block
+		bra.s	BlockRead		block in d0
+
+; The block wasn't in memory or pending so we have to really read the thing.
+; First check for an instantly available buffer and read into that if OK.
+ReallyRead	move.l	FreeBufferQueue(a5),d0	any free buffers ?
+		beq.s	10$			nope, doing it the hard way
+		movea.l	d0,a1			yep, unlink from free queue
+		move.l	(a1),FreeBufferQueue(a5)
+		bra.s	DoTheRead		and read into the buffer
+
+; There were no buffers instantly available so wait for one.  Since another
+; co-routine may be waiting here to read the same block: when we get a free
+; buffer, we put it back on the free buffer queue and search the queues again
+; in case the block we want was read in while we were waiting.
+10$		bsr	GetBlock
+		movea.l	d0,a0
+		moveq.l	#0,d0			put back on FreeBufferQueue
+		bsr	FreeBlock
+		bra	ReReadBlock		and do everything again
+
+; we have a buffer to read into so start everything up and wait for the block
+DoTheRead	moveq.l	#cb_SIZEOF,d0		point to data part of cache buf
+		add.l	a1,d0
+		move.l	d0,cb_Buff(a1)		this is where we read to
+		move.l	d2,cb_Size(a1)		fill in type (-2,-1,0 or >0)
+		move.l	d3,cb_Key(a1)		the key we want to read
+		move.w	#CMD_READ,cb_State(a1)	what we want to do
+		move.l	CurrentCo(a5),cb_CoPkt(a1)  where to resumeco to
+		move.w	#HASHPENDING,cb_QueueType(a1)
+		lea.l	PendingQueue(a5),a0	attach to pending queue
+		ADDTAIL				other reads get queued
+		movea.l	a1,a0
+		bsr	AddHash			add into hash table too (a0=buf)
+		bsr	Fetch			start disk or wait (buf to d0)
+BlockRead	movea.l	d0,a0			don't associate with anything
+		clr.l	cb_Header(a0)
+		movem.l	(sp)+,d3-d4
+		rts
+
+;==============================================================================
+; WriteBlock( buffer, key, status, type )
+;		a0     d0    d1     d2
+;
+; Stuffs a block into the waiting or pending queues ready to be written later.
+; if status=TRUE then it will go on WaitingQueue else PendingQueue.  Type is
+; the same as used in ReadBlock (-2,-1,0 or >0).  We first look for the buffer
+; on any of the queues (it shouldn't be on any other than the valid queue) and
+; discard it if it's found since we're going to write over it anyway.
+;
+; Update: it _can_ be on the pending queue from a previous write!  Worse yet,
+; it can be at the head of the pending queue!  Solution: if not at the head
+; of the pending queue, steal it's WaitFor's/QueueBehind's, free it, and put
+; ourself on the pending queue.  If at the head, don't free it but set a bit
+; that will make Disk put it on the free queue.  (Actually we UnHash it so
+; no one else can find it, and set it's queuetype to FREE.  Disk will notice
+; the queuetype and put it in the free queue without unhashing.)
+;
+; This depends on people calling QueueBehind/WaitFor to use the buffer ptr
+; returned by them, since it now can change while waiting!
+;==============================================================================
+WriteBlock	movem.l	d3-d4,-(sp)
+	printf <'writing buffer 0x%lx, block %ld, status %ld, type %ld\n'>,a0,d0,d1,d2
+;	printf <'w:$%lx b %ld s %ld t %ld\n'>,a0,d0,d1,d2
+		move.l	d0,d3			stash the key
+		move.l	d1,d4			and status
+
+		; need to init here so we can hijack CoPkt waiters later
+		clr.l	cb_CoPkt(a0)		no co-routine owns this
+
+		move.l	a0,-(sp)		and the buffer
+		bsr	FindHash		find key in d0
+		movea.l	d0,a1
+		move.l	a1,d0
+		beq.s	10$			didn't find the buffer
+;	IFD DEBUG_CODE
+;		printf <'killing block %ld, state = $%lx @@$%lx'>,cb_Key(a1),cb_QueueType(a1),a1
+;		cmp.w	#HASHVALID,cb_QueueType(a1)
+;		beq.s	1$			as expected
+;		printf <'	What the ####??????'>
+;1$
+;	ENDC
+		cmp.w	#HASHPENDING,cb_QueueType(a1)
+		bne.s	5$
+		; it's on the pending queue.  Nasty.
+		; first, hijack it's waiters if any.
+		; the new block must go on the pending queue!
+		moveq	#0,d4			this MUST go on pending!
+		move.l	(sp),a0			the new buffer
+		move.l	cb_CoPkt(a1),cb_CoPkt(a0)  steal the waiters
+		clr.l	cb_CoPkt(a1)
+		move.l	a1,a0			UnHash/FreeBuffer need it in a0
+		cmp.l	PendingQueue(a5),a1	is it first?
+		beq.s	7$			yup unhash it and set q type
+		; no, remove it and add to the free queue as well
+
+5$		bsr	FreeBuffer		Unhashes and frees
+		bra.s	10$
+
+7$		bsr	UnHash			remove from hash table too
+		movea.l	d0,a0
+		clr.w	cb_QueueType(a0)	type free
+
+10$		move.l	(sp)+,d0		get back the buffer
+		movea.l	d0,a1
+		add.l	#cb_SIZEOF,d0		point to data part of cache buf
+		move.l	d0,cb_Buff(a1)		this is where we write from
+		move.l	d2,cb_Size(a1)		fill in type (-2,-1,0 or >0)
+		move.l	d3,cb_Key(a1)		the key we want to write
+		move.w	#CMD_WRITE,cb_State(a1)	what we want to do
+		lea.l	PendingQueue(a5),a0	assume the pending queue
+		moveq.l	#HASHPENDING,d0
+		tst.l	d4
+		beq.s	WritePending		it was the pending queue
+
+		lea.l	WaitingQueue(a5),a0	nope, it was the waiting queue
+		moveq.l	#HASHWAITING,d0
+		tst.w	TimerRunning(a5)	if timer running
+		bne.s	WritePending		then we don't need to send
+		movem.l	d0/a0-a1,-(sp)		send timer request to ensure
+		bsr	SendTimer		this gets flushed later
+		movem.l	(sp)+,d0/a0-a1
+
+WritePending	move.w	d0,cb_QueueType(a1)	set correct queue type
+		ADDTAIL				add to appropriate queue
+		movea.l	a1,a0
+		bsr	AddHash			put into hash table too
+		movem.l	(sp)+,d3-d4
+		rts
+
+		END
+
+@
+
+
+1.15
+log
+@Tweaked the cache algorithms.  Try to keep at least one valid buffer.
+Also, if we have to steal non-data blocks from the waiting queue, dump
+the whole thing to the pending queue, on the assumption that we've
+filled it up pretty much and might as well get around to writing it
+out.  number 1 reduced a recursive protect from 110 sec to 85 sec,
+number 2 dropped it to 70 seconds (total about 35% improvement).
+Also, cleaned some stuff up (use LN_SUCC even though we know it's 0).
+@
+text
+@d89 7
+a95 1
+GetBlock	move.l	FreeBufferQueue(a5),d0	any free buffers available
+d97 1
+a97 1
+	printf <'Got Free buffer $%lx'>,d0
+d126 1
+a126 1
+	printf <'waiting for head pending buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d167 1
+a167 1
+	printf <'moved to pending buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d178 5
+a182 2
+; REJ
+StealData	lea.l	ValidBufferQueue(a5),a0	don't try if no valid buffers
+d184 2
+a185 1
+		beq	StealWaiting ^^		nothing on valid queue!
+a186 1
+; the FFS test had been commented out by steve...  wonder why - we'll try it
+d198 1
+a198 1
+	printf <'grabbed from valid buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d200 1
+d208 4
+d219 1
+a219 1
+	printf <'grabbed from valid buffer (any) $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d246 1
+a246 1
+	printf <'grabbed from valid buffer (last) $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d263 1
+a263 1
+	printf <'wait for pend (any) buffer $%lx, type %ld, %ld'>,a0,cb_Size(a0),cb_Key(a0)
+d359 1
+a359 1
+;	printf <'Reading block %ld, snatch %ld, type %ld\n'>,d0,d1,d2
+d478 1
+a478 1
+;	printf <'writing buffer 0x%lx, block %ld, status %ld, type %ld\n'>,a0,d0,d1,d2
+@
+
+
+1.14
+log
+@fixed a missing (a0) on a reference (enforcer hit)
+@
+text
+@d17 2
+d91 1
+d120 1
+d145 4
+d152 1
+a152 1
+		movea.l	(a0),a1			fetch the first node
+d155 2
+a156 2
+		movea.l	(a1),a1			lookahead to next node
+		tst.l	(a1)			is it the end of the list ?
+d161 1
+d169 4
+d175 4
+a178 3
+		beq.s	StealWaiting		nothing on valid queue!
+;		btst.b	#0,DiskType+3(a5)
+;		bne.s	StealValid		only try this for oldfs disks
+d189 1
+d193 4
+d198 4
+d205 1
+d210 8
+d220 11
+a230 3
+		beq.s	AnyBlock		no
+		REMHEAD				yes, remove first buffer
+		movea.l	d0,a0			but leave it in hash table
+d232 2
+a233 1
+		bra	WaitForPend		and wait for it then rts
+d238 1
+a238 1
+AnyBlock	move.l	PendingQueue(a5),d0	fetch the first node
+d240 1
+a240 1
+		move.l	(a0),d0			look ahead to next node
+d249 1
+d264 2
+a265 1
+10$		bsr	QueueBehind
+d465 1
+a465 1
+	printf <'w:$%lx b %ld s %ld t %ld\n'>,a0,d0,d1,d2
+d477 7
+a483 7
+	IFD DEBUG_CODE
+		printf <'killing block %ld, state = $%lx @@$%lx'>,cb_Key(a1),cb_QueueType(a1),a1
+		cmp.w	#HASHVALID,cb_QueueType(a1)
+		beq.s	1$			as expected
+		printf <'	What the ####??????'>
+1$
+	ENDC
+@
+
+
+1.13
+log
+@Modifed the GetBlock strategy.  Now it tries to avoid the block at the
+front of the pending queue if it's not a data block.
+Fixed some bugs with checking to see if the head pending block has been
+invalidated.  Also make sure that when that happens the new block is
+forced onto pending (oops).
+@
+text
+@d205 1
+a205 1
+		tst.w	cb_QueueType		is this buffer invalid?
+@
+
+
+1.12
+log
+@WriteBlock can now handle blocks on the pending queue which it needs to
+invalidate.  Some changes elsewhere to handle this as well (GetBlock).
+@
+text
+@d18 1
+d96 7
+d110 5
+a114 1
+		bgt.s	WaitData		nope, so we can't use it!
+d155 1
+a155 1
+; Third point five, try to steal data blocks off the valid queue first.  This
+d163 1
+a163 1
+;		tst.b	DiskType+3(a5)
+d196 1
+d205 2
+d215 8
+a222 1
+		bsr	QueueBehind
+d445 2
+@
+
+
+1.11
+log
+@support for DOS/2 and DOS/3 format disks (international char sets for hashing)
+@
+text
+@d15 1
+a15 1
+		XREF	WaitCo,ResumeCo,CallCo
+d25 2
+d40 2
+d53 1
+d103 2
+d228 1
+d280 1
+d386 11
+d399 2
+d403 4
+d412 24
+a435 4
+		REMOVE				dequeue from it's queue
+		movea.l	d0,a0			(should have been valid queue)
+		bsr	UnHash			remove from hash table too
+		movea.l	d0,a0			link into free buffer queue
+a436 2
+		move.l	FreeBufferQueue(a5),(a0)
+		move.l	a0,FreeBufferQueue(a5)
+a444 1
+		clr.l	cb_CoPkt(a1)		no co-routine owns this
+@
+
+
+1.10
+log
+@fixed FreeBlock to handle null buffer ptr.  Stops validator enforcer hits.
+@
+text
+@@
+
+
+1.9
+log
+@
+@
+text
+@d219 3
+a221 1
+FreeBlock	tst.w	cb_Error+2(a0)		did we get an error ?
+d228 1
+a228 1
+		rts
+@
+
+
+1.8
+log
+@now fires off timer events for deferred writes on the waiting queue
+@
+text
+@d250 5
+d357 1
+a357 1
+		ADDTAIL
+@
+
+
+1.7
+log
+@
+@
+text
+@d16 1
+a16 1
+		XREF	EnQueue,DeQueue,FindHash,AddHash,UnHash
+d219 2
+a220 3
+FreeBlock:
+;		tst.w	cb_Error+2(a0)		did we get an error ?
+;		bne.s	5$			yes, trash this block
+d398 2
+a399 1
+		beq.s	20$			it was the pending queue
+d402 7
+a408 1
+20$		move.w	d0,cb_QueueType(a1)	set correct queue type
+d412 1
+a412 1
+30$		movem.l	(sp)+,d3-d4
+@
+
+
+1.6
+log
+@improved some of the searching schemes and added new tags to cache buffs
+support variable sized blocks.  Added new stuff to read/write bitmaps too
+@
+text
+@d274 1
+a274 1
+		beq	ReallyRead		nope, must read it from disk
+d318 1
+a318 1
+		bra	BlockRead		buffer in d0
+d323 1
+a323 1
+		bra	BlockRead		block in d0
+@
+
+
+1.5
+log
+@notification added
+@
+text
+@d6 2
+d17 1
+a17 1
+		XDEF	GetBlock,FreeBlock,ReadBlock,Fetch,WriteBlock
+d26 1
+a26 1
+WaitForPend	movea.l	a0,a1			buffer to a1 for EnQueue
+d29 2
+a30 3
+		move.l	a1,-(sp)		save buffer for us later
+		bsr	EnQueue			stuff it on the end
+		movea.l	(sp)+,a0		need buffer again
+d47 2
+a48 1
+; weird this one, but it works.
+d73 2
+a74 2
+; buffer = GetBlock( hold )
+;   d0		      d0
+a79 3
+;
+; If hold is TRUE and a block is not on the free queue then wait for one else
+; we will fail and return 0.
+d81 2
+a82 6
+GetBlock	move.l	d2,-(sp)		not a co-routine
+		move.l	d0,d2			save the hold flag
+; re-entry point if no blocks are immediately available and we have to wait.
+; First, try and get a buffer from the free buffer queue
+ReGetBlock	move.l	FreeBufferQueue(a5),d0	any buffers available
+		beq.s	10$			no, try the next thing
+d85 2
+a86 1
+		bra	GotBlock		and return buffer in d0
+d90 6
+a95 10
+10$:
+		IFD STATISTICS
+		addq.l	#1,s_NotFree(a5)
+		ENDC
+
+		tst.l	PendingQueue(a5)	anything on the queue
+		beq.s	20$			nope, so cant do anything here
+		movea.l	PendingQueue(a5),a0	see if a co-routine is waiting
+		tst.l	cb_CoPkt(a0)		for this block
+		bne.s	20$			one is, so forget it.
+d97 3
+a99 3
+		bgt.s	20$			nope, so we can't use it!
+		bsr	WaitFor			yep, wait for this buffer
+		bra	GotBlock		buff is in d0
+d101 16
+d118 14
+a131 10
+; waiting to be written then write the first one out. (Only data blocks).
+20$		tst.l	WaitingQueue(a5)	anything on the queue ?
+		beq.s	30$			nope, so that won't work
+		movea.l	WaitingQueue(a5),a1	is there another entry ?
+		tst.l	(a1)
+		beq.s	30$			nope, still won't work
+		tst.l	cb_Size(a1)		is first block a data block
+		bne.s	30$			no, still won't work
+25$		lea.l	WaitingQueue(a5),a0	DeQueue this entry
+		bsr	DeQueue			but leave it in the hash chains
+d133 2
+a134 2
+		bsr	WaitForPend		and make it pending
+		bra	GotBlock		buffer in d0
+d136 21
+a156 11
+; Third point five, try to steal data blocks off the valid queue first (this
+; should fix the thrashing problems when writing disks in oldfs format).
+30$		tst.b	DiskType+3(a5)
+		bne.s	35$			only try this for oldfs disks
+		lea.l	ValidBufferQueue(a5),a1
+31$		move.l	(a1),d0
+		beq.s	35$			at end of list
+		movea.l	d0,a1
+		tst.l	cb_Size(a1)
+		bne.s	31$			not found a data buffer
+		bra.s	36$			found data buff, unlink it
+d159 2
+a160 5
+35$		move.l	ValidBufferQueue(a5),d0
+		beq.s	40$			nothing in it!!
+		movea.l	d0,a1			unlink it
+36$		lea.l	ValidBufferQueue(a5),a0
+		bsr	DeQueue
+d162 2
+a163 2
+		bsr	UnHash
+		bra	GotBlock
+d165 6
+a170 6
+; Fifth, ANY block on the waiting queue.  This will take some time!
+40$		move.l	WaitingQueue(a5),d0
+		beq.s	50$			nothing there
+		movea.l	d0,a1
+		lea.l	WaitingQueue(a5),a0	unlink it from the queue
+		bsr	DeQueue
+d172 2
+a173 2
+		bsr	WaitForPend		and wait for it
+		bra	GotBlock
+d177 10
+a186 11
+50$		movea.l	PendingQueue(a5),a0
+55$		cmpa.w	#0,a0			is there another ?
+		beq.s	60$			no, final panic stage
+		tst.l	cb_CoPkt(a0)		someone waiting ?
+		bne.s	56$			yep, skip it
+		tst.l	cb_Size(a0)		is it block sized ?
+		ble.s	57$			yes, got one
+56$		movea.l	(a0),a0
+		bra.s	55$			go for the next
+57$		bsr	WaitFor			wait for the buffer we found
+		bra	GotBlock		and return buff in d0
+d188 7
+a194 8
+; PANIC! PANIC! PANIC!  Any block sized buffer will do when it's free.
+60$		movea.l	PendingQueue(a5),a0
+65$		cmpa.w	#0,a0			is there another ?
+		beq.s	66$			oh shit! no block sized buffers
+		tst.l	cb_Size(a0)
+		ble.s	67$			got one
+		movea.l	(a0),a0			link to the next
+		bra.s	65$
+a195 4
+66$		movea.l	PendingQueue(a5),a0	no block sized, q behind first
+67$		bsr	QueueBehind
+		bra	ReGetBlock		do the whole thing again
+
+d197 1
+a197 2
+GotBlock	move.l	(sp)+,d2
+		rts
+d209 3
+a211 3
+;	WaitingQueue	=	state=TRUE  AND command=CMD_WRITE
+;	ValidQueue	=	state=TRUE  AND command=CMD_READ
+;	FreeQueue	=	state=FALSE AND command=?
+d213 5
+a217 4
+; NOTE: entries for the free queue are no longer appended, they
+;       are just stuffed straight into the head of the list.
+; Entries for any other queue have thier cb_QueueType set up appropriately and
+; they are also added into the current hash table.
+d219 9
+a227 10
+FreeBlock	move.l	a2,-(sp)
+		movea.l	a0,a2			stash cache buff ptr
+		clr.w	cb_QueueType(a2)	assume the free queue
+;		tst.l	cb_SIZEOF(a2)		what's the file type
+;		beq.s	10$			0 is invalid file type, free it
+		tst.l	d0			is this destined for free queue
+		bne.s	20$			nope, waiting or Valid
+10$		move.l	FreeBufferQueue(a5),(a2)  link at head of free queue
+		move.l	a2,FreeBufferQueue(a5)	no need to append it!!!
+		bra.s	40$
+d229 4
+a232 1
+20$		movea.l	a2,a1
+d238 1
+a238 9
+		bra.s	35$			put into hash table too
+
+30$		lea.l	ValidBufferQueue(a5),a0	it's a valid buffer
+		move.w	#HASHVALID,cb_QueueType(a1)
+35$		bsr	EnQueue
+		movea.l	a2,a0
+		bsr	AddHash			add into hash table
+
+40$		move.l	(sp)+,a2
+d246 2
+a247 2
+; Type refers to the block type as looked at by Disk (-1,0 or >0) and has the
+; following meanings:-
+d249 5
+a253 2
+; 	-1	file header so read 512 bytes to cache buffer and checksum it.
+;	 0	data block, read 512 bytes to cache buffer, don't checksum it.
+d255 1
+d259 1
+a259 3
+; Snatch=TRUE means snatch it else wait for it to write out first.
+; Before the block is actually read, the queues are searched to see if it is
+; already in memory.  No point reading it if it is, right?
+d261 3
+a263 3
+; Latest addition:  One search is done using a hashing algorithm, if the block
+; is not found then we must really read it.  If it is found then we use the
+; cb_QueueType field to determine what to do with the buffer we snagged.
+d265 1
+a265 1
+ReadBlock	movem.l	d3/d4/a2,-(sp)
+d270 1
+a270 1
+ReReadBlock	move.l	d3,d0			see if it's there
+d272 3
+a274 2
+		tst.l	d0			did we find it
+		beq	ReallyRead		nope, so we must read it
+d276 2
+a277 3
+; we found a buffer, see if it belongs to the valid queue.
+		movea.l	d0,a2			stash buffer address
+		cmpi.w	#HASHVALID,cb_QueueType(a2)
+d279 2
+a280 9
+
+		IFD STATISTICS
+		addq.l	#1,s_ValidHits(a5)
+		ENDC
+
+		lea.l	ValidBufferQueue(a5),a0
+		movea.l	a2,a1
+		bsr	DeQueue			take from valid
+		movea.l	a2,a0
+d285 1
+a285 1
+5$		cmpi.w	#HASHWAITING,cb_QueueType(a2)
+d287 2
+a288 3
+		lea.l	WaitingQueue(a5),a0	unlink from the waiting queue
+		movea.l	a2,a1
+		bsr	DeQueue			buffer in d0
+d293 1
+a293 3
+
+		movea.l	d0,a0			we can snatch it, so...
+		bsr	UnHash			...remove from hash table
+d295 1
+a295 3
+
+6$		movea.l	d0,a0			we must wait for it
+		bsr	WaitForPend		so put it on pending and wait
+d301 4
+a304 5
+10$		movea.l	a2,a0
+		tst.l	cb_CoPkt(a0)
+		beq.s	20$			nobody waiting
+; another co-routine is waiting so queue behind it and then search queues again
+		bsr	QueueBehind
+d307 4
+a310 1
+; no-one is waiting for this block, see if we can snatch it now
+d313 1
+a313 1
+		cmpa.l	PendingQueue(a5),a0	can't snatch the first one
+d315 2
+a316 4
+		lea.l	PendingQueue(a5),a0
+		movea.l	a2,a1
+		bsr	DeQueue			we can unlink it
+		movea.l	a2,a0			unlink from hash table too
+d321 2
+a322 1
+30$		bsr	WaitFor			wait for this block
+d327 5
+a331 4
+ReallyRead:
+		IFD STATISTICS
+		addq.l	#1,s_ValidMisses(a5)
+		ENDC
+d333 1
+a333 6
+		moveq.l	#0,d0			set hold = FALSE
+		bsr	GetBlock		fetch an empty cache buffer
+		tst.l	d0			did we get it ?
+		bne.s	40$			yep, no problems
+
+; there were no buffers instantly available so wait for one.  Since another
+d336 2
+a337 3
+; for the block to prevent it being read twice.
+		moveq.l	#-1,d0			set hold = TRUE
+		bsr	GetBlock
+d344 2
+a345 2
+40$		movea.l	d0,a1
+		add.l	#cb_SIZEOF,d0		point to data part of cache buf
+d347 1
+a347 1
+		move.l	d2,cb_Size(a1)		fill in type (-1,0 or >0)
+d353 3
+a355 4
+		movea.l	a1,a2
+		bsr	EnQueue
+		movea.l	a2,a0
+		bsr	AddHash			add into hash table too
+d357 3
+a359 1
+BlockRead	movem.l	(sp)+,d3/d4/a2
+d368 3
+a370 1
+; the same as used in ReadBlock (-1,0 or >0).
+d372 1
+a372 1
+WriteBlock	movem.l	d3/d4/a2,-(sp)
+a375 3
+;		tst.l	d2			not fake buffers
+;		bgt.s	10$
+
+a376 2
+		tst.l	d0			did we get a buffer ?
+		beq.s	10$			nope, it didn't exist
+d378 5
+a382 7
+		cmpi.w	#HASHVALID,cb_QueueType(a1)
+		bne.s	10$			not on valid queue
+
+		lea.l	ValidBufferQueue(a5),a0
+		bsr	DeQueue			dequeue from valid
+		movea.l	d0,a0
+		bsr	UnHash
+a387 4
+		IFD STATISTICS
+		addq.l	#1,s_ValidTrash(a5)
+		ENDC
+
+d392 1
+a392 1
+		move.l	d2,cb_Size(a1)		fill in type (-1,0 or >0)
+d397 1
+a397 1
+		move.w	#HASHPENDING,cb_QueueType(a1)
+d401 4
+a404 7
+		move.w	#HASHWAITING,cb_QueueType(a1)
+20$		movea.l	a1,a2
+		bsr	EnQueue			put on the correct queue
+;		tst.l	d2			don't hash fake buffers
+;		bgt.s	30$
+
+		movea.l	a2,a0
+d406 1
+a406 1
+30$		movem.l	(sp)+,d3/d4/a2
+@
+
+
+1.4
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.3
+log
+@When stealing buffers from the valid buffer queue, now tries to get data
+blocks first (in oldfs mode) instead of arbitrarily stealing headers
+@
+text
+@@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@d124 12
+d137 1
+a137 1
+30$		move.l	ValidBufferQueue(a5),d0
+d140 1
+a140 1
+		lea.l	ValidBufferQueue(a5),a0
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d118 1
+a118 1
+		lea.l	WaitingQueue(a5),a0	DeQueue this entry
+@

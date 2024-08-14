@@ -1,0 +1,1279 @@
+head     1.19;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.19
+date     94.03.17.22.44.53;  author jesup;  state Exp;
+branches ;
+next     1.18;
+
+1.18
+date     94.03.16.18.45.06;  author jesup;  state Exp;
+branches ;
+next     1.17;
+
+1.17
+date     93.07.30.18.43.19;  author gregm;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     92.12.16.14.42.01;  author kcd;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     92.11.02.13.56.32;  author kcd;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.05.08.14.32.55;  author kcd;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.05.05.17.30.01;  author kcd;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.05.04.10.58.40;  author kcd;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     92.04.21.16.00.51;  author kcd;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     92.04.10.00.39.27;  author kcd;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.04.05.15.53.55;  author kcd;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.03.23.10.22.17;  author gregm;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.03.05.17.27.26;  author gregm;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.03.04.16.58.22;  author gregm;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.02.27.21.02.42;  author kcd;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.02.24.10.41.31;  author kcd;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.20.11.09.14;  author kcd;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.02.17.09.55.04;  author kcd;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.02.13.10.04.06;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@The routing portion of IP.
+@
+
+
+1.19
+log
+@autodoc fix
+@
+text
+@/*** route.c **************************************************************
+*
+*   route.c     - Routines for IP Route management
+*
+*   Copyright 1992, Commodore-Amiga, Inc.
+*
+*   $Id: route.c,v 1.18 94/03/16 18:45:06 jesup Exp Locker: jesup $
+*
+**************************************************************************/
+
+/*------------------------------------------------------------------------*/
+
+#include "nipcinternal.h"
+
+#include <utility/tagitem.h>
+#include <dos/rdargs.h>
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/iffparse_protos.h>
+
+#include "nipcinternal_protos.h"
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include "externs.h"
+
+/*------------------------------------------------------------------------*/
+
+ULONG NetNum(ipa)
+ULONG ipa;
+{
+    ULONG net;
+
+    if (IP_CLASSA(ipa)) net=ipa & 0xff000000;
+    if (IP_CLASSB(ipa)) net=ipa & 0xffff0000;
+    if (IP_CLASSC(ipa)) net=ipa & 0xffffff00;
+    if (IP_CLASSD(ipa)) net=ipa;
+    if (IP_CLASSE(ipa)) net=ipa;
+    return net;
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL IsBroadcast(dest)
+ULONG dest;
+{
+    struct sanadev *iface;
+
+    if((dest == 0x00000000L) ||
+       (dest == 0xffffffffL))
+        return TRUE;
+
+    iface = (struct sanadev *) gb->DeviceList.lh_Head;
+
+    while(iface->sanadev_Node.mln_Succ)
+    {
+        if(dest == (iface->sanadev_IPAddress | ~iface->sanadev_IPMask))
+            return TRUE;
+        if(iface->sanadev_SValid)
+        {
+            if(dest == (iface->sanadev_IPSubnet | ~iface->sanadev_SubnetMask))
+                return TRUE;
+        }
+
+        iface = (struct sanadev *) iface->sanadev_Node.mln_Succ;
+    }
+
+    return FALSE;
+}
+
+/*------------------------------------------------------------------------*/
+
+struct sanadev *LocalNet(DestIP)
+ULONG DestIP;
+{
+    struct sanadev *iface;
+
+    iface = (struct sanadev *) gb->DeviceList.lh_Head;
+
+    while(iface->sanadev_Node.mln_Succ)
+    {
+        if(iface->sanadev_SValid)
+        {
+            if((DestIP & iface->sanadev_SubnetMask) == iface->sanadev_IPSubnet)
+                return iface;
+        }
+        else if((DestIP & iface->sanadev_IPMask) == iface->sanadev_IPNetwork)
+            return iface;
+
+        iface = (struct sanadev *) iface->sanadev_Node.mln_Succ;
+    }
+
+    return NULL;
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL IsLocalDevice(DestIP)
+ULONG DestIP;
+{
+    struct sanadev *iface;
+
+    iface = (struct sanadev *) gb->DeviceList.lh_Head;
+
+    while(iface->sanadev_Node.mln_Succ)
+    {
+        if(DestIP == iface->sanadev_IPAddress)
+            return TRUE;
+        iface = (struct sanadev *) iface->sanadev_Node.mln_Succ;
+    }
+    return FALSE;
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL NetMatch(dst, net, mask, islocal)
+ULONG dst, net, mask;
+BOOL islocal;
+{
+    if ((mask & dst) != net)
+        return FALSE;
+
+/*    if(islocal) */
+        if(IsBroadcast(dst))
+            return ((BOOL)!(mask == 0xffffffff));
+
+    return TRUE;
+}
+
+/*------------------------------------------------------------------------*/
+
+ULONG NetMask(net)
+ULONG net;
+{
+    ULONG netpart;
+    struct sanadev *iface;
+
+    if(!net)
+        return 0L;
+
+    netpart=NetNum(net);
+
+    iface = (struct sanadev *) gb->DeviceList.lh_Head;
+
+    while(iface->sanadev_Node.mln_Succ)
+    {
+//        if(iface->sanadev_SValid && (netpart == iface->sanadev_IPNetwork))
+        if(iface->sanadev_SValid && (net == iface->sanadev_IPSubnet) )
+            return iface->sanadev_SubnetMask;
+
+        iface = (struct sanadev *) iface->sanadev_Node.mln_Succ;
+    }
+
+    if (IP_CLASSA(net)) return 0xff000000;
+    if (IP_CLASSB(net)) return 0xffff0000;
+    if (IP_CLASSC(net)) return 0xffffff00;
+    if (IP_CLASSD(net)) return 0xffffffff;
+    if (IP_CLASSE(net)) return 0xffffffff;
+
+}
+
+/*------------------------------------------------------------------------*/
+
+ULONG RtHash(net)
+ULONG net;
+{
+    ULONG hv;
+    UBYTE nt[4], bc;
+    hv=0;
+
+    nt[0]=net>>24;
+    nt[1]=(net & 0x00ff0000)>>16;
+    nt[2]=(net & 0x0000ff00)>>8;
+    nt[3]=(net * 0x000000ff);
+
+    if(IP_CLASSA(net)) bc=1;
+    if(IP_CLASSB(net)) bc=2;
+    if(IP_CLASSC(net)) bc=3;
+    if(IP_CLASSD(net)) bc=4;
+    if(IP_CLASSE(net)) bc=4;
+
+    while(bc--)
+        hv += nt[bc] & 0xff;
+
+    return hv % MAX_ROUTES;
+}
+
+/*------------------------------------------------------------------------*/
+
+struct NIPCRoute *Route(dest, local)
+ULONG dest;
+BOOL local;
+{
+    register struct NBase *nb = gb;
+    struct NIPCRoute *prt;
+    struct NIPCRouteInfo *nri;
+    struct MinList *tmp;
+    UWORD hv;
+
+    nri = (struct NIPCRouteInfo *) &gb->RouteInfo;
+
+    ObtainSemaphore(&nb->RouteInfo.nri_Lock);
+
+    if (!dest)              // If he's crazy enough to pass in null, convert to the loopback
+        dest = 0x7f000001;
+
+    hv = RtHash(dest);
+    tmp = (struct MinList *) &nri->nri_Routes[hv];
+    for (prt = (struct NIPCRoute *) tmp->mlh_Head; prt->nr_Node.mln_Succ; prt=(struct NIPCRoute *) prt->nr_Node.mln_Succ)
+        if(NetMatch(dest,prt->nr_Network,prt->nr_Mask,local))
+            break;
+
+    if(prt->nr_Node.mln_Succ == 0)
+        prt = gb->RouteInfo.nri_Default;
+
+    if(prt)
+    {
+        prt->nr_RefCnt++;
+        prt->nr_UseCnt++;
+    }
+    ReleaseSemaphore(&nb->RouteInfo.nri_Lock);
+    return prt;
+}
+
+/*------------------------------------------------------------------------*/
+
+/* This routine will need to be changed once we have decided on a format
+** for the routing information.
+*/
+
+BOOL InitRoute()
+{
+    register struct NBase *nb = gb;
+    struct NIPCRoutePrefs *iffroute;
+    struct CollectionItem *ci;
+    struct sanadev *dev;
+
+    struct NIPCRouteInfo *nri;
+    int i;
+
+    nri = &gb->RouteInfo;
+    for(i = 0;i < MAX_ROUTES; i++)
+        NewList((struct List *)&nri->nri_Routes[i]);
+
+    InitSemaphore(&nri->nri_Lock);
+
+    dev = (struct sanadev *) gb->DeviceList.lh_Head;
+    while(dev->sanadev_Node.mln_Succ)
+    {
+        if(dev->sanadev_SValid)
+            AddRoute(dev->sanadev_IPSubnet,dev->sanadev_IPAddress,0,-1);
+        else
+            AddRoute(dev->sanadev_IPNetwork,dev->sanadev_IPAddress,0,-1);
+
+        dev = (struct sanadev *)dev->sanadev_Node.mln_Succ;
+    }
+
+    if(ci = FindCollection(nb->iff,ID_PREF,ID_NIRT))
+    {
+        while(ci)
+        {
+            iffroute = (struct NIPCRoutePrefs *)ci->ci_Data;
+	    AddRoute(iffroute->nrp_DestNetwork,iffroute->nrp_Gateway,iffroute->nrp_Hops,-1);
+            ci = ci->ci_Next;
+        }
+    }
+    return TRUE;
+}
+
+/*------------------------------------------------------------------------*/
+
+VOID DeinitRoute()
+{
+    ULONG i;
+    struct NIPCRouteInfo *nri;
+
+    nri = &gb->RouteInfo;
+    if(nri->nri_Default)
+        FreeMem(nri->nri_Default,sizeof(struct NIPCRoute));
+
+    for(i=0;i<MAX_ROUTES;i++)
+        while((void *)&nri->nri_Routes[i] != (void *) nri->nri_Routes[i].mlh_TailPred)
+            FreeMem(RemHead((struct List *)&nri->nri_Routes[i]),sizeof(struct NIPCRoute));
+}
+
+/*------------------------------------------------------------------------*/
+/****** nipc.library/AddRoute *****************************************
+*
+*   NAME
+*     AddRoute -- Add a route/gateway for a network
+*
+*   SYNOPSIS
+*	success = AddRoute(network,gateway,hops,ttl)
+*	   d0		     d0      d1     d2  d3
+*
+*	BOOL AddRoute(ULONG,ULONG,UWORD,WORD);
+*
+*   FUNCTION
+*     Adds a route for a given network to NIPC's routing tables.  Gateway
+*     tells NIPC what gateway to use for that network, and hops is the
+*     maximum number of hops to use to get to the network.  'ttl' is
+*     'time to live' for the route.  This parameter is currently ignored,
+*     and -1 must be passed for ttl.
+*
+*   INPUTS
+*     network - network number this route is for
+*     gateway - the gateway machine on that knows how to talk to 'network'
+*     hops    - maximum number of hops for packets going to 'network'
+*     ttl     - time to live.  Must currently be set to -1.
+*
+*   RESULT
+*     success - true for success, false for failure to add the route.
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*       DeleteRoute()
+*
+******************************************************************************
+*
+*/
+
+BOOL __asm AddRoute(register __d0 ULONG network,
+                             register __d1 ULONG gateway,
+                             register __d2 UWORD hops,
+                             register __d3 WORD ttl)
+{
+    register struct NBase *nb = gb;
+    struct sanadev *dev;
+    struct NIPCRoute *route;
+    UWORD hash;
+    BOOL status;
+    struct NIPCRouteInfo *nri;
+
+    nri = &gb->RouteInfo;
+
+    if(route = (struct NIPCRoute *) AllocMem(sizeof(struct NIPCRoute),MEMF_PUBLIC|MEMF_CLEAR))
+    {
+        route->nr_Network = network;
+        route->nr_Gateway = gateway;
+        route->nr_Hops = hops;
+        route->nr_TTL = ttl;
+
+        dev = (struct sanadev *) gb->DeviceList.lh_Head;
+
+        while(dev->sanadev_Node.mln_Succ)
+        {
+            if(dev->sanadev_SValid)
+            {
+                if((dev->sanadev_SubnetMask & route->nr_Gateway) == (dev->sanadev_SubnetMask & dev->sanadev_IPAddress))
+                {
+                    route->nr_Device=dev;
+                    break;
+                }
+            }
+            else
+            {
+                if((dev->sanadev_IPMask & route->nr_Gateway) == (dev->sanadev_IPMask & dev->sanadev_IPAddress))
+                {
+                    route->nr_Device=dev;
+                    break;
+                }
+            }
+
+            dev = (struct sanadev *) dev->sanadev_Node.mln_Succ;
+        }
+
+        if(route->nr_Device)
+        {
+            route->nr_Mask = NetMask(route->nr_Network);
+            ObtainSemaphore(&nb->RouteInfo.nri_Lock);
+            if(route->nr_Network)
+            {
+                hash = RtHash(route->nr_Network);
+                AddHead((struct List *)&nri->nri_Routes[hash],(struct Node *)route);
+                status = TRUE;
+            }
+            else if(!gb->RouteInfo.nri_Default)
+            {
+                gb->RouteInfo.nri_Default = route;
+                status = TRUE;
+            }
+
+            ReleaseSemaphore(&nb->RouteInfo.nri_Lock);
+        }
+        if(!status)
+            FreeMem(route,sizeof(struct NIPCRoute));
+    }
+
+    return status;
+}
+
+/*------------------------------------------------------------------------*/
+
+/****** nipc.library/DeleteRoute *****************************************
+*
+*   NAME
+*     DeleteRoute -- Remove a route/gateway for a network
+*
+*   SYNOPSIS
+*	DeleteRoute(network)
+*		      d0
+*
+*	VOID DeleteRoute(ULONG);
+*
+*   FUNCTION
+*     Removes a route for a given network from NIPC's routing tables.
+*
+*   INPUTS
+*     network - network number to remove the route for
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*       AddRoute()
+*
+******************************************************************************
+*
+*/
+VOID __asm DeleteRoute(register __d0 ULONG network)
+{
+    register struct NBase *nb = gb;
+    struct NIPCRoute *route;
+    if(route=Route(network,FALSE))
+    {
+        ObtainSemaphore(&nb->RouteInfo.nri_Lock);
+        if(route->nr_RefCnt==1)
+        {
+            if(route != gb->RouteInfo.nri_Default)
+                Remove((struct Node *)route);
+            else
+                gb->RouteInfo.nri_Default=NULL;
+
+            FreeMem(route,sizeof(struct NIPCRoute));
+        }
+        ReleaseSemaphore(&nb->RouteInfo.nri_Lock);
+    }
+}
+
+@
+
+
+1.18
+log
+@added autodocs for AddRoute/DeleteRoute
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.17 93/07/30 18:43:19 gregm Exp $
+d401 1
+a401 1
+/****** nipc.library/AddRoute *****************************************
+@
+
+
+1.17
+log
+@Fixed problem related to networks with variable netmasks.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.16 92/12/16 14:42:01 kcd Exp $
+d265 1
+a265 1
+            AddRoute(iffroute->nrp_DestNetwork,iffroute->nrp_Gateway,iffroute->nrp_Hops,-1);
+d289 39
+d401 31
+@
+
+
+1.16
+log
+@Fixed a return value mismatch compiler warning.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.15 92/11/02 13:56:32 kcd Exp Locker: kcd $
+d149 2
+a150 1
+        if(iface->sanadev_SValid && (netpart == iface->sanadev_IPNetwork))
+d205 3
+@
+
+
+1.15
+log
+@Changed hash values from ULONGs to UWORDs to avoild the 32-bit math.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.14 92/05/08 14:32:55 kcd Exp Locker: kcd $
+d127 1
+a127 1
+            return !(mask == 0xffffffff);
+@
+
+
+1.14
+log
+@Slight change.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.13 92/05/05 17:30:01 kcd Exp Locker: kcd $
+d199 1
+a199 1
+    ULONG hv;
+d294 1
+a294 1
+    ULONG hash;
+@
+
+
+1.13
+log
+@Changed init routine to return a BOOL.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.12 92/05/04 10:58:40 kcd Exp Locker: kcd $
+d125 1
+a125 1
+    if(islocal)
+@
+
+
+1.12
+log
+@Updated to use the new IFF configuration file. Also added code to 
+help fix the routing problems in ip_out.c.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.11 92/04/21 16:00:51 kcd Exp Locker: kcd $
+a263 1
+        return TRUE;
+d265 1
+a265 1
+    return FALSE;
+@
+
+
+1.11
+log
+@Added IsLocalDevice() function for the newer routing stuff.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.10 92/04/10 00:39:27 kcd Exp Locker: kcd $
+d20 2
+d26 1
+d59 1
+a59 1
+        if(dest == (iface->sanadev_IPAddress | !iface->sanadev_IPMask))
+d61 5
+d84 6
+a89 1
+        if((DestIP & iface->sanadev_IPMask) == iface->sanadev_IPNetwork)
+d195 1
+a195 1
+	register struct NBase *nb = gb;
+d231 3
+a233 2
+    struct NIPCRoute *route;
+    struct RDArgs *routeargs;
+d235 1
+a235 5
+    BPTR file;
+    BOOL status=FALSE;
+    ULONG args[4];
+    ULONG hash;
+    UBYTE *linebuff;
+d245 2
+a246 1
+    if(file=Open("s:nipc.routes",MODE_OLDFILE))
+d248 11
+a258 3
+        struct TagItem *ttag;
+        ttag = (struct TagItem *) &gb->notags;
+        if(routeargs = (struct RDArgs *) AllocDosObject(DOS_RDARGS, ttag))
+d260 3
+a262 74
+            if(routeargs->RDA_Buffer = (UBYTE *) AllocMem(80,MEMF_PUBLIC))
+            {
+                if(linebuff = (UBYTE *) AllocMem(256, MEMF_PUBLIC))
+                {
+                    routeargs->RDA_BufSiz = 80;
+
+                    while(FGets(file, linebuff, 256))
+                    {
+
+                        routeargs->RDA_DAList = NULL;
+                        routeargs->RDA_Flags = 0;
+                        if(linebuff[0] == '\n')
+                            break;
+                        if((linebuff[0] == '#') || (linebuff[0] == ';')) continue;
+                        routeargs->RDA_Source.CS_Buffer = linebuff;
+                        routeargs->RDA_Source.CS_Length = 256;
+                        routeargs->RDA_Source.CS_CurChr = 0;
+                        for(i = 0; i < 4; i++)
+                        	args[i]=0L;
+                        ReadArgs("network/A,subnet/A,gateway/A,metric/A/N",(ULONG *) args, routeargs);
+                        if(!( (args[0]) && (args[1]) && (args[2]) && (args[3]) )) continue;
+                        status=TRUE;
+                        if(route = (struct NIPCRoute *) AllocMem(sizeof(struct NIPCRoute),MEMF_PUBLIC|MEMF_CLEAR))
+                        {
+                            route->nr_Network = ip_to_num((char *) args[0]);
+                            route->nr_Mask = ip_to_num((char *) args[1]);
+                            route->nr_Gateway = ip_to_num((char *) args[2]);
+                            route->nr_Hops = *(ULONG *)args[3];
+                            route->nr_TTL = -1;
+
+                            dev = (struct sanadev *) gb->DeviceList.lh_Head;
+
+                            while(dev->sanadev_Node.mln_Succ)
+                            {
+                                if(dev->sanadev_SValid)
+                                {
+                                    if((dev->sanadev_SubnetMask & route->nr_Gateway) == (dev->sanadev_SubnetMask & dev->sanadev_IPAddress))
+                                    {
+                                        route->nr_Device=dev;
+                                        break;
+                                    }
+                                }
+                                else
+                                {
+                                    if((dev->sanadev_IPMask & route->nr_Gateway) == (dev->sanadev_IPMask & dev->sanadev_IPAddress))
+                                    {
+                                        route->nr_Device=dev;
+                                        break;
+                                    }
+                                }
+
+                                dev = (struct sanadev *) dev->sanadev_Node.mln_Succ;
+                            }
+
+                            if(route->nr_Device)
+                            {
+                                if(route->nr_Mask)
+                                {
+                                    hash=RtHash(route->nr_Network);
+                                    AddHead((struct List *)&nri->nri_Routes[hash],(struct Node *) route);
+                                }
+                                else if(!nri->nri_Default)
+                                {
+                                    nri->nri_Default=route;
+                                }
+                            }
+                        }
+                        FreeArgs(routeargs);
+                    }
+                    FreeMem(linebuff, 256);
+                }
+                FreeMem(routeargs->RDA_Buffer, 80);
+            }
+            FreeDosObject(DOS_RDARGS, routeargs);
+d264 1
+a264 1
+        Close(file);
+d266 1
+a266 1
+    return status;
+d288 3
+a290 4
+                             register __d1 ULONG mask,
+                             register __d2 ULONG gateway,
+                             register __d3 UWORD hops,
+                             register __d4 UWORD ttl)
+d292 1
+a292 1
+	register struct NBase *nb = gb;
+d303 4
+d312 11
+a322 1
+            if((dev->sanadev_IPMask & route->nr_Network) == (dev->sanadev_IPMask & dev->sanadev_IPAddress))
+d327 2
+d334 1
+d336 1
+a336 2
+
+            if(route->nr_Mask)
+d361 1
+a361 1
+	register struct NBase *nb = gb;
+@
+
+
+1.10
+log
+@Removed Dependencies on old exec_pragmas.h file.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.9 92/04/05 15:53:55 kcd Exp Locker: kcd $
+d83 18
+@
+
+
+1.9
+log
+@Removed GetRouteInfo() call.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.8 92/03/23 10:22:17 gregm Exp Locker: kcd $
+d106 1
+a106 1
+    ULONG mask,netpart;
+a108 2
+    mask=0xffffffff;
+
+d164 1
+d172 1
+a172 1
+    ObtainSemaphore(&gb->RouteInfo.nri_Lock);
+d188 1
+a188 1
+    ReleaseSemaphore(&gb->RouteInfo.nri_Lock);
+d240 1
+a240 1
+                        for(i = 0; i<4; i++)
+d327 1
+d353 1
+a353 1
+            ObtainSemaphore(&gb->RouteInfo.nri_Lock);
+d367 1
+a367 1
+            ReleaseSemaphore(&gb->RouteInfo.nri_Lock);
+d380 1
+d384 1
+a384 1
+        ObtainSemaphore(&gb->RouteInfo.nri_Lock);
+d394 1
+a394 1
+        ReleaseSemaphore(&gb->RouteInfo.nri_Lock);
+@
+
+
+1.8
+log
+@The_voodoo_stuff_is_GONE!
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.7 92/03/05 17:27:26 gregm Exp $
+d241 2
+a396 8
+/*------------------------------------------------------------------------*/
+
+struct NIPCRouteInfo * __asm GetRouteInfo()
+{
+    return &gb->RouteInfo;
+}
+
+/*------------------------------------------------------------------------*/
+@
+
+
+1.7
+log
+@trivial changes.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.6 92/03/04 16:58:22 gregm Exp Locker: gregm $
+d52 1
+a52 1
+    iface = (struct sanadev *) DeviceList.lh_Head;
+d72 1
+a72 1
+    iface = (struct sanadev *) DeviceList.lh_Head;
+d116 1
+a116 1
+    iface = (struct sanadev *) DeviceList.lh_Head;
+d167 2
+d171 1
+a171 1
+    ObtainSemaphore(&RouteInfo.nri_Lock);
+d173 2
+d176 2
+a177 3
+
+
+    for(prt=(struct NIPCRoute *) RouteInfo.nri_Routes[hv].mlh_Head; prt->nr_Node.mln_Succ; prt=(struct NIPCRoute *) prt->nr_Node.mln_Succ)
+d182 1
+a182 1
+        prt = RouteInfo.nri_Default;
+d189 1
+a189 1
+    ReleaseSemaphore(&RouteInfo.nri_Lock);
+d209 1
+d212 3
+a214 2
+    for(i=0;i < MAX_ROUTES; i++)
+        NewList((struct List *)&RouteInfo.nri_Routes[i]);
+d216 1
+a216 1
+    InitSemaphore(&RouteInfo.nri_Lock);
+d220 3
+a222 1
+        if(routeargs = (struct RDArgs *) AllocDosObject(DOS_RDARGS, (struct TagItem *) &notags))
+d232 1
+d252 1
+a252 1
+                            dev = (struct sanadev *) DeviceList.lh_Head;
+d281 1
+a281 1
+                                    AddHead((struct List *)&RouteInfo.nri_Routes[hash],(struct Node *) route);
+d283 1
+a283 1
+                                else if(!RouteInfo.nri_Default)
+d285 1
+a285 1
+                                    RouteInfo.nri_Default=route;
+d307 1
+d309 3
+a311 2
+    if(RouteInfo.nri_Default)
+        FreeMem(RouteInfo.nri_Default,sizeof(struct NIPCRoute));
+d314 2
+a315 2
+        while((void *)&RouteInfo.nri_Routes[i] != (void *) RouteInfo.nri_Routes[i].mlh_TailPred)
+            FreeMem(RemHead((struct List *)&RouteInfo.nri_Routes[i]),sizeof(struct NIPCRoute));
+d320 1
+a320 1
+BOOL __saveds __asm AddRoute(register __d0 ULONG network,
+d330 3
+d337 1
+a337 1
+        dev = (struct sanadev *) DeviceList.lh_Head;
+d351 1
+a351 1
+            ObtainSemaphore(&RouteInfo.nri_Lock);
+d356 1
+a356 1
+                AddHead((struct List *)&RouteInfo.nri_Routes[hash],(struct Node *)route);
+d359 1
+a359 1
+            else if(!RouteInfo.nri_Default)
+d361 1
+a361 1
+                RouteInfo.nri_Default = route;
+d365 1
+a365 1
+            ReleaseSemaphore(&RouteInfo.nri_Lock);
+d376 1
+a376 1
+VOID __saveds __asm DeleteRoute(register __d0 ULONG network)
+d381 1
+a381 1
+        ObtainSemaphore(&RouteInfo.nri_Lock);
+d384 1
+a384 1
+            if(route != RouteInfo.nri_Default)
+d387 1
+a387 1
+                RouteInfo.nri_Default=NULL;
+d391 1
+a391 1
+        ReleaseSemaphore(&RouteInfo.nri_Lock);
+d397 1
+a397 1
+struct NIPCRouteInfo * __saveds __asm GetRouteInfo()
+d399 1
+a399 1
+    return &RouteInfo;
+@
+
+
+1.6
+log
+@Moved globals to globals.c; externs for these in externs.h.
+@
+text
+@d7 1
+a7 1
+*   $Id: route.c,v 1.5 92/02/27 21:02:42 kcd Exp Locker: gregm $
+a13 1
+#include "externs.h"
+d24 1
+@
+
+
+1.5
+log
+@New formatting.  Changed a few function names to mixed case.  Now uses
+internal include files.
+@
+text
+@d7 1
+a7 1
+*   $Id$
+d14 2
+a27 9
+/* Globals */
+
+extern struct MinList DeviceList;
+extern struct Library *DOSBase;
+struct NIPCRouteInfo RouteInfo;
+static long notags[2] = {TAG_DONE, 0};
+
+/*------------------------------------------------------------------------*/
+
+d52 1
+a52 1
+    iface = (struct sanadev *) DeviceList.mlh_Head;
+d72 1
+a72 1
+    iface = (struct sanadev *) DeviceList.mlh_Head;
+d116 1
+a116 1
+    iface = (struct sanadev *) DeviceList.mlh_Head;
+d244 1
+a244 1
+                            dev = (struct sanadev *) DeviceList.mlh_Head;
+d324 1
+a324 1
+        dev = (struct sanadev *) DeviceList.mlh_Head;
+@
+
+
+1.4
+log
+@Added code for monitor stats.
+@
+text
+@d1 9
+d11 1
+a11 4
+/*
+ * $Header: APPN:src/nipc/RCS/route.c,v 1.3 92/02/20 11:09:14 kcd Exp $
+ *
+ */
+d13 1
+a13 5
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include "s2io.h"
+#include "route.h"
+d16 7
+a22 2
+#include <proto/exec.h>
+#include <proto/dos.h>
+d24 1
+a24 1
+extern struct MinList DeviceList;
+d27 3
+d33 1
+a33 1
+/* Prototypes */
+d35 1
+a35 9
+ULONG netnum();
+BOOL isbrc();
+BOOL netmatch();
+ULONG rthash();
+struct NIPCRoute *Route();
+BOOL InitRoute();
+void DeinitRoute();
+
+ULONG netnum(ipa)
+d48 3
+a50 1
+BOOL isbrc(dest)
+d72 2
+d92 3
+a94 1
+BOOL netmatch(dst, net, mask, islocal)
+a97 2
+//    kprintf("Netmatch: Net: %lx Mask: %lx Dest: %lx\n",net, mask, dst);
+
+d102 1
+a102 1
+        if(isbrc(dst))
+d108 3
+a110 1
+ULONG netmask(net)
+d121 1
+a121 1
+    netpart=netnum(net);
+d141 1
+d143 1
+a143 1
+ULONG rthash(net)
+d167 2
+d178 1
+a178 1
+    hv = rthash(dest);
+a179 1
+//    kprintf("Route Called.\n");
+d182 1
+a182 3
+    {
+//        kprintf("Trying to match...\n");
+        if(netmatch(dest,prt->nr_Network,prt->nr_Mask,local))
+a183 1
+    }
+a185 2
+    {
+//        kprintf("Trying default route.\n");
+a186 1
+    }
+a189 1
+//        kprintf("Route succeeded.\n");
+d197 6
+d279 1
+a279 7
+//                                    kprintf("Adding route:\n");
+//                                    kprintf("nr_Network: %lx\n",route->nr_Network);
+//                                    kprintf("nr_Mask:    %lx\n",route->nr_Mask);
+//                                    kprintf("nr_Gateway: %lx\n",route->nr_Gateway);
+//                                    kprintf("nr_Device:  %lx\n",route->nr_Device);
+//                                    kprintf("\n");
+                                    hash=rthash(route->nr_Network);
+a283 6
+//                                    kprintf("Setting Default route:\n");
+//                                    kprintf("nr_Network: %lx\n",route->nr_Network);
+//                                    kprintf("nr_Mask:    %lx\n",route->nr_Mask);
+//                                    kprintf("nr_Gateway: %lx\n",route->nr_Gateway);
+//                                    kprintf("nr_Device:  %lx\n",route->nr_Device);
+//                                    kprintf("\n");
+d301 3
+a303 1
+void DeinitRoute()
+d315 2
+d349 1
+a349 1
+                hash = rthash(route->nr_Network);
+d368 3
+a370 1
+void __saveds __asm DeleteRoute(register __d0 ULONG network)
+d389 2
+d396 1
+a396 1
+
+@
+
+
+1.3
+log
+@New routing functions added for the new routing algorithm.
+@
+text
+@d3 1
+a3 1
+ * $Header: APPN:src/libs/nipc.library/RCS/route.c,v 1.2 92/02/17 09:55:04 kcd Exp $
+d270 6
+a275 6
+                                    kprintf("Adding route:\n");
+                                    kprintf("nr_Network: %lx\n",route->nr_Network);
+                                    kprintf("nr_Mask:    %lx\n",route->nr_Mask);
+                                    kprintf("nr_Gateway: %lx\n",route->nr_Gateway);
+                                    kprintf("nr_Device:  %lx\n",route->nr_Device);
+                                    kprintf("\n");
+d281 6
+a286 6
+                                    kprintf("Setting Default route:\n");
+                                    kprintf("nr_Network: %lx\n",route->nr_Network);
+                                    kprintf("nr_Mask:    %lx\n",route->nr_Mask);
+                                    kprintf("nr_Gateway: %lx\n",route->nr_Gateway);
+                                    kprintf("nr_Device:  %lx\n",route->nr_Device);
+                                    kprintf("\n");
+@
+
+
+1.2
+log
+@"Real" routing code added.
+@
+text
+@d3 1
+a3 1
+ * $Header: APPN:src/libs/nipc.library/RCS/route.c,v 1.1 92/02/13 10:04:06 gregm Exp Locker: kcd $
+d68 18
+d90 1
+a90 1
+//    kprintf("Netmatch: %lx %lx %lx\n",net, mask, dst);
+d102 32
+d180 1
+a180 1
+//        kprintf("Trying default route.");
+d246 9
+a254 1
+                                if((dev->sanadev_IPMask & route->nr_Gateway) == (dev->sanadev_IPMask & dev->sanadev_IPAddress))
+d256 5
+a260 2
+                                    route->nr_Device=dev;
+                                    break;
+d262 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d3 1
+a3 1
+ * $Header$
+d9 1
+d11 3
+d19 90
+a108 1
+struct sanadev *Route(dest)
+d110 133
+d244 1
+d246 2
+a247 2
+ULONG netaddr;
+struct sanadev *dev;
+d249 15
+a263 1
+ if (IsListEmpty((struct List *) &DeviceList)) return(0L);
+d265 36
+a300 3
+/* VERY simple routing for the time being.  So simple that it's
+ * barely better than none at all.
+ */
+d302 2
+a303 1
+ dev = (struct sanadev *) DeviceList.mlh_Head;
+d305 12
+a316 9
+ while (dev->sanadev_Node.mln_Succ)
+   {
+   netaddr = (dest & dev->sanadev_IPMask);
+   if (netaddr == (dev->sanadev_IPAddress & dev->sanadev_IPMask))
+      return(dev);
+   dev = (struct sanadev *) dev->sanadev_Node.mln_Succ;
+   }
+
+/* for the time being, the route is defaulted then */
+d318 5
+a322 2
+ dev = (struct sanadev *) DeviceList.mlh_Head;
+ return(dev);
+d324 3
+d328 2
+@

@@ -1,0 +1,295 @@
+	include "exec/types.i"
+	include "exec/execbase.i"
+
+CALLSYS	macro	*
+	jsr	LVO\1(a6)
+	endm
+
+JUMPSYS macro	*
+	jmp	LVO\1(a6)
+	endm
+
+GURU	macro	*
+	pmove	temp,tc
+	move.l	4,a6			; Load ExecBase address
+	move.l	#\1,d7			; Load Guru number
+	CALLSYS	Alert
+	endm
+
+;	OPT	p=68030
+
+	section	text,code
+
+
+LVOSupervisor	EQU	-30
+LVOAlert	EQU	-$6c
+
+	XDEF	_NewBusError
+
+	XREF	_LVOAlert
+	XREF	_LVOSupervisor
+	XREF	_OldVector
+
+	XREF	_PrintFrame
+	XREF	_PrintPipeStageB
+	XREF	_PrintPipeStageC
+	XREF	_PrintDataFault
+	XREF	_PrintBusError
+	XREF	_PrintLimitViolation
+	XREF	_PrintSupervisorOnly
+	XREF	_PrintWriteProtected
+	XREF	_PrintInvalid
+	XREF	_PrintAccessLevel
+	XREF	_PrintNotPMMU
+	XREF	_PrintCompleting
+	XREF	_PrintBase
+
+subSysName:
+	dc.b	"TrapZero",0
+
+STK	EQU	$3C			; =60 decimal (4 * (7+8))
+
+;======================================================================
+;
+;	Upon a Bus Error exception, we arrive here. The special status
+;	word (SSW) tells us what caused the fault, and we calculate the
+;	fault address accordingly. But first we have to save all
+;	registers onto the (user) stack.
+;
+;======================================================================
+
+	CNOP	0,4
+
+_NewBusError:
+	movem.l	d0-d7/a0-a6,-(sp)	; Save all registers
+
+	move.b	STK+$a(sp),d0		; Get special status word (SSW)
+	btst.l	#0,d0			; Data cycle fault?
+	bne	DataFault		; Branch if so
+	btst.l	#6,d0			; Stage B of instruction pipe?
+	bne	PipeStageB		; Branch if so
+	btst.l	#7,d0			; Stage C of instruction pipe?
+	bne	PipeStageC		; Branch if so
+
+	GURU	$B4000000
+
+;======================================================================
+;
+;	There are a variety of Gurus that may be generated when we fall
+;	into an unrecognized state. Only a few are really needed, the
+;	rest are for debugging puposes.
+;
+;	B0000000	
+;	B0000001	
+;	B1000001	Bus Error (MMU not at fault, probably hardware)
+;	B1000002	Limit Violation
+;	B1000003	Supervisor Only
+;	B1000004	Access Level
+;	B1000005	Write Protected
+;	B2000001	Unrecognized exception frame for SaveFrame
+;	B2000002	Unrecognized exception frame for RestoreFrame
+;	B2000003	Unrecognized exception frame for DiscardFrame
+;	B2000004	Unrecognized exception frame for PipeStageB
+;	B2000005	Unrecognized exception frame for PipeStageC
+;	B300000x	Disk I/O error
+;	B4000000	None of FC, FB or DF bits in SSW were set
+;	B5000000	Debugging Halt (Assembler)
+;
+;======================================================================
+
+
+PipeStageB:
+	jsr	_PrintPipeStageB
+	move.b	STK+$6(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it 
+	cmpi.b	#%10100000,d0		; Short bus cycle stack frame?
+	bne	0$			; Branch if not
+	movea.l	STK+$2(sp),a0		; Calculate fault address
+	addq.l	#4,a0
+	bra	TestAddress
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne	1$			; Branch if not
+	movea.l	STK+$24(sp),a0		; Load fault address
+	bra	TestAddress
+1$
+	GURU	$B2000004		; Unrecognized exception stack frame
+
+PipeStageC:
+	jsr	_PrintPipeStageC
+	move.b	STK+$6(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it
+	cmpi.b	#%10100000,d0		; Short bus cycle stack frame?
+	bne	0$			; Branch if not
+	movea.l	STK+$2(sp),a0		; Calculate fault address
+	addq.l	#4,a0
+	bra.s	TestAddress
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne	1$			; Branch if not
+	movea.l	STK+$24(sp),a0		; Calculate fault address
+	subq.l	#2,a0
+	bra.s	TestAddress
+1$
+	GURU	$B2000005		; Unrecognized exception stack frame
+
+	CNOP	0,4
+
+DataFault:
+	move.l	STK+$10(sp),d0		; Get data cycle fault address
+	cmpi.l	#4,d0			; Was it the Execbase pointer?
+	beq	GetBase			; Get Execbase manually
+	movea.l	d0,a0			; Put error address here
+	jsr	_PrintDataFault
+
+TestAddress:
+	bchg	#1,$bfe001		; Blink LED
+	move.b	STK+$b(sp),d0		; Get FC of fault address ?? $b(sp)?
+	ptestr	d0,(a0),#3		; Test out fault address
+	pmove	mmusr,temp		; Get MMU status register
+	bfffo	temp,{0:6},d1		; What type of exception occurred?
+	beq	not_pmmu		; Branch if not an MMU error
+	jmp	([4,pc,d1.w*4])		; Jump according to error type
+
+	dc.l	bus_error		; A bus error occurred on table search
+	dc.l	limit_violation		; A limit violation
+	dc.l	supervisor_only		; Page reserved to supervisor only 
+	dc.l	access_level		; Access level violation (68851 only)
+	dc.l	write_protected		; Write protect violation
+	dc.l	invalid_descriptor	; Aha, It's a page fault!
+	dc.l	not_pmmu		; Not an MMU error
+
+bus_error:
+	jsr	_PrintBusError
+	jsr	_PrintFrame
+	GURU	$B1000001
+
+limit_violation:
+	jsr	_PrintLimitViolation
+	jsr	_PrintFrame
+	bra	Complete
+
+supervisor_only:
+	jsr	_PrintSupervisorOnly
+	jsr	_PrintFrame
+	bra	Complete
+
+access_level:
+	jsr	_PrintAccessLevel
+	jsr	_PrintFrame
+	bra	Complete
+
+write_protected:
+	jsr	_PrintWriteProtected
+	jsr	_PrintFrame
+	bra	Complete
+
+
+;======================================================================
+;
+;	If the cause is an invalid descriptor, that means we have a page
+;	fault. So let's save the current exception frame onto the user
+;	stack, then go into user mode. So the supervisor stack will be
+;	just like it was before the page fault occured. Then we can 
+;	perform page swapping under safe multitasking condition.
+;
+;======================================================================
+
+	CNOP	0,4
+
+invalid_descriptor:
+	jsr	_PrintInvalid
+	jsr	_PrintFrame
+	bra	Complete
+
+
+;======================================================================
+;
+;	Since it was not an MMU error, let's fetch the pointer to the
+;	user's exception handler. (probably just the faithful Guru)
+;	Although I could avoid trashing the a0 regiter, this is a dead
+;	end error anyway, so I don't bother.
+;
+;======================================================================
+
+not_pmmu:
+	jsr	_PrintNotPMMU
+	jsr	_PrintFrame
+	movem.l	(sp)+,d0-d7/a0-a6	; Restore all registers (what for)
+	movea.l	_OldVector,a0		; Get old bus error autovector
+	jmp	(a0)			; Go to that error handler
+
+
+;======================================================================
+;
+;	Since the fault was caused by accessing address 4, we must now
+;	complete the data access by hand. That way when an RTE is
+;	executed, the processor will not fall into a second exception.
+;	Even if the program wanted to perform a write, we'll perform a
+;	read here. (Write to $4 is always illegal anyway)
+;
+;======================================================================
+
+GetBase:
+	bclr.b	#0,STK+$a(sp)		; Clear the DF bit (no more except)
+	move.l	_Base,STK+$2c(sp)	; Read in cached Execbase
+	movem.l	(sp)+,d0-d7/a0-a6	; Restore all registers
+	rte
+
+
+;======================================================================
+;
+;	Although the memory access is illegal, we shall now complete the
+;	memory access by hand. The MMU is turned off in case the access
+;	is made in supervisor mode. Note that VBR does not point to zero
+;	page anymore.
+;
+;======================================================================
+
+Complete:
+	bclr.b	#0,STK+$a(sp)		; Clear the DF bit (no more except)
+	bclr.b	#6,STK+$a(sp)		; Clear the FB bit (no more except)
+	bclr.b	#7,STK+$a(sp)		; Clear the FC bit (no more except)
+
+	lea.l	temp,a0			; Turn off MMU
+	pmove	tc,(a0)
+	and.l	#$7fffffff,(a0)
+	pmove	(a0),tc
+
+	btst.b	#6,STK+$b(sp)		; Was it a read or write fault?
+	beq.s	0$			; Branch if write
+
+;	move.l	([$10,sp]),$2c(sp)	; Read in the data
+	dc.l	$2f770161
+	dc.l	$004c0068		; Now adds STK to $10 and $2c
+
+	bra	exit
+0$
+
+;	move.l	$18(sp),([$10,sp])	; Write out the data
+	dc.l	$2faf0054
+	dc.l	$0161004c		; Now adds STK to $18 and $10
+
+exit:
+
+	lea.l	temp,a0			; Turn on MMU
+	pmove	tc,(a0)
+	or.l	#$80000000,(a0)
+	pmove	(a0),tc
+
+	movem.l	(sp)+,d0-d7/a0-a6	; Restore all registers
+	rte
+
+
+;======================================================================
+;
+;	Here is the data section (in the same hunk though)
+;
+;======================================================================
+
+	XDEF	_Base
+
+_Base:	dc.l	0
+temp:	dc.l	0
+
+	END

@@ -1,0 +1,804 @@
+head     38.6;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:38.6; strict;
+comment  @ * @;
+
+
+38.6
+date     92.07.09.22.31.14;  author davidj;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.06.24.02.07.47;  author davidj;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     92.06.08.23.25.29;  author davidj;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     92.03.02.12.36.59;  author davidj;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.01.22.17.09.06;  author davidj;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.11.11.08.52.00;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial rcs login
+@
+
+
+38.6
+log
+@*** empty log message ***
+@
+text
+@/* io.c
+ *
+ */
+
+#include "pointer.h"
+#include <intuition/pointerclass.h>
+
+#define	DR(x)	;
+#define	DW(x)	;
+#define	DM(x)	;
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+/* The PrefHeader structure this editor outputs */
+static struct PrefHeader far IFFPrefHeader =
+{
+    0,				/* version */
+    0,				/* type    */
+    0				/* flags   */
+};
+
+/*****************************************************************************/
+
+/* The IFF chunks known to this prefs editor. IFFPrefChunkCnt says how many
+ * chunks there are
+ */
+#define IFFPrefChunkCnt 2
+static LONG far IFFPrefChunks[] =
+{
+    ID_PREF, ID_PRHD,
+    ID_PREF, ID_PNTR,
+};
+
+/*****************************************************************************/
+
+struct BitMap *allocbitmap (EdDataPtr ed, WORD width, WORD height, BYTE depth)
+{
+    ULONG planes, data, msize;
+    struct BitMap *bm;
+    BYTE i;
+
+    planes = RASSIZE (width, height);
+    msize = sizeof (struct BitMap) + (planes * depth);
+    if (bm = AllocVec (msize, MEMF_CHIP | MEMF_CLEAR))
+    {
+	InitBitMap (bm, depth, width, height);
+	data = ((void *) ((bm) + 1));
+	for (i = 0; i < depth; i++)
+	    bm->Planes[i] = (PLANEPTR) (data + i * planes);
+    }
+    return (bm);
+}
+
+/*****************************************************************************/
+
+void freebitmap (EdDataPtr ed, struct BitMap * bm)
+{
+    FreeVec (bm);
+}
+
+/*****************************************************************************/
+
+EdStatus ReadPrefs (EdDataPtr ed, struct IFFHandle * iff, struct ContextNode * cn)
+{
+    struct ExtPrefs *ep = &ed->ed_PrefsWork;
+    EdStatus result = ES_IFFERROR;
+    struct PointerPrefs *pp;
+    struct PointerPrefs tmp;
+    struct BitMap *bm;
+    struct RGBTable t;
+    BOOL ok = TRUE;
+    WORD i, plane;
+    WORD ncolors;
+    ULONG msize;
+
+    if (cn->cn_ID != ID_PNTR || cn->cn_Type != ID_PREF)
+	return (ES_IFF_UNKNOWNCHUNK);
+
+    if (ReadChunkBytes (iff, &tmp, sizeof (struct PointerPrefs)) == sizeof (struct PointerPrefs))
+    {
+	pp = &ed->ed_PrefsWork.ep_PP[tmp.pp_Which];
+
+	CopyMem (&tmp, pp, sizeof (struct PointerPrefs));
+
+	/* GET THE COLORMAP */
+	ncolors = (1 << pp->pp_Depth) - 1;
+	DR (kprintf ("read %ld colors\n", (LONG) ncolors));
+	for (i = 0; i < ncolors; i++)
+	{
+	    if (ok)
+	    {
+		if (ReadChunkBytes (iff, (char *) &t, sizeof (struct RGBTable)) != sizeof (struct RGBTable))
+		{
+		    DR (kprintf (" couldn't read palette\n"));
+		    ok = FALSE;
+		}
+		else if (i < MAXCOLORS)
+		{
+		    DR (kprintf (" %ld: r=%ld g=%ld b=%ld\n", (LONG) i, (ULONG) t.t_Red, (ULONG) t.t_Green, (ULONG) t.t_Blue));
+		    ep->ep_CMap[(i + 1)] = *(&t);
+		}
+		else
+		{
+		    DR (kprintf ("TOO MANY COLORS!!!\n"));
+		}
+	    }
+	    else
+	    {
+		result = ES_DOSERROR;
+		ed->ed_SecondaryResult = IoErr ();
+		DR (kprintf (" dos error %ld\n", ed->ed_SecondaryResult));
+	    }
+	}
+
+	if (bm = allocbitmap (ed, pp->pp_Width, pp->pp_Height, pp->pp_Depth))
+	{
+	    /* GET THE BITPLANES */
+	    msize = bm->Rows * bm->BytesPerRow;
+	    for (plane = 0; plane < bm->Depth; plane++)
+	    {
+		if (plane < pp->pp_Depth)
+		{
+		    if (ok)
+		    {
+			if (ReadChunkBytes (iff, (char *) bm->Planes[plane], msize) != msize)
+			{
+			    DR (kprintf (" couldn't read\n"));
+			    ok = FALSE;
+			}
+			else
+			{
+			    DR (kprintf (" read %ld bytes\n", msize));
+			}
+		    }
+		    else
+		    {
+			result = ES_DOSERROR;
+			ed->ed_SecondaryResult = IoErr ();
+			DR (kprintf (" dos error %ld\n", ed->ed_SecondaryResult));
+		    }
+		}
+		else
+		{
+		    /* Set additional planes to zero */
+		    DR (kprintf (" plane %ld < %ld\n", (ULONG) plane, (ULONG) pp->pp_Depth));
+		    memset (bm->Planes[plane], 0, msize);
+		}
+	    }
+
+	    if (ok)
+	    {
+		DR (kprintf (" screen=0x%lx\n", ed->ed_Screen));
+
+		SetAPen (&ed->ed_PrefsWork.ep_RPort, 0);
+		RectFill (&ed->ed_PrefsWork.ep_RPort,
+			  (pp->pp_Which * MAXWIDTH), 0,
+			  (pp->pp_Which * MAXWIDTH) + MAXWIDTH - 1, MAXHEIGHT - 1);
+
+		bltbm (bm, 0, 0,
+		       ed->ed_PrefsWork.ep_BMap,
+		       pp->pp_Which * MAXWIDTH, 0,
+		       MIN (pp->pp_Width, MAXWIDTH), MIN (pp->pp_Height, MAXHEIGHT),
+		       0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+		result = ES_NORMAL;
+
+		ed->ed_Size = (pp->pp_Size) ? pp->pp_Size - POINTERXRESN_LORES : 0;
+	    }
+	    freebitmap (ed, bm);
+	}
+    }
+
+    return (result);
+}
+
+/*****************************************************************************/
+
+EdStatus OpenPrefs (EdDataPtr ed, STRPTR name)
+{
+    EdStatus result;
+
+    DR (kprintf ("OpenPrefs %s\n", name));
+    if ((result = ReadIFF (ed, name, IFFPrefChunks, IFFPrefChunkCnt, ReadPrefs)) == ES_NORMAL)
+    {
+	/* Map up */
+	DM (kprintf ("OpenPrefs : map up\n"));
+	ReMap (ed, &ed->ed_PrefsWork, 1);
+    }
+
+    /* Update the sketchpad */
+    UpdateSketch (ed);
+
+    return (result);
+}
+
+/*****************************************************************************/
+
+EdStatus WritePrefs (EdDataPtr ed, struct IFFHandle * iff, struct ContextNode * cn)
+{
+    struct ExtPrefs *ep = &ed->ed_PrefsWork;
+    EdStatus result = ES_NORMAL;
+    UWORD depth = ed->ed_Depth;
+    struct PointerPrefs *pp;
+    struct BitMap *bm;
+    BOOL ok = TRUE;
+    WORD ncolors;
+    ULONG msize;
+    WORD i, j;
+
+    if (ed->ed_Screen)
+	depth = MIN (ed->ed_Depth, ed->ed_Screen->BitMap.Depth);
+
+    for (i = 0; i < 2; i++)
+    {
+	pp = &ed->ed_PrefsWork.ep_PP[i];
+	pp->pp_Which = i;
+	if (!(PushChunk (iff, 0, ID_PNTR, IFFSIZE_UNKNOWN)))
+	{
+	    DW (kprintf ("save pointer %ld\n", (LONG) i));
+	    pp->pp_Depth  = 2;
+	    pp->pp_Width  = ed->ed_Width;
+	    pp->pp_Height = ed->ed_Height;
+	    pp->pp_Size   = ed->ed_Size + POINTERXRESN_LORES;
+	    if (WriteChunkBytes (iff, pp, sizeof (struct PointerPrefs)) == sizeof (struct PointerPrefs))
+	    {
+		/* PUT THE COLORMAP */
+		ncolors = (1 << pp->pp_Depth) - 1;
+		for (j = 0; j < ncolors; j++)
+		{
+		    if (ok)
+		    {
+			if (WriteChunkBytes (iff, (char *) &ep->ep_CMap[(j + 1)], sizeof (struct RGBTable)) != sizeof (struct RGBTable))
+			{
+			    ok = FALSE;
+			}
+		    }
+		    else
+		    {
+			result = ES_DOSERROR;
+			ed->ed_SecondaryResult = IoErr ();
+			DW (kprintf (" dos error %ld\n", ed->ed_SecondaryResult));
+		    }
+		}
+
+		DB (kprintf ("sprite is %ld x %ld x %ld\n", (LONG)pp->pp_Width, (LONG)pp->pp_Height, (LONG)pp->pp_Depth));
+		if (bm = allocbitmap (ed, pp->pp_Width, pp->pp_Height, pp->pp_Depth))
+		{
+		    /* Copy the image to the temporary BitMap */
+		    bltbm (ed->ed_PrefsWork.ep_BMap,
+			   (i * MAXWIDTH), 0,
+			   bm, 0, 0, pp->pp_Width, pp->pp_Height,
+			   0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+#if 0
+bltbm (bm, 0, 0,
+	&ed->ed_Screen->BitMap, 0, (i * MAXHEIGHT), pp->pp_Width, pp->pp_Height,
+	0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+bltbm (ed->ed_PrefsWork.ep_BMap, (i * MAXWIDTH), 0,
+	&ed->ed_Screen->BitMap, pp->pp_Width, (i * MAXHEIGHT), pp->pp_Width, pp->pp_Height,
+	0xC0, 0xFF, NULL, ed->ed_GfxBase);
+#endif
+
+		    /* PUT THE BODY */
+		    msize = bm->Rows * bm->BytesPerRow;
+		    for (j = 0; j < pp->pp_Depth; j++)
+		    {
+			if (ok)
+			{
+			    if (WriteChunkBytes (iff, (char *) bm->Planes[j], msize) != msize)
+			    {
+				ok = FALSE;
+			    }
+			}
+			else
+			{
+			    result = ES_DOSERROR;
+			    ed->ed_SecondaryResult = IoErr ();
+			    DW (kprintf (" dos error %ld\n", ed->ed_SecondaryResult));
+			}
+		    }
+
+		    freebitmap (ed, bm);
+		}
+
+		PopChunk (iff);
+	    }
+	}
+    }
+    return (result);
+}
+
+/*****************************************************************************/
+
+EdStatus SavePrefs (EdDataPtr ed, STRPTR name)
+{
+    EdStatus result;
+
+    /* Map down */
+    DM (kprintf ("SavePrefs : map down\n"));
+    ReMap (ed, &ed->ed_PrefsWork, -1);
+
+    DW (kprintf ("SavePrefs %s\n", name));
+    result = WriteIFF (ed, name, &IFFPrefHeader, WritePrefs);
+
+    /* Map up */
+    DM (kprintf ("SavePrefs : map up\n"));
+    ReMap (ed, &ed->ed_PrefsWork, 1);
+
+    return (result);
+}
+
+/*****************************************************************************/
+
+UWORD chip RomPointer0[] =
+{
+    0xC000,
+    0x7000,
+    0x3C00,
+    0x3F00,
+
+    0x1FC0,
+    0x1FC0,
+    0x0F00,
+    0x0D80,
+
+    0x04C0,
+    0x0460,
+    0x0020,
+    0x0000,
+
+    0x0000,
+    0x0000,
+    0x0000,
+    0x0000,
+
+};
+
+UWORD chip RomPointer1[] =
+{
+    0x4000,
+    0xB000,
+    0x4C00,
+    0x4300,
+
+    0x20C0,
+    0x2000,
+    0x1100,
+    0x1280,
+
+    0x0940,
+    0x08A0,
+    0x0040,
+    0x0000,
+
+    0x0000,
+    0x0000,
+    0x0000,
+    0x0000,
+};
+
+UWORD chip RomBusyPointer0[] =
+{
+    0x0400,
+    0x0000,
+    0x0100,
+    0x0000,
+
+    0x07C0,
+    0x1FF0,
+    0x3FF8,
+    0x3FF8,
+
+    0x7FFC,
+    0x7EFC,
+    0x7FFC,
+    0x3FF8,
+
+    0x3FF8,
+    0x1FF0,
+    0x07C0,
+    0x0000,
+};
+
+UWORD chip RomBusyPointer1[] =
+{
+    0x07C0,
+    0x07C0,
+    0x0380,
+    0x07E0,
+
+    0x1FF8,
+    0x3FEC,
+    0x7FDE,
+    0x7FBE,
+
+    0xFF7F,
+    0xFFFF,
+    0xFFFF,
+    0x7FFE,
+
+    0x7FFE,
+    0x3FFC,
+    0x1FF8,
+    0x07E0,
+};
+
+UBYTE PDefCols[4][3] =
+{
+    {0x00, 0x00, 0x00},
+    {0xE0, 0x40, 0x40},
+    {0x00, 0x00, 0x00},
+    {0xE0, 0xE0, 0xC0}
+};
+
+/*****************************************************************************/
+
+VOID CopyFromDefault (EdDataPtr ed)
+{
+    struct ExtPrefs *ep = &ed->ed_PrefsDefaults;
+    struct BitMap bm;
+    register WORD i;
+
+    ep->ep_PP[0].pp_X     =  ep->ep_PP[0].pp_Y    =  0;
+    ep->ep_PP[0].pp_Size  = ep->ep_PP[1].pp_Size  = 0;
+    ep->ep_PP[0].pp_Depth = ep->ep_PP[1].pp_Depth = 2;
+
+    for (i = 0; i < 4; i++)
+    {
+	ep->ep_CMap[i].t_Red   = PDefCols[i][0];
+	ep->ep_CMap[i].t_Green = PDefCols[i][1];
+	ep->ep_CMap[i].t_Blue  = PDefCols[i][2];
+    }
+
+    InitBitMap (&bm, 2, 16, 16);
+    bm.Planes[0] = RomPointer0;
+    bm.Planes[1] = RomPointer1;
+    bltbm (&bm, 0, 0, ep->ep_BMap, 0, 0, 16, 16, 0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+    InitBitMap (&bm, 2, 16, 16);
+    bm.Planes[0] = RomBusyPointer0;
+    bm.Planes[1] = RomBusyPointer1;
+    bltbm (&bm, 0, 0, ep->ep_BMap, MAXWIDTH, 0, 16, 16, 0xC0, 0xFF, NULL, ed->ed_GfxBase);
+
+    ep->ep_PP[1].pp_X  = -5;
+    ep->ep_PP[1].pp_Y  =  0;
+
+    /* Map up */
+    DM (kprintf ("Default : map up\n"));
+    ReMap (ed, ep, 1);
+}
+@
+
+
+38.5
+log
+@all new IO code
+@
+text
+@d167 2
+d425 1
+d431 1
+a431 1
+	ep->ep_CMap[i].t_Red = PDefCols[i][0];
+d433 1
+a433 1
+	ep->ep_CMap[i].t_Blue = PDefCols[i][2];
+a436 1
+
+d445 3
+@
+
+
+38.4
+log
+@*** empty log message ***
+@
+text
+@d6 1
+d8 3
+d15 2
+a16 1
+VOID CopyFromSketchBM (EdDataPtr ed)
+d18 4
+a21 1
+}
+d25 5
+a29 1
+VOID UpdateSketch (EdDataPtr ed)
+d31 3
+a33 8
+    if (ed->ed_GSketch)
+    {
+	/* Show that the bitmap has been updated */
+	setgadgetattrs (ed, ed->ed_GSketch,
+			SPA_Update, TRUE,
+			TAG_DONE);
+    }
+}
+d37 1
+a37 1
+EdStatus OpenPrefs (EdDataPtr ed, STRPTR name)
+d39 51
+a89 11
+    EdStatus result = ES_NO_MEMORY;
+    struct IFFHandle *iff;
+
+    DB (kprintf ("OpenPrefs : enter name=0x%lx (%s)\n", name, (name) ? name : "NULL"));
+    ed->ed_ErrorFileName = name;
+
+    /* Allocate an IFF handle */
+    if (iff = AllocIFF ())
+    {
+	/* Open the preference file */
+	if (iff->iff_Stream = Open (name, MODE_OLDFILE))
+d91 1
+a91 5
+	    /* Indicate that the IFF handle is for a file */
+	    InitIFFasDOS (iff);
+
+	    /* Read the preference record */
+	    if ((result = ReadPrefs (ed, iff)) == ES_NORMAL)
+d93 14
+a106 2
+		/* Update the sketchpad */
+		UpdateSketch (ed);
+d110 3
+a112 1
+		result = ES_IFFERROR;
+d114 1
+d116 1
+a116 4
+	    /* Close the file */
+	    Close (iff->iff_Stream);
+	}
+	else
+d118 51
+a168 3
+	    result = ES_DOSERROR;
+	    ed->ed_SecondaryResult = IoErr ();
+	    DB (kprintf (" couldn't open : %ld\n", ed->ed_SecondaryResult));
+d170 10
+d181 6
+a186 2
+	/* Free the IFF handle */
+	FreeIFF (iff);
+d189 3
+a191 1
+    DB (kprintf ("OpenPrefs : exit %ld\n", result));
+d197 1
+a197 1
+EdStatus SavePrefs (EdDataPtr ed, STRPTR name)
+d199 53
+a251 2
+    EdStatus result = ES_NO_MEMORY;
+    struct IFFHandle *iff;
+d253 4
+a256 1
+    DB (kprintf ("SavePrefs : enter name=0x%lx (%s)\n", name, (name) ? name : "NULL"));
+d258 4
+a261 4
+    ed->ed_ErrorFileName = name;
+
+    /* Copy from the sketchpad to the preference structure */
+    CopyFromSketchBM (ed);
+d263 18
+a280 8
+    /* Allocate an IFF handle */
+    if (iff = AllocIFF ())
+    {
+	/* Open the preference file */
+	if (iff->iff_Stream = Open (name, MODE_NEWFILE))
+	{
+	    /* Indicate that the IFF handle is for a file */
+	    InitIFFasDOS (iff);
+d282 2
+a283 6
+	    /* Place it in the clipboard */
+	    if ((result = WritePrefs (ed, iff)) != ES_NORMAL)
+		result = ES_IFFERROR;
+
+	    /* Close the file */
+	    Close (iff->iff_Stream);
+d285 2
+a286 2
+	    /* Clear the execute file attribute */
+	    SetProtection (name, FIBF_EXECUTE);
+d288 16
+a303 5
+	else
+	{
+	    result = ES_DOSERROR;
+	    ed->ed_SecondaryResult = IoErr ();
+	}
+d305 3
+a307 3
+	/* Free the IFF handle */
+	FreeIFF (iff);
+    }
+d314 1
+a314 2
+#if 0
+void UpdateSamples (EdDataPtr ed, WORD x, WORD y, WORD c)
+d316 19
+d336 18
+a353 1
+    SetDrMd (rport, JAM1);
+d355 5
+a359 15
+    SetAPen (rport, ((c == 4) ? BLUE : c));
+    WritePixel (rport, SAMPLE0_X + x, SAMPLE0_Y + y);
+    SetAPen (rport, ((c == 4) ? WHITE : c));
+    WritePixel (rport, SAMPLE1_X + x, SAMPLE1_Y + y);
+    SetAPen (rport, ((c == 4) ? BLACK : c));
+    WritePixel (rport, SAMPLE2_X + x, SAMPLE2_Y + y);
+    SetAPen (rport, ((c == 4) ? RED : c));
+    WritePixel (rport, SAMPLE3_X + x, SAMPLE3_Y + y);
+}
+
+void InitSamples (EdDataPtr ed)
+{
+    UBYTE *pptr;		/* plane pointer */
+    WORD plane;			/* plane number */
+    UWORD x, y, c;		/* x coord, y coord, color */
+d361 16
+a376 18
+    for (y = 0; y < ed->ed_Height; y++)
+    {
+	for (x = 0; x < ed->ed_Width; x++)
+	{
+	    c = 0;
+	    for (plane = (skpad->WorkBM.Depth) - 1; plane >= 0; plane--)
+	    {
+		c = c << 1;
+		pptr = (UBYTE *) skpad->WorkBM.Planes[plane];
+		if (pptr[y * skpad->WorkBM.BytesPerRow + x / 8] &
+		    (1 << (7 - x % 8)))
+		    c |= 1;
+	    }
+	    if (c != 0)
+		UpdateSamples (x, y, c + 4);
+	}
+    }
+}
+d378 5
+a382 1
+#endif
+d384 1
+a384 30
+/* Default pointer imagry */
+#define DEF_PL0 \
+	0xC000, \
+	0x7000, \
+	0x3C00, \
+	0x3F00, \
+	0x1FC0, \
+	0x1FC0, \
+	0x0F00, \
+	0x0D80, \
+	0x04C0, \
+	0x0460, \
+	0x0020, \
+	0x0000
+
+#define DEF_PL1 \
+	0x4000, \
+	0xB000, \
+	0x4C00, \
+	0x4300, \
+	0x20C0, \
+	0x2000, \
+	0x1100, \
+	0x1280, \
+	0x0940, \
+	0x08A0, \
+	0x0040, \
+	0x0000
+
+UWORD PDefBody[2][12] =
+d386 19
+a404 2
+    {DEF_PL0},
+    {DEF_PL1}
+d419 3
+a421 3
+    struct PointerPrefs *pp = &(ed->ed_PrefsDefaults);
+    register WORD i, p;
+    UWORD *pptr;
+d423 20
+a442 9
+    /* Copy body data to default */
+    for (i = 0; i < 12; i++)
+    {
+	for (p = 0; p < 2; p++)
+	{
+	    pptr = (UWORD *)pp->pp_BMap.Planes[p];
+	    pptr[i] = PDefBody[p][i];
+	}
+    }
+d445 2
+a446 10
+    ConvertPP (ed, pp, pp, 4);
+
+    pp->pp_Depth = 2;
+    pp->pp_NumColors = 4;
+    for (i = 0; i < pp->pp_NumColors; i++)
+    {
+	pp->pp_CMap[i].red   = PDefCols[i][0];
+	pp->pp_CMap[i].green = PDefCols[i][1];
+	pp->pp_CMap[i].blue  = PDefCols[i][2];
+    }
+@
+
+
+38.3
+log
+@update error file name.
+@
+text
+@d7 2
+d35 1
+d65 1
+d72 1
+a73 1
+
+d82 2
+@
+
+
+38.2
+log
+@removed kprintf
+@
+text
+@d33 2
+d50 4
+d79 2
+d94 2
+a95 1
+	    result = WritePrefs (ed, iff);
+@
+
+
+38.1
+log
+@initial rcs login
+@
+text
+@a6 2
+#define	DB(x)	;
+
+a16 1
+    DB (kprintf ("UpdateSketch\n"));
+@

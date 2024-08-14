@@ -1,0 +1,1618 @@
+head     39.11;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.11; strict;
+comment  @ * @;
+
+
+39.11
+date     93.09.22.15.37.44;  author davidj;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     93.06.17.14.00.24;  author davidj;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     93.05.25.12.37.02;  author davidj;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     93.04.30.15.26.20;  author davidj;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     93.03.24.11.55.04;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.03.22.16.13.09;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.12.04.17.04.26;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.08.13.13.11.02;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.08.10.16.18.09;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.22.10.52.39;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.19.04.05.59;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.31.23;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.11
+log
+@can now turn off the control panel
+@
+text
+@/* input.c
+ *
+ */
+
+#include "amigaguidebase.h"
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+static VOID translateInput (Class * cl, struct IBox *box, Object * o2, struct gpInput *msg)
+{
+    msg->gpi_Mouse.X -= (G (o2)->LeftEdge - box->Left);
+    msg->gpi_Mouse.Y -= (G (o2)->TopEdge - box->Top);
+}
+
+/*****************************************************************************/
+
+ULONG propagateHit (struct AGLib *ag, Class * cl, Object * o, struct gpHitTest *msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct NodeData *nd;
+    struct IBox *box;
+
+    GetAttr (DTA_Domain, o, (ULONG *) & box);
+    cd->cd_Active = NULL;
+
+    if ((cd->cd_Flags & AGF_CONTROLS) && (msg->gpht_Mouse.Y < cd->cd_Top - box->Top))
+    {
+	/* Set the control flag */
+	cd->cd_Flags |= AGF_CONTROL;
+    }
+    else if (cd->cd_CurrentNode)
+    {
+	/* Clear the control flag */
+	cd->cd_Flags &= ~AGF_CONTROL;
+
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+	if (nd->nd_Object)
+	{
+	    cd->cd_Active = nd->nd_Object;
+	}
+    }
+    return (GMR_GADGETHIT);
+}
+
+/*****************************************************************************/
+
+ULONG goinactive (struct AGLib * ag, Class * cl, Object * o, struct gpInput * msg)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    struct ClientData *cd = INST_DATA (cl, o);
+    LONG wordt, topvt, topht;
+    struct TextFont *font;
+    struct Rectangle rect;
+    struct Region *old_r;
+    struct RastPort *trp;
+    struct RastPort *rp;
+    struct NodeData *nd;
+    BOOL notify = FALSE;
+    struct SIPCMsg *sm;
+    struct Line *line;
+    struct IBox *box;
+    struct IBox sel;
+    ULONG msize;
+
+    /* Get the node data for the current node */
+    nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+    if (cd->cd_Active)
+    {
+	struct DTSpecialInfo *esi = (struct DTSpecialInfo *) G (cd->cd_Active)->SpecialInfo;
+	struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+	ULONG retval;
+
+	retval = DoMethodA (cd->cd_Active, msg);
+	si->si_Flags = esi->si_Flags;
+	return (retval);
+    }
+    /* Get a pointer to the rastport */
+    else if (rp = ObtainGIRPort (msg->gpi_GInfo))
+    {
+	if (nd->nd_Font)
+	    font = nd->nd_Font;
+	else if (cd->cd_Font)
+	    font = cd->cd_Font;
+	else
+	    font = msg->gpi_GInfo->gi_DrInfo->dri_Font;
+	SetFont (rp, font);
+
+	/* Get the domain of the gadget */
+	GetAttr (DTA_Domain, o, (ULONG *) & box);
+
+	/* Do we have a current line? */
+	if (line = cd->cd_CurLine)
+	{
+	    /* Set up the rectangle */
+	    rect.MinX = box->Left;
+	    rect.MinY = cd->cd_Top;
+	    rect.MaxX = box->Left + box->Width - 1;
+	    rect.MaxY = box->Top + box->Height - 1;
+
+	    if (cd->cd_Flags & AGF_CONTROL)
+	    {
+		rect.MinY = box->Top;
+		rect.MaxY = cd->cd_Top;
+		trp = &cd->cd_Control;
+	    }
+	    else
+		trp = &cd->cd_Render;
+
+	    if (trp->Layer)
+	    {
+		/* Set up the rectangle */
+		ClearRegion (cd->cd_Region);
+		OrRectRegion (cd->cd_Region, &rect);
+		old_r = InstallClipRegion (trp->Layer, cd->cd_Region);
+
+		/* Draw the button frame */
+		drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+			   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+			   cd->cd_CurBox.Width, cd->cd_CurBox.Height, TRUE);
+
+		/* Draw the button text */
+		if (line == cd->cd_ActiveLine)
+		    SetABPenDrMd (trp, cd->cd_DrawInfo->dri_Pens[FILLTEXTPEN], cd->cd_DrawInfo->dri_Pens[FILLPEN], JAM2);
+		else
+		    SetABPenDrMd (trp, line->ln_FgPen, line->ln_BgPen, JAM2);
+		Move (trp, cd->cd_CurX, cd->cd_CurY);
+		Text (trp, line->ln_Text, line->ln_TextLen);
+
+		/* Remove the clipping region */
+		InstallClipRegion (trp->Layer, old_r);
+	    }
+
+	    /* Did they select a button */
+	    if (cd->cd_Flags & AGF_SELECTED)
+	    {
+		if (cd->cd_Flags & AGF_CONTROL)
+		{
+		    struct dtTrigger dtt;
+
+		    dtt.MethodID = DTM_TRIGGER;
+		    dtt.dtt_GInfo = NULL;
+		    dtt.dtt_Function = line->ln_Box.Left;
+		    dtt.dtt_Data = NULL;
+		    sam (ag, cd, &dtt, sizeof (struct dtTrigger));
+		}
+		else if (line && line->ln_Data)
+		{
+		    /* Set the new active line */
+		    cd->cd_ActiveLine = line;
+		    cd->cd_ActiveNum = line->ln_LinkNum;
+
+		    /* Allocate the command message */
+		    msize = sizeof (struct SIPCMsg) + strlen (line->ln_Data) + 1;
+
+		    if (sm = AllocVec (msize, MEMF_CLEAR))
+		    {
+			sm->sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+			sm->sm_Message.mn_Length = msize;
+			sm->sm_Type = SIPCT_COMMAND;
+			sm->sm_Data = MEMORY_FOLLOWING (sm);
+			strcpy (sm->sm_Data, line->ln_Data);
+			PutMsg (cd->cd_SIPCPort, (struct Message *) sm);
+		    }
+		}
+	    }
+	}
+	/* Was a word selected? */
+	else if (cd->cd_Flags & AGF_WORDSELECT)
+	{
+	    /* Double-click */
+	    cd->cd_Flags ^= AGF_WORDSELECT;
+	    wordt = TDTA_WordSelect;
+
+	    msize = sizeof (struct SIPCMsg) + (strlen (cd->cd_WordBuffer) * 2) + 14;
+
+	    if (sm = AllocVec (msize, MEMF_CLEAR))
+	    {
+		sm->sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+		sm->sm_Message.mn_Length = msize;
+		sm->sm_Type = SIPCT_COMMAND;
+		sm->sm_Data = MEMORY_FOLLOWING (sm);
+		sprintf (sm->sm_Data, "\"%s\" Link \"%s\"", cd->cd_WordBuffer, cd->cd_WordBuffer);
+		PutMsg (cd->cd_SIPCPort, (struct Message *) sm);
+	    }
+	}
+	/* Were we drag selecting */
+	else if (si->si_Flags & DTSIF_DRAGSELECT)
+	{
+	    /* Good select? */
+	    if (G (o)->Flags & SELECTED)
+	    {
+		if (cd->cd_Select.Top <= cd->cd_Select.Height)
+		{
+		    /* Prepare the select box */
+		    sel.Left = cd->cd_Select.Left;
+		    sel.Top = cd->cd_Select.Top;
+		    sel.Width = cd->cd_Select.Width;
+		    sel.Height = cd->cd_Select.Height;
+		}
+		else
+		{
+		    /* Prepare the select box */
+		    sel.Left = cd->cd_Select.Left;
+		    sel.Top = cd->cd_Select.Height;
+		    sel.Width = cd->cd_Select.Width;
+		    sel.Height = cd->cd_Select.Top;
+		}
+
+		/* Set the selected domain of the object */
+		setattrs (ag, o, DTA_SelectDomain, &sel, TAG_DONE);
+
+		/* Show that we are highlighted */
+		si->si_Flags |= DTSIF_HIGHLIGHT;
+	    }
+	    else
+	    {
+		/* Aborted by the right mouse button */
+		DrawBox (ag, cl, o, rp, box, &cd->cd_Select, DBS_UP);
+	    }
+
+	    /* We need to clear the pointer */
+	    notify = TRUE;
+	}
+
+	/* Did the top changed? */
+	if (cd->cd_Flags & AGF_CHANGED)
+	{
+	    cd->cd_Flags &= ~AGF_CHANGED;
+	    topvt = DTA_TopVert;
+	    topht = DTA_TopHoriz;
+	    notify = TRUE;
+	}
+
+	if (notify)
+	{
+	    /* Tell the world about our new data */
+	    notifyAttrChangesDM (ag, o, msg->gpi_GInfo, NULL,
+				 GA_ID, G (o)->GadgetID,
+				 wordt, cd->cd_WordBuffer,
+				 topvt, si->si_TopVert,
+				 topht, si->si_TopHoriz,
+				 DTA_Busy, FALSE,
+				 TAG_DONE);
+
+	    /* Show that we aren't busy */
+	    cd->cd_Flags &= ~AGF_BUSY;
+	}
+
+	/* Release the rastport */
+	ReleaseGIRPort (rp);
+    }
+
+    if (cd->cd_Flags & AGF_CONTROL)
+    {
+	FreeVec (cd->cd_CurLine);
+	cd->cd_Flags &= ~AGF_CONTROL;
+    }
+
+    /* Unselect the gadget */
+    si->si_Flags &= ~(DTSIF_DRAGGING | DTSIF_DRAGSELECT);
+    G (o)->Flags &= ~(SELECTED | ACTIVEGADGET);
+    cd->cd_Flags &= ~AGF_SELECTED;
+    cd->cd_CurLine = NULL;
+    return (0);
+}
+
+/*****************************************************************************/
+
+ULONG handleInput (struct AGLib * ag, Class * cl, Object * o, struct gpInput * msg)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct InputEvent *ie = msg->gpi_IEvent;
+    struct GadgetInfo *gi = msg->gpi_GInfo;
+    struct DrawInfo *dri = gi->gi_DrInfo;
+    ULONG retval = GMR_MEACTIVE;
+    struct Region *old_r = NULL;
+    struct TextFont *font;
+    struct Rectangle rect;
+    struct RastPort *trp;
+    struct RastPort *rp;
+    struct NodeData *nd;
+    struct Line *line;
+    struct IBox *box;
+    struct IBox *sel;
+    LONG fx, fy;
+    LONG fw, fh;
+    BOOL raised;
+    BOOL draw;
+    UWORD y;
+
+    if ((cd->cd_CurrentNode == NULL) || (cd->cd_Flags & AGF_BUSY))
+	return (GMR_NOREUSE);
+    if ((msg->MethodID == GM_GOACTIVE) && (ie == NULL))
+	return (GMR_NOREUSE);
+    if ((si->si_Flags & DTSIF_LAYOUT) || (!AttemptSemaphoreShared (&(si->si_Lock))))
+	return (GMR_NOREUSE);
+
+    cd = INST_DATA (ag->ag_Class, o);
+    nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+    prepareRastPorts (ag, cl, o);
+
+    GetAttr (DTA_Domain, o, (ULONG *) & box);
+
+    if (cd->cd_Active)
+    {
+	struct DTSpecialInfo *esi = (struct DTSpecialInfo *) G (cd->cd_Active)->SpecialInfo;
+
+	esi->si_Flags = si->si_Flags;
+
+	translateInput (cl, box, cd->cd_Active, msg);
+	retval = DoMethodA (cd->cd_Active, msg);
+    }
+    /* Get a pointer to the rastport */
+    else if (rp = ObtainGIRPort (msg->gpi_GInfo))
+    {
+	if (nd->nd_Font)
+	    font = nd->nd_Font;
+	else if (cd->cd_Font)
+	    font = cd->cd_Font;
+	else
+	    font = gi->gi_DrInfo->dri_Font;
+	SetFont (rp, font);
+
+	line = cd->cd_CurLine;
+
+	/* Set up the rectangle */
+	rect.MinX = box->Left;
+	rect.MinY = cd->cd_Top;
+	rect.MaxX = box->Left + box->Width - 1;
+	rect.MaxY = box->Top + box->Height - 1;
+
+	if (cd->cd_Flags & AGF_CONTROL)
+	{
+	    rect.MinY = box->Top;
+	    rect.MaxY = cd->cd_Top;
+	    trp = &cd->cd_Control;
+	}
+	else
+	    trp = &cd->cd_Render;
+
+	/* Set up clipping region here */
+	if (trp->Layer)
+	{
+	    /* Set up the rectangle */
+	    ClearRegion (cd->cd_Region);
+	    OrRectRegion (cd->cd_Region, &rect);
+	    old_r = InstallClipRegion (trp->Layer, cd->cd_Region);
+	}
+
+	/* Determine what to do... */
+	switch (ie->ie_Class)
+	{
+		/* Mouse button or movement */
+	    case IECLASS_RAWMOUSE:
+		switch (ie->ie_Code)
+		{
+		    case SELECTDOWN:
+			G (o)->Flags |= SELECTED;
+
+			/* Clear selection */
+			if (GetAttr (DTA_SelectDomain, o, (ULONG *) & sel) && sel)
+			    DoMethod (o, DTM_CLEARSELECTED, msg->gpi_GInfo);
+
+			/* See if they are hitting in the control area */
+			if (cd->cd_Flags & AGF_CONTROL)
+			{
+			    struct Controls *c;
+			    LONG i;
+
+			    /* They hit within the control panel */
+			    for (i = 0; i < MAX_CONTROLS; i++)
+			    {
+				c = &cd->cd_Controls[i];
+
+				if ((msg->gpi_Mouse.X >= c->c_Left) &&
+				    (msg->gpi_Mouse.X <= c->c_Left + cd->cd_BoxWidth - 1) &&
+				    (msg->gpi_Mouse.Y >= c->c_Top - box->Top) &&
+				    (msg->gpi_Mouse.Y <= c->c_Top - box->Top + cd->cd_ControlHeight - 1))
+				{
+				    if (c->c_Flags & CF_DISABLED)
+				    {
+					retval = GMR_NOREUSE;
+				    }
+				    else if (line = AllocVec (sizeof (struct Line), MEMF_CLEAR | MEMF_PUBLIC))
+				    {
+					line->ln_Text = c->c_Label;
+					line->ln_TextLen = c->c_LabelLen;
+					line->ln_FgPen = dri->dri_Pens[TEXTPEN];
+					line->ln_BgPen = dri->dri_Pens[BACKGROUNDPEN];
+					line->ln_Box.Left = c->c_ID;
+					line->ln_Font = font;
+
+					cd->cd_CurLine = line;
+
+					cd->cd_CurBox.Left = box->Left + c->c_Left;
+					cd->cd_CurBox.Top = c->c_Top;
+					cd->cd_CurBox.Width = cd->cd_BoxWidth;
+					cd->cd_CurBox.Height = cd->cd_ControlHeight;
+
+					cd->cd_CurX = box->Left + c->c_TLeft,
+					    cd->cd_CurY = c->c_Top + cd->cd_Control.TxBaseline + 2;
+
+					/* should be a routine for this since it's called so much */
+					drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+						   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+						   cd->cd_CurBox.Width, cd->cd_CurBox.Height, FALSE);
+					SetABPenDrMd (trp, dri->dri_Pens[FILLTEXTPEN], dri->dri_Pens[FILLPEN], JAM2);
+					Move (trp, cd->cd_CurX, cd->cd_CurY);
+					Text (trp, line->ln_Text, line->ln_TextLen);
+					cd->cd_Flags |= AGF_SELECTED | AGF_CONTROL;
+				    }
+				    i = MAX_CONTROLS;
+				}
+			    }
+			}
+			/* Are we drag selecting? */
+			else if (si->si_Flags & DTSIF_DRAGSELECT)
+			{
+			    /* Show that we changed */
+			    cd->cd_Flags |= AGF_CHANGED;
+
+			    /* Show that we are dragging */
+			    si->si_Flags |= DTSIF_DRAGGING | DTSIF_DRAGSELECT;
+
+			    /* Find the character that was selected */
+			    FindLine (ag, cl, o, msg, rp, 1, box, DBS_DOWN);
+			}
+			/* Are we on a line? */
+			else if (line = FindLine (ag, cl, o, msg, rp, 0, box, DBS_DOWN))
+			{
+			    /* Is this line a link? */
+			    if (line->ln_Flags & LNF_LINK)
+			    {
+				/* If this isn't the active link, then make it the active link */
+				if (cd->cd_ActiveLine && (line != cd->cd_ActiveLine))
+				{
+				    struct Line *oln = cd->cd_ActiveLine;
+				    LONG y, vta;
+
+				    /* Calculate the y position of the previous active button */
+				    vta = UMult32 (si->si_TopVert, cd->cd_LineHeight);
+				    y = (LONG) (cd->cd_Top + cd->cd_RPort.TxBaseline + 1) + (LONG) oln->ln_Box.Top - vta;
+
+				    /* Set the new active line */
+				    cd->cd_ActiveLine = line;
+				    cd->cd_ActiveNum = line->ln_LinkNum;
+
+				    /* Dehighlight the previous active button */
+				    r_renderLink (ag, cd, oln, (LONG) box->Left - si->si_TopHoriz, y, 0);
+				}
+
+				fx = (LONG) line->ln_Box.Left - si->si_TopHoriz;
+				fw = (LONG) line->ln_Box.Width;
+				fh = (LONG) cd->cd_LineHeight;
+				y = cd->cd_Top - box->Top + ((cd->cd_WY - si->si_TopVert) * si->si_VertUnit);
+
+				cd->cd_CurLine = line;
+
+				cd->cd_CurBox.Left = box->Left + fx;
+				cd->cd_CurBox.Top = box->Top + y;
+				cd->cd_CurBox.Width = fw;
+				cd->cd_CurBox.Height = fh;
+
+				cd->cd_CurX = box->Left + fx + 2;
+				cd->cd_CurY = box->Top + y + font->tf_Baseline + 1;
+
+				/* should be a routine for this since it's called so much */
+				drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+					   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+					   cd->cd_CurBox.Width, cd->cd_CurBox.Height, FALSE);
+				SetABPenDrMd (trp, dri->dri_Pens[FILLTEXTPEN], dri->dri_Pens[FILLPEN], JAM2);
+				Move (trp, cd->cd_CurX, cd->cd_CurY);
+				Text (trp, line->ln_Text, line->ln_TextLen);
+				cd->cd_Flags |= AGF_SELECTED;
+			    }
+			    /* Did they double-click us? */
+			    else if (DoubleClick (cd->cd_SSec, cd->cd_SMic, msg->gpi_IEvent->ie_TimeStamp.tv_secs, msg->gpi_IEvent->ie_TimeStamp.tv_micro))
+			    {
+				/* Same word? */
+				if (cd->cd_SWord == cd->cd_Word)
+				{
+				    /* Set all the flag values that we need */
+				    cd->cd_Flags |= (AGF_CHANGED | AGF_WORDSELECT);
+				    G (o)->Flags |= SELECTED;
+				    retval = (GMR_NOREUSE | GMR_VERIFY);
+				}
+			    }
+			    /* Remember the time stamp */
+			    else
+			    {
+				/* Prepare the stamp */
+				cd->cd_SSec = msg->gpi_IEvent->ie_TimeStamp.tv_secs;
+				cd->cd_SMic = msg->gpi_IEvent->ie_TimeStamp.tv_micro;
+				cd->cd_SWord = cd->cd_Word;
+			    }
+			}
+			else
+			{
+			    retval = GMR_NOREUSE;
+			}
+			break;
+
+			/* Select button released */
+		    case SELECTUP:
+			retval = (GMR_NOREUSE | GMR_VERIFY);
+			break;
+
+			/* Menu (ABORT) button pressed */
+		    case MENUDOWN:
+			cd->cd_Flags &= ~AGF_SELECTED;
+			retval = GMR_NOREUSE;
+			break;
+
+		    default:
+			if (line)
+			{
+			    draw = FALSE;
+			    raised = TRUE;
+			    fx = cd->cd_CurBox.Left - box->Left;
+			    fy = cd->cd_CurBox.Top - box->Top;
+
+			    if ((msg->gpi_Mouse.X >= fx) &&
+				(msg->gpi_Mouse.X <= fx + cd->cd_CurBox.Width - 1) &&
+				(msg->gpi_Mouse.Y >= fy) &&
+				(msg->gpi_Mouse.Y <= fy + cd->cd_CurBox.Height - 1))
+			    {
+				raised = FALSE;
+			    }
+
+			    if (cd->cd_Flags & AGF_SELECTED)
+			    {
+				if (raised)
+				{
+				    draw = TRUE;
+				    if (line == cd->cd_ActiveLine)
+					SetABPenDrMd (trp, dri->dri_Pens[FILLTEXTPEN], dri->dri_Pens[FILLPEN], JAM2);
+				    else
+					SetABPenDrMd (trp, line->ln_FgPen, line->ln_BgPen, JAM2);
+				    cd->cd_Flags &= ~AGF_SELECTED;
+				}
+			    }
+			    else
+			    {
+				if (!raised)
+				{
+				    draw = TRUE;
+				    SetABPenDrMd (trp, dri->dri_Pens[FILLTEXTPEN], dri->dri_Pens[FILLPEN], JAM2);
+				    cd->cd_Flags |= AGF_SELECTED;
+				}
+			    }
+
+			    if (draw)
+			    {
+				drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+					   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+					   cd->cd_CurBox.Width, cd->cd_CurBox.Height, raised);
+				Move (trp, cd->cd_CurX, cd->cd_CurY);
+				Text (trp, line->ln_Text, line->ln_TextLen);
+			    }
+			}
+			else if (si->si_Flags & DTSIF_DRAGSELECT)
+			{
+			    /* Find the character that was selected */
+			    FindLine (ag, cl, o, msg, rp, 1, box, DBS_MOVE);
+			}
+
+			break;
+		}
+		break;
+	}
+
+	/* Remove the clipping region */
+	if (trp->Layer)
+	    InstallClipRegion (trp->Layer, old_r);
+
+	/* Release the rastport */
+	ReleaseGIRPort (rp);
+    }
+
+    /* Release the data lock */
+    ReleaseSemaphore (&si->si_Lock);
+
+    return (retval);
+}
+@
+
+
+39.10
+log
+@*** empty log message ***
+@
+text
+@d30 1
+a30 1
+    if (msg->gpht_Mouse.Y < cd->cd_Top - box->Top)
+@
+
+
+39.9
+log
+@*** empty log message ***
+@
+text
+@d13 1
+a13 1
+static VOID translateInput (Class * cl, struct IBox * box, Object * o2, struct gpInput * msg)
+d21 1
+a21 1
+ULONG propagateHit (struct AGLib * ag, Class * cl, Object * o, struct gpHitTest * msg)
+d32 1
+d37 3
+d99 6
+d106 3
+d110 1
+a116 4
+		rect.MinX = box->Left;
+		rect.MinY = box->Top;
+		rect.MaxX = rect.MinX + box->Width - 1;
+		rect.MaxY = rect.MinY + box->Height - 1;
+d155 1
+a155 1
+		    cd->cd_ActiveNum  = line->ln_LinkNum;
+d159 1
+d180 1
+d309 1
+a309 1
+    GetAttr (DTA_Domain, o, (ULONG *) &box);
+d333 6
+d340 3
+d344 1
+a351 4
+	    rect.MinX = box->Left;
+	    rect.MinY = box->Top;
+	    rect.MaxX = rect.MinX + box->Width - 1;
+	    rect.MaxY = rect.MinY + box->Height - 1;
+d372 1
+a372 1
+			if (msg->gpi_Mouse.Y < cd->cd_Top - box->Top)
+d393 4
+a396 4
+					line->ln_Text     = c->c_Label;
+					line->ln_TextLen  = c->c_LabelLen;
+					line->ln_FgPen    = dri->dri_Pens[TEXTPEN];
+					line->ln_BgPen    = dri->dri_Pens[BACKGROUNDPEN];
+d398 1
+a398 1
+					line->ln_Font     = font;
+d402 3
+a404 3
+					cd->cd_CurBox.Left   = box->Left + c->c_Left;
+					cd->cd_CurBox.Top    = c->c_Top;
+					cd->cd_CurBox.Width  = cd->cd_BoxWidth;
+d408 1
+a408 1
+					  cd->cd_CurY = c->c_Top + cd->cd_Control.TxBaseline + 2;
+a440 1
+#if 0
+d449 1
+a449 1
+				    y   = (LONG)(cd->cd_Top + cd->cd_RPort.TxBaseline + 1) + (LONG)oln->ln_Box.Top - vta;
+d453 1
+a453 1
+				    cd->cd_ActiveNum  = line->ln_LinkNum;
+d456 1
+a456 1
+				    r_renderLink (ag, cd, oln, (LONG)box->Left - si->si_TopHoriz, y, 0);
+a457 1
+#endif
+d462 1
+a462 1
+				y  = cd->cd_Top - box->Top + ((cd->cd_WY - si->si_TopVert) * si->si_VertUnit);
+d466 3
+a468 3
+				cd->cd_CurBox.Left   = box->Left + fx;
+				cd->cd_CurBox.Top    = box->Top + y;
+				cd->cd_CurBox.Width  = fw;
+@
+
+
+39.8
+log
+@handles active gadget
+@
+text
+@d143 1
+a143 1
+		    /* This has been activated */
+d147 1
+d375 4
+a378 4
+					line->ln_Text = c->c_Label;
+					line->ln_TextLen = c->c_LabelLen;
+					line->ln_FgPen = dri->dri_Pens[TEXTPEN];
+					line->ln_BgPen = dri->dri_Pens[BACKGROUNDPEN];
+d380 1
+a380 1
+					line->ln_Font = font;
+d384 3
+a386 3
+					cd->cd_CurBox.Left = box->Left + c->c_Left;
+					cd->cd_CurBox.Top = c->c_Top;
+					cd->cd_CurBox.Width = cd->cd_BoxWidth;
+d423 20
+d446 1
+a446 1
+				y = cd->cd_Top - box->Top + ((cd->cd_WY - si->si_TopVert) * si->si_VertUnit);
+@
+
+
+39.7
+log
+@was using bogus lines
+@
+text
+@d117 4
+a120 1
+		SetABPenDrMd (trp, line->ln_FgPen, line->ln_BgPen, JAM2);
+d137 1
+a137 1
+		    dtt.dtt_Function = line->ln_XOffset;
+d143 4
+d378 2
+a379 1
+					line->ln_XOffset = c->c_ID;
+d422 2
+a423 2
+				fx = (LONG) line->ln_XOffset - si->si_TopHoriz;
+				fw = (LONG) line->ln_Width;
+d434 1
+a434 1
+				cd->cd_CurX = box->Left + fx + 4;
+d505 4
+a508 1
+				    SetABPenDrMd (trp, line->ln_FgPen, line->ln_BgPen, JAM2);
+@
+
+
+39.6
+log
+@*** empty log message ***
+@
+text
+@d138 1
+a138 1
+		else
+@
+
+
+39.5
+log
+@render speedup.
+@
+text
+@a9 4
+#define	DL(x)	;
+#define	DR(x)	;
+#define	DN(x)	;
+#define	DX(x)	;
+a50 1
+    struct Region *old_r = NULL;
+d54 1
+a59 1
+    struct IBox *csel;
+a64 2
+    DN (kprintf ("goinactive\n"));
+
+d100 1
+a100 7
+	    /* Not much chance of this happening anymore.  Could probably
+	     * safely take it out. */
+	    if (trp->Layer == NULL)
+	    {
+		DN (kprintf ("input.c 110: layer == NULL\n"));
+	    }
+	    else
+a147 1
+			DB (kprintf ("cmd := %s\n", sm->sm_Data));
+a155 7
+	    si->si_Flags |= DTSIF_HIGHLIGHT;
+	    DB (kprintf ("set       : 0x%08lx\n", si->si_Flags));
+
+	    /* Clear selection */
+	    if (GetAttr (DTA_SelectDomain, o, (ULONG *) & csel) && csel)
+		DoMethod (o, DTM_CLEARSELECTED, msg->gpi_GInfo);
+
+a156 1
+	    DB (kprintf ("word select \"%s\"\n", cd->cd_WordBuffer));
+a167 1
+		DB (kprintf ("cmd := %s\n", sm->sm_Data));
+a169 1
+	    si->si_Flags |= DTSIF_HIGHLIGHT;
+a198 1
+		DB (kprintf ("set       : 0x%08lx\n", si->si_Flags));
+a221 1
+	    DX (kprintf ("notify %ld,%ld\n", si->si_TopVert, si->si_TopHoriz));
+a248 1
+    DB (kprintf ("release   : 0x%08lx\n", si->si_Flags));
+d289 1
+a289 1
+    GetAttr (DTA_Domain, o, (ULONG *) & box);
+a338 1
+			DB (kprintf ("down      : 0x%08lx\n", si->si_Flags));
+a342 2
+			{
+			    DB (kprintf ("clear selected\n"));
+a343 1
+			}
+d345 1
+d396 1
+d408 1
+d411 1
+d421 3
+a423 3
+				cd->cd_CurBox.Left = box->Left + fx;
+				cd->cd_CurBox.Top = box->Top + y;
+				cd->cd_CurBox.Width = fw;
+d438 2
+a439 3
+			    /* Same word and within double-click time? */
+			    else if ((cd->cd_SWord == cd->cd_Word) &&
+				     (DoubleClick (cd->cd_SSec, cd->cd_SMic, msg->gpi_IEvent->ie_TimeStamp.tv_secs, msg->gpi_IEvent->ie_TimeStamp.tv_micro)))
+d441 8
+a448 12
+				/* Set all the flag values that we need */
+				cd->cd_Flags |= (AGF_CHANGED | AGF_WORDSELECT);
+				si->si_Flags |= DTSIF_DRAGSELECT;
+				G (o)->Flags |= SELECTED;
+
+				/* Show that we are dragging */
+				si->si_Flags |= DTSIF_DRAGGING | DTSIF_DRAGSELECT;
+
+				/* Draw the highlight */
+				DrawBox (ag, cl, o, rp, box, &cd->cd_Select, DBS_DOWN);
+
+				retval = (GMR_NOREUSE | GMR_VERIFY);
+d450 1
+a532 1
+	{
+a533 1
+	}
+d535 1
+d539 1
+@
+
+
+39.4
+log
+@uses WA_HelpGroup now.
+@
+text
+@d13 1
+d55 1
+a55 1
+    struct Region *new_r, *old_r = NULL;
+d115 8
+a122 15
+		/* SET UP CLIPPING REGION HERE */
+		if (new_r = NewRegion ())
+		{
+		    /* Set up the rectangle */
+		    rect.MinX = box->Left;
+		    rect.MinY = box->Top;
+		    rect.MaxX = rect.MinX + box->Width - 1;
+		    rect.MaxY = rect.MinY + box->Height - 1;
+
+		    DR (kprintf ("OrRectRegion\n"));
+		    OrRectRegion (new_r, &rect);
+		    DR (kprintf ("InstallClipRegion\n"));
+		    old_r = InstallClipRegion (trp->Layer, new_r);
+		    DR (kprintf ("done\n"));
+		}
+d130 3
+a132 3
+		SetAPen (trp, line->ln_FgPen);
+		SetBPen (trp, line->ln_BgPen);
+		RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+d134 2
+a135 6
+		/* REMOVE THE CLIPPING REGION */
+		if (new_r)
+		{
+		    InstallClipRegion (trp->Layer, old_r);
+		    DisposeRegion (new_r);
+		}
+d247 1
+a288 1
+    struct Region *new_r = NULL;
+d345 2
+a346 1
+	if (trp->Layer == NULL)
+a347 6
+	    DN (kprintf ("input.c 363: layer == NULL\n"));
+	}
+
+	/* SET UP CLIPPING REGION HERE */
+	if (trp->Layer && (new_r = NewRegion ()))
+	{
+d353 3
+a355 3
+
+	    OrRectRegion (new_r, &rect);
+	    old_r = InstallClipRegion (trp->Layer, new_r);
+d417 3
+a419 3
+					SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+					SetBPen (trp, dri->dri_Pens[FILLPEN]);
+					RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+d460 3
+a462 3
+				SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+				SetBPen (trp, dri->dri_Pens[FILLPEN]);
+				RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+d528 1
+a528 2
+				    SetAPen (trp, line->ln_FgPen);
+				    SetBPen (trp, line->ln_BgPen);
+d537 1
+a537 2
+				    SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+				    SetBPen (trp, dri->dri_Pens[FILLPEN]);
+d547 2
+a548 1
+				RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+d562 2
+a563 2
+	/* REMOVE THE CLIPPING REGION */
+	if (new_r)
+a565 1
+	    DisposeRegion (new_r);
+@
+
+
+39.3
+log
+@now blocks input when busy
+@
+text
+@d54 1
+a54 2
+    struct Region *new_r = NULL;
+    struct Region *old_r = NULL;
+a55 1
+    struct DatabaseData *dbd;
+a100 2
+	    dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+
+a299 1
+    struct DatabaseData *dbd;
+a307 1
+    LONG px, py;
+a322 1
+    dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+a348 2
+	px = si->si_HorizUnit;
+	py = si->si_VertUnit;
+@
+
+
+39.2
+log
+@added highlighting
+@
+text
+@d12 1
+d71 2
+d110 3
+a112 2
+	    /* SET UP CLIPPING REGION HERE */
+	    if (new_r = NewRegion ())
+d114 3
+a116 25
+		/* Set up the rectangle */
+		rect.MinX = box->Left;
+		rect.MinY = box->Top;
+		rect.MaxX = rect.MinX + box->Width - 1;
+		rect.MaxY = rect.MinY + box->Height - 1;
+
+		DR (kprintf ("OrRectRegion\n"));
+		OrRectRegion (new_r, &rect);
+		DR (kprintf ("InstallClipRegion\n"));
+		old_r = InstallClipRegion (trp->Layer, new_r);
+		DR (kprintf ("done\n"));
+	    }
+
+	    /* Draw the button frame */
+	    drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+		       cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+		       cd->cd_CurBox.Width, cd->cd_CurBox.Height, TRUE);
+
+	    /* Draw the button text */
+	    SetAPen (trp, line->ln_FgPen);
+	    SetBPen (trp, line->ln_BgPen);
+	    RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+
+	    /* REMOVE THE CLIPPING REGION */
+	    if (new_r)
+d118 32
+a149 2
+		InstallClipRegion (trp->Layer, old_r);
+		DisposeRegion (new_r);
+d185 1
+a185 1
+DB (kprintf ("set       : 0x%08lx\n", si->si_Flags));
+d237 1
+a237 1
+DB (kprintf ("set       : 0x%08lx\n", si->si_Flags));
+d268 3
+d288 1
+a288 1
+DB (kprintf ("release   : 0x%08lx\n", si->si_Flags));
+a316 1
+    ULONG i, j;
+d320 1
+a320 3
+    struct TextFont *tf = cd->cd_GInfo.gi_DrInfo->dri_Font;
+
+    if (cd->cd_CurrentNode == NULL)
+d331 2
+d364 5
+d370 1
+a370 1
+	if (new_r = NewRegion ())
+d390 1
+a390 1
+DB (kprintf ("down      : 0x%08lx\n", si->si_Flags));
+d403 1
+a403 2
+			    LONG i, j, x, y;
+			    STRPTR label;
+d468 1
+a468 1
+				y  = cd->cd_Top - box->Top + ((cd->cd_WY - si->si_TopVert) * si->si_VertUnit);
+@
+
+
+39.1
+log
+@implemented node hosts.
+@
+text
+@d9 1
+d11 1
+d15 1
+a15 1
+static VOID translateInput (Class * cl, struct IBox *box, Object * o2, struct gpInput * msg)
+d17 2
+a18 2
+    msg->gpi_Mouse.X -= (G(o2)->LeftEdge - box->Left);
+    msg->gpi_Mouse.Y -= (G(o2)->TopEdge - box->Top);
+d34 1
+a34 2
+	DL (kprintf ("hit control\n"));
+	cd->cd_Flags |= HNF_CONTROL;
+a40 1
+	    DL (kprintf ("hit embedded\n"));
+a42 4
+	else
+	{
+	    DL (kprintf ("hit node\n"));
+	}
+d51 1
+d55 1
+d57 1
+d62 1
+d64 1
+d67 1
+d75 2
+a76 2
+	struct DTSpecialInfo *esi = (struct DTSpecialInfo *)G(cd->cd_Active)->SpecialInfo;
+	struct DTSpecialInfo *si = (struct DTSpecialInfo *)G(o)->SpecialInfo;
+a78 1
+	DL (kprintf ("goinactive nd_Object\n"));
+d83 2
+a84 1
+    else
+d86 13
+a98 2
+	/* Get a pointer to the rastport */
+	if (rp = ObtainGIRPort (msg->gpi_GInfo))
+d100 1
+a100 4
+	    /* Do we have a current line? */
+	    if (line = cd->cd_CurLine)
+	    {
+		dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+d102 4
+a105 4
+		if (cd->cd_Flags & HNF_CONTROL)
+		    trp = &cd->cd_Control;
+		else
+		    trp = &cd->cd_Render;
+d107 8
+a114 8
+		/* SET UP CLIPPING REGION HERE */
+#if 1
+		if (new_r = NewRegion ())
+#else
+		if ((dbd->dbd_Flags & DBDF_LAYER) && (new_r = NewRegion ()))
+#endif
+		{
+		    GetAttr (DTA_Domain, o, (ULONG *) & box);
+d116 6
+a121 5
+		    /* Set up the rectangle */
+		    rect.MinX = box->Left;
+		    rect.MinY = box->Top;
+		    rect.MaxX = rect.MinX + box->Width - 1;
+		    rect.MaxY = rect.MinY + box->Height - 1;
+d123 4
+a126 3
+		    OrRectRegion (new_r, &rect);
+		    old_r = InstallClipRegion (trp->Layer, new_r);
+		}
+d128 4
+a131 4
+		/* Draw the button frame */
+		drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+			   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+			   cd->cd_CurBox.Width, cd->cd_CurBox.Height, TRUE);
+d133 6
+a138 4
+		/* Draw the button text */
+		SetAPen (trp, line->ln_FgPen);
+		SetBPen (trp, line->ln_BgPen);
+		RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+d140 4
+a143 2
+		/* REMOVE THE CLIPPING REGION */
+		if (new_r)
+d145 7
+a151 2
+		    InstallClipRegion (trp->Layer, old_r);
+		    DisposeRegion (new_r);
+d153 1
+a153 3
+
+		/* Did they select a button */
+		if (cd->cd_Flags & HNF_SELECTED)
+d155 2
+a156 1
+		    if (cd->cd_Flags & HNF_CONTROL)
+d158 25
+a182 1
+			struct dtTrigger dtt;
+d184 34
+a217 19
+			dtt.MethodID     = DTM_TRIGGER;
+			dtt.dtt_GInfo    = NULL;
+			dtt.dtt_Function = line->ln_XOffset;
+			dtt.dtt_Data     = NULL;
+			sam (ag, cd, &dtt, sizeof (struct dtTrigger));
+		    }
+		    else
+		    {
+			msize = sizeof (struct SIPCMsg) + strlen (line->ln_Data) + 1;
+			if (sm = AllocVec (msize, MEMF_CLEAR))
+			{
+			    sm->sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+			    sm->sm_Message.mn_Length = msize;
+			    sm->sm_Type = SIPCT_COMMAND;
+			    sm->sm_Data = MEMORY_FOLLOWING (sm);
+			    strcpy (sm->sm_Data, line->ln_Data);
+			    PutMsg (cd->cd_SIPCPort, (struct Message *) sm);
+			}
+		    }
+d220 11
+a230 3
+		/* Deselect the line */
+		cd->cd_Flags &= ~HNF_SELECTED;
+		cd->cd_CurLine = NULL;
+d233 23
+a255 2
+	    /* Release the rastport */
+	    ReleaseGIRPort (rp);
+d257 3
+d262 1
+a262 1
+    if (cd->cd_Flags & HNF_CONTROL)
+d265 1
+a265 1
+	cd->cd_Flags &= ~HNF_CONTROL;
+d269 1
+d271 3
+d281 1
+a289 1
+    struct DTSpecialInfo *si;
+d297 2
+a306 1
+    UWORD lineheight = tf->tf_YSize + 2;
+a311 1
+    si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+d318 1
+d323 1
+a323 1
+	struct DTSpecialInfo *esi = (struct DTSpecialInfo *)G(cd->cd_Active)->SpecialInfo;
+a326 1
+	DL (kprintf ("handleInput nd_Object\n"));
+d330 2
+a331 1
+    else
+d333 19
+a351 2
+	/* Get a pointer to the rastport */
+	if (rp = ObtainGIRPort (msg->gpi_GInfo))
+d353 5
+a357 6
+	    if (nd->nd_Font)
+		font = nd->nd_Font;
+	    else if (cd->cd_Font)
+		font = cd->cd_Font;
+	    else
+		font = gi->gi_DrInfo->dri_Font;
+d359 3
+a361 1
+	    line = cd->cd_CurLine;
+d363 10
+a372 4
+	    if (cd->cd_Flags & HNF_CONTROL)
+		trp = &cd->cd_Control;
+	    else
+		trp = &cd->cd_Render;
+d374 6
+a379 12
+	    /* SET UP CLIPPING REGION HERE */
+#if 1
+	    if (new_r = NewRegion ())
+#else
+	    if ((dbd->dbd_Flags & DBDF_LAYER) && (new_r = NewRegion ()))
+#endif
+	    {
+		/* Set up the rectangle */
+		rect.MinX = box->Left;
+		rect.MinY = box->Top;
+		rect.MaxX = rect.MinX + box->Width - 1;
+		rect.MaxY = rect.MinY + box->Height - 1;
+d381 5
+a385 3
+		OrRectRegion (new_r, &rect);
+		old_r = InstallClipRegion (trp->Layer, new_r);
+	    }
+d387 2
+a388 11
+	    /* Determine what to do... */
+	    switch (ie->ie_Class)
+	    {
+		    /* Mouse button or movement */
+		case IECLASS_RAWMOUSE:
+		    switch (ie->ie_Code)
+		    {
+			case SELECTDOWN:
+			    G (o)->Flags |= SELECTED;
+
+			    if (msg->gpi_Mouse.Y < cd->cd_Top - box->Top)
+d390 1
+a390 3
+				struct Controls *c;
+				LONG i, j, x, y;
+				STRPTR label;
+d392 4
+a395 2
+				/* They hit within the control panel */
+				for (i = 0; i < MAX_CONTROLS; i++)
+d397 21
+a417 1
+				    c = &cd->cd_Controls[i];
+d419 8
+a426 37
+				    if ((msg->gpi_Mouse.X >= c->c_Left) &&
+					(msg->gpi_Mouse.X <= c->c_Left + cd->cd_BoxWidth - 1) &&
+					(msg->gpi_Mouse.Y >= c->c_Top - box->Top) &&
+					(msg->gpi_Mouse.Y <= c->c_Top - box->Top + cd->cd_ControlHeight - 1))
+				    {
+					if (c->c_Flags & CF_DISABLED)
+					{
+					    retval = GMR_NOREUSE;
+					}
+					else if (line = AllocVec (sizeof (struct Line), MEMF_CLEAR | MEMF_PUBLIC))
+					{
+					    line->ln_Text = c->c_Label;
+					    line->ln_TextLen = c->c_LabelLen;
+					    line->ln_FgPen = dri->dri_Pens[TEXTPEN];
+					    line->ln_BgPen = dri->dri_Pens[BACKGROUNDPEN];
+					    line->ln_XOffset = c->c_ID;
+
+					    cd->cd_CurLine = line;
+
+					    cd->cd_CurBox.Left = box->Left + c->c_Left;
+					    cd->cd_CurBox.Top = c->c_Top;
+					    cd->cd_CurBox.Width = cd->cd_BoxWidth;
+					    cd->cd_CurBox.Height = cd->cd_ControlHeight;
+
+					    cd->cd_CurX = box->Left + c->c_TLeft,
+					      cd->cd_CurY = c->c_Top + cd->cd_Control.TxBaseline + 2;
+
+					    /* should be a routine for this since it's called so much */
+					    drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+						       cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+						       cd->cd_CurBox.Width, cd->cd_CurBox.Height, FALSE);
+					    SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+					    SetBPen (trp, dri->dri_Pens[FILLPEN]);
+					    RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+					    cd->cd_Flags |= HNF_SELECTED | HNF_CONTROL;
+					}
+					i = MAX_CONTROLS;
+d428 1
+d431 15
+a445 1
+			    else
+d447 4
+a450 9
+				/* Get a pointer to the first visible line */
+				line = (struct Line *) cd->cd_LineList.mlh_Head;
+				i = si->si_TopVert;
+				while (line->ln_Link.mln_Succ && i)
+				{
+				    if (line->ln_Flags & LNF_LF)
+					i--;
+				    line = (struct Line *) line->ln_Link.mln_Succ;
+				}
+d452 27
+a478 2
+				i = si->si_VisVert;
+				y = cd->cd_Top - box->Top;
+d480 2
+a481 7
+				while (line->ln_Link.mln_Succ && i && !cd->cd_CurLine)
+				{
+				    if (line->ln_Flags & LNF_LINK)
+				    {
+					fx = (LONG) line->ln_XOffset - si->si_TopHoriz;
+					fw = (LONG) line->ln_Width;
+					fh = (LONG) cd->cd_LineHeight;
+d483 2
+a484 25
+					if ((msg->gpi_Mouse.X >= fx) &&
+					    (msg->gpi_Mouse.X <= (fx + fw - 1)) &&
+					    (msg->gpi_Mouse.Y >= y) &&
+					    (msg->gpi_Mouse.Y <= (y + fh - 1)))
+					{
+					    cd->cd_CurLine = line;
+
+					    cd->cd_CurBox.Left = box->Left + fx;
+					    cd->cd_CurBox.Top = box->Top + y;
+					    cd->cd_CurBox.Width = fw;
+					    cd->cd_CurBox.Height = fh;
+
+					    cd->cd_CurX = box->Left + fx + 4;
+					    cd->cd_CurY = box->Top + y + font->tf_Baseline + 1;
+
+					    /* should be a routine for this since it's called so much */
+					    drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+						       cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+						       cd->cd_CurBox.Width, cd->cd_CurBox.Height, FALSE);
+					    SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+					    SetBPen (trp, dri->dri_Pens[FILLPEN]);
+					    RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+					    cd->cd_Flags |= HNF_SELECTED;
+					}
+				    }
+d486 8
+a493 7
+				    if (line->ln_Flags & LNF_LF)
+				    {
+					y += cd->cd_LineHeight;
+					i--;
+				    }
+				    line = (struct Line *) line->ln_Link.mln_Succ;
+				}
+d495 6
+a500 1
+			    break;
+d502 10
+a511 4
+			    /* Select button released */
+			case SELECTUP:
+			    retval = (GMR_NOREUSE | GMR_VERIFY);
+			    break;
+d513 7
+a519 5
+			    /* Menu (ABORT) button pressed */
+			case MENUDOWN:
+			    cd->cd_Flags &= ~HNF_SELECTED;
+			    retval = GMR_NOREUSE;
+			    break;
+d521 4
+a524 2
+			default:
+			    if (line)
+d526 2
+a527 4
+				draw = FALSE;
+				raised = TRUE;
+				fx = cd->cd_CurBox.Left - box->Left;
+				fy = cd->cd_CurBox.Top - box->Top;
+d529 3
+a531 4
+				if ((msg->gpi_Mouse.X >= fx) &&
+				    (msg->gpi_Mouse.X <= fx + cd->cd_CurBox.Width - 1) &&
+				    (msg->gpi_Mouse.Y >= fy) &&
+				    (msg->gpi_Mouse.Y <= fy + cd->cd_CurBox.Height - 1))
+d533 4
+a536 1
+				    raised = FALSE;
+d538 4
+a541 2
+
+				if (cd->cd_Flags & HNF_SELECTED)
+d543 4
+a546 7
+				    if (raised)
+				    {
+					draw = TRUE;
+					SetAPen (trp, line->ln_FgPen);
+					SetBPen (trp, line->ln_BgPen);
+					cd->cd_Flags &= ~HNF_SELECTED;
+				    }
+d548 1
+a548 10
+				else
+				{
+				    if (!raised)
+				    {
+					draw = TRUE;
+					SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+					SetBPen (trp, dri->dri_Pens[FILLPEN]);
+					cd->cd_Flags |= HNF_SELECTED;
+				    }
+				}
+d550 6
+a555 7
+				if (draw)
+				{
+				    drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+					       cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+					       cd->cd_CurBox.Width, cd->cd_CurBox.Height, raised);
+				    RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+				}
+d557 6
+d564 4
+a567 4
+			    break;
+		    }
+		    break;
+	    }
+d569 6
+a574 6
+	    /* REMOVE THE CLIPPING REGION */
+	    if (new_r)
+	    {
+		InstallClipRegion (trp->Layer, old_r);
+		DisposeRegion (new_r);
+	    }
+d576 1
+a576 2
+	    ReleaseGIRPort (rp);
+	}
+d578 1
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d12 2
+a13 2
+#if 0
+static VOID translateCGPInput (Class *cl, Object * o1, Object * o2, struct gpInput * msg)
+d15 2
+a16 4
+    struct localObjData *lod = INST_DATA(cl, o1);
+
+    msg->gpi_Mouse.X -= (G(o2)->LeftEdge - lod->lod_Domain.Left);
+    msg->gpi_Mouse.Y -= (G(o2)->TopEdge - lod->lod_Domain.Top);
+a17 1
+#endif
+d21 1
+a21 1
+ULONG propagateHit (struct AGLib *ag, Class *cl, Object *o, struct gpHitTest *msg)
+d27 1
+a27 1
+    GetAttr (DTA_Domain, o, (ULONG *)&box);
+d37 1
+a37 1
+	nd  = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+d73 4
+d78 3
+a80 1
+	return DoMethodA (cd->cd_Active, msg);
+d220 2
+a221 2
+    cd  = INST_DATA (ag->ag_Class, o);
+    nd  = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+d227 4
+d232 1
+d288 1
+a288 1
+				for (i = 0; i < 6; i++)
+d297 5
+a301 1
+					if (line = AllocVec (sizeof (struct Line), MEMF_CLEAR | MEMF_PUBLIC))
+d303 1
+a303 1
+					    line->ln_Text    = c->c_Label;
+d305 2
+a306 2
+					    line->ln_FgPen   = dri->dri_Pens[TEXTPEN];
+					    line->ln_BgPen   = dri->dri_Pens[BACKGROUNDPEN];
+d308 19
+d328 1
+a328 19
+					cd->cd_CurLine = line;
+
+					cd->cd_CurBox.Left   = box->Left + c->c_Left;
+					cd->cd_CurBox.Top    = c->c_Top;
+					cd->cd_CurBox.Width  = cd->cd_BoxWidth;
+					cd->cd_CurBox.Height = cd->cd_ControlHeight;
+
+					cd->cd_CurX = box->Left + c->c_TLeft,
+					cd->cd_CurY = c->c_Top + cd->cd_Control.TxBaseline + 2;
+
+					/* should be a routine for this since it's called so much */
+					drawbevel (ag, cd->cd_Frame, rp, msg->gpi_GInfo->gi_DrInfo,
+						   cd->cd_CurBox.Left, cd->cd_CurBox.Top,
+						   cd->cd_CurBox.Width, cd->cd_CurBox.Height, FALSE);
+					SetAPen (trp, dri->dri_Pens[FILLTEXTPEN]);
+					SetBPen (trp, dri->dri_Pens[FILLPEN]);
+					RenderLine (ag, trp, cd->cd_CurX, cd->cd_CurY, line->ln_Text, line->ln_TextLen);
+					cd->cd_Flags |= HNF_SELECTED | HNF_CONTROL;
+					i = 6;
+@

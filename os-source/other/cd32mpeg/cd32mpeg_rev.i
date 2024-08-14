@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	22
+DATE	MACRO
+		dc.b	'15.3.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cd32mpeg 40.22'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cd32mpeg 40.22 (15.3.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cd32mpeg 40.22 (15.3.94)',0
+	ENDM

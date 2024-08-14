@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	14
+DATE	MACRO
+		dc.b	'1.4.93'
+	ENDM
+VERS	MACRO
+		dc.b	'camd 37.14'
+	ENDM
+VSTRING	MACRO
+		dc.b	'camd 37.14 (1.4.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: camd 37.14 (1.4.93)',0
+	ENDM

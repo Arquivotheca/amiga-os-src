@@ -1,0 +1,1619 @@
+**********************************************************************
+*                                                                    *
+*   Copyright 1985, Commodore-Amiga Inc.   All rights reserved.      *
+*   No part of this program may be reproduced, transmitted,          *
+*   transcribed, stored in retrieval system, or translated into      *
+*   any language or computer language, in any form or by any         *
+*   means, electronic, mechanical, magnetic, optical, chemical,      *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030                                     *
+*                                                                    *
+**********************************************************************
+*
+*	clipboard device assembly interface
+*
+*   Source Control
+*   --------------
+*   $Header: adev.asm,v 36.0 89/05/24 10:00:25 kodiak Exp $
+*
+*   $Locker:  $
+*
+*   $Log:	adev.asm,v $
+*   Revision 36.0  89/05/24  10:00:25  kodiak
+*   *** empty log message ***
+*   
+*   Revision 1.0  85/08/29  19:00:06  kodiak
+*   added to rcs for updating in version 1
+*   
+*
+**********************************************************************
+
+	CODE
+
+*------ Included Files -----------------------------------------------
+
+	INCLUDE		"exec/types.i"
+	INCLUDE		"exec/nodes.i"
+	INCLUDE		"exec/resident.i"
+	INCLUDE		"exec/strings.i"
+
+	INCLUDE		"clipboard_rev.i"
+
+
+*------ Imported names -----------------------------------------------
+
+	XREF		_CInit
+
+	XREF		_COpen
+	XREF		_CClose
+	XREF		_CExpunge
+	XREF		_CBeginIO
+	XREF		_CAbortIO
+
+
+*------ Exported names -----------------------------------------------
+
+	XDEF		_AOpen
+	XDEF		_AClose
+	XDEF		_AExpunge
+	XDEF		_AExtFunc
+	XDEF		_ABeginIO
+	XDEF		_AAbortIO
+
+
+**********************************************************************
+	;------ if executing here, then this isn't ramlib calling
+		MOVEQ	#0,D0
+		RTS
+
+residentTag:
+		DC.W	RTC_MATCHWORD
+		DC.L	residentTag
+		DC.L	name		; make the "end" field later
+		DC.B	0
+		DC.B	VERSION
+		DC.B	NT_DEVICE
+		DC.B	0
+		DC.L	name
+		DC.L	idString
+		DC.L	_AInit
+
+name:
+		STRING	<'clipboard.device'>
+idString:
+		VSTRING
+
+_AInit:
+		MOVEM.L	A0/A6,-(A7)
+		JSR	_CInit
+		ADDQ	#8,A7
+		RTS
+
+_AOpen:
+		MOVEM.L	D0/A1,-(A7)
+		JSR	_COpen
+		ADDQ	#8,A7
+		RTS
+
+_AClose:
+		MOVE.L	A1,-(A7)
+		JSR	_CClose
+		ADDQ	#4,A7
+		RTS
+
+_AExpunge:
+		JMP	_CExpunge
+
+_ABeginIO:
+		MOVE.L	A1,-(A7)
+		JSR	_CBeginIO
+		ADDQ	#4,A7
+		RTS
+
+_AAbortIO:
+		MOVE.L	A1,-(A7)
+		JSR	_CAbortIO
+		ADDQ	#4,A7
+_AExtFunc:	
+		RTS
+
+		END
+/*********************************************************************/
+/*                                                                   */
+/*                     Copyright (c) 1985                            */
+/*                    Commodore-Amiga, Inc.                          */
+/*                    All rights reserved.                           */
+/*                                                                   */
+/*     No part of this program may be reproduced, transmitted,       */
+/*     transcribed, stored in retrieval system, or translated        */
+/*     into any language or computer language, in any form or        */
+/*     by any means, electronic, mechanical, magnetic, optical,      */
+/*     chemical, manual or otherwise, without the prior written      */
+/*     permission of:                                                */
+/*                     Commodore-Amiga, Inc.                         */
+/*                     983 University Ave #D                         */
+/*                     Los Gatos, CA. 95030                          */
+/*                                                                   */
+/*********************************************************************/
+
+#include        "exec/types.h"
+#include        "exec/nodes.h"
+#include        "exec/lists.h"
+#include        "exec/memory.h"
+#include        "exec/libraries.h"
+#include        "exec/io.h"
+#include        "exec/errors.h"
+#include	"exec/execbase.h"
+#include        "libraries/dos.h"
+#include        "libraries/dosextens.h"
+#include	"clipboard.h"
+#include	"clipboard_rev.h"
+
+/*********************************************************************
+**********************************************************************
+*
+*	Device Initialization
+*
+**********************************************************************
+*********************************************************************/
+extern	int AOpen();
+extern	int AClose();
+extern	int AExpunge();
+extern	int AExtFunc();
+extern	int ABeginIO();
+extern	int AAbortIO();
+
+extern	int Read();
+extern	int Write();
+
+extern	char *AName;
+extern	char *AIdent;
+
+#define	JMP	0x4ef9
+
+/* clipboard device node */
+struct {
+    struct {
+	UWORD	jmp;
+	int	(*(function))();
+    } libFunctions[6];
+    struct Library cd;
+} cdn = {
+    /* library functions */
+    {
+	{ JMP, AAbortIO },
+	{ JMP, ABeginIO },
+	{ JMP, AExtFunc },
+	{ JMP, AExpunge },
+	{ JMP, AClose },
+	{ JMP, AOpen }
+    }
+    /* Library */
+    {
+	/* lib_Node */
+	{ 
+	    0, 0, NT_DEVICE, 0, "clipboard.device"
+	},
+	LIBF_SUMUSED|LIBF_CHANGED, 0, 36, sizeof(cdn.cd),
+	VERSION, REVISION, VSTRING, 0, 0
+    }
+};
+
+/* clipboard device data */
+
+#define	BLOCKSIZE		512
+#define	BLOCKMASK		0x01ff
+#define	BLOCKSHIFT		9
+#define	CLIPSIZECHECK		2000
+#define	LOWMEMMARK		0x4000	/* 16K */
+#define	IOF_DONE		0x80	/* returned to the user */
+#define	IOF_ACTIVE		0x40	/* this will be done soon */
+#define	IOF_QUEUED		0x20	/* on a list somewhere */
+#define	IOF_PENDINGREAD		0x10	/* this group of reads not started */
+
+struct	ExecBase *SysBase;
+struct	Library *DOSBase;
+ULONG	cd_Segment;
+struct	List cd_Units;
+
+
+/* clip block */
+struct ClipBlock {
+    struct  Node cb_Node;		/* list of blocks */
+    LONG    cb_BlockNum;		/* block number (origin 0) */
+    UBYTE   cb_Data[BLOCKSIZE];		/* block data */
+};
+
+
+#define	OPEN_OK			0
+#define	OPEN_PROGRESSING	1
+
+/* clipboard unit data */
+struct ClipboardUnit {
+    struct  ClipboardUnitPartial cu_CUP;/* list of units */
+    ULONG   cu_OpenCnt;			/* number of accessors for unit */
+    struct  MsgPort cu_PendingOpens;	/* other open requests waiting */
+    LONG    cu_PendingID;		/* latest clip identifier */
+    LONG    cu_ProcessingID;		/* clip identifier being processed */
+    UWORD   cu_ProcessingCommand;	/* command in progress */
+    BYTE    cu_WorkLocked;		/* doWork in progress */
+    BYTE    cu_OpenFlags;		/* Open() handshake flags */
+
+    ULONG   cu_DiskFile;		/* disk file for clip, if necessary */
+    char    cu_DiskFileName[28];	/* name associated w/ cu_DiskFile */
+    struct  List cu_BlockHead;		/* list of clip blocks */
+    struct  ClipBlock *cu_CurrBlock;	/* most recently accessed block */
+    ULONG   cu_CurrentLength;		/* length of clip */
+    BOOL    cu_CutValid;		/* false if clip contents not valid */
+
+    struct  List cu_ReadPending;	/* pending read commands, sorted */
+    UWORD   cu_CurrentReadCount;	/* number of reads w/ ID w/o EOF */
+
+    struct  List cu_CutPending;		/* pending cut commands, sorted */
+    struct  SatisfyMsg cu_SatisfyMsg;	/* message to send to satisfy post */
+    struct  MsgPort *cu_SatisfyMsgPort;	/* message port for current post */
+};
+
+
+CInit(segment, sysBase)
+ULONG segment;
+struct ExecBase *sysBase;
+{
+    SysBase = sysBase;
+    if ((DOSBase = (struct Library *) OpenLibrary("dos.library", 0)) == 0)
+	return(FALSE);
+    cd_Segment = segment;
+    NewList(&cd_Units);
+    Forbid();
+    if (FindName(&sysBase->DeviceList, cdn.cd.lib_Node.ln_Name)) {
+#ifdef	DEBUG
+kprintf("CInit abort: CloseLibrary(DOSBase = 0x%lx);\n", DOSBase);
+#endif
+	CloseLibrary(DOSBase);
+	Permit();
+	return(FALSE);
+    }
+    AddDevice(&cdn.cd);
+    Permit();
+#ifdef	DEBUG
+kprintf("CInit success: device node 0x%lx\n", &cdn.cd);
+#endif
+    return(TRUE);
+}
+
+
+
+/*********************************************************************
+**********************************************************************
+*
+*	support functions
+*
+**********************************************************************
+*********************************************************************/
+
+struct ClipBlock
+*newTailBlock(cu)
+struct ClipboardUnit *cu;
+{
+    struct ClipBlock *newBlock;
+
+#ifdef	DEBUG
+kprintf("newTailBlock(0x%06lx): ", cu);
+#endif
+    Forbid();
+    if (newBlock = (struct ClipBlock *)
+	    AllocMem(sizeof(*newBlock), MEMF_CLEAR)) {
+	if (cu->cu_BlockHead.lh_TailPred->ln_Pred) {
+	    /* the list is not empty */
+	    newBlock->cb_BlockNum =
+		    ((struct ClipBlock *) cu->cu_BlockHead.lh_TailPred)
+		    ->cb_BlockNum + 1;
+	}
+	else {
+	    /* the list is empty, this is the first block */
+	    newBlock->cb_BlockNum = 0;
+	}
+	AddTail(&cu->cu_BlockHead, newBlock);
+#ifdef	DEBUG
+kprintf("# %ld ", newBlock->cb_BlockNum);
+#endif
+    }
+    else {
+	cu->cu_CutValid = FALSE;
+    }
+    Permit();
+#ifdef	DEBUG
+kprintf("@ 0x%06lx\n", newBlock);
+#endif
+    return(newBlock);
+}
+
+ULONG
+openDiskClip(cu, mode)
+struct ClipboardUnit *cu;
+int mode;
+{
+    struct Process *pr;
+    APTR prWindowPtr;
+    int lock1, lock2;
+    int tpr, file;
+
+    file = 0;
+
+    /* disable any dos requestor */
+    pr = (struct Process *) FindTask(0);
+    prWindowPtr = pr->pr_WindowPtr;
+    pr->pr_WindowPtr = (APTR) -1;
+
+    /* first see if the new "CLIPS:" assign has been made */
+    tpr = DeviceProc("CLIPS:");
+
+    /* re-enable any dos requestor */
+    pr->pr_WindowPtr = prWindowPtr;
+
+    if (tpr == 0) {
+	/* "CLIPS:" does not exist, use the default "DEVS:clipboards/" */
+	if ((lock1 = Lock("DEVS:", SHARED_LOCK)) != 0) {
+	    if (((lock2 = Lock("DEVS:clipboards", SHARED_LOCK)) == 0) &&
+		    (mode == MODE_NEWFILE)) {
+		lock2 = CreateDir("DEVS:clipboards");
+	    }
+	    if (lock2 != 0) {
+		sprintf(cu->cu_DiskFileName, "DEVS:clipboards/%ld",
+			cu->cu_CUP.cu_UnitNum);
+		file = Open(cu->cu_DiskFileName, mode);
+		UnLock(lock2);
+	    }
+	    UnLock(lock1);
+	}
+    }
+    else {
+	sprintf(cu->cu_DiskFileName, "CLIPS:%ld", cu->cu_CUP.cu_UnitNum);
+	file = Open(cu->cu_DiskFileName, mode);
+    }
+
+    return(file);
+}
+
+clearClip(cu)
+struct ClipboardUnit *cu;
+{
+    struct ClipBlock *block, *nextBlock;
+
+#ifdef	DEBUG
+kprintf("clearClip(0x%06lx);\n", cu);
+#endif
+    Forbid();
+    block = cu->cu_BlockHead.lh_Head;
+    while (nextBlock = (struct ClipBlock *) block->cb_Node.ln_Succ) {
+	FreeMem(block, sizeof(*block));
+	block = nextBlock;
+    }
+    NewList(&cu->cu_BlockHead);
+    cu->cu_CurrBlock = 0;
+    Permit();
+}
+
+    
+int
+readClip(cu, ior, data, length, offset)
+struct ClipboardUnit *cu;
+struct IOClipReq *ior;
+UBYTE *data;
+ULONG length;
+ULONG offset;
+{
+    struct ClipBlock *block;
+    ULONG blockNum, index, actual, remaining;
+    short i;
+
+#ifdef	DEBUG
+kprintf("r(0x%06lx, %ld, %ld): ", data, length, offset);
+#endif
+    Forbid();
+    actual = 0;
+    if (cu->cu_CutValid) {
+	if (cu->cu_DiskFile) {
+	    /* about to loose Forbid: protect this IO */
+	    ior->io_Flags |= IOF_ACTIVE;
+	    if (Seek(cu->cu_DiskFile, offset, OFFSET_BEGINING) != -1) {
+		actual = Read(cu->cu_DiskFile, data, length);
+	    }
+	}
+	else {
+	    if (offset < cu->cu_CurrentLength) {
+		if (offset + length > cu->cu_CurrentLength) {
+		    actual = cu->cu_CurrentLength - offset;
+		}
+		else {
+		    actual = length;
+		}
+		if (actual) {
+		    /* the starting data will be here */
+		    blockNum = offset >> BLOCKSHIFT;
+		    index = offset & BLOCKMASK;
+		    if ((block = cu->cu_CurrBlock) == 0) {
+			block = cu->cu_BlockHead.lh_Head;
+		    }
+		    if (block->cb_BlockNum != blockNum) {
+			while (block->cb_BlockNum > blockNum) {
+			    block = (struct ClipBlock *) block->cb_Node.ln_Pred;
+			}
+			while (block->cb_BlockNum < blockNum) {
+			    block = (struct ClipBlock *) block->cb_Node.ln_Succ;
+			}
+#ifdef	DEBUG
+kprintf("\nnew read block: 0x%06lx, # %ld\n", block, block->cb_BlockNum);
+#endif
+		    }
+		    remaining = actual;
+		    while (remaining != 0) {
+			if (BLOCKSIZE-index < remaining) {
+			    for (i = index; i < BLOCKSIZE; i++) {
+				*data++ = block->cb_Data[i];
+			    }
+			    block = (struct ClipBlock *) block->cb_Node.ln_Succ;
+#ifdef	DEBUG
+kprintf("\ncont'd. read block: 0x%06lx, # %ld\n", block, block->cb_BlockNum);
+#endif
+			    remaining -= BLOCKSIZE-index;
+			    index = 0;
+			}
+			else {
+			    for (i = index; i < index+remaining; i++) {
+				*data++ = block->cb_Data[i];
+			    }
+			    remaining = 0;
+			}
+		    }
+		    cu->cu_CurrBlock = block;
+		}
+	    }
+	}
+    }
+    Permit();
+    return(actual);
+}
+
+
+int
+writeClip(cu, ior, data, length, offset)
+struct ClipboardUnit *cu;
+struct IOClipReq *ior;
+UBYTE *data;
+ULONG length;
+ULONG offset;
+{
+    struct ClipBlock *block, *nextBlock;
+    ULONG blockNum, index, actual;
+    ULONG file;
+    short i;
+
+#ifdef	DEBUG
+kprintf("w(0x%06lx, %ld, %ld): ", data, length, offset);
+#endif
+    Forbid();
+#ifdef	DEBUG
+if (!(cu->cu_CutValid)) kprintf("CUT NOT VALID!\n");
+#endif
+    actual = 0;
+    if ((!(cu->cu_DiskFile)) &&
+	    ((offset + length) > CLIPSIZECHECK) &&
+	    (cu->cu_CutValid) &&
+	    (AvailMem(MEMF_LARGEST) < LOWMEMMARK)) {
+	if (cu->cu_DiskFile = openDiskClip(cu, MODE_NEWFILE)) {
+	    /* copy blocks to disk */
+	    block = cu->cu_BlockHead.lh_Head;
+	    while (nextBlock = (struct ClipBlock *) block->cb_Node.ln_Succ) {
+		if (block->cb_BlockNum*BLOCKSIZE < cu->cu_CurrentLength) {
+		    if ((block->cb_BlockNum+1)*BLOCKSIZE
+			    > cu->cu_CurrentLength) {
+			if (Write(cu->cu_DiskFile, block->cb_Data,
+				cu->cu_CurrentLength & BLOCKMASK) !=
+				(cu->cu_CurrentLength & BLOCKMASK)) {
+			    cu->cu_CutValid = FALSE;
+			}
+		    }
+		    else {
+			if (Write(cu->cu_DiskFile, block->cb_Data, BLOCKSIZE) !=
+				    BLOCKSIZE) {
+				cu->cu_CutValid = FALSE;
+			    }
+		    }
+		}
+		FreeMem(block, sizeof(*block));
+		block = nextBlock;
+	    }
+	    NewList(&cu->cu_BlockHead);
+	}
+	else {
+	    cu->cu_CutValid = FALSE;
+	}
+    }
+    if (cu->cu_CutValid) {
+	if (cu->cu_DiskFile) {
+#ifdef	DEBUG
+kprintf("(write to disk) ");
+#endif
+	    /* about to loose Forbid: protect this IO */
+	    ior->io_Flags |= IOF_ACTIVE;
+	    if (Seek(cu->cu_DiskFile, offset, OFFSET_BEGINING) != -1) {
+		actual = Write(cu->cu_DiskFile, data, length);
+	    }
+	}
+	else {
+	    blockNum = offset >> BLOCKSHIFT;
+	    index = offset & BLOCKMASK;
+	    if ((block = cu->cu_CurrBlock) == 0) {
+		block = newTailBlock(cu);
+	    }
+	    if (block) {
+		if (block->cb_BlockNum != blockNum) {
+		    while (block->cb_BlockNum > blockNum) {
+			block = (struct ClipBlock *) block->cb_Node.ln_Pred;
+		    }
+		    while (block && (block->cb_BlockNum < blockNum)) {
+			block = (struct ClipBlock *) block->cb_Node.ln_Succ;
+			if (block->cb_Node.ln_Succ == 0) {
+			    /* build a new node here */
+			    block = newTailBlock(cu);
+			}
+		    }
+		}
+	    }
+	    while (block && (length > 0)) {
+		if (BLOCKSIZE-index < length) {
+#ifdef	DEBUG
+kprintf("\n    finish block: %ld to %ld\n    next block ", index, BLOCKSIZE);
+#endif
+		    for (i = index; i < BLOCKSIZE; i++) {
+			block->cb_Data[i] = *data++;
+		    }
+		    block = (struct ClipBlock *) block->cb_Node.ln_Succ;
+		    if (block->cb_Node.ln_Succ == 0) {
+			/* build a new node here */
+			block = newTailBlock(cu);
+#ifdef	DEBUG
+kprintf("(NEW) ");
+#endif
+		    }
+		    actual += BLOCKSIZE-index;
+		    length -= BLOCKSIZE-index;
+		    index = 0;
+#ifdef	DEBUG
+kprintf("\n    index now zero, actual %ld, and length %ld\n", actual, length);
+#endif
+		}
+		else {
+		    for (i = index; i < index+length; i++) {
+			block->cb_Data[i] = *data++;
+		    }
+		    actual += length;
+		    length = 0;
+		}
+	    }
+	    cu->cu_CurrBlock = block;
+	}
+    }
+    Permit();
+    return(actual);
+}
+
+
+endIO(io)
+struct IOClipReq *io;
+{
+    Forbid();
+    if (!(io->io_Flags & IOF_DONE)) {
+	/* this is the completion of the IO */
+	if ((io->io_Flags & IOF_QUICK) == 0)
+	    ReplyMsg(io);
+    }
+    else
+	/* the IO has already been completed */
+	io->io_Flags &= ~IOF_QUICK;
+    io->io_Flags |= IOF_DONE;
+    Permit();
+#ifdef	DEBUG
+kprintf("a(%ld) e(%ld) ", io->io_Actual, io->io_Error);
+#endif
+}
+
+
+endQueuedIO(io, ior)
+struct IOClipReq *io;
+struct IOClipReq *ior;
+{
+    if (!(io->io_Flags & IOF_DONE))
+	Remove(io);
+    if (io != ior)
+	io->io_Flags &= ~IOF_QUICK;
+    endIO(io);
+    io->io_Flags &= ~IOF_QUEUED;
+}
+
+
+BOOL
+nextPendingReading(cu)
+struct ClipboardUnit *cu;
+{
+    struct IOClipReq *wior1, *wior2;
+
+    wior1 = (struct IOClipReq *) cu->cu_CutPending.lh_Head;
+    wior2 = (struct IOClipReq *) cu->cu_ReadPending.lh_Head;
+    if (wior1->io_Message.mn_Node.ln_Succ)
+	if (wior2->io_Message.mn_Node.ln_Succ) {
+#ifdef	DEBUG
+kprintf("R #%ld \\ W #%ld\n", wior2->io_ClipID, wior1->io_ClipID);
+#endif
+	    if (wior1->io_ClipID > wior2->io_ClipID)
+		/* read list is next up */
+		return(TRUE);
+	    else
+		return(FALSE);
+	}
+	else
+	    return(FALSE);
+    else
+	return(TRUE);
+}
+
+
+doPost(cu, io, ior)
+struct ClipboardUnit *cu;
+struct IOClipReq *io;
+struct IOClipReq *ior;
+{
+    cu->cu_SatisfyMsgPort = io->io_Data;
+    cu->cu_SatisfyMsg.sm_Unit = cu->cu_CUP.cu_UnitNum;
+    cu->cu_SatisfyMsg.sm_ClipID = io->io_ClipID;
+    endQueuedIO(io, ior);
+}
+
+
+doWork(cu, ior)
+/*	call Forbid()en	*/
+struct ClipboardUnit *cu;
+struct IOClipReq *ior;
+{
+    struct IOClipReq *wior;
+    BOOL workToDo;
+    ULONG file;
+    int i;
+    char c;
+
+#ifdef	DEBUG
+kprintf("doWork(0x%lx); ", cu);
+#endif
+    ior->io_Flags |= IOF_QUEUED;
+    if (cu->cu_WorkLocked) {
+	ior->io_Flags &= ~IOF_QUICK;
+#ifdef	DEBUG
+kprintf("/ locked\n");
+#endif
+	return(0);
+    }
+    cu->cu_WorkLocked = TRUE;
+    workToDo = TRUE;
+    do {
+#ifdef	DEBUG
+kprintf("%ld ", cu->cu_ProcessingCommand);
+#endif
+	if (cu->cu_ProcessingCommand == CMD_INVALID) {
+	    /* nothing's happening now */
+	    if (nextPendingReading(cu)) {
+		wior = (struct IOClipReq *) cu->cu_ReadPending.lh_Head;
+		if (wior->io_Message.mn_Node.ln_Succ) {
+		    cu->cu_ProcessingID = wior->io_ClipID;
+		    cu->cu_ProcessingCommand = CMD_READ;
+		}
+		else
+		    workToDo = FALSE;
+	    }
+	    else {
+		wior = (struct IOClipReq *) cu->cu_CutPending.lh_Head;
+		if (wior->io_Message.mn_Node.ln_Succ) {
+		    cu->cu_ProcessingID = wior->io_ClipID;
+		    if ((cu->cu_ProcessingCommand = wior->io_Command)
+			    == CBD_POST) {
+			doPost(cu, wior, ior);
+		    }
+		    /* clear the clip file */
+		    if (cu->cu_DiskFile) {
+#ifdef	DEBUG
+kprintf("        about to Close(0x%lx);\n", cu->cu_DiskFile);
+#endif
+			Close(cu->cu_DiskFile);
+			cu->cu_DiskFile = 0;
+			DeleteFile(cu->cu_DiskFileName);
+		    }
+		    else {
+			clearClip(cu);
+		    }
+		    cu->cu_CutValid = TRUE;
+		}
+		else
+		    workToDo = FALSE;
+	    }
+	}
+/******/
+/******	POST
+/******/
+	if (cu->cu_ProcessingCommand == CBD_POST) {
+	    /* post outstanding */
+	    if (nextPendingReading(cu)) {
+		wior = (struct IOClipReq *) cu->cu_ReadPending.lh_Head;
+		if (wior->io_Message.mn_Node.ln_Succ) {
+		    /* a read is waiting for the post */
+		    PutMsg(cu->cu_SatisfyMsgPort, &cu->cu_SatisfyMsg);
+		    cu->cu_ProcessingCommand = CMD_WRITE;
+		}
+		else
+		    workToDo = FALSE;
+	    }
+	    else {
+		wior = (struct IOClipReq *) cu->cu_CutPending.lh_Head;
+		if (wior->io_Message.mn_Node.ln_Succ) {
+		    cu->cu_ProcessingID = wior->io_ClipID;
+		    if ((cu->cu_ProcessingCommand = wior->io_Command)
+			    == CBD_POST) {
+			doPost(cu, wior, ior);
+		    }
+		}
+		else
+		    workToDo = FALSE;
+	    }
+	}
+/******/
+/******	READ
+/******/
+	if (cu->cu_ProcessingCommand == CMD_READ) {
+	    wior = (struct IOClipReq *) cu->cu_ReadPending.lh_Head;
+	    if (wior->io_Message.mn_Node.ln_Succ) {
+		if (wior->io_Flags & IOF_PENDINGREAD) {
+		    /* this is an initial read command */
+		    cu->cu_CurrentReadCount++;
+		    wior->io_Flags &= ~IOF_PENDINGREAD;
+		}
+		/* check for end of file (indicating the paste is complete) */
+		if (wior->io_Offset < cu->cu_CurrentLength) {
+		    /* not end of file */
+		    /* check for a nil destination before actually reading */
+		    if (wior->io_Data != 0) {
+			/* real destination, perform the read */
+			wior->io_Actual = readClip(cu, wior, wior->io_Data,
+				wior->io_Length, wior->io_Offset);
+			wior->io_Offset += wior->io_Actual;
+		    }
+		    else {
+			if (wior->io_Offset + wior->io_Length <
+				cu->cu_CurrentLength)
+			    wior->io_Actual = wior->io_Length;
+			else
+			    wior->io_Actual =
+				    cu->cu_CurrentLength - wior->io_Offset;
+			wior->io_Offset += wior->io_Actual;
+		    }
+		}
+		else {
+		    /* end of file */
+		    wior->io_Actual = 0;
+		    wior->io_ClipID = -1;
+		    cu->cu_CurrentReadCount--;
+		}
+		endQueuedIO(wior, ior);
+		if (cu->cu_CurrentReadCount == 0) {
+		    /* there are no more reads pending */
+		    cu->cu_ProcessingCommand = CMD_INVALID;
+		}
+	    }
+	    else
+		workToDo = FALSE;
+	}
+/******/
+/******	WRITE
+/******/
+	if (cu->cu_ProcessingCommand == CMD_WRITE) {
+	    wior = (struct IOClipReq *) cu->cu_CutPending.lh_Head;
+	    if (wior->io_Message.mn_Node.ln_Succ) {
+		if (wior->io_Command == CMD_WRITE) {
+		    /* this is a write command */
+		    wior->io_Actual = writeClip(cu, wior,
+			    wior->io_Data, wior->io_Length, wior->io_Offset);
+		    wior->io_Offset += wior->io_Actual;
+		    cu->cu_CurrentLength =
+			    (cu->cu_CurrentLength > wior->io_Offset) ?
+			    cu->cu_CurrentLength : wior->io_Offset;
+		    endQueuedIO(wior, ior);
+		}
+		else
+		    if (wior->io_Command == CMD_UPDATE) {
+			/* this is an update command */
+			cu->cu_ProcessingCommand = CMD_UPDATE;
+		    }
+		    else
+			workToDo = FALSE;
+	    }
+	    else
+		workToDo = FALSE;
+	}
+/******/
+/******	UPDATE
+/******/
+	if (cu->cu_ProcessingCommand == CMD_UPDATE) {
+	    wior = (struct IOClipReq *) cu->cu_CutPending.lh_Head;
+	    if (cu->cu_CurrentLength >= 8) {
+		if (readClip(cu, wior, &cu->cu_CurrentLength, 4, 4) == 4) {
+		    cu->cu_CurrentLength += 8;
+		}
+		else cu->cu_CurrentLength = 0;
+	    }
+	    else cu->cu_CurrentLength = 0;
+#ifdef	DEBUG
+kprintf("    UPDATE cu_CurrentLength %ld\n", cu->cu_CurrentLength);
+#endif
+	    cu->cu_CurrentReadCount = 0;
+	    endQueuedIO(wior, ior);
+	    cu->cu_ProcessingCommand = CMD_INVALID;
+	}
+    }
+	while (workToDo);
+    if (ior->io_Flags & IOF_QUEUED)
+	ior->io_Flags &= ~IOF_QUICK;
+    cu->cu_WorkLocked = FALSE;
+#ifdef	DEBUG
+kprintf(".\n");
+#endif
+}
+
+
+insort(list, node)
+struct List *list;
+struct IOClipReq *node;
+{
+    struct IOClipReq *search;
+    struct Node *loopNode;
+
+    search = (struct IOClipReq *) list->lh_Head;
+    loopNode = search->io_Message.mn_Node.ln_Succ;
+    while (loopNode) {
+	if (node->io_ClipID >= search->io_ClipID) {
+	    /* still looking */
+	    search = (struct IOClipReq *) loopNode;
+	    loopNode = search->io_Message.mn_Node.ln_Succ;
+	}
+	else {
+	    /* insert this one here */
+	    loopNode = 0;
+	}
+    }
+    /* insert before search */
+    Insert(list, node, search->io_Message.mn_Node.ln_Pred);
+}
+
+
+
+/*********************************************************************
+**********************************************************************
+*
+*	Device Commands
+*
+**********************************************************************
+*********************************************************************/
+
+
+CCInvalid(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCInvalid(0x%lx);\n", ior);
+#endif
+    ior->io_Error = IOERR_NOCMD;
+    endIO(ior);
+}
+
+
+CCClear(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCClear(0x%lx);\n", ior);
+#endif
+    CCInvalid(ior);
+}
+
+
+CCStop(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCStop(0x%lx);\n", ior);
+#endif
+    CCInvalid(ior);
+}
+
+
+CCStart(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCStart(0x%lx);\n", ior);
+#endif
+    CCInvalid(ior);
+}
+
+
+CCFlush(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCFlush(0x%lx);\n", ior);
+#endif
+    CCInvalid(ior);
+}
+
+
+/****** clipboard.device/Reset ***************************************
+*
+*   NAME
+*	Reset - reset the clipboard
+*
+*   FUNCTION
+*	Reset resets the clipboard device without destroying handles
+*	to the open device.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Command	CMD_RESET
+*	io_Flags	IOB_QUICK set if quick I/O is possible
+*
+*********************************************************************/
+
+CCReset(ior)
+struct IOClipReq *ior;
+{
+#ifdef	DEBUG
+kprintf("CCReset(0x%lx);\n", ior);
+#endif
+    CCStop(ior);
+    CCFlush(ior);
+    CCStart(ior);
+}
+
+
+/****** clipboard.device/Read ****************************************
+*
+*   NAME
+*	Read - read clip from clipboard
+*
+*   FUNCTION
+*	The read function serves two purposes.
+*
+*	When io_Offset is within the clip, this acts as a normal read
+*	request, and io_Data is filled with data from the clipboard.
+*	The first read request should have a zero io_ClipID, which
+*	will be filled with the ID assigned for this read.  Normal
+*	sequential access from the beginning of the clip is achieved
+*	by setting io_Offset to zero for the first read, then leaving
+*	it untouched for subsequent reads.  If io_Data is null, then
+*	io_Offset is incremented by io_Actual as if io_Length bytes
+*	had been read: this is useful to skip to the end of file
+*	by using a huge io_Length.
+*
+*	When io_Offset is beyond the end of the clip, this acts as a
+*	signal to the clipboard device that the application is
+*	through reading this clip.  Realize that while an application
+*	is in the middle of reading a clip, any attempts to write new
+*	data to the clipboard are held off.  This read past the end
+*	of file indicates that those operations may now be initiated.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CMD_READ
+*	io_Length	number of bytes to put in data buffer
+*	io_Data		pointer to buffer of data to fill, or null to
+*			skip over data
+*	io_Offset	byte offset of data to read
+*	io_ClipID	zero if this is the initial read
+*
+*   RESULTS
+*	io_Error	non-zero if an error occurred
+*	io_Actual	filled with the actual number of bytes read
+*	io_Data		(the buffer now has io_Actual bytes of data)
+*	io_Offset	updated to next read position, which is
+*			beyond EOF if io_Actual != io_Length
+*	io_ClipID	the clip ID assigned to this read: do not
+*			alter for subsequent reads
+*
+*********************************************************************/
+
+CCRead(ior)
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+
+    cu = (struct ClipboardUnit *) ior->io_Unit;
+
+#ifdef	DEBUG
+kprintf("CCRead(0x%lx)...", ior);
+#endif
+    if (ior->io_ClipID == 0) {
+	ior->io_ClipID = cu->cu_PendingID;
+	ior->io_Flags |= IOF_PENDINGREAD;
+    }
+    if (ior->io_ClipID < cu->cu_ProcessingID) {
+	/* obsolete read */
+#ifdef	DEBUG
+kprintf("    clip id %ld is obsolete\n", ior->io_ClipID);
+#endif
+	ior->io_Actual = 0;
+	ior->io_Error = CBERR_OBSOLETEID;
+	endIO(ior);
+    }
+    else {
+	insort(&cu->cu_ReadPending, ior);
+	doWork(cu, ior);
+    }
+}
+
+
+/****** clipboard.device/Write ***************************************
+*
+*   NAME
+*	Write - write clip to clipboard
+*
+*   FUNCTION
+*	This command writes data to the clipboard.  This data can be
+*	provided sequentially by clearing io_Offset for the initial
+*	write, and using the incremented value unaltered for
+*	subsequent writes.  If io_Offset is ever beyond the current
+*	clip size, the clip is padded with zeros.
+*
+*	If this write is in response to a SatisfyMsg for a pending
+*	Post, then the io_ClipID returned by the Post command must
+*	be used.  Otherwise, a new ID is obtained by clearing the
+*	io_ClipID for the first write.  Subsequent writes must not
+*	alter the io_ClipID.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CMD_WRITE
+*	io_Length	number of bytes from io_Data to write
+*	io_Data		pointer to block of data to write
+*	io_Offset	usually zero if this is the initial write
+*	io_ClipID	zero if this is the initial write, ClipID of
+*			the Post if this is to satisfy a post
+*
+*   RESULTS
+*	io_Error	non-zero if an error occurred
+*	io_Actual	filled with the actual number of bytes written
+*	io_Offset	updated to next write position
+*	io_ClipID	the clip ID assigned to this write: do not
+*			alter for subsequent writes
+*
+*********************************************************************/
+
+/****** clipboard.device/Update **************************************
+*
+*   NAME
+*	Update - terminate the writing of a cut to the clipboard
+*
+*   FUNCTION
+*	Indicate to the clipboard that the previous write commands are
+*	complete and can be used for any pending pastes (reads).  This
+*	command cannot be issued while any of the write commands are
+*	pending.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CMD_UPDATE
+*	io_ClipID	the ClipID of the write
+*
+*   RESULTS
+*	io_Error	non-zero if an error occurred
+*
+*********************************************************************/
+
+/****** clipboard.device/Post ****************************************
+*
+*   NAME
+*	Post - post clip to clipboard
+*
+*   FUNCTION
+*	Indicate to the clipboard device that data is available for
+*	use by accessors of the clipboard.  This is intended to be
+*	used when a cut is large, in a private data format, and/or
+*	changing frequently, and it thus makes sense to avoid
+*	converting it to an IFF form and writing it to the clipboard
+*	unless another application wants it.  The post provides a
+*	message port to which the clipboard device will send a satisfy
+*	message if the data is required.
+*
+*	If the satisfy message is received, the write associated with
+*	the post must be performed.  The act of writing the clip
+*	indicates that the message has been received: it may then be
+*	re-used by the clipboard device, and so must actually be
+*	removed from the satisfy message port so that the port is not
+*	corrupted.
+*
+*	If the application wishes to determine if a post it has
+*	performed is still the current clip, it should check the
+*	post's io_ClipID with that returned by the CurrentReadID
+*	command.  If CurrentReadID is greater, the clip is not still
+*	current.
+*	
+*	If an application has a pending post and wishes to determine
+*	if it should satisfy it (e.g. before it exits), it should
+*	check the post's io_ClipID with that returned by the
+*	CurrentWriteID command.  If CurrentWriteID is greater, there
+*	is no need to satisfy the post.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CBD_POST
+*	io_Data		pointer to satisfy message port
+*	io_ClipID	zero
+*
+*   RESULTS
+*	io_Error	non-zero if an error occurred
+*	io_ClipID	the clip ID assigned to this post, to be used
+*			in the write command if this is satisfied
+*
+*
+*********************************************************************/
+
+
+CCCut(ior)
+/* used as CCWrite(ior), CCUpdate(ior) and CCPost(ior) */
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+
+    cu = (struct ClipboardUnit *) ior->io_Unit;
+
+#ifdef	DEBUG
+kprintf("CCCut(0x%lx)...", ior);
+#endif
+    if (ior->io_ClipID == 0) {
+	ior->io_ClipID = ++cu->cu_PendingID;
+#ifdef	DEBUG
+kprintf("    ClipID %ld assigned\n", ior->io_ClipID);
+#endif
+    }
+    if (ior->io_ClipID < cu->cu_ProcessingID) {
+	/* obsolete write */
+#ifdef	DEBUG
+kprintf("    clip id %ld is obsolete\n", ior->io_ClipID);
+#endif
+	ior->io_Actual = 0;
+	ior->io_Error = CBERR_OBSOLETEID;
+	endIO(ior);
+    }
+    else {
+	insort(&cu->cu_CutPending, ior);
+	doWork(cu, ior);
+    }
+}
+
+
+/****** clipboard.device/CurrentReadID *******************************
+*
+*   NAME
+*	CurrentReadID - determine the current read identifier.
+*
+*   FUNCTION
+*	CurrentReadID fills the io_ClipID with a clip identifier that
+*	can be compared with that of a post command: if greater than
+*	the post identifier then the post data held privately by an
+*	application is not valid for its own pasting.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CMD_CLIPREADID
+*
+* 
+*	io_ClipID	the ClipID of the current write is set
+*
+*********************************************************************/
+
+CCCurrentReadID(ior)
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+
+    cu = (struct ClipboardUnit *) ior->io_Unit;
+
+    ior->io_ClipID = cu->cu_PendingID;
+    endIO(ior);
+}
+
+
+/****** clipboard.device/CurrentWriteID ******************************
+*
+*   NAME
+*	CurrentWriteID - determine the current write identifier.
+*
+*   FUNCTION
+*	CurrentWriteID fills the io_ClipID with a clip identifier that
+*	can be compared with that of a post command: if greater than
+*	the post identifier then the post is obsolete and need never
+*	be satisfied.
+*
+*   IO REQUEST
+*	io_Message	mn_ReplyPort set up
+*	io_Device	preset by OpenDevice
+*	io_Unit		preset by OpenDevice
+*	io_Command	CMD_CLIPWRITEID
+*
+* 
+*	io_ClipID	the ClipID of the current write is set
+*
+*********************************************************************/
+
+CCCurrentWriteID(ior)
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+
+    cu = (struct ClipboardUnit *) ior->io_Unit;
+
+    ior->io_ClipID = cu->cu_ProcessingID;
+    endIO(ior);
+}
+
+
+/*********************************************************************
+**********************************************************************
+*
+*	Device Functions
+*
+**********************************************************************
+*********************************************************************/
+
+
+/****** clipboard.device/Open ****************************************
+*
+*   NAME
+*	Open - a request to open the clipboard device
+*
+*   SYNOPSIS
+*	OpenDevice("clipboard.device", unit, iORequest, 0), sysBase
+*
+*   FUNCTION
+*	The open routine grants access to a device.  There are two
+*	fields in the iORequest block that will be filled in:
+*	io_Device and io_Unit.
+*
+*	A successful OpenDevice call must be matched by a CloseDevice
+*	call when access to the device is no longer needed.
+*
+*   RESULTS
+*	If the open was unsuccessful, OpenDevice returns a non-zero
+*	result and the iORequest is not valid.
+*
+*********************************************************************/
+
+#define	po_Task		mn_ReplyPort
+#define	po_SigBit	mn_Node.ln_Pri
+
+COpen(unitNum, ior)
+ULONG unitNum;
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+    struct Node *loopNode;
+    struct Node *insert;
+    struct Message *po;
+    ULONG  diskFile;
+    struct ClipBlock *block;
+    int    length;
+
+#ifdef	DEBUG
+kprintf("COpen(0x%lx, 0x%lx);\n", unitNum, ior);
+#endif
+    Forbid();
+    cdn.cd.lib_Flags &= ~LIBF_DELEXP;
+    cu = (struct IOClipReq *) cd_Units.lh_Head;
+    loopNode = cu->cu_CUP.cu_Node.ln_Succ;
+    insert = cu;
+    while (loopNode) {
+	if (cu->cu_CUP.cu_UnitNum < unitNum) {
+	    /* still looking */
+	    cu = (struct IOClipReq *) loopNode;
+	    loopNode = cu->cu_CUP.cu_Node.ln_Succ;
+	    insert = cu;
+	}
+	else {
+	    if (cu->cu_CUP.cu_UnitNum == unitNum)
+		/* found the unit */
+		insert = 0;
+	    /* indicate to stop looking */
+	    loopNode = 0;
+	}
+    }
+    if (insert) {
+#ifdef	DEBUG
+kprintf("    insert new unit at 0x%lx.\n", insert->ln_Pred);
+#endif
+	/* insert new unit */
+	if ((cu = (struct ClipboardUnit *)
+		AllocMem(sizeof(*cu), MEMF_PUBLIC+MEMF_CLEAR)) == 0) {
+#ifdef	DEBUG
+kprintf("    error: no memory for unit\n");
+#endif
+	    ior->io_Error = IOERR_OPENFAIL;
+	    Permit();
+	    return(-1);
+	}
+	cu->cu_CUP.cu_Node.ln_Name = "clipboard.unit";
+	cu->cu_CUP.cu_UnitNum = unitNum;
+	cu->cu_OpenCnt = 1;
+	NewList(&cu->cu_PendingOpens.mp_MsgList);
+	cu->cu_PendingID = 1;
+	cu->cu_ProcessingID = 1;
+	cu->cu_OpenFlags = OPEN_PROGRESSING;
+	NewList(&cu->cu_BlockHead);
+	cu->cu_CutValid = FALSE;	/* just a guess */
+	NewList(&cu->cu_ReadPending);
+	NewList(&cu->cu_CutPending);
+
+	cdn.cd.lib_OpenCnt++;
+	ior->io_Unit = cu;
+	Insert(&cd_Units, cu, insert->ln_Pred);
+
+	/* try to copy disk clip to ram */
+	if (diskFile = openDiskClip(cu, MODE_OLDFILE)) {
+#ifdef	DEBUG
+kprintf("        0x%06lx\n", diskFile);
+#endif
+	    if (Seek(diskFile, 4, OFFSET_BEGINING) != -1) {
+		if (Read(diskFile, &length, 4) == 4) {
+		    cu->cu_CutValid = TRUE;		/* just a guess */
+		    length += 8;
+		    cu->cu_CurrentLength = length;
+		    if (Seek(diskFile, 0, OFFSET_BEGINING) == -1)
+			    cu->cu_CutValid = FALSE;
+		    while (cu->cu_CutValid && (length > BLOCKSIZE)) {
+			if ((block = (struct ClipBlock *)newTailBlock(cu)) == 0)
+				cu->cu_CutValid = FALSE;
+			else {
+			    if (Read(diskFile, block->cb_Data, BLOCKSIZE) != 
+				    BLOCKSIZE) cu->cu_CutValid = FALSE;
+			}
+			length -= BLOCKSIZE;
+		    }
+		    if (cu->cu_CutValid && (length > 0)) {
+			if ((block = (struct ClipBlock *)newTailBlock(cu)) == 0)
+				cu->cu_CutValid = FALSE;
+			else {
+			    if (Read(diskFile, block->cb_Data, length) != 
+				    length) cu->cu_CutValid = FALSE;
+			}
+		    }
+		    if (!cu->cu_CutValid) {
+			clearClip(cu);
+			if (Seek(diskFile, cu->cu_CurrentLength,
+				OFFSET_BEGINING) == 0) {
+			    /* make the clip a disk clip */
+			    cu->cu_DiskFile = diskFile;
+			    diskFile = 0;
+			    cu->cu_CutValid = 0;
+			}
+		    }
+		}
+	    }
+#ifdef	DEBUG
+kprintf("        Close(0x%06lx);\n", diskFile);
+#endif
+	    if (diskFile)
+		Close(diskFile);
+	}
+	if (!(cu->cu_CutValid)) cu->cu_CurrentLength = 0;
+#ifdef	DEBUG
+kprintf("    cu_CurrentLength %ld\n", cu->cu_CurrentLength);
+#endif
+	/* Forbid should be re-instated by here */
+	/******/
+	cu->cu_OpenFlags = OPEN_OK;
+	while (po = (struct Message *) GetMsg(&cu->cu_PendingOpens)) {
+	    Signal(po->po_Task, 1<<po->po_SigBit);
+	}
+    }
+    else {
+	cu->cu_OpenCnt++;
+	cdn.cd.lib_OpenCnt++;
+	ior->io_Unit = cu;
+	if (cu->cu_OpenFlags == OPEN_PROGRESSING) {
+	    /* wait for someone else to create the unit file */
+	    {
+		struct Message wpo;
+		wpo.po_Task = (struct MsgPort *) FindTask(0);
+		wpo.po_SigBit = AllocSignal(-1);
+		PutMsg(&cu->cu_PendingOpens, &wpo);
+		Wait(1<<wpo.po_SigBit);
+		FreeSignal(wpo.po_SigBit);
+	    }
+	}
+    }
+#ifdef	DEBUG
+kprintf("    unit # %ld at 0x%lx\n", cu->cu_CUP.cu_UnitNum, cu);
+#endif
+    Permit();
+    return(ior->io_Error);
+}
+
+
+/****** clipboard.device/Close ***************************************
+*
+*   NAME
+*	Close - terminate access to the clipboard device
+*
+*   SYNOPSIS
+*	CloseDevice(iORequest), sysBase
+*
+*   FUNCTION
+*	The close routine notifies the clipboard device that the
+*	iORequest will no longer be used.
+*
+*********************************************************************/
+
+CClose(ior)
+struct IOClipReq *ior;
+{
+    struct ClipboardUnit *cu;
+    struct ClipBlock *block;
+    int    length;
+
+    cu = (struct ClipboardUnit *) ior->io_Unit;
+    Forbid();
+#ifdef	DEBUG
+kprintf("CClose(0x%lx);\n", ior);
+#endif
+    if (--(cu->cu_OpenCnt) == 0) {
+	/* last accessor to this unit, shut it down */
+	if ((cu->cu_CutValid) && (!(cu->cu_DiskFile)) &&
+		(cu->cu_ProcessingID > 1) &&
+		(cu->cu_DiskFile = openDiskClip(cu, MODE_NEWFILE))) {
+	    /* write out the current cut to disk */
+	    length = cu->cu_CurrentLength;
+	    block = (struct ClipBlock *)
+		    cu->cu_BlockHead.lh_Head;
+	    while (cu->cu_CutValid && (length > 0)) {
+		if (block->cb_Node.ln_Succ) {
+		    if (length > BLOCKSIZE) {
+			if (Write(cu->cu_DiskFile, block->cb_Data,
+				BLOCKSIZE) != BLOCKSIZE)
+				cu->cu_CutValid = FALSE;
+			length -= BLOCKSIZE;
+		    }
+		    else {
+			if (Write(cu->cu_DiskFile, block->cb_Data,
+				length) != length)
+				cu->cu_CutValid = FALSE;
+			length = 0;
+		    }
+		    block = block->cb_Node.ln_Succ;
+		}
+		else cu->cu_CutValid = FALSE;
+	    }
+	}
+	if (cu->cu_DiskFile) {
+#ifdef	DEBUG
+kprintf("        about to Close(0x%lx);\n", cu->cu_DiskFile);
+#endif
+	    Close(cu->cu_DiskFile);
+	    if ((!cu->cu_CutValid) || (cu->cu_CurrentLength == 0)) {
+		DeleteFile(cu->cu_DiskFileName);
+	    }
+	}
+	else {
+	    clearClip(cu);
+	}
+	Remove(cu);
+	FreeMem(cu, sizeof(*cu));
+    }
+    ior->io_Unit = ior->io_Device = 0;
+    if ((--(cdn.cd.lib_OpenCnt) == 0) &&
+	/* last accessor for this device, pending expunge? */
+	    (cdn.cd.lib_Flags & LIBF_DELEXP)) {
+	/* expunge the device */
+#ifdef	DEBUG
+kprintf("    CClose calling CExpunge.\n");
+#endif
+	CExpunge();
+    }
+    Permit();
+}
+
+
+/****** clipboard.device/Expunge *************************************
+*
+*   NAME
+*	Expunge - indicate a desire to remove the clipboard device
+*
+*   SYNOPSIS
+*	<Expunge is not generally called by application programs>
+*
+*   FUNCTION
+*	The Expunge routine is called when the system needs the memory
+*	used by the clipboard device, and the clipboard device has no
+*	open units.  The clipboard device is removed from memory until
+*	next needed (i.e. until the next
+*	OpenDevice("clipboard.device", ...);
+*
+*********************************************************************/
+
+CExpunge()
+{
+    if (cdn.cd.lib_OpenCnt == 0) {
+	CloseLibrary(DOSBase);
+	Remove(&cdn.cd);
+	return(cd_Segment);
+    }
+    else {
+	cdn.cd.lib_Flags |= LIBF_DELEXP;
+	return(0);
+    }
+}
+
+
+/****** clipboard.device/BeginIO *************************************
+*
+*   NAME
+*	BeginIO - initiate clipboard device IO
+*
+*   SYNOPSIS
+*	SendIO(iORequest), sysBase
+*	DoIO(iORequest), sysBase
+*
+*   FUNCTION
+*	The BeginIO is the workhorse device function used to initiate
+*	device commands.  It can be called directly or via the exec
+*	library functions SendIO and DoIO.
+*
+*********************************************************************/
+int (*commandVector[])() = {
+    CCInvalid, CCReset, CCRead, /* CCWrite: */ CCCut, /* CCUpdate */ CCCut,
+    CCClear, CCStop, CCStart, CCFlush,
+    /* CCPost: */ CCCut, CCCurrentReadID, CCCurrentWriteID
+};
+
+CBeginIO(ior)
+struct IOClipReq *ior;
+{
+    Forbid();
+    ior->io_Message.mn_Node.ln_Type = NT_MESSAGE;
+    ior->io_Flags &= ~(IOF_DONE | IOF_QUEUED | IOF_PENDINGREAD);
+    if (ior->io_Command >= (sizeof(commandVector)/sizeof(commandVector[0]))) {
+	CCInvalid(ior);
+    }
+    else {
+	(*(commandVector[ior->io_Command]))(ior);
+    }
+    Permit();
+}
+
+CAbortIO(ior)
+struct IOClipReq *ior;
+{
+    Forbid();
+    if ((!(ior->io_Flags & IOF_DONE)) && (!(ior->io_Flags & IOF_ACTIVE))) {
+	ior->io_Error = IOERR_ABORTED;
+	if (ior->io_Flags & IOF_QUEUED) 
+	    Remove(ior);
+	endIO(ior);
+    }
+    Permit();
+}

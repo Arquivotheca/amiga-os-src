@@ -1,0 +1,1073 @@
+head     37.8;
+branch   ;
+access   ;
+symbols  ;
+locks    kcd:37.8; strict;
+comment  @ * @;
+
+
+37.8
+date     92.12.16.14.27.59;  author kcd;  state Exp;
+branches ;
+next     37.7;
+
+37.7
+date     92.06.09.15.16.50;  author kcd;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     92.06.09.15.02.11;  author kcd;  state Exp;
+branches ;
+next     37.5;
+
+37.5
+date     92.06.04.18.36.52;  author kcd;  state Exp;
+branches ;
+next     37.4;
+
+37.4
+date     92.04.14.15.18.42;  author kcd;  state Exp;
+branches ;
+next     37.3;
+
+37.3
+date     92.03.27.02.25.39;  author kcd;  state Exp;
+branches ;
+next     37.2;
+
+37.2
+date     92.03.25.18.06.04;  author kcd;  state Exp;
+branches ;
+next     37.1;
+
+37.1
+date     92.03.22.18.16.30;  author kcd;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Services Manager source.
+@
+
+
+37.8
+log
+@Changed the calling convention for services.  Added prototypes and pragmas
+for utility library.  Starting services manager with another one already
+running will result in shutting down the first invocation.
+@
+text
+@/*
+ * * $Id: manager.c,v 37.7 92/06/09 15:16:50 kcd Exp Locker: kcd $ *
+ *
+ * (C) Copyright 1992, Commodore-Amiga, Inc. *
+ *
+ * manager.c - Envoy Services Manager *
+ *
+ */
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/lists.h>
+#include <exec/ports.h>
+
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <dos/dostags.h>
+#include <dos/rdargs.h>
+#include <envoy/errors.h>
+
+#include <libraries/iffparse.h>
+
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/nipc_protos.h>
+#include <clib/svc_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/utility_protos.h>
+
+extern __stdargs NewList(struct List *list);
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/nipc_pragmas.h>
+#include <pragmas/svc_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+#define SERVICES_MANAGER oui
+
+#include "services.h"
+#include "servicesinternal.h"
+#include "servicesbase.h"
+#include "manager_rev.h"
+
+#include "string.h"
+
+/*--------------------------------------------------------------------------*/
+
+/* Globals */
+
+struct DosLibrary *DOSBase;
+struct Library *NIPCBase;
+struct Library *UtilityBase;
+struct Library *IFFParseBase;
+struct ServicesLib *ServicesBase;
+struct Library *SvcBase;
+struct ExecBase *SysBase;
+struct TagItem svc_entity_tags[4] =
+{
+    ENT_Public, 0,
+    ENT_Name, (ULONG) MGR_ENTITY_NAME,
+    ENT_AllocSignal, NULL,
+    TAG_DONE, 0
+};
+UBYTE clientHostName[128];
+UBYTE VersionTag[] = VERSTAG;
+
+/*--------------------------------------------------------------------------*/
+
+/* Prototypes */
+
+BOOL LoadServicesInfo(void);
+VOID ProcessEntity(APTR svc_entity);
+struct Service *LocalFindService(STRPTR svc_name);
+LONG manager(void);
+BPTR PrefOpen(void);
+BOOL MakeServices(struct IFFHandle *iff);
+
+#define ID_ISVC  MAKE_ID('I','S','V','C')
+#define ID_PREF  MAKE_ID('P','R','E','F')
+
+struct IFFService
+{
+    ULONG   is_Flags;
+    UWORD   is_UID;
+    UWORD   is_GID;
+    UBYTE   is_PathName[256];
+    UBYTE   is_SvcName[64];
+};
+
+#define SVCFLAGB_ENABLE     0
+#define SVCFLAGF_ENABLE     (1L << SVCFLAGB_ENABLE)
+
+/*--------------------------------------------------------------------------*/
+
+/* Main  */
+
+LONG manager()
+{
+    APTR ServiceEntity;
+    ULONG entitymask, waitmask, sigs;
+    ULONG entitysigbit = 0;
+    struct Message *wbmessage = NULL;
+    struct Process *myproc;
+    struct MsgPort *smport;
+
+    SysBase = (struct ExecBase *)*((void **)4);
+    myproc = (struct Process *)FindTask(0L);
+    if(!myproc->pr_CLI)
+    {
+        WaitPort(&myproc->pr_MsgPort);
+        wbmessage = GetMsg(&myproc->pr_MsgPort);
+    }
+
+    Forbid();
+    if(smport = FindPort("Services Manager"))
+    {
+    	Signal(smport->mp_SigTask,SIGBREAKF_CTRL_F);
+    	smport = NULL;
+    }
+    else
+    {
+    	smport = CreateMsgPort();
+    	smport->mp_Node.ln_Name = "Services Manager";
+    	smport->mp_Node.ln_Pri = -128;
+    	AddPort(smport);
+    }
+    Permit();
+
+    if(smport)
+    {
+        if (DOSBase = (struct DosLibrary *) OpenLibrary("dos.library", 37L))
+        {
+            if (UtilityBase = (struct Library *) OpenLibrary("utility.library", 37L))
+            {
+                if (NIPCBase = (struct Library *) OpenLibrary("nipc.library", 0L))
+                {
+                    if (ServicesBase = (struct ServicesLib *) OpenLibrary("services.library", 37L))
+                    {
+                        svc_entity_tags[2].ti_Data = (ULONG) & entitysigbit;
+
+                        DBMSG(("services.library opened.\n"));
+
+                        if (ServiceEntity = CreateEntityA(svc_entity_tags))
+                        {
+                            if (LoadServicesInfo());
+                            {
+                                DBMSG(("Services Configuration Loaded.\n"));
+
+                                entitymask = (1 << entitysigbit);
+
+                                waitmask = (entitymask | SIGBREAKF_CTRL_F);
+
+                                while (TRUE)
+                                {
+                                    sigs = Wait(waitmask);
+
+                                    DBMSG(("Awake! %lx\n",sigs));
+
+                                    ProcessEntity(ServiceEntity);
+
+                                    DBMSG(("Sigs after PE(): %lx\n",sigs));
+
+                                    if (sigs & SIGBREAKF_CTRL_F)
+                                    {
+                                        DBMSG(("***break: CTRL_F\n"));
+                                        break;
+                                    }
+
+                                }
+                            }
+                            DeleteEntity(ServiceEntity);
+                        }
+                        CloseLibrary((struct Library *) ServicesBase);
+                    }
+                    CloseLibrary(NIPCBase);
+                }
+                CloseLibrary(UtilityBase);
+            }
+            CloseLibrary((struct Library *) DOSBase);
+        }
+        RemPort(smport);
+    }
+    if(wbmessage)
+    {
+        Forbid();
+        ReplyMsg(wbmessage);
+    }
+    return(0L);
+}
+
+/*--------------------------------------------------------------------------*/
+
+/* LoadServicesInfo  */
+
+BOOL LoadServicesInfo()
+{
+    struct ContextNode *top;
+    ULONG error;
+    BPTR IFFStream;
+    struct IFFHandle *iff;
+    BOOL status = FALSE, cont = TRUE;
+
+    LONG props[]={ID_PREF,ID_ISVC};
+
+    if(IFFParseBase = OpenLibrary("iffparse.library",37))
+    {
+        if(IFFStream = PrefOpen())
+        {
+            if(iff = AllocIFF())
+            {
+                InitIFFasDOS(iff);
+
+                if(!OpenIFF(iff,IFFF_READ))
+                {
+                    iff->iff_Stream = (ULONG) IFFStream;
+                    if(!CollectionChunks(iff,props,1))
+                    {
+                        while(cont)
+                        {
+                            error = ParseIFF(iff,IFFPARSE_STEP);
+                            if(!error)
+                                continue;
+                            if(error != IFFERR_EOC)
+                                break;
+
+                            top = CurrentChunk(iff);
+                            if((top->cn_Type == ID_PREF) && (top->cn_ID == ID_FORM))
+                                status = MakeServices(iff);
+                        }
+                    }
+                    CloseIFF(iff);
+                }
+                FreeIFF(iff);
+            }
+            Close(IFFStream);
+        }
+        CloseLibrary(IFFParseBase);
+    }
+    return status;
+}
+
+BPTR PrefOpen(void)
+{
+    BPTR stream;
+
+    if(stream = Open("ENV:envoy/services.prefs",MODE_OLDFILE))
+        return stream;
+    else if(stream = Open("ENVARC:envoy/services.prefs",MODE_OLDFILE))
+        return stream;
+    else
+        return (BPTR)0L;
+}
+
+BOOL MakeServices(struct IFFHandle *iff)
+{
+    struct Service *new_svc, *old_svc;
+    struct IFFService *is;
+    struct CollectionItem *ci;
+
+    if(ci = FindCollection(iff,ID_PREF,ID_ISVC))
+    {
+        old_svc = (struct Service *) ServicesBase->SVCS_Services.mlh_Head;
+        while (old_svc->svc_Node.ln_Succ)
+        {
+            old_svc->svc_Flags |= SVCF_EXPUNGE;
+            old_svc = (struct Service *) old_svc->svc_Node.ln_Succ;
+        }
+
+        while(ci)
+        {
+            is = (struct IFFService *)ci->ci_Data;
+
+            if (old_svc = LocalFindService(is->is_SvcName))
+            {
+                DBMSG(("Updating old Service: %s\n", is->is_SvcName));
+
+                strcpy(old_svc->svc_PathName, is->is_PathName);
+                old_svc->svc_Flags &= ~SVCF_EXPUNGE;
+            }
+            else if (new_svc = AllocMem(sizeof(struct Service), MEMF_PUBLIC | MEMF_CLEAR))
+            {
+                DBMSG(("Adding new Service: %s\n", is->is_SvcName));
+
+                strcpy(new_svc->svc_SvcName, (UBYTE *) is->is_SvcName);
+                strcpy(new_svc->svc_PathName, (UBYTE *) is->is_PathName);
+                AddTail((struct List *) &ServicesBase->SVCS_Services, (struct Node *) new_svc);
+                new_svc->svc_Flags &= ~SVCF_EXPUNGE;
+            }
+
+            ci = ci->ci_Next;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/*--------------------------------------------------------------------------*/
+
+/* LocalFindService() */
+
+struct Service *LocalFindService(svc_name)
+STRPTR svc_name;
+{
+    struct Service *svc;
+
+    svc = (struct Service *) ServicesBase->SVCS_Services.mlh_Head;
+    while (svc->svc_Node.ln_Succ)
+    {
+        DBMSG(("LocalFindService: %s == %s ?\n", svc_name, svc->svc_SvcName));
+        if (!Stricmp(svc_name, svc->svc_SvcName))
+            return (svc);
+        svc = (struct Service *) svc->svc_Node.ln_Succ;
+    }
+    return (NULL);
+}
+
+/*--------------------------------------------------------------------------*/
+
+/* ProcessEntity */
+
+VOID ProcessEntity(svc_entity)
+APTR svc_entity;
+{
+    struct Transaction *req_trans;
+    struct FindServiceReq *fsr;
+    struct Service *svc;
+    ULONG error;
+
+    ULONG sstags[9]={SSVC_UserName, 0,
+    		     SSVC_Password, 0,
+    		     SSVC_EntityName, 0,
+    		     SSVC_HostName,0,
+    		     TAG_DONE};
+
+    while (req_trans = GetTransaction(svc_entity))
+    {
+        error = ENVOYERR_BADSTARTSERVICE; /* Assume the worst. */
+
+        if ((req_trans->trans_ReqDataLength >= sizeof(struct FindServiceReq)) &&
+            (req_trans->trans_Command == MGRCMD_FINDSERVICE))
+        {
+            fsr = (struct FindServiceReq *) req_trans->trans_RequestData;
+
+            DBMSG(("Request for Service: %s\n", fsr->fsr_Service));
+
+            if (svc = LocalFindService(fsr->fsr_Service))
+            {
+                if (!(svc->svc_Flags & SVCF_EXPUNGE))
+                {
+                    DBMSG(("Opening %s\n",svc->svc_PathName));
+
+                    if(SvcBase = OpenLibrary(svc->svc_PathName,0L))
+                    {
+                        DBMSG(("Service Opened okay!\n"));
+                        GetHostName(req_trans->trans_SourceEntity,clientHostName,127);
+
+                        sstags[1]=(ULONG)fsr->fsr_UserName;
+                        sstags[3]=(ULONG)fsr->fsr_PassWord;
+                        sstags[5]=(ULONG)req_trans->trans_ResponseData;
+                        sstags[7]=(ULONG)clientHostName;
+
+                        error = StartServiceA((struct TagItem *)sstags);
+
+/*                        error=StartService(SSVC_UserName,fsr->fsr_UserName,
+                        		   SSVC_Password,fsr->fsr_PassWord,
+                        		   SSVC_EntityName,req_trans->trans_ResponseData,
+                        		   SSVC_HostName,clientHostName,
+                        		   TAG_DONE); */
+
+                        DBMSG(("StartService() Returned %ld, EntityName: %s\n",error,req_trans->trans_ResponseData));
+                        req_trans->trans_RespDataActual = sizeof(struct FindServiceAck);
+                        CloseLibrary(SvcBase);
+                    }
+                    else
+                    	error = ENVOYERR_OPENSERVICEFAIL;
+                }
+                else
+                    error = ENVOYERR_UNKNOWNSERVICE;
+            }
+            else
+            	error = ENVOYERR_UNKNOWNSERVICE;
+        }
+        req_trans->trans_Error = error;
+        ReplyTransaction(req_trans);
+    }
+}
+
+@
+
+
+37.7
+log
+@Changed occurences of appn to Envoy
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.6 92/06/09 15:02:11 kcd Exp Locker: kcd $ *
+d19 1
+d28 1
+d37 1
+a47 7
+#define SVCERR_SERVERFAIL   301UL
+#define SVCERR_BADSTARTSERV     302UL
+#define SVCERR_CANTLOADSERV 303UL
+#define SVCERR_NOMEMORY     304UL
+#define SVCERR_BADSERVICE   305UL
+#define SVCERR_BADTRANS     306UL
+
+d57 1
+d66 1
+a66 1
+
+d106 1
+d115 17
+a131 1
+    if (DOSBase = (struct DosLibrary *) OpenLibrary("dos.library", 37L))
+d133 1
+a133 1
+        if (UtilityBase = (struct Library *) OpenLibrary("utility.library", 37L))
+d135 1
+a135 1
+            if (NIPCBase = (struct Library *) OpenLibrary("nipc.library", 0L))
+d137 1
+a137 1
+                if (ServicesBase = (struct ServicesLib *) OpenLibrary("services.library", 37L))
+d139 3
+a141 1
+                    svc_entity_tags[2].ti_Data = (ULONG) & entitysigbit;
+d143 1
+a143 1
+                    DBMSG(("services.library opened.\n"));
+d145 1
+a145 3
+                    if (ServiceEntity = CreateEntityA(svc_entity_tags))
+                    {
+                        if (LoadServicesInfo());
+d147 3
+a149 1
+                            DBMSG(("Services Configuration Loaded.\n"));
+d151 1
+a151 1
+                            entitymask = (1 << entitysigbit);
+d153 1
+a153 1
+                            waitmask = (entitymask | SIGBREAKF_CTRL_F);
+d155 3
+a157 5
+                            while (TRUE)
+                            {
+                                sigs = Wait(waitmask);
+
+                                DBMSG(("Awake! %lx\n",sigs));
+d159 1
+a159 1
+                                ProcessEntity(ServiceEntity);
+d161 9
+a169 1
+                                DBMSG(("Sigs after PE(): %lx\n",sigs));
+a170 4
+                                if (sigs & SIGBREAKF_CTRL_F)
+                                {
+                                    DBMSG(("***break: CTRL_F\n"));
+                                    break;
+a171 1
+
+d173 1
+d175 1
+a175 1
+                        DeleteEntity(ServiceEntity);
+d177 1
+a177 1
+                    CloseLibrary((struct Library *) ServicesBase);
+d179 1
+a179 1
+                CloseLibrary(NIPCBase);
+d181 1
+a181 1
+            CloseLibrary(UtilityBase);
+d183 1
+a183 1
+        CloseLibrary((struct Library *) DOSBase);
+d312 1
+a312 1
+        if (!strcmp(svc_name, svc->svc_SvcName))
+a328 1
+    struct Library *SvcBase;
+d331 6
+d339 1
+a339 1
+        error = SVCERR_BADSTARTSERV; /* Assume the worst. */
+d357 15
+a371 1
+                        error=StartService(fsr->fsr_UserName,fsr->fsr_PassWord,req_trans->trans_ResponseData);
+d376 2
+d379 2
+d382 2
+@
+
+
+37.6
+log
+@Changed the way StartService works to now be sync, and to reply the
+transaction for the service.
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.5 92/06/04 18:36:52 kcd Exp Locker: kcd $ *
+d6 1
+a6 1
+ * manager.c - APPN Services Manager *
+@
+
+
+37.5
+log
+@Redone to conform to new service specs
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.4 92/04/14 15:18:42 kcd Exp Locker: kcd $ *
+d22 5
+a26 5
+#include "clib/exec_protos.h"
+#include "clib/dos_protos.h"
+#include "clib/nipc_protos.h"
+#include "clib/svc_protos.h"
+#include "clib/iffparse_protos.h"
+d30 5
+a34 5
+#include "pragmas/exec_pragmas.h"
+#include "pragmas/dos_pragmas.h"
+#include "pragmas/nipc_pragmas.h"
+#include "pragmas/svc_pragmas.h"
+#include "pragmas/iffparse_pragmas.h"
+d312 1
+a312 1
+    BOOL status;
+d316 2
+a317 1
+        status = FALSE;
+d334 3
+a336 5
+                        if(StartService(fsr->fsr_UserName,fsr->fsr_PassWord,req_trans))
+                        {
+                            DBMSG(("Service Started okay!\n"));
+                            status = TRUE;
+                        }
+d342 2
+a343 5
+        if(!status)
+        {
+            req_trans->trans_Error = SVCERR_BADSTARTSERV;
+            ReplyTransaction(req_trans);
+        }
+@
+
+
+37.4
+log
+@
+Removed dependencies on old exec pragmas file.
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.3 92/03/27 02:25:39 kcd Exp Locker: kcd $ *
+d20 2
+d25 2
+d33 2
+d59 1
+d77 1
+a77 4
+VOID ProcessEntity(APTR svc_entity, struct MsgPort * svc_port);
+VOID AddStartedServers(struct MsgPort * port);
+struct Server *StartServer(struct FindServerReq * fsr);
+VOID DeinitManager(struct MsgPort *);
+a78 1
+VOID MakeNewNames(struct Server * server);
+d80 14
+d95 3
+a103 1
+    struct MsgPort *ServicePort;
+d105 1
+a105 1
+    ULONG portmask, entitymask, waitmask, sigs;
+d107 10
+a116 1
+	SysBase = (struct ExecBase *)*((void **)4);
+d131 1
+a131 1
+                        if (ServicePort = CreateMsgPort())
+d133 3
+a135 3
+                            if (LoadServicesInfo());
+                            {
+                                DBMSG(("Services Configuration Loaded.\n"));
+d137 1
+a137 2
+                                entitymask = (1 << entitysigbit);
+                                portmask = (1 << ServicePort->mp_SigBit);
+d139 3
+a141 1
+                                waitmask = (entitymask | portmask | SIGBREAKF_CTRL_F);
+d143 1
+a143 3
+                                while (TRUE)
+                                {
+                                    sigs = Wait(waitmask);
+d145 1
+a145 1
+                                    DBMSG(("Awake! %lx\n",sigs));
+d147 1
+a147 13
+                                    ProcessEntity(ServiceEntity, ServicePort);
+
+                                    DBMSG(("Sigs after PE(): %lx\n",sigs));
+
+                                    AddStartedServers(ServicePort);
+
+                                    DBMSG(("Sigs after ASS(): %lx\n",sigs));
+
+                                    if (sigs & SIGBREAKF_CTRL_F)
+                                    {
+                                        DBMSG(("***break: CTRL_F\n"));
+                                        break;
+                                    }
+d149 4
+d154 1
+a154 1
+                                DBMSG(("Services Manager exiting.\n"));
+a155 1
+                            DeinitManager(ServicePort);
+d167 5
+a171 1
+    DeleteMsgPort(ServicePort);
+a174 1
+
+d177 1
+a177 1
+/* DeinitManager() */
+d179 1
+a179 2
+VOID DeinitManager(port)
+struct MsgPort *port;
+d181 5
+a185 13
+    struct Server *server;
+
+    ObtainSemaphore(&ServicesBase->SVCS_StartedLock);
+
+    while (server = (struct Server *) RemHead((struct List *) & ServicesBase->SVCS_Started))
+        FreeMem(server, sizeof(struct Server));
+
+    ReleaseSemaphore(&ServicesBase->SVCS_StartedLock);
+
+    AddStartedServers(port);
+}
+
+/*--------------------------------------------------------------------------*/
+d187 1
+a187 1
+/* LoadServicesInfo  */
+d189 1
+a189 10
+BOOL LoadServicesInfo()
+{
+    struct Service *new_svc, *old_svc;
+    struct RDArgs *svc_args;
+    ULONG args[5],stlen;
+    UBYTE *linebuff, i;
+    BPTR file;
+    BOOL status = FALSE;
+
+    if (file = Open("envarc:appn/services.prefs", MODE_OLDFILE))
+d191 1
+a191 1
+        if (svc_args = (struct RDArgs *) AllocDosObject(DOS_RDARGS, NULL))
+d193 1
+a193 1
+            if (svc_args->RDA_Buffer = (UBYTE *) AllocMem(256, MEMF_PUBLIC))
+d195 3
+a197 1
+                if (linebuff = (UBYTE *) AllocMem(256, MEMF_PUBLIC))
+d199 10
+a208 1
+                    svc_args->RDA_BufSiz = 256;
+d210 4
+a213 5
+                    old_svc = (struct Service *) ServicesBase->SVCS_Services.mlh_Head;
+                    while (old_svc->svc_Node.ln_Succ)
+                    {
+                        old_svc->svc_Flags |= SVCF_EXPUNGE;
+                        old_svc = (struct Service *) old_svc->svc_Node.ln_Succ;
+d215 22
+d238 5
+a242 5
+                    while (FGets(file, linebuff, 256))
+                    {
+                        stlen = strlen(linebuff);
+                        *(linebuff + stlen) = '\n';
+                        *(linebuff + stlen + 1) = 0;
+d244 8
+a251 19
+                        svc_args->RDA_DAList = NULL;
+                        svc_args->RDA_Flags = 0;
+
+                        if (linebuff[0] == '\n')
+                            break;
+                        if ((linebuff[0] == '#') || (linebuff[0] == ';'))
+                            continue;
+
+                        svc_args->RDA_Source.CS_Buffer = linebuff;
+                        svc_args->RDA_Source.CS_Length = 256;
+                        svc_args->RDA_Source.CS_CurChr = 0;
+
+                        for (i = 0; i < 5; i++)
+                            args[i] = 0;
+
+                        ReadArgs("ServiceName/A, PathName/A, GID/A/N,S=Stack/K/N,P=Priority/K/N", args, svc_args);
+
+                        if (!((args[0]) && (args[1]) && (args[2])))
+                            continue;
+d253 3
+a255 1
+                        status = TRUE;
+d257 3
+a259 3
+                        if (old_svc = LocalFindService((STRPTR) args[0]))
+                        {
+                            DBMSG(("Updating old Service: %s\n", args[0]));
+d261 6
+a266 13
+                            strcpy(old_svc->svc_PathName, (UBYTE *) args[1]);
+                            old_svc->svc_GID = (UWORD) * (ULONG *) args[2];
+                            if (args[3])
+                                old_svc->svc_Stack = *(ULONG *) args[3];
+                            else
+                                old_svc->svc_Stack = 4096;
+                            if (args[4])
+                                old_svc->svc_Pri = (UBYTE) * (ULONG *) args[4];
+                            old_svc->svc_Flags &= ~SVCF_EXPUNGE;
+                        }
+                        else if (new_svc = AllocMem(sizeof(struct Service), MEMF_PUBLIC | MEMF_CLEAR))
+                        {
+                            DBMSG(("Adding new Service: %s\n", args[0]));
+d268 4
+a271 18
+                            NewList((struct List *)&new_svc->svc_List);
+                            strcpy(new_svc->svc_SvcName, (UBYTE *) args[0]);
+                            strcpy(new_svc->svc_PathName, (UBYTE *) args[1]);
+                            new_svc->svc_GID = (UWORD) * (ULONG *) args[2];
+                            if (args[3])
+                                new_svc->svc_Stack = *(ULONG *) args[3];
+                            else
+                                new_svc->svc_Stack = 4096;
+                            if (args[4])
+                                new_svc->svc_Pri = (UBYTE) * (ULONG *) args[4];
+                            AddTail((struct List *) & ServicesBase->SVCS_Services, (struct Node *) new_svc);
+                            new_svc->svc_Flags &= ~SVCF_EXPUNGE;
+                        }
+                        FreeArgs(svc_args);
+                    }
+                    FreeMem(linebuff, 256);
+                }
+                FreeMem(svc_args->RDA_Buffer, 256);
+d273 2
+a274 1
+            FreeDosObject(DOS_RDARGS, svc_args);
+d276 1
+a276 1
+        Close(file);
+d278 1
+a278 1
+    return (status);
+a302 42
+/* AddStartedServers() */
+
+VOID AddStartedServers(svc_port)
+struct MsgPort *svc_port;
+{
+    struct Transaction *req_trans;
+    struct FindServiceAck *fsa;
+    struct Server *server;
+
+    DBMSG(("AddStartedServers()\n"));
+
+    while (server = (struct Server *) GetMsg(svc_port))
+    {
+        DBMSG(("Got a server startup message!\n"));
+
+        req_trans = server->serv_Trans;
+        fsa = (struct FinsServiceAck *) req_trans->trans_ResponseData;
+
+        if (server->serv_Process)
+        {
+            req_trans->trans_Error = 0;
+            req_trans->trans_RespDataActual = sizeof(struct FindServiceAck);
+            strcpy(fsa->fsa_EntityName, server->serv_EntityName);
+            DBMSG(("Server Entity Name: %s\n",server->serv_EntityName));
+            DBMSG(("Replying to transaction. Server started okay.\n"));
+            ReplyTransaction(req_trans);
+
+            ObtainSemaphore(&ServicesBase->SVCS_ServicesLock);
+            AddTail((struct List *) &(server->serv_Service->svc_List), (struct Node *) server);
+            ReleaseSemaphore(&ServicesBase->SVCS_ServicesLock);
+        }
+        else
+        {
+            req_trans->trans_Error = 301;       /* SVCERR_SERVERFAIL; */
+            ReplyTransaction(req_trans);
+            FreeMem(server, sizeof(struct Server));
+        }
+    }
+}
+
+/*--------------------------------------------------------------------------*/
+
+d305 1
+a305 1
+VOID ProcessEntity(svc_entity, svc_port)
+a306 1
+struct MsgPort *svc_port;
+a309 1
+    struct FindServiceAck *fsa;
+d311 2
+a312 2
+    struct Server *server;
+    BPTR server_seglist;
+d316 1
+d328 1
+a328 6
+                    if ((svc->svc_Flags & SVCF_MULTI) && svc->svc_List.mlh_Head->mln_Succ)
+                    {
+                        fsa = (struct FindServiceAck *) req_trans->trans_ResponseData;
+                        req_trans->trans_Error = 0;
+                        req_trans->trans_RespDataActual = sizeof(struct FindServiceAck);
+                        server = (struct Server *) svc->svc_List.mlh_Head;
+d330 1
+a330 10
+                        DBMSG(("BLEAH!: %lx\n",server));
+
+                        strcpy(fsa->fsa_EntityName, server->serv_EntityName);
+                        DBMSG(("XXX: %lx  ****: %ld",server->serv_EntityName,(ULONG)server->serv_EntityName[0]));
+                        DBMSG(("Using Running Server: %s\n",server->serv_EntityName));
+
+                        ReplyTransaction(req_trans);
+                        continue;
+                    }
+                    else
+d332 2
+a333 1
+                        if (server = (struct Server *) AllocMem(sizeof(struct Server), MEMF_PUBLIC | MEMF_CLEAR))
+d335 2
+a336 35
+                            DBMSG(("Starting New Server Process.\n"));
+                            server->serv_Msg.mn_ReplyPort = svc_port;
+                            server->serv_Trans = req_trans;
+                            server->serv_Timer = 60;
+                            server->serv_Service = svc;
+                            MakeNewNames(server);
+                            if (server_seglist = NewLoadSeg(svc->svc_PathName, NULL))
+                            {
+                                DBMSG(("New Server Loaded.\n"));
+                                ObtainSemaphore(&ServicesBase->SVCS_StartedLock);
+                                DBMSG(("CreateNewProc: Seg: %lx, Stack: %ld, Name: %s, Pri: %ld\n", server_seglist,
+                                        svc->svc_Stack,
+                                        server->serv_EntityName,
+                                        (ULONG) svc->svc_Pri));
+                                if (server->serv_Process = CreateNewProcTags(NP_Seglist, server_seglist,
+                                                                             NP_FreeSeglist, TRUE,
+                                                                             NP_StackSize, svc->svc_Stack,
+                                                                             NP_Name, server->serv_EntityName,
+                                                                             NP_Priority, svc->svc_Pri,
+                                                                             NP_Cli,TRUE,
+                                                                             NP_CommandName,server->serv_EntityName,
+                                                                             NP_Arguments, " ",
+                                                                             TAG_DONE, 0))
+                                {
+                                    DBMSG(("New Server Process Started.\n"));
+                                    AddTail((struct List *) & ServicesBase->SVCS_Started, (struct Node *) server);
+                                    ReleaseSemaphore(&ServicesBase->SVCS_StartedLock);
+                                    continue;
+                                }
+                                else
+                                    req_trans->trans_Error = SVCERR_BADSTARTSERV;
+                                ReleaseSemaphore(&ServicesBase->SVCS_StartedLock);
+                            }
+                            else
+                                req_trans->trans_Error = SVCERR_CANTLOADSERV;
+d338 1
+a338 2
+                        else
+                            req_trans->trans_Error = SVCERR_NOMEMORY;
+a340 7
+                else
+                    req_trans->trans_Error = SVCERR_BADSERVICE;
+            }
+            else
+            {
+                DBMSG(("Service Not Available.\n"));
+                req_trans->trans_Error = SVCERR_BADSERVICE;
+d343 3
+a345 4
+        else
+            req_trans->trans_Error = SVCERR_BADTRANS;
+
+        if (req_trans->trans_Error)
+d347 1
+a348 1
+    DBMSG(("ProcessEntity: Done.\n"));
+a350 15
+/*--------------------------------------------------------------------------*/
+
+/* MakeNewNames() */
+
+VOID MakeNewNames(server)
+struct Server *server;
+{
+    ULONG unique;
+
+    Forbid();
+    unique = ServicesBase->SVCS_Unique++;
+    Permit();
+
+    sprintf(server->serv_EntityName, "%s_%ld", server->serv_Service->svc_SvcName, unique);
+}
+@
+
+
+37.3
+log
+@Minor: Fixed the random return code bug.
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.2 92/03/25 18:06:04 kcd Exp Locker: kcd $ *
+d54 1
+d88 1
+a88 1
+
+@
+
+
+37.2
+log
+@Fixed a bug causing multiple copies of MultiClient servers to be started.
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 37.1 92/03/22 18:16:30 kcd Exp Locker: kcd $ *
+d75 1
+a75 1
+VOID manager(void);
+d81 1
+a81 1
+VOID manager()
+d149 1
+@
+
+
+37.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+ * * $Id: manager.c,v 1.1 92/03/18 18:40:27 kcd Exp $ *
+d24 2
+d117 1
+a117 1
+									DBMSG(("Awake! %lx\n",sigs));
+d203 3
+a205 3
+                    	stlen = strlen(linebuff);
+                    	*(linebuff + stlen) = '\n';
+                    	*(linebuff + stlen + 1) = 0;
+d247 1
+d304 1
+a304 1
+	DBMSG(("AddStartedServers()\n"));
+d308 1
+a308 1
+    	DBMSG(("Got a server startup message!\n"));
+d323 1
+a323 1
+            AddTail((struct List *) server->serv_Service, (struct Node *) server);
+d363 1
+a363 2
+                    if ((svc->svc_Flags & SVCF_MULTI) &&
+                        (svc->svc_List.mlh_Head != (struct MinNode *) svc->svc_List.mlh_Tail))
+d367 1
+d369 3
+d373 3
+d398 8
+a405 8
+          		                                    				         NP_FreeSeglist, TRUE,
+                								                             NP_StackSize, svc->svc_Stack,
+                                									         NP_Name, server->serv_EntityName,
+                                									         NP_Priority, svc->svc_Pri,
+                                									         NP_Cli,TRUE,
+                                									         NP_CommandName,server->serv_EntityName,
+                                									         NP_Arguments, " ",
+                             				                                 TAG_DONE, 0))
+@

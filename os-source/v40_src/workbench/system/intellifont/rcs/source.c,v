@@ -1,0 +1,528 @@
+head     37.8;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+37.8
+date     92.02.10.10.58.07;  author davidj;  state Exp;
+branches ;
+next     37.7;
+
+37.7
+date     92.02.07.11.58.35;  author davidj;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     91.03.11.14.23.48;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.8
+log
+@enhanced debugging statements
+@
+text
+@/*
+**	$Id: source.c,v 37.7 92/02/07 11:58:35 davidj Exp Locker: davidj $
+**
+**	Fountain/source.c -- handle source font side of display
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+*/
+
+#include  "fountain.h"
+
+#define	DB(x)	;
+
+static int num_install = 0;
+
+extern struct Process *Process;
+
+extern struct Library *SysBase;
+extern struct Library *DOSBase;
+extern struct Library *GadToolsBase;
+extern struct Library *IntuitionBase;
+
+extern struct Window *Window;
+extern struct Gadget *GPSDir;
+extern struct Gadget *GPSFace;
+extern struct Gadget *GPInstall;
+
+extern union StaticPool S;
+
+extern struct MinList SFaceList;
+
+struct MinList SourceList =
+{
+    (struct MinNode *) & SourceList.mlh_Tail, 0,
+    (struct MinNode *) & SourceList.mlh_Head
+};
+
+char SDirName[PATHNAMELEN] = {0};
+
+void HuntPath (int lDirType, char *pathName, int huntLimit)
+{
+    DB (kprintf ("HuntPath(%ld, \"%s\")\n", lDirType, pathName));
+    if (lDirType == GLDTYPE_PCDOS)
+	FAISInfo (pathName);
+    else
+	LIBInfo (pathName, &SourceList, huntLimit);
+}
+
+FindSourceDisk (int lDirType)
+{
+    APTR oldPRWindowPtr;
+    struct DosList *dol;
+    struct FileSysStartupMsg *fssm;
+    struct DosEnvec *de;
+    BPTR lock;
+    UWORD fibBuffer[sizeof (struct FileInfoBlock) / 2 + 1];
+    char sourcePath[PATHNAMELEN], *s;
+    struct FileInfoBlock *fib;
+
+    DB (kprintf ("FindSourceDisk\n"));
+    oldPRWindowPtr = Process->pr_WindowPtr;
+    Process->pr_WindowPtr = (APTR) - 1;
+    dol = LockDosList (LDF_DEVICES | LDF_READ);
+    while (dol = NextDosEntry (dol, LDF_DEVICES))
+    {
+	if ((dol->dol_Task) && (dol->dol_Type == DLT_DEVICE))
+	{
+	    fssm = (struct FileSysStartupMsg *) BADDR (dol->dol_misc.dol_handler.dol_Startup);
+	    if (((ULONG) fssm) >= 0x40)
+	    {
+		de = (struct DosEnvec *) BADDR (fssm->fssm_Environ);
+		if (lDirType == GLDTYPE_PCDOS)
+		{
+		    DB (kprintf ("GLDTYPE_PCDOS\n"));
+		    DB (kprintf ("fssm_Device %ld \"%s\"\n", ((UBYTE *) BADDR (fssm->fssm_Device))[0], ((UBYTE *) BADDR (fssm->fssm_Device)) + 1));
+		    if ((de->de_TableSize < DE_DOSTYPE) ||
+			((de->de_DosType & 0xffffff00) != ID_PC_DISK))
+			continue;
+		}
+		else		/* GLDTYPE_AMIGA */
+		{
+		    DB (kprintf ("GLDTYPE_AMIGA\n"));
+		    DB (kprintf ("fssm_Device %ld \"%s\"\n", ((UBYTE *) BADDR (fssm->fssm_Device))[0], ((UBYTE *) BADDR (fssm->fssm_Device)) + 1));
+		    if ((strcmp (BADDR (fssm->fssm_Device), DOSDEV_TRACKDISK) != 0) ||
+			((de->de_TableSize > DE_DOSTYPE) && ((de->de_DosType & 0xffffff00) != ID_DOS_DISK)))
+			continue;
+		}
+		lock = 0;	/* null BSTR */
+		lock = DoPkt3 (dol->dol_Task, ACTION_LOCATE_OBJECT, 0,(((ULONG) & lock) + 2) >> 2, SHARED_LOCK);
+		if (lock)
+		{
+		    if (NameFromLock (lock, sourcePath, 256))
+		    {
+			if (lDirType == GLDTYPE_PCDOS)
+			{
+			    HuntPath (GLDTYPE_PCDOS, sourcePath, 0);
+			}
+			else	/* GLDTYPE_AMIGA */
+			{
+			    fib = (struct FileInfoBlock *)(((ULONG) & fibBuffer[1]) & 0xfffffffc);
+			    if (Examine (lock, fib) && (fib->fib_DirEntryType >= 0))
+			    {
+				while (ExNext (lock, fib))
+				{
+				    if (fib->fib_DirEntryType >= 0)
+				    {
+					/* Build pathname of dir to examine */
+					s = sourcePath + strlen (sourcePath);
+					AddPart (sourcePath, fib->fib_FileName, PATHNAMELEN);
+					HuntPath (GLDTYPE_AMIGA, sourcePath, 11);
+					*s = '\0';
+					break;
+				    }
+				}
+			    }
+			}
+		    }
+		    else
+		    {
+			DB (kprintf ("Couldn't get name from lock\n"));
+		    }
+		    UnLock (lock);
+		}
+		if (SourceList.mlh_Head->mln_Succ)
+		{
+		    strcpy (SDirName, sourcePath);
+		    break;
+		}
+	    }
+	}
+    }
+    UnLockDosList (LDF_DEVICES | LDF_READ);
+    Process->pr_WindowPtr = oldPRWindowPtr;
+
+    /* Show it, please! */
+    redisplaySFace ();
+}
+
+redisplaySFace ()
+{
+    struct TypeEntry *src;
+
+    if (GPSFace)
+    {
+	GT_SetGadgetAttrs (GPSDir,    Window, 0, GTST_String, SDirName, TAG_DONE);
+	GT_SetGadgetAttrs (GPInstall, Window, 0, GA_Disabled, TRUE, TAG_DONE);
+	GT_SetGadgetAttrs (GPSFace,   Window, 0, GTLV_Labels, ~0L, TAG_DONE);
+    }
+
+    FreeList (&SFaceList);
+    num_install = 0;
+    for (src = (struct TypeEntry *) SourceList.mlh_Head;
+	 src->node.mln_Succ;
+	 src = (struct TypeEntry *) src->node.mln_Succ)
+    {
+	AddFace (&SFaceList, src->amigaName, src);
+    }
+
+    if (GPSFace)
+    {
+	GT_SetGadgetAttrs (GPSFace,   Window, 0, GTLV_Labels, &SFaceList, TAG_DONE);
+    }
+}
+
+FindSource ()
+{
+    DB (kprintf ("FindSource\n"));
+    FreeList (&SourceList);
+
+    FindSourceDisk (GLDTYPE_PCDOS);
+    if (!SourceList.mlh_Head->mln_Succ)
+	FindSourceDisk (GLDTYPE_AMIGA);
+}
+
+SelectSDirReq ()
+{
+    DirRequester (GPSDir, TITLE_OutlineSource);
+    SelectSDir ();
+    SelectDDir ();
+}
+
+SelectSDir ()
+{
+    BPTR lock;
+
+    int lDirType;
+    char *s;
+
+    FreeList (&SourceList);
+
+    s = ((struct StringInfo *) GPSDir->SpecialInfo)->Buffer;
+
+    strcpy (SDirName, s);
+
+    WaitPointer (0);
+    if (strlen (s) == 0)
+    {
+	FindSource ();
+    }
+    else
+    {
+	if (lock = Lock (s, SHARED_LOCK))
+	{
+	    if (NameFromLock (lock, S.t.TempBuffer, 256))
+	    {
+		strcpy (SDirName, S.t.TempBuffer);
+		for (lDirType = 0; lDirType < GLDTYPE_COUNT; lDirType++)
+		{
+		    HuntPath (lDirType, s, 0);
+		    if (SourceList.mlh_Head->mln_Succ)
+			break;
+		}
+	    }
+	    UnLock (lock);
+	}
+    }
+    WaitPointer (-1);
+
+    redisplaySFace ();
+}
+
+SelectSFace (int newSFaceNum)
+{
+    struct FaceDisplay *fd;
+    int i;
+
+    GT_SetGadgetAttrs (GPSFace, Window, 0, GTLV_Labels, ~0L, TAG_DONE);
+    for (fd = (struct FaceDisplay *) SFaceList.mlh_Head, i = 0;
+	 fd && (i < newSFaceNum);
+	 fd = (struct FaceDisplay *) fd->node.ln_Succ, i++) ;
+
+    if (fd->name[0] == ' ')
+    {
+	num_install++;
+	fd->name[0] = '+';
+    }
+    else
+    {
+	num_install--;
+	fd->name[0] = ' ';
+    }
+    GT_SetGadgetAttrs (GPInstall, Window, 0, GA_Disabled, ((num_install) ? FALSE : TRUE), TAG_DONE);
+    GT_SetGadgetAttrs (GPSFace, Window, 0, GTLV_Labels, &SFaceList, TAG_DONE);
+}
+
+ValidateSource ()
+{
+    if (strcmp (SDirName, ((struct StringInfo *) GPSDir->SpecialInfo)->Buffer))
+	SelectSDir ();
+}
+@
+
+
+37.7
+log
+@fixed bugs
+@
+text
+@d2 1
+a2 1
+**	$Id: source.c,v 37.6 91/03/11 14:23:48 kodiak Exp Locker: davidj $
+d74 2
+d82 1
+d84 2
+a85 4
+		    if ((strcmp (BADDR (fssm->fssm_Device),
+				 DOSDEV_TRACKDISK) != 0)
+			|| ((de->de_TableSize > DE_DOSTYPE) &&
+			    ((de->de_DosType & 0xffffff00) != ID_DOS_DISK)))
+d89 1
+a89 2
+		lock = DoPkt3 (dol->dol_Task, ACTION_LOCATE_OBJECT, 0,
+			       (((ULONG) & lock) + 2) >> 2, SHARED_LOCK);
+d100 2
+a101 4
+			    fib = (struct FileInfoBlock *)
+			      (((ULONG) & fibBuffer[1]) & 0xfffffffc);
+			    if (Examine (lock, fib) &&
+				(fib->fib_DirEntryType >= 0))
+d109 1
+a109 2
+					AddPart (sourcePath, fib->fib_FileName,
+						 PATHNAMELEN);
+d117 4
+@
+
+
+37.6
+log
+@*** empty log message ***
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d12 4
+d26 1
+d32 4
+a35 3
+struct MinList SourceList = {
+    (struct MinNode *) &SourceList.mlh_Tail, 0,
+    (struct MinNode *) &SourceList.mlh_Head
+d38 1
+a38 1
+char SDirName[PATHNAMELEN] = { 0 };
+d40 1
+a40 6
+
+void
+HuntPath(lDirType, pathName, huntLimit)
+int lDirType;
+char *pathName;
+int huntLimit;
+d42 1
+a42 2
+    DBG2("HuntPath(%ld, \"%s\")\n", lDirType, pathName);
+
+d44 1
+a44 1
+	FAISInfo(pathName);
+d46 1
+a46 1
+	LIBInfo(pathName, &SourceList, huntLimit);
+d49 1
+a49 3
+
+FindSourceDisk(lDirType)
+int lDirType;
+d56 1
+a56 1
+    UWORD fibBuffer[sizeof(struct FileInfoBlock) / 2 + 1];
+d60 1
+a60 1
+    DBG("FindSourceDisk\n");
+d62 12
+a73 9
+    Process->pr_WindowPtr = (APTR) -1;
+    dol = LockDosList(LDF_DEVICES|LDF_READ);
+    while (dol = NextDosEntry(dol, LDF_DEVICES)) {
+	if ((dol->dol_Task) && (dol->dol_Type == DLT_DEVICE)) {
+	    fssm = (struct FileSysStartupMsg *)
+		    BADDR(dol->dol_misc.dol_handler.dol_Startup);
+	    if (((ULONG) fssm) >= 0x40) {
+		de = (struct DosEnvec *) BADDR(fssm->fssm_Environ);
+		if (lDirType == GLDTYPE_PCDOS) {
+d75 1
+a75 1
+			    ((de->de_DosType & 0xffffff00) != ID_PC_DISK))
+d78 6
+a83 7
+		else /* GLDTYPE_AMIGA */ {
+		    DBG2("fssm_Device %ld \"%s\"\n",
+			    ((UBYTE *)BADDR(fssm->fssm_Device))[0],
+			    ((UBYTE *)BADDR(fssm->fssm_Device))+1);
+		    if ((strcmp(BADDR(fssm->fssm_Device),
+			    DOSDEV_TRACKDISK) != 0)
+			    || ((de->de_TableSize > DE_DOSTYPE) &&
+d87 10
+a96 7
+		lock = 0;			/* null BSTR */
+		lock = DoPkt3(dol->dol_Task, ACTION_LOCATE_OBJECT, 0,
+			(((ULONG) &lock)+2)>>2, SHARED_LOCK);
+		if (lock) {
+		    if (NameFromLock(lock, sourcePath, 256)) {
+			if (lDirType == GLDTYPE_PCDOS) {
+			    HuntPath(GLDTYPE_PCDOS, sourcePath, 0);
+d98 2
+a99 1
+			else /* GLDTYPE_AMIGA */ {
+d101 8
+a108 5
+				    (((ULONG) & fibBuffer[1]) & 0xfffffffc);
+			    if (Examine(lock, fib) &&
+				    (fib->fib_DirEntryType >= 0)) {
+				while (ExNext(lock, fib)) {
+				    if (fib->fib_DirEntryType >= 0) {
+d110 4
+a113 4
+					s = sourcePath+strlen(sourcePath);
+					AddPart(sourcePath, fib->fib_FileName,
+						PATHNAMELEN);
+					HuntPath(GLDTYPE_AMIGA, sourcePath, 11);
+d121 1
+a121 1
+		    UnLock(lock);
+d123 3
+a125 2
+		if (SourceList.mlh_Head->mln_Succ) {
+		    strcpy(SDirName, sourcePath);
+d131 1
+a131 1
+    UnLockDosList(LDF_DEVICES|LDF_READ);
+d133 3
+d138 1
+a138 2
+
+redisplaySFace()
+d142 9
+a150 3
+    GT_SetGadgetAttrs(GPSFace, Window, 0,
+	    GTLV_Labels, ~0L, TAG_DONE);
+    FreeList(&SFaceList);
+d152 9
+a160 3
+	    src->node.mln_Succ;
+	    src = (struct TypeEntry *) src->node.mln_Succ) {
+	AddFace(&SFaceList, src->amigaName, src);
+d162 1
+a162 10
+    GT_SetGadgetAttrs(GPSFace, Window, 0,
+	    GTLV_Labels, &SFaceList, TAG_DONE);
+    GT_SetGadgetAttrs(GPSDir, Window, 0,
+	    GTST_String, SDirName, TAG_DONE);
+}
+
+
+FindSource()
+{
+    DBG("FindSource\n");
+d164 4
+a167 1
+    FreeList(&SourceList);
+d169 1
+a169 1
+    FindSourceDisk(GLDTYPE_PCDOS);
+d171 1
+a171 1
+	FindSourceDisk(GLDTYPE_AMIGA);
+d174 5
+a178 6
+
+SelectSDirReq()
+{
+    DirRequester(GPSDir, TITLE_OutlineSource);
+    SelectSDir();
+    SelectDDir();
+d181 1
+a181 2
+
+SelectSDir()
+d188 3
+a190 1
+    FreeList(&SourceList);
+d192 1
+a192 1
+    s =  ((struct StringInfo *) GPSDir->SpecialInfo)->Buffer;
+d194 15
+a208 12
+    strcpy(SDirName, s);
+
+    WaitPointer(0);
+    if (strlen(s) == 0) {
+	FindSource();
+    }
+    else {
+	if (lock = Lock(s, SHARED_LOCK)) {
+	    if (NameFromLock(lock, S.t.TempBuffer, 256)) {
+		strcpy(SDirName, S.t.TempBuffer);
+		for (lDirType = 0; lDirType < GLDTYPE_COUNT; lDirType++) {
+		    HuntPath(lDirType, s, 0);
+d213 1
+a213 1
+	    UnLock(lock);
+d216 1
+a216 1
+    WaitPointer(-1);
+d218 1
+a218 1
+    redisplaySFace();
+d221 1
+a221 2
+
+SelectSFace(newSFaceNum)
+d226 1
+a226 1
+    GT_SetGadgetAttrs(GPSFace, Window, 0, GTLV_Labels, ~0L, TAG_DONE);
+d228 3
+a230 2
+	    fd && (i < newSFaceNum);
+	    fd = (struct FaceDisplay *) fd->node.ln_Succ, i++);
+d232 2
+d235 1
+d237 2
+d240 3
+a242 2
+    GT_SetGadgetAttrs(GPSFace, Window, 0,
+	    GTLV_Labels, &SFaceList, TAG_DONE);
+d245 1
+a245 1
+ValidateSource()
+d247 2
+a248 2
+    if (strcmp(SDirName, ((struct StringInfo *) GPSDir->SpecialInfo)->Buffer))
+	SelectSDir();
+@

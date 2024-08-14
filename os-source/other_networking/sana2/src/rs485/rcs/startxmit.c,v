@@ -1,0 +1,631 @@
+head     1.7;
+branch   ;
+access   ;
+symbols  ;
+locks    kcd:1.7; strict;
+comment  @ * @;
+
+
+1.7
+date     91.12.30.18.35.01;  author dlarson;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     91.12.13.11.54.29;  author dlarson;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     91.12.03.14.30.20;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.12.03.14.05.44;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.27.15.48.58;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.11.19.09.49.45;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.21.15.41.24;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Original snapshot from Ameristar
+@
+
+
+1.7
+log
+@Includes various optimizations and the long packet Christmas fix.  Probably
+last working version before enhancements and Novell "ARCNET Packet Header
+Definition Standard."
+@
+text
+@/*
+ * Attempt to send queued packet on specified unit:
+ *
+ * try to get xmit page from com chip; leave at least one buf for rcvr
+ * try to grab iob from write_q; if none, free xmit buffer & return
+ * build packet header into packet header struct
+ * build body of packet in transmit buffer.  See com20020 doc pg 36 for format
+ * 	also, pg 37: can't send 254,255,256 byte pkts
+ * 	512 byte packets have two byte count field: a zero, and a count byte
+ * try to send the packet: Disable ints, check if xmit available,
+ * 	assert trasmit from buffer command.  Otherwise, just mark buffer
+ * 	as "HAS_XMIT_DATA" and let the interrupt driver send the buffer.
+ *
+ * returns: 0 if no work/buffers, 1 if sent, -1 if error
+ */
+
+#ifndef RS485_H
+#include "rs485.h"
+#endif
+
+int startxmit(struct rs485Unit *up)
+{
+unsigned int len, offset, dataoffset;
+struct TrackedType *ttp, tp;
+struct IOSana2Req *iob;
+struct pkthdr ph;
+int bn, i;
+
+/*
+**  Clear current request if excessive negative acknowledgements for that
+**  packet.  The interrupt serever will clear the buffer as if it had been
+**  sent.
+*/
+//int dsr;
+//	dsr = DSR(up);
+//	if(dsr & DSR_EXCNAK)
+//	{
+//DPRINT(("EXCNAK!!!\n"));
+//		CMD(up) = C_DIS_XMIT;
+//		/*  Don't I need to free the buffer being worked on here?  */
+//	}
+//	 else
+//	{
+//DPRINT(("No EXCNAK.\n"));
+//	}
+//	if(dsr & DSR_TOKEN)
+//		DPRINT(("Token seen.\n"));
+//	else
+//		DPRINT(("Token not seen.\n"));
+//	if(dsr & DSR_MYRECON)
+//		DPRINT(("I caused a recon.\n"));
+//	else
+//		DPRINT(("I haven't caused a recon.\n"));
+
+/*
+**  get transmit buffer
+*/
+DPRINT(("startxmit\n"));
+	i = NBUF;
+	bn = -1;
+	Disable();
+	while(--i >= 0)
+	{
+		if(up->bstate[i] == IS_FREE)
+		{
+			if(bn < 0)
+			{
+				up->bstate[i] = IS_BUSY;
+    				bn = i;
+			} else
+			{
+				break;
+			}
+		}
+	}
+	Enable();
+	if(i < 0)
+	{
+		if(bn >= 0)
+		{
+			up->bstate[bn] = IS_FREE;
+		}
+		return 0;
+	}
+DPRINT(("got buffer %ld\n", bn));
+/*
+**  pull next writer packet off send queue
+*/
+	iob = (struct IOSana2Req *)RemHead(&up->write_q);
+	if(!iob)
+	{
+		up->bstate[bn] = IS_FREE;
+		return 0;
+	}
+DPRINT(("got it off send queue\n"));
+
+/*
+**  get packet from abstract data structure into contiguous memory.
+**  this is an extra copy, but given that we must feed one byte at
+**  a time to the COM20020, it is hardly avoidable.  and, depending
+**  on the actual buffer management scheme, this could speed up things
+**  anyway by allowing a very tight loop to copy the buffer out.
+*/
+	if(CopyFromBuff(UNIT(iob)->temp[bn], iob->ios2_Data, iob->ios2_DataLength) == FALSE)
+	{
+DPRINT(("Error on CopyFromBuff()\n"));
+		iob->ios2_Req.io_Error = S2ERR_SOFTWARE;
+		iob->ios2_WireError = S2WERR_BUFF_ERROR;
+		up->bstate[bn] = IS_FREE;
+		if(!(iob->ios2_Req.io_Flags & SANA2IOF_QUICK))
+		{
+			ReplyMsg(&iob->ios2_Req.io_Message);
+		}
+		return -1;
+	}
+DPRINT(("did CopyFromBuff (%s) %ld\n", UNIT(iob)->temp[bn], iob->ios2_DataLength));
+/*
+**  if it's raw, just dump it, else compute lengths/offsets from packet
+*/
+	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW)
+	{
+DPRINT(("Raw send!!!\n"));
+		ADDRH(up) = (bn << 1) | ADH_AUTOINC;
+		ADDRL(up) = 0;
+		copyout(UNIT(iob)->temp[bn], &DATA(up), iob->ios2_DataLength);
+		goto xmit;
+	}
+DPRINT(("Not a raw send!!!\n"));
+	ph.sid = SUB_REG(up);
+	ph.did = (iob->ios2_Req.io_Command==CMD_WRITE)?iob->ios2_DstAddr[0]:BROADCASTADDR;
+	ph.type[0] = (UBYTE)iob->ios2_PacketType;
+	ph.type[1] = *(((BYTE *)&iob->ios2_PacketType)+1);
+	dataoffset = 0;
+
+	len = iob->ios2_DataLength - dataoffset;
+/*
+**  find stats buffer, if any
+*/
+	ttp = 0;
+	if(!ISEMPTY(&up->trackedtype)){
+		ttp = findtracked(up, iob->ios2_PacketType);
+	}
+	if(!ttp){
+		ttp = &tp;
+	}
+/*
+**  marshall header
+*/
+	ADDRH(up) = (bn << 1) | ADH_AUTOINC;
+	ADDRL(up) = 0;
+	DATA(up) = ph.sid;
+	DATA(up) = ph.did;
+	if(len > 253)
+	{
+		if(len < 257)
+		{
+			len = 257;
+		}
+		DATA(up) = 0;
+		offset = 512 - len;
+DPRINT(("Long packet.\n"));
+	} else
+	{
+		offset = 256 - len;
+	}
+	offset -= (TWOBYTECODE(&ph)? 2:1);
+	DATA(up) = offset;
+	ADDRL(up) = offset;
+	DATA(up) = ph.type[0];
+	if((TWOBYTECODE(&ph)? 2:1) == 2)
+	{
+		DATA(up) = ph.type[1];
+	}
+DPRINT(("about to copyout  offset=%ld, tlength=%ld, count=%ld type=%ld\n", offset, (TWOBYTECODE(&ph)? 2:1), len, (long)ph.type[0]));
+/*
+**  marshall data part of packet
+*/
+	copyout(UNIT(iob)->temp[bn], &DATA(up), len);
+/*
+**  output packet to wire + do loopback, if any
+*/
+xmit:
+	if((ph.did==BROADCASTADDR || ph.did==SUB_REG(up)) &&
+	   !ISEMPTY(&up->read_q))
+	{
+		recv(up, bn);
+	}
+	Disable();
+	if(SR(up) & SR_TA)
+	{
+		CMD(up) = C_SEND(bn);
+		up->intmask |= SR_TA;
+		SR(up) = up->intmask;
+		up->bstate[bn] = IS_CURR_XMIT;
+DPRINT(("Actually sending to %ld!!!\n", (long)ph.did));
+	} else
+	{
+		up->bstate[bn] = HAS_XMIT_DATA;
+DPRINT(("on send queue.\n"));
+	}
+	Enable();
+
+/*
+**  update stats, reply to message
+*/
+	up->stats.PacketsSent++;
+	ttp->stats.PacketsSent++;
+	ttp->stats.BytesSent += iob->ios2_DataLength;
+	ReplyMsg(&iob->ios2_Req.io_Message);
+
+
+	return 1;
+}
+@
+
+
+1.6
+log
+@raw reads and writes work now.
+@
+text
+@a20 2
+KPrintF(){;}
+
+d34 8
+a41 8
+int dsr;
+	dsr = DSR(up);
+	if(dsr & DSR_EXCNAK)
+	{
+KPrintF("EXCNAK!!!\n");
+		CMD(up) = C_DIS_XMIT;
+		/*  Don't I need to free the buffer being worked on here?  */
+	}
+d44 1
+a44 1
+//KPrintF("No EXCNAK.\n");
+d47 1
+a47 1
+//		KPrintF("Token seen.\n");
+d49 1
+a49 1
+//		KPrintF("Token not seen.\n");
+d51 1
+a51 1
+//		KPrintF("I caused a recon.\n");
+d53 1
+a53 1
+//		KPrintF("I haven't caused a recon.\n");
+d58 1
+a58 1
+KPrintF("startxmit\n");
+d85 1
+a85 1
+KPrintF("got buffer %ld\n", bn);
+d95 1
+a95 1
+KPrintF("got it off send queue\n");
+d106 1
+a106 1
+KPrintF("Error on CopyFromBuff()\n");
+d116 1
+a116 2
+KPrintF("did CopyFromBuff (%s) %ld\n", UNIT(iob)->temp[bn], iob->ios2_DataLength);
+
+d122 1
+a122 1
+KPrintF("Raw send!!!\n");
+d128 6
+a133 11
+KPrintF("Not a raw send!!!\n");
+//	if(iob->ios2_Req.io_Flags & SANA2IOF_RAW)
+//	{
+//		memcpy((UBYTE *)&ph, UNIT(iob)->temp[bn], sizeof(ph));
+//		dataoffset = 2 + (TWOBYTECODE(&ph)? 2:1);
+//	} else
+		ph.sid = SUB_REG(up);
+		ph.did = (iob->ios2_Req.io_Command==CMD_WRITE)?iob->ios2_DstAddr[0]:BROADCASTADDR;
+		ph.type[0] = (UBYTE)iob->ios2_PacketType;
+		ph.type[1] = *(((BYTE *)&iob->ios2_PacketType)+1);
+		dataoffset = 0;
+d161 1
+a161 1
+KPrintF("Long packet.\n");
+d174 1
+a174 1
+KPrintF("about to copyout  offset=%ld, tlength=%ld, count=%ld type=%ld\n", offset, (TWOBYTECODE(&ph)? 2:1), len, (long)ph.type[0]);
+d195 1
+a195 1
+KPrintF("Actually sending to %ld!!!\n", (long)ph.did);
+d199 1
+a199 1
+KPrintF("on send queue.\n");
+@
+
+
+1.5
+log
+@doesn't print debugging messages...  (bad programmer)
+@
+text
+@a0 1
+
+d32 26
+d121 1
+a121 1
+**  compute lengths/offsets from packet
+d125 12
+a136 4
+		memcpy((UBYTE *)&ph, UNIT(iob)->temp[bn], sizeof(ph));
+		dataoffset = 2 + (TWOBYTECODE(&ph)? 2:1);
+	} else
+	{
+d142 1
+a142 1
+	}
+a156 1
+
+d190 1
+@
+
+
+1.4
+log
+@Fixed online/offline/onevent.
+@
+text
+@d22 1
+a22 1
+//KPrintF(){;}
+@
+
+
+1.3
+log
+@First version which works with inet.library!!!
+@
+text
+@d22 2
+a23 1
+KPrintF(){;}
+a123 1
+KPrintF("about to marshall header\n");
+d137 1
+a154 8
+
+	KPrintF("copyout: (%s)\n", UNIT(iob)->temp[bn]);
+	memset(UNIT(iob)->temp[bn], 0, len);
+	KPrintF("memset: (%s)\n", UNIT(iob)->temp[bn]);
+	ADDRL(up) = offset;
+	copyin(&DATA(up), UNIT(iob)->temp[bn], len);
+	KPrintF("copyin: (%s)\n", UNIT(iob)->temp[bn]);
+//	copyout(UNIT(iob)->temp[bn]+dataoffset, &DATA(up), iob->ios2_DataLength);
+a176 1
+KPrintF("out of disable\n");
+a185 1
+KPrintF("replied to message");
+@
+
+
+1.2
+log
+@Getting it up to current spec...
+@
+text
+@d18 2
+a19 2
+#ifndef AMIGANET_H
+#include "amiganet.h"
+d22 2
+a23 1
+int startxmit(struct AmiganetUnit *up)
+a24 5
+	return 0;
+}
+#if 0
+int startxmit(struct AmiganetUnit *up)
+{
+a26 1
+ULONG spt;
+d31 6
+a36 2
+	/* get transmit buffer */
+	i = NBUF; bn = -1;
+d61 4
+a64 2
+
+	/* pull next writer packet off send queue */
+d66 2
+a67 1
+	if(!iob){
+d71 2
+a78 4
+**
+**
+**  I should probably keep 4 system buffers which correspond to
+**  COM20020 internal buffers.  Thus, below, temp should be temp[bn].
+d80 1
+a80 1
+	if(!CopyFromBuff(iob->ios2_Data, temp, iob->ios2_DataLength))
+d82 1
+d92 1
+d94 3
+a96 1
+	/* compute lengths/offsets from packet */
+d99 1
+a99 1
+		memcpy((UBYTE *)&ph, temp, sizeof(ph));
+d104 1
+a104 1
+		ph.did = (iob->ios2_Req.io_Command==CMD_WRITE)? iob->ios2_DstAddr[0]:BROADCASTADDR;
+d110 3
+a112 5
+
+	/*  get a two byte array into a long */
+	spt = *(UWORD *)ph.type;
+
+	/* find stats buffer, if any */
+d115 1
+a115 1
+		ttp = findtracked(up, spt);
+d121 1
+a121 3
+**  Is it possible to be interupted while copying the packet to the
+**  chip and to thus die a horrible death because the address register
+**  gets hosed?
+d123 2
+a124 1
+	/* marshall header */
+d149 5
+d155 10
+a164 4
+	/* marshall data part of packet */
+	copyout(temp+dataoffset, &DATA(up), iob->ios2_DataLength);
+
+	/* output packet to wire + do loopback, if any */
+d177 1
+d181 1
+d184 1
+d186 3
+a188 1
+	/* update stats, reply to message */
+d194 2
+a197 2
+
+#endif
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d22 1
+a22 2
+int startxmit(up)
+	struct AmiganetUnit *up;
+d24 11
+a34 7
+	unsigned int len, offset, dataoffset, n;
+	struct TrackedType *ttp, tp;
+	struct NetBuffSegment *nsp;
+	struct Sana2PacketType spt;
+	struct IOSana2Req *iob;
+	struct pkthdr ph;
+	int bn, i;
+d39 6
+a44 3
+	while(--i >= 0){
+		if(up->bstate[i] == IS_FREE){
+			if(bn < 0){
+d47 2
+a48 1
+			} else {
+d54 4
+a57 2
+	if(i < 0){
+		if(bn >= 0){
+d69 22
+d93 6
+a98 14
+	if(iob->S2io_Flags & SANA2IOF_RAW){
+		if(CopyFromNetBuff(&iob->S2io_Body, 0, (UBYTE *)&ph, sizeof(ph))){
+			iob->S2io_Error = S2ERR_SOFTWARE;
+			iob->S2io_WireError = S2WERR_NETBUFF_ERROR;
+			up->bstate[bn] = IS_FREE;
+			if(!(iob->S2io_Flags & SANA2IOF_QUICK)){
+				ReplyMsg(&iob->S2io_Message);
+			}
+			return -1;
+		}
+
+		spt.Length = TWOBYTECODE(&ph)? 2:1;
+		dataoffset = 2 + spt.Length;
+	} else {
+d100 4
+a103 7
+		ph.did = (iob->S2io_Command==CMD_WRITE)? iob->S2io_DstAddr[0]:BROADCASTADDR;
+		ph.type[0] = iob->S2io_PacketType->Match[0];
+		spt.Length = iob->S2io_PacketType->Length;
+		if(spt.Length == 2){
+			ph.type[1] = iob->S2io_PacketType->Match[1];
+		}
+		dataoffset = 0; 
+d105 1
+a105 1
+	len = iob->S2io_DataLength - dataoffset;
+d107 2
+a108 4
+	spt.CanonicalType = 0;
+	spt.Magic = S2MAGIC_ARCNET;
+	spt.Match = ph.type;
+	spt.Mask = 0;
+d113 1
+a113 1
+		ttp = findtracked(up, &spt);
+d118 5
+a122 1
+
+d128 4
+a131 2
+	if(len > 253){ 
+		if(len < 257){
+d136 2
+a137 1
+	} else {
+d140 1
+a140 1
+	offset -= spt.Length;
+d144 2
+a145 1
+	if(spt.Length == 2){
+d150 1
+a150 22
+	nsp = (struct NetBuffSegment *)iob->S2io_Body.List.mlh_Head;
+	while(len != 0){
+		if(!nsp->Node.mln_Succ){
+			while(len-- != 0){
+				DATA(up) = 0;
+			}
+			break;
+		}
+
+		if(nsp->DataCount <= dataoffset){
+			dataoffset -= nsp->DataCount;
+			nsp = (struct NetBuffSegment *)nsp->Node.mln_Succ;
+			continue;
+		}
+
+		n = min(len, nsp->DataCount - dataoffset);
+		copyout(nsp->Buffer+nsp->DataOffset+dataoffset, &DATA(up), n);
+		len -= n;
+		dataoffset = 0;
+
+		nsp = (struct NetBuffSegment *)nsp->Node.mln_Succ;
+	}
+d153 3
+a155 1
+	if((ph.did==BROADCASTADDR || ph.did==SUB_REG(up)) && !ISEMPTY(&up->read_q)){
+d159 2
+a160 1
+	if(SR(up) & SR_TA){
+d165 2
+a166 1
+	} else {
+d172 1
+a172 1
+	up->stats.packets_sent++;
+d174 2
+a175 2
+	ttp->stats.BytesSent += iob->S2io_DataLength;
+	ReplyMsg(&iob->S2io_Message);
+d180 1
+@

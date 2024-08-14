@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	38
+DATE	MACRO
+		dc.b	'20.12.93'
+	ENDM
+VERS	MACRO
+		dc.b	'GameSelect 1.38'
+	ENDM
+VSTRING	MACRO
+		dc.b	'GameSelect 1.38 (20.12.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: GameSelect 1.38 (20.12.93)',0
+	ENDM

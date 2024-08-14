@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'17.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'slip 38.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'slip 38.1 (17.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: slip 38.1 (17.2.94)',0
+	ENDM

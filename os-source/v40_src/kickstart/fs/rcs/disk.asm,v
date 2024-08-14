@@ -1,0 +1,1370 @@
+head     1.21;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.21
+date     93.02.03.21.49.56;  author jesup;  state Exp;
+branches ;
+next     1.20;
+
+1.20
+date     92.07.14.02.16.41;  author jesup;  state Exp;
+branches ;
+next     1.19;
+
+1.19
+date     92.04.09.00.43.19;  author jesup;  state Exp;
+branches ;
+next     1.18;
+
+1.18
+date     91.02.22.14.05.47;  author steveb;  state Exp;
+branches ;
+next     1.17;
+
+1.17
+date     91.02.01.11.19.50;  author steveb;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     91.01.17.14.35.04;  author steveb;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     90.12.18.14.38.37;  author steveb;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     90.10.22.12.44.31;  author steveb;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     90.09.20.17.39.36;  author steveb;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     90.06.13.16.59.02;  author steveb;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     90.06.05.13.03.30;  author steveb;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.04.16.17.05.52;  author steveb;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.04.09.17.45.07;  author steveb;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.04.06.15.16.42;  author steveb;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     89.12.08.01.05.47;  author steveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     89.12.06.10.54.59;  author steveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     89.07.13.15.30.15;  author steveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     89.07.07.14.49.05;  author steveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     89.06.26.16.33.04;  author steveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     89.06.26.14.53.29;  author steveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.03.13.16.46.28;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@1.3.1
+@
+
+
+1.21
+log
+@changes for SectorsPerBlock
+@
+text
+@		SECTION	filesystem,CODE
+
+		NOLIST
+		INCLUDE	"exec/types.i"
+		INCLUDE	"exec/io.i"
+		INCLUDE	"exec/alerts.i"
+		INCLUDE	"libraries/dosextens.i"
+		INCLUDE	"devices/trackdisk.i"
+		INCLUDE	"fault.i"
+		INCLUDE	"moredos.i"
+		INCLUDE	"globals.i"
+		INCLUDE	"private.i"
+		INCLUDE	"printf.mac"
+		LIST
+
+;		DEBUGENABLE
+
+		XDEF	Disk,DoButtons
+
+		XREF	WaitCo,ResumeCo
+		XREF	Checksum,FreeBlock,ClearBlock
+		XREF	_LVOSendIO
+		XREF	TestDisk,Request
+		XREF	DeQueue,UnHash
+		XREF	SendTimer
+		XREF	_LVOFault
+
+;==============================================================================
+; Disk()  The main mover and shaker.  Since this is a co-routine there is no
+;	  need to save any registers because this is done by CallCo et al.
+;==============================================================================
+Disk		lea.l	PendingQueue(a5),a0	anything to be done ?
+		TSTLIST	a0
+		bne.s	DiskGotWork		yes, get some work
+		bsr	WaitCo			no, wait until there is
+
+; There is some work in the pending queue so go and fetch the first buffer.
+; This buffer is not actually removed from the queue until the work is done.
+DiskGotWork	move.w	#TRUE,DiskRunning(a5)	disk running is true
+
+; grab the first header off the pending queue and see if it's read or write
+		movea.l	PendingQueue(a5),a2	get first buffer to a2
+		clr.l	cb_Actual(a2)		assume no data transfer
+		clr.l	cb_Error(a2)		therefore no errors
+		move.w	cb_State(a2),d2		d2 = req 
+		move.l	cb_Size(a2),d3		d3 = header flag/size
+		movea.l	cb_Buff(a2),a3		a3 = data pointer
+
+		cmpi.w	#CMD_WRITE,d2		is this a write command ?
+		bne.s	DiskRead		nope, so must be a read
+
+; This is a write to disk so check cb_Size to see if we need a checksum test.
+; There are a few possibilities for checksumming.  If in oldFS mode (DOS\0)
+; then we checksum everything except bitmap blocks in the normal manner.  If
+; we're in FFS mode then only file headers get checksummed in the normal way
+; because data blocks are all data.  Bitmap blocks are treated differently
+; because thier checksum is in the first longword of the block.
+		moveq.l	#RAW,d0			is it a raw block ?
+		cmp.l	d3,d0
+		beq.s	NoWriteSum		yes, so no checksum either
+		tst.l	d3			do we need a checksum ?
+		bgt.s	NoWriteSum		anything >0 doesn't
+		bmi.s	DoWriteSum		yes, header or bitmap block
+		btst.b	#0,DiskType+3(a5)	is it oldfs format
+		bne.s	NoWriteSum		no, so don't checksum data
+
+DoWriteSum	move.l	a3,a0			where the data is
+		bsr	Checksum		returns in d0
+		cmpi.l	#BITMAP,d3		bitmap or normal header ?
+		bne.s	30$			normal header
+		sub.l	d0,(a3)			fix bitmap checksum
+		bra.s	NoWriteSum		and do the write
+30$		sub.l	d0,fhb_Checksum(a3)	fix normal header checksum
+
+NoWriteSum	bsr	Diskact			a2=cachebuff d2=devcommand
+		move.w	#CMD_READ,cb_State(a2)	change to read request
+		bra.s	DiskCommon
+
+; This is a read from disk.  The same rules as write apply when checksumming
+; the block after the read.  If this is straight into a user buffer then there
+; is no special info involved and a checksum need not be performed (cb_Size>=0)
+DiskRead	bsr	Diskact			a2=cachebuff d2=devcommand
+		tst.l	d3			should we run a checksum ?
+		bgt.s	DiskCommon		not if >0
+		bmi.s	DoReadSum		yes, it's a header
+		btst.b	#0,DiskType+3(a5)	always checksum oldfs format
+		bne.s	DiskCommon		no need to checksum
+DoReadSum	move.l	a3,a0			where the data is
+		bsr	Checksum		returns in d0
+		tst.l	d0			was checksum OK ?
+		beq.s	DiskCommon		yep, carry on
+
+; Checksum was bad.  Report the error and retry if user requests it
+	printf <'disk: Checksum error on read (size = %ld) '>,cb_Size(a2)
+	printf <'(block = %ld, buffer = $%lx)\n'>,cb_Key(a2),a2
+		move.l	#ERROR_CHECKSUM,cb_Error(a2)
+		movea.l	a2,a0			this buffer
+		moveq.l	#0,d0			no particular error number
+		bsr	IOError
+		tst.l	d0
+		bne	DiskRead		user said Retry
+
+; The read or write has completed, see if we were called indirectly by a
+; deferred write (initially from the waiting queue) or directly by a read.
+; If we were called directly then we ResumeCo back to the co-routine that's
+; waiting for this block to read.  Writes can be made direct if someone made
+; a Fetch() call on a writing buffer.
+DiskCommon	tst.w	TimerRunning(a5)	is timer request already going?
+		bne.s	TimerDone		yes, so don't send again
+;	printf <'Disk: sending timer request\n'>
+		bsr	SendTimer		nope, fire off one second event
+
+TimerDone	clr.w	DiskRunning(a5)		disk not running now
+		lea.l	PendingQueue(a5),a0	deque from head of pending
+		REMHEAD				we still have pointer in a2
+		tst.l	cb_Size(a2)		not in hash table if not...
+		bgt.s	not_hashed		...block sized
+		tst.w	cb_QueueType(a2)	was this buffer already freed?
+		bne.s	unhashit		no (HASHFREE == 0)
+
+; The buffer was invalidated by WriteBlock.  There can be no cb_CoPkt waiters
+; (they were stolen).  The block has already been removed from the Hash table,
+; but needs to be added to the FreeQueue
+		move.l	FreeBufferQueue(a5),(a2)
+		move.l	a2,FreeBufferQueue(a5)	link into free buffer queue
+		bra	Disk			see if there's more to do
+
+unhashit	movea.l	a2,a0			it's a single block
+		bsr	UnHash			remove from hash table
+	IFD DEBUG_CODE
+	  tst.l	d1
+	  beq.s 1$
+ printf <' in disk, cb_Size %ld, cb_CoPkt $%lx, cb_Header %ld, cb_buff[cb_sizeof] $%lx'>,cb_Size(a2),cb_CoPkt(a2),cb_Header(a2),cb_SIZEOF+cb_SIZEOF(a2)
+	  lea	cb_SIZEOF(a2),a0
+	  cmp.l	cb_Buff(a2),a0
+	  beq.s	1$
+ printf <' it was a direct write buffer (cb_Buff = $%lx)!!!!'>,cb_Buff(a2)
+1$
+	ENDC
+not_hashed	tst.l	cb_CoPkt(a2)		who owns this buffer
+		beq.s	20$			nobody, it's ours
+		movea.l	cb_CoPkt(a2),a0		Resume back to owning co-routine
+		move.l	a2,d0			giving buffer as an argument
+		bsr	ResumeCo
+		bra	Disk			and CoWait when we come back
+
+; This was probably a write block so it will get transferred to the valid queue
+20$		move.l	d3,d0			pass size/flag
+		movea.l	a2,a0			pass the cache buff struct
+		bsr	FreeBlock		put valid headers in valid list
+		bra	Disk			and go wait for more work
+
+;==============================================================================
+; Diskact(action,Buffer)  Sends the action requested by Disk to the device and
+;	    d2	   a2	  fakes up a packet so the dispatcher in main will know
+;			  to CallCo the disk routine again.
+; If an error occurs then we can come back here multiple times to re-read/write
+;==============================================================================
+Diskact		lea.l	-dp_Type(sp),sp		get a temporary packet
+		movea.l	DiskDev(a5),a1		get the IORequest pointer
+		move.l	a1,dp_Port(sp)		packet for dispatcher in main
+		move.l	sp,LN_NAME(a1)		link into the IORequest
+		move.w	d2,IO_COMMAND(a1)	set up the command
+		move.l	cb_Key(a2),d0		get offset on the disk
+		cmp.l	Reserved(a5),d0
+		blt.s	KeyError		negative offset not allowed
+		cmp.l	HighestBlock(a5),d0	beyond end of partition is bad
+		ble.s	NoKeyError		key is in range
+
+; the key is outside the range of this partition, return an error to say this
+KeyError	lea.l	dp_Type(sp),sp		free up stack space used
+		move.w	#ERROR_KEYRANGE,cb_Error+2(a2)	this is the error
+	printf <'disk: key out of range (%ld)\n'>,d0
+	printf <'      type = %ld\n'>,cb_Size(a2)
+		bra.s	DiskactDone
+
+; the disk key is in range, convert to a byte offset and perform the read/write
+NoKeyError	move.w	BlockShift(a5),d1	multiply by sector size and...
+		lsl.l	d1,d0			...make key into a byte offset
+		add.l	LowerByte(a5),d0	add byte offset to first block
+		move.l	d0,IO_OFFSET(a1)
+		move.l	cb_Size(a2),d0		get size to transfer
+		bgt.s	10$			direct to user buffer
+		move.l	BlockSize(a5),d0	file header or data block
+10$		move.l	d0,IO_LENGTH(a1)
+		move.l	cb_Buff(a2),IO_DATA(a1)	where data goes to
+		jsr	_LVOSendIO(a6)		send cmd to the disk device
+
+		move.w	#3,MotorTicks(a5)	so motor doesn't turn off
+
+		bsr	WaitCo			wait to be called again
+		lea.l	dp_Type(sp),sp		reclaim stack space
+		movea.l	DiskDev(a5),a1		check for an error
+		move.l	IO_ACTUAL(a1),cb_Actual(a2) transfer count
+		move.b	IO_ERROR(a1),cb_Error+3(a2) transfer the error code
+		beq.s	DiskactDone		no problems, all done
+
+; The only errors we are interested in is write errors because no co-routine
+; will be hanging on to the write block.  At this point we should pop a request
+; stating which file contains the error (if it's not the header block that got
+; messed up).
+	printf <'diskact: got an IOError (%lx)\n'>,cb_Error(a2)
+		addq.l	#1,SoftErrors(a5)	one extra error
+		move.l	cb_Error(a2),d0		fetch the error code
+		movea.l	a2,a0			set up buffer argument
+		bsr.s	IOError			see what user wants to do
+		tst.l	d0			did they hit retry 
+		bne	Diskact			yes, try again
+
+; the read/write has completed but may have failed with keyrange error etc.
+DiskactDone	clr.l	cb_Suppress(a2)		don`t suppress write errors
+		rts				thats all
+
+;==============================================================================
+; result = IOError( buffer, error )
+;  d0		      a0      d0
+;
+; Calls Request to pop the appropriate requester and returns TRUE if the user
+; pressed Retry or FALSE if the user pressed Cancel.
+;
+; If user cancels a write error then requesters are suppressed on all pending
+; writes.
+;==============================================================================
+IOError		movem.l	d2/a2-a3,-(sp)
+		movea.l	a0,a3			save cache buffer pointer
+		move.l	d0,d2			and error number (maybe 0)
+		moveq.l	#CMD_UPDATE,d0
+		bsr	TestDisk		flush out dirty buffers
+		moveq.l	#CMD_CLEAR,d0		and then invalidate all buffers
+		bsr	TestDisk
+		moveq.l	#TD_MOTOR,d0
+		moveq.l	#0,d1
+		bsr	TestDisk		make sure motor is off
+
+; Fix for 2.0 trackdisk.  Popping the disk will often return write protect or
+; read write errors instead of TDERR_DiskChanged.  We check if the disk is in
+; the drive before reporting errors and tell user to replace it if it's out
+		moveq.l	#TD_CHANGESTATE,d0
+		bsr	TestDisk		see if disk in or out
+		tst.l	d0
+		beq.s	NotFalseError
+		moveq.l	#TDERR_DiskChanged,d2	make like diskchange error
+
+; if we are looking at a new disk after inhibit, don't complain if its removed.
+NotFalseError	move.l	d2,ErrorCode(a5)
+		cmpi.b	#TDERR_DiskChanged,d2
+		bne.s	DiskStillIn
+		tst.l	CurrentVolume(a5)
+		beq	IOErrorDone		return false (continue)
+
+; The disk changed, we tell the user that they MUST replace the disk in the
+; correct unit.  It won't do to put it in another drive because we have buffers
+; waiting to be written to by THIS fs process.  Don't do this for CMD_READs
+;		cmpi.w	#CMD_READ,cb_State(a3)
+;		beq.s	DiskStillIn		treat like a read error
+
+		bsr	BuildReplaceMsg
+		bsr	Request			pop the you-must requester
+;		moveq.l	#TRUE,d0		always retry
+		bra	IOErrorDone		finished
+
+; The disk is still in the drive, so this must be a read/write error of some
+; kind.  Report the volume that the error occured on and check for retry.
+DiskStillIn	tst.l	cb_Suppress(a3)		suppressing write errors?
+		beq.s	10$			nope
+		cmpi.w	#CMD_WRITE,cb_State(a3)	yes, was it a write
+		bne.s	10$
+		moveq.l	#0,d0
+		bra.s	IOErrorDone		just return a cancel
+
+10$		move.l	cb_Key(a3),d0		will need block number for args
+		move.l	#STR_CHECKSUM_ERROR,d1	assume checksum error
+		tst.l	d2			true if d2==0
+		beq.s	GotRWError
+		move.l	#STR_READ_ERROR,d1	assume a read error
+		cmpi.w	#CMD_READ,cb_State(a3)
+		beq.s	GotRWError
+		move.l	#STR_WRITE_ERROR,d1
+
+GotRWError	bsr	BuildErrorMsg
+		bsr	Request
+		cmpi.w	#CMD_READ,cb_State(a3)	clear buffer if it's a read
+		bne.s	IOErrorDone
+		tst.l	cb_Size(a3)		NOT FOR DIRECT BUFFERS !!!
+		bgt.s	IOErrorDone		(this was the cancel bug)
+
+		move.l	d0,-(sp)		save retry/cancel flag
+		lea.l	cb_SIZEOF(a3),a0	and clear out the buffer
+		bsr	ClearBlock
+		move.l	(sp)+,d0
+
+; new fix, if this was a write and the user pressed cancel, mark all other
+; pending write buffers so that write error requesters are suppressed.
+		bne.s	IOErrorDone
+		moveq.l	#-1,d1
+		lea.l	PendingQueue(a5),a0	scan pending queue
+		move.l	(a0),d0			must set d0=0 for CANCEL
+10$		movea.l	d0,a0			node pointer to a0
+		move.l	(a0),d0			lookahead to next node
+		beq.s	15$			last in list
+		cmpi.w	#CMD_WRITE,cb_State(a0)
+		bne.s	10$
+		move.l	d1,cb_Suppress(a0)
+		bra.s	10$
+
+15$		lea.l	WaitingQueue(a5),a0	scan waiting queue
+		move.l	(a0),d0			must set d0=0 for CANCEL
+20$		movea.l	d0,a0			node pointer to a0
+		move.l	(a0),d0			lookahead to next node
+		beq.s	IOErrorDone		last in list
+		cmpi.w	#CMD_WRITE,cb_State(a0)
+		bne.s	20$
+		move.l	d1,cb_Suppress(a0)
+		bra.s	20$
+
+IOErrorDone	movem.l	(sp)+,d2/a2-a3
+		rts
+
+
+;==============================================================================
+; BuildReplaceMsg()
+;
+; sets up the ReqString and ReqArgs for a "You must replace" requester.
+;==============================================================================
+BuildReplaceMsg	movem.l	d2-d4/a2/a6,-(sp)
+		movea.l	DosLib(a5),a6
+		movea.l	ReqString(a5),a2	this string
+		moveq.l	#STR_MUST_REPLACE,d1
+		moveq.l	#0,d2			no pre-string
+		move.l	a2,d3			buffer address
+		moveq.l	#80,d4			maximum length
+		jsr	_LVOFault(a6)
+		adda.w	d0,a2			bump length of string
+
+		move.b	#10,-1(a2)		req text to next line
+		move.b	#'%',(a2)+		volume name on next line
+		move.b	#'b',(a2)+
+		move.b	#10,(a2)+		move to next line
+
+		moveq.l	#STR_IN_DEVICE,d1
+		moveq.l	#0,d2			no pre-string
+		move.l	a2,d3			buffer address
+		moveq.l	#80,d4			maximum length
+		jsr	_LVOFault(a6)
+
+		movea.l	ReqArgs(a5),a0		build argument list
+		movea.l	CurrentVolume(a5),a1	using BSTR volume name
+		adda.l	a1,a1
+		adda.l	a1,a1
+		move.l	dl_Name(a1),(a0)+
+		movea.l	DevEntry(a5),a1		get unit name (DF0: DH0: etc)
+		movea.l	dol_Name(a1),a1
+		adda.l	a1,a1
+		adda.l	a1,a1			"in device" expects CSTR not BSTR
+		addq.l	#1,a1
+		move.l	a1,(a0)+
+		lea.l	Exclam(pc),a1
+		move.l	a1,(a0)			exclamation marks after name
+
+		movem.l	(sp)+,d2-d4/a2/a6
+		bra.s	DoButtons
+
+;==============================================================================
+; BuildErrorMsg(key,msg)
+;		d0  d1
+;
+; sets up the ReqString and ReqArgs for a Checksum|Read|Write error.  Key is
+; block number where the error occured.  msg is the Fault.i number for the
+; appropriate error string.
+;==============================================================================
+BuildErrorMsg	movem.l	d2-d4/a2/a6,-(sp)
+		movea.l	DosLib(a5),a6
+		movea.l	ReqString(a5),a2
+
+		move.w	#'%b',(a2)+		volumename is first line
+		move.b	#10,(a2)+
+
+		move.l	d0,-(sp)		save block number
+		moveq.l	#0,d2			and get correct error string
+		move.l	a2,d3			buffer address
+		moveq.l	#80,d4			maximum length
+		jsr	_LVOFault(a6)
+		adda.l	d0,a2
+		move.b	#10,-1(a2)
+
+		move.l	#STR_BLOCK_NUM,d1	get block number message
+		moveq.l	#0,d2			and get correct error string
+		move.l	a2,d3			buffer address
+		moveq.l	#80,d4			maximum length
+		jsr	_LVOFault(a6)
+
+		movea.l	ReqArgs(a5),a0		build argument list
+		movea.l	CurrentVolume(a5),a1	using BSTR volume name
+		adda.l	a1,a1
+		adda.l	a1,a1
+		move.l	dl_Name(a1),(a0)+
+		move.l	(sp)+,(a0)		disk block argument
+
+		movem.l	(sp)+,d2-d4/a2/a6	drop into DoButtons
+
+;==============================================================================
+; DoButtons()
+;
+; Sets up the default RETRY|CANCEL string for an EasyRequest with two buttons
+;==============================================================================
+DoButtons	movem.l	d2-d4/a6,-(sp)
+		movea.l	DosLib(a5),a6
+		moveq.l	#STR_RETRY_CANCEL,d1
+		moveq.l	#0,d2			no pre-string
+		move.l	ButtonString(a5),d3	buffer address
+		moveq.l	#64,d4			maximum length
+		jsr	_LVOFault(a6)
+		movem.l	(sp)+,d2-d4/a6
+		rts
+
+Exclam		DC.B	' !!',0
+
+		END
+
+@
+
+
+1.20
+log
+@use the shared checksum routine!  not that time critical.
+(and caches better anyways)
+@
+text
+@d178 1
+a178 2
+NoKeyError	add.l	LowerCyl(a5),d0		add offset to first block
+		move.w	BlockShift(a5),d1	multiply by sector size and...
+d180 1
+@
+
+
+1.19
+log
+@Added debugs
+Handle WriteBlock invalidating the block currently being written.  If
+this happens, on finishing writing it put it in the FreeQueue
+@
+text
+@d67 2
+a68 15
+DoWriteSum	move.l	BlockSize(a5),d0	get number of bytes to sum
+		lsr.l	#5,d0			summing groups of 8 lwords
+		moveq.l	#0,d1			initial checksum
+		movea.l	a3,a0			where the data is
+		bra.s	20$			enter the loop
+10$		add.l	(a0)+,d1		perform sum to zero checksum
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+20$		dbra	d0,10$
+
+d71 1
+a71 1
+		sub.l	d1,(a3)			fix bitmap checksum
+d73 1
+a73 1
+30$		sub.l	d1,fhb_Checksum(a3)	fix normal header checksum
+d88 3
+a90 15
+DoReadSum	move.l	BlockSize(a5),d0	get number of bytes to sum
+		lsr.l	#5,d0			summing groups of 8 lwords
+		moveq.l	#0,d1			initial checksum
+		movea.l	a3,a0			where the data is
+		bra.s	20$			enter the loop
+10$		add.l	(a0)+,d1		perform sum to zero checksum
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+		add.l	(a0)+,d1
+20$		dbra	d0,10$
+		tst.l	d1			was checksum OK ?
+@
+
+
+1.18
+log
+@support for DOS/2 and DOS/3 format disks (international char sets for hashing)
+@
+text
+@d48 1
+d120 1
+a120 1
+	printf <'(block = %ld)\n'>,cb_Key(a2)
+d126 1
+a126 1
+		bne.s	DiskRead		user said Retry
+d135 1
+a135 1
+	printf <'Disk: sending timer request\n'>
+d142 12
+a153 2
+		bgt.s	10$			...block sized
+		movea.l	a2,a0			it's a single block
+d155 11
+a165 1
+10$		tst.l	cb_CoPkt(a2)		who owns this buffer
+@
+
+
+1.17
+log
+@Added support for DOS Fault() command, now get strings from DOS, noyt static
+@
+text
+@d63 1
+a63 1
+		tst.b	DiskType+3(a5)		is it oldfs format
+d98 1
+a98 1
+		tst.b	DiskType+3(a5)		always checksum oldfs format
+@
+
+
+1.16
+log
+@removed CMD_FLUSH after error and replaced with CMD_UPDATE
+@
+text
+@d9 1
+d18 1
+a18 1
+		XDEF	Disk,BuildString
+d26 1
+a26 1
+		XREF	_LVORawDoFmt
+d261 1
+a261 18
+		lea.l	-40(sp),sp		create last line of message
+		movea.l	sp,a1			this is where string goes
+		lea.l	UnitMessage(pc),a0	get sprintf string
+		move.l	UnitNumber(a5),-(sp)	stacked number argument
+		bsr	BuildString
+		addq.l	#4,sp			clear stacked argument
+		movea.l	sp,a2			this is line three of request
+		lea.l	-40(sp),sp		create middle line of msg
+		movea.l	sp,a1
+		movea.l	CurrentVolume(a5),a0	using BSTR volume name
+		adda.l	a0,a0
+		adda.l	a0,a0
+		move.l	dl_Name(a0),-(sp)
+		lea.l	VolumeName(pc),a0
+		bsr	BuildString
+		addq.l	#4,sp
+		movea.l	sp,a1
+		lea.l	YouMust(pc),a0		first line of requester
+d263 1
+a263 2
+		lea.l	80(sp),sp		clear stack space used
+		moveq.l	#TRUE,d0		always retry
+d273 1
+a273 1
+		bra	IOErrorDone		just return a cancel
+d275 2
+a276 20
+10$		lea.l	-40(sp),sp		get space for disk block msg
+		movea.l	sp,a1
+		lea.l	BlockError(pc),a0
+		move.l	cb_Key(a3),-(sp)
+		bsr	BuildString
+		addq.l	#4,sp
+		movea.l	sp,a2			last line of message
+
+		lea.l	-40(sp),sp		create first line of msg
+		movea.l	sp,a1
+		movea.l	CurrentVolume(a5),a0	using BSTR volume name
+		adda.l	a0,a0
+		adda.l	a0,a0
+		move.l	dl_Name(a0),-(sp)
+		lea.l	VolumeName(pc),a0
+		bsr	BuildString
+		addq.l	#4,sp
+		movea.l	sp,a0
+
+		lea.l	CheckError(pc),a1	assume checksum error
+d279 1
+a279 1
+		lea.l	ReadError(pc),a1	assume a read error
+d282 1
+a282 1
+		lea.l	WriteError(pc),a1	it's a write error
+d284 2
+a285 2
+GotRWError	bsr	Request
+		lea.l	80(sp),sp		reclaim spare stack space
+a322 8
+YouMust		DC.B	'You MUST replace',0
+VolumeName	DC.B	'Volume %b',0
+UnitMessage	DC.B	'in unit %ld !!!',0
+ReadError	DC.B	'has a read error',0
+WriteError	DC.B	'has a write error',0
+CheckError	DC.B	'has a checksum error',0
+BlockError	DC.B	'on disk block %ld',0
+		CNOP	0,4
+d324 94
+a417 6
+BuildString	movem.l	a2-a3,-(sp)
+		movea.l	a1,a3		a3=PutChData
+		lea.l	12(sp),a1	a1=DataStream
+		lea.l	MyPutCh(pc),a2	a2=PutChProc
+		jsr	_LVORawDoFmt(a6)
+		movem.l	(sp)+,a2-a3
+d420 1
+a420 2
+MyPutCh		move.b	d0,(a3)+
+		rts
+@
+
+
+1.15
+log
+@make sure "YOU MUST" requesters always return TRUE for retry
+@
+text
+@d230 3
+a232 3
+		moveq.l	#CMD_FLUSH,d0
+		bsr	TestDisk		flush out buffers
+		moveq.l	#CMD_CLEAR,d0		and invalidate all buffers
+@
+
+
+1.14
+log
+@added CMD_CLEAR when an error occurs
+converted requester string building to us RawDoFmt
+@
+text
+@d214 2
+a215 1
+DiskactDone	rts				thats all
+d223 3
+d280 2
+a281 1
+		bra.s	IOErrorDone		finished
+d285 8
+a292 1
+DiskStillIn	lea.l	-40(sp),sp		get space for disk block msg
+d330 24
+@
+
+
+1.13
+log
+@
+@
+text
+@d25 1
+d228 2
+d253 3
+d331 6
+a336 99
+;===========================================================================
+; BuildString (format,output)
+;		 a0	a1
+;
+; Builds a string using the provided printf type format string and stores
+; the result in the output string.  Arguments required by the format string
+; are always stored as longwords on the stack and cleaned up by the caller.
+;===========================================================================
+BuildString	movem.l	d2/a2-a4,-(sp)
+		movea.l	a0,a3			a3=input string
+		movea.l	a1,a2			a2=output string
+		lea.l	20(sp),a4		a4=list of parameters
+
+; The main loop, copy characters to the output buffer until a % or \ is
+; encountered in which case interpret the characters following in the same
+; manner as C's printf function and put the results into the output stream
+; instead.  A null byte terminates the output.
+_printloop	move.b	(a3)+,d0		get a copy of the byte
+_possibleend	move.b	d0,(a2)			move to output string
+		beq	_printdone		terminating byte
+		cmpi.b	#'\',d0			special character byte ?
+		beq.s	_specialchar		yes, go see what it is
+		cmpi.b	#'%',d0			number or string byte ?
+		beq.s	_introchar		yes, go process that
+_bumpptr	addq.l	#1,a2			nothing special, bump ptr...
+		bra.s	_printloop		...and go back for the next
+
+; Found a backslash, replace character after with tab or newline (\t or \n)
+_specialchar	move.b	(a3)+,d0		get the next character
+		beq.s	_possibleend		that could have been nasty!!
+		cmpi.b	#'\',d0			did caller want a backslash
+		beq.s	_bumpptr		yes, so leave the other
+		cmpi.b	#'t',d0			did user want a tab ?
+		bne.s	_checkcr		nope, maybe a newline
+		move.b	#9,(a2)+		yes, store tab and bump
+		bra.s	_printloop		and go for the next char
+_checkcr	cmpi.b	#'n',d0			did user want a newline ?
+		bne.s	_printloop		nope, ignore all others
+		move.b	#10,(a2)+		yes, store cr and bump
+		bra.s	_printloop		and go for the next char
+
+; Found a percent sign.  Must be introducing a number, string or character
+_introchar	move.b	(a3)+,d0		get the next character
+		beq.s	_possibleend		another possible oops!
+		cmpi.b	#'%',d0			did caller want a percent?
+		beq.s	_bumpptr		yes, so leave the last one
+		cmpi.b	#'c',d0			print a character ?
+		bne.s	_checkstring		nope!
+		move.l	(a4)+,d0		get char from arg stack
+		move.b	d0,(a2)+		store it and bump ptr
+		bra.s	_printloop		and go for the next char
+
+_checkstring	cmpi.b	#'s',d0			print a string ?
+		bne.s	_checkbstring		nope!
+		movea.l	(a4)+,a0		get ptr from arg stack
+10$		move.b	(a0)+,(a2)+		and copy the string
+		bne.s	10$
+		subq.l	#1,a2			went 1 byte too far
+		bra.s	_printloop		go for the next char
+
+_checkbstring	cmpi.b	#'b',d0			printf a BSTR
+		bne.s	_checknumber		nope
+		movea.l	(a4)+,a0		get the BPTR
+		adda.l	a0,a0			make into a mc pointer
+		adda.l	a0,a0
+		clr.w	d0			get string length
+		move.b	(a0)+,d0
+		beq.s	_printloop
+		subq.w	#1,d0
+10$		move.b	(a0)+,(a2)+		copy the string
+		dbra	d0,10$
+		bra.s	_printloop
+
+; wasn't a string or character code so it has to be a number code here
+_checknumber	moveq.l	#0,d2			flag, short (word) number
+		cmpi.b	#'l',d0			long version of a number ?
+		bne.s	_decnumber		no, it was a short
+		moveq.l	#1,d2			flag, longword number
+		move.b	(a3)+,d0		and get the next letter
+		beq	_possibleend		yet another nasty spot!
+
+_decnumber	cmpi.b	#'d',d0			really want a decimal ?
+		bne	_printloop		nope, illegal character!
+		move.l	(a4)+,d0		get decimal value to print
+		movea.l	a2,a0			and buffer to store to
+		tst.w	d2			see what size
+		bne.s	_dolongdec		it's a longword
+		bsr.s	bin2asc16		it's a word
+		bra.s	_findend		see what size
+_dolongdec	bsr.s	bin2asc32
+
+; A number has been stored into the buffer, find the end to update A2 ptr
+_findend	tst.b	(a2)+			search for null byte
+		bne.s	_findend		not there yet
+		subq.l	#1,a2			went one byte too far
+		bra	_printloop		go for the next char
+
+; all finished, just restore saved registers and return
+_printdone	movem.l	(sp)+,d2/a2-a4
+d339 1
+a339 75
+;=============================================================================
+; NAME
+;    bin2asc[nn] - converts binary to a signed decimal string
+;
+; SYSNOPSIS
+;    string=bin2asc[nn]( value,buffer )
+;      D0		   D0    A0
+;
+; FUNCTION
+;    converts the given value to null terminated string of ascii digits
+;
+; INPUTS
+;    value - the value to be converted
+;    [nn]denotes the size of the operator being worked on, this can be 8 or 16
+;
+;    buffer - where the string should go
+;
+; RESULT
+;    string - pointer to the null terminated decimal string
+;
+;============================================================================
+bin2asc16	ext.l	d0			make word into a longword
+bin2asc32	tst.l	d0			is it negative ?
+		bpl.s	bin2asc			nope, call main routine
+		neg.l	d0			make positive
+		move.b	#'-',(a0)+		output a minus sign
+
+;=============================================================================
+; NAME
+;    bin2asc - converts unsigned binary in D0 to ascii digits in a buffer
+;
+; SYSNOPSIS
+;    number = bin2asc( value,buffer )
+;      D0		 D0    A0
+;
+; FUNCTION
+;     converts the unsigned binary value in D0 to a null terminated string
+;     of ascii digits beginning at the buffer position given
+;
+; INPUTS
+;    value - 32 bit unsigned value
+;
+;    buffer - pointer to the buffer where the digits should be put
+;
+; RESULT
+;    number is generated and original pointer is returned in D0
+;
+;============================================================================
+bin2asc		movem.l	d2-d3/a2-a3,-(sp)
+		movea.l	a0,a3			save buffer pointer
+		lea.l	PowersOfTen(pc),a2	powers of ten table
+		moveq.l	#0,d1			leading zero flag
+		move.l	(a2)+,d2		fetch first power of ten
+
+10$		moveq.l	#-1,d3			current digit value
+20$		addq.b	#1,d3			update this digit
+		sub.l	d2,d0			subtract current pwr of 10
+		bpl.s	20$			go for another
+		add.l	d2,d0			fix, we went too far
+		tst.b	d3			is this a zero ?
+		bne.s	30$			no, skip leading zero test
+		tst.w	d1			have we put in any digits yet?
+		beq.s	40$			no, so scrap this one
+30$		moveq.l	#1,d1			stop suppressing zeros now
+		addi.b	#'0',d3			make an ascii digit
+		move.b	d3,(a0)+		store it
+40$		move.l	(a2)+,d2		get next power of 10
+		bne.s	10$			do the next bit
+
+		tst.w	d1			did we put any digits in
+		bne.s	50$			yes
+		move.b	#'0',(a0)+		no, put zero as the result
+50$		clr.b	(a0)			terminate the string
+		move.l	a3,d0			retrieve pointer to buffer
+		movem.l	(sp)+,d2-d3/a2-a3
+a340 3
+
+PowersOfTen	DC.L	1000000000,100000000,10000000,1000000
+		DC.L	100000,10000,1000,100,10,1,0
+@
+
+
+1.12
+log
+@flushes device after an eror occurs
+@
+text
+@a190 6
+; Changed completely from original turnoff scheme.  We now check to see if a
+; timer event is running and fire it off if it isn't.  We also drop down a
+; timestamp to indicate when the last request was fired off to the disk.  When
+; the timer event returns the current time is compared with the last timestamp
+; to see if the timer request needs firing off again.  This removes the old
+; one second polling scheme that was used before.
+@
+
+
+1.11
+log
+@
+@
+text
+@d30 1
+a30 6
+Disk		tst.w	TimerRunning(a5)	is timer request already going?
+		bne.s	TimerDone		yes, so don't send again
+	printf <'Disk: sending timer request\n'>
+		bsr	SendTimer		nope, fire off one second event
+
+TimerDone	lea.l	PendingQueue(a5),a0	anything to be done ?
+d130 6
+a135 1
+DiskCommon	clr.w	DiskRunning(a5)		disk not running now
+a196 1
+****new scheme not implemented yet
+d209 1
+a209 2
+; messed up).  The user is offered a choice of RETRY IGNORE CANCEL if this is
+; a data block.  If it's a header then only RETRY and CANCEL are offered.
+d231 2
+d255 1
+a255 2
+; waiting to be written to by THIS fs process.
+
+@
+
+
+1.10
+log
+@*** empty log message ***
+@
+text
+@d17 1
+a17 1
+		XDEF	Disk
+d19 1
+a19 1
+		XREF	WaitCo,ResumeCo,Abort
+d24 1
+d30 6
+a35 1
+Disk		lea.l	PendingQueue(a5),a0	anything to be done ?
+d174 1
+a174 1
+		move.b	#ERROR_KEYRANGE,cb_Error+3(a2)	this is the error
+d177 1
+a177 1
+		bra	DiskactDone
+d180 1
+a180 2
+NoKeyError	move.w	#3,MotorTicks(a5)	so motor doesn't turn off
+		add.l	LowerCyl(a5),d0		add offset to first block
+d190 10
+d214 3
+a216 5
+		move.w	cb_State(a2),d0		is this a write
+		cmpi.w	#CMD_WRITE,d0
+		bne.s	DiskactDone		nope, don't pop requesters
+		movea.l	a2,a0			get buffer back
+		bsr	IOError			see what user wants to do
+d222 1
+d227 2
+a228 1
+; Calls Request with volume name set up and returns TRUE if we are to retry.
+d230 3
+a232 3
+IOError		movem.l	d2/a2,-(sp)
+		movea.l	a0,a2			save buffer
+		move.l	d0,d2			and error number
+d235 1
+a235 1
+		bsr	TestDisk
+d237 9
+d247 5
+a251 6
+		ext.w	d2
+		move.w	d2,ErrorCode+2(a5)
+		cmpi.b	#29,d2
+		bne.s	10$
+		move.l	CurrentVolume(a5),d0
+		beq.s	IOErrorDone		return false (continue)
+d253 14
+a266 11
+; if disk changed error, tell user to put disk back else report a real error.
+; For Fast Filing System, never get diskchange messages, just report errors
+; of the type 'Volume xxxxxxx has a read/write error'
+10$		move.l	a2,-(sp)		need spare register
+		lea.l	-40(sp),sp		space for 'Volume xxxx' msg
+		movea.l	sp,a2
+		lea.l	VlName(pc),a0		copy volume part of msg
+11$		move.b	(a0)+,(a2)+
+		bne.s	11$
+		subq.l	#1,a2			went 1 byte too far
+		movea.l	CurrentVolume(a5),a0	copy volume name across
+d269 23
+a291 1
+		movea.l	dl_Name(a0),a0
+d294 4
+a297 6
+		clr.w	d0
+		move.b	(a0)+,d0
+		bra.s	13$
+12$		move.b	(a0)+,(a2)+
+13$		dbra	d0,12$
+		clr.b	(a2)
+d299 12
+a310 6
+		lea.l	RWErrorMess(pc),a1
+		suba.l	a2,a2
+		bsr	Request
+		lea.l	40(sp),sp		reclaim spare stack space
+		move.l	(sp)+,a2
+		cmpi.w	#CMD_READ,cb_State(a2)
+d312 1
+a312 1
+		tst.l	cb_Size(a2)		NOT FOR DIRECT BUFFERS !!!
+d316 1
+a316 1
+		lea.l	cb_SIZEOF(a2),a0	and clear out the buffer
+d320 1
+a320 1
+IOErrorDone	movem.l	(sp)+,d2/a2
+d323 189
+a511 4
+VlName		DC.B	'Volume ',0
+		CNOP	0,2
+RWErrorMess	DC.B	'has a read/write error',0
+		CNOP	0,2
+@
+
+
+1.9
+log
+@fixed checksumming bug with RAW sector test
+@
+text
+@d115 3
+a117 1
+	printf <'disk: Checksum error (size = %ld)\n'>,d3
+d169 2
+@
+
+
+1.8
+log
+@better error returns (actually looks at IO_ERROR and IO_ACTUAL now)
+support for bitmap blocks and better handling of ofs/ffs differences
+@
+text
+@a53 2
+		tst.l	d3			do we need a checksum ?
+		bgt.s	NoWriteSum		anything >0 doesn't
+d57 2
+@
+
+
+1.7
+log
+@notification added
+@
+text
+@d1 1
+a1 1
+ 		SECTION	filesystem,CODE
+d29 3
+a31 2
+Disk		tst.l	PendingQueue(a5)	anything to do
+		bne.s	10$			yes, get some work
+d34 5
+a38 2
+; there is some work in the pending queue so go and fetch the first buffer
+10$		move.w	#TRUE,DiskRunning(a5)	disk running is true
+d40 2
+a44 1
+
+d49 13
+a61 6
+; If cb_Size < 0 then we are writing a file or dir header and must checksum
+; it before we write it out.  If cb_Size > 0 then we are writing as much as
+; possible to disk with no special information held in the sectors (it's all
+; data).  If cb_Size = 0 then we are writing a file data block and must not
+; checksum this.  Any case where we have to checksum will involve a size
+; of one sector (512 bytes). (When oldfs then checksum data blocks too).
+d63 14
+a76 3
+		IFD STATISTICS
+		addq.l	#1,s_DiskWrites(a5)
+		ENDC
+d78 5
+a82 3
+**** changed to support old filing system disks, always checksum data blocks
+		tst.b	DiskType+3(a5)		if oldfs format
+		beq.s	11$			then always run a checksum
+d84 1
+a84 14
+		tst.l	d3			test cb_Size
+		bge.s	20$			not a file header block
+
+		IFD STATISTICS
+		addq.l	#1,s_HeaderWrites(a5)
+		ENDC
+
+11$		movea.l	a3,a0			where data is
+		bsr	Checksum
+		sub.l	d0,fhb_Checksum(a3)	fixup existing checksum
+
+20$		movea.l	a2,a0			a0 = buffer
+		move.w	d2,d0			d0 = Device command
+		bsr	Diskact			do this action
+d91 21
+a111 23
+DiskRead:
+		IFD STATISTICS
+		addq.l	#1,s_DiskReads(a5)
+		ENDC
+
+		movea.l	a2,a0			a0 = cache buffer
+		move.w	d2,d0			d0 = Device command
+		bsr	Diskact			do this action
+
+**** changed to support old filing system disks, always checksum data blocks
+		tst.b	DiskType+3(a5)		if oldfs format
+		beq.s	1$			then always run a checksum
+
+		tst.l	d3			test cb_Size
+		bge.s	DiskCommon		read straight to user buffer
+
+		IFD STATISTICS
+		addq.l	#1,s_HeaderReads(a5)
+		ENDC
+
+1$		movea.l	a3,a0			where data is
+		bsr	Checksum
+		tst.l	d0			was checksum OK ?
+d115 1
+a115 1
+	printf <'FFS: Checksum error\n'>
+d122 5
+a126 2
+; The read or write has completed, see if we were called directly or if we
+; should ResumeCo back to another co-routine to complete this request.
+d128 10
+a137 11
+		movea.l	a2,a1			dequeue us from pending
+		lea.l	PendingQueue(a5),a0
+		bsr	DeQueue
+		tst.l	cb_Size(a2)		not in hash table if not a blk
+		bgt.s	5$
+		movea.l	a2,a0
+		bsr	UnHash			and remove from hash table
+5$		tst.l	cb_CoPkt(a2)		who owns this buffer
+		beq.s	10$			nobody, it's ours
+		move.l	a2,d0			Resume back to owning co-routine
+		movea.l	cb_CoPkt(a2),a0
+d141 2
+a142 3
+; Done with this block for now, put it on the appropriate queue.  This will
+; automatically put the block back into the hash table too.
+10$		move.l	d3,d0			pass size/flag
+d149 1
+a149 1
+;	    d0	   a0	  fakes up a packet so the dispatcher in main will know
+d151 1
+d153 1
+a153 6
+Diskact		movem.l	d2/a2,-(sp)
+		movea.l	a0,a2			save buffer pointer
+		move.w	d0,d2			and the action to perform
+
+; If an error occurs then we can come back here multiple times to re-read/write
+ReDiskact	lea.l	-dp_Type(sp),sp		get a temporary packet
+d159 4
+a162 4
+		cmp.l	Keylwb(a5),d0		check range first
+		blt.s	KeyError		bad !!!
+		cmp.l	Keyupb(a5),d0
+		ble.s	NoKeyError		everything OK
+d164 4
+a167 5
+********** THIS HAS GOT TO GO ************************************************
+KeyError	move.l	#AN_KeyRange!AT_DeadEnd,d0
+		bsr	Abort
+		bra.s	KeyError		keep erroring out
+******************************************************************************
+d169 1
+d172 1
+a172 1
+		moveq.l	#9,d1			multiply by sector size and...
+a174 1
+
+d177 1
+a177 1
+		move.l	#512,d0			file header or data block
+d180 1
+a180 3
+
+		movea.l	DiskDev(a5),a1		reload IORequest pointer
+		jsr	_LVOSendIO(a6)		send it to the disk
+a182 1
+
+d184 3
+a186 2
+		move.b	IO_ERROR(a1),d0
+		beq.s	ll20			no problems, all done
+d188 10
+a197 3
+; Here we should get an input from the user to see if they want to retry or not
+25$		addq.l	#1,SoftErrors(a5)	one extra error
+	printf <'FFS: IO_ERROR\n'>
+d201 1
+a201 2
+		bne	ReDiskact		yes, try again
+;		bne.s	ReDiskact		yes, try again
+d203 2
+a204 4
+; the read/write was successful so return to disk to get further work.
+ll20		movem.l	(sp)+,d2/a2
+		rts				thats all
+
+d257 1
+a257 1
+		bgt.s	IOErrorDone		(this was the canel bug)
+@
+
+
+1.6
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.5
+log
+@changed a comment and had to ci to make RCS happy, I STILL hate RCS!!!!
+@
+text
+@@
+
+
+1.4
+log
+@*** empty log message ***
+@
+text
+@@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@d49 2
+a50 1
+; of one sector (512 bytes).
+@
+
+
+1.2
+log
+@now correctly handles cb_Type of 0 when writing oldfs data blocks
+@
+text
+@@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d53 5
+d65 1
+a65 1
+		movea.l	a3,a0			where data is
+d86 5
+d98 1
+a98 1
+		movea.l	a3,a0			where data is
+@

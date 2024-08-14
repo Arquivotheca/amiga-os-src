@@ -1,0 +1,2294 @@
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-1
+
+
+				page 63,132 
+				;***************************************************************************** 
+				; Autoboot handlers: 
+				; 
+				;  
+				; Bill13 handles BIOS INT13 ...... 
+				; ------ 
+				; 
+				; Will be called from PC.  
+				; 
+				; Called from INT 13: 	Entry 
+				;		     	- Jump to old INT13 if ...... 
+				; 
+				; 
+				; 
+				; Bill19 handles BIOS INT19 ...... 
+				; ------ 
+				; 
+				; Will be called from PC.  
+				; 
+				; Called from INT 19: 	Entry 
+				;		     	- Attempt boot off drive A: 
+				;			- Attempt boot off drive B: 
+				;			- Attempt boot off drive C: (our fake drive) 
+				;			- Call bios int 18h Rom Basic (should not return) 
+				;			- iret 
+				; 
+				; 
+				; 
+				; New code  :   25-Mar-88 Bill Koester 
+				; 54.Update :  	27-jun-88 BK		load filename for autoboot drive 
+				; 55.Update :  	28-jun-88 BK		no reset for harddisk 
+				; 56.Update :  	18-jul-88 BK		allow multiple sector r/w for autoboot 
+				; 57.Update :	20-jul-88 TB		no reset for 'strange' drives	     
+				; 
+				;****************************************************************************** 
+				 
+				public	       	Bill13, Bill19 
+				 
+ 0000				cseg 		segment	para public 'code' 
+				 
+				     		assume	cs:cseg,ss:cseg,ds:cseg,es:nothing 
+				 
+				extrn	       	JanInt:near		; janus interupt entry 
+				 
+				; external utilities 
+				 
+				extrn	       	outhxw:near		; prints hex word in ax 
+				extrn		outhxb:near		;prints hex byte in al 
+				extrn	       	newline:near		; prints cr,lf 
+				extrn	       	pstrng:near		; prints out string 
+				extrn		change_int:near		 
+					 
+ =				w	       	equ     word ptr 
+ =				b		equ	byte ptr 
+				 
+				include		macros.inc 
+			     C	;***************************************************************************** 
+			     C	; 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-2
+
+
+			     C	; macros.inc	        
+			     C	; 
+			     C	;***************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include        	vars_ext.inc 
+			     C	;***************************************************************************** 
+			     C	; 
+			     C	; vars_ext.inc declares variable datas of PC janus handler as external; 
+			     C	;	       these datas are defined in vars.inc	    
+			     C	; 
+			     C	;--- external data ----------------------------------------------------------- 
+			     C	.list 
+			     C	 
+			     C	 
+				 
+				include        	equ.inc 
+			     C	;****************************************************************************** 
+			     C	; 
+			     C	; equ.inc contains equals, flag bits and register addresses  
+			     C	; 
+			     C	;****************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include 	abdata.inc		 
+			     C	; 
+			     C	; 
+			     C	extrn	AB_Cyl:word 
+			     C	extrn	AB_Head:word 
+			     C	extrn	AB_Sec:word 
+			     C	extrn	AB_Secs:word 
+			     C	extrn	AB_SecsDone:word 
+			     C	extrn	AB_bill_int13:dword 
+			     C	extrn	AB_jparmseg:word 
+			     C	extrn	AB_jparmoff:word 
+			     C	extrn	AB_jbuffseg:word 
+			     C	extrn	AB_jbuffoff:word 
+			     C	extrn	AB_dataseg:word 
+			     C	extrn	AB_dataoff:word 
+			     C	extrn	AB_FileOpen:word 
+			     C	extrn	AB_NumHeads:word 
+			     C	extrn	AB_TrackSecs:word 
+			     C	extrn	AB_Cyls:word 
+			     C	extrn	AB_billmsg0:byte 
+			     C	extrn	AB_billmsg1:byte 
+			     C	extrn	AB_billmsg2:byte 
+			     C	extrn	AB_billmsg3:byte 
+			     C	extrn	AB_billmsg4:byte 
+			     C	extrn	AB_billmsg5:byte 
+			     C	extrn	AB_READPARMS:byte 
+			     C	extrn	AB_COPENFAILMSG:byte 
+			     C	extrn	AB_OPENFAILMSG:byte 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-3
+
+
+			     C	extrn	AB_FTEXITMSG:byte 
+			     C	extrn	AB_File:word 
+			     C	extrn	AB_TFile:word 
+			     C	extrn	AB_FileName:byte 
+			     C	extrn	AB_okflag:word 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include		abequ.inc 
+			     C	;*************************************************************************** 
+			     C	;* ABEqu.inc		-	Equates for AutoBoot handler 
+			     C	;*************************************************************************** 
+			     C					     
+ = 0001                      C	AB_ACTIVATE		=      	1	;Make autoboot active 
+ = 0000                      C	AB_INT13MSG		=	0	;Display parms when int13 called 
+			     C	 
+			     C	 
+			     C	;*************************************************************************** 
+			     C	;* Debug switches for Autoboot File Open routine first_time 
+			     C	;*************************************************************************** 
+			     C	 
+ = 0000                      C	DBG_AB_FILEOPENMSG   	=	0 	;Prints return value from DoJanus 
+ = 0000                      C	DBG_AB_READPARMS	=	0 	 
+ = 0001                      C	DBG_AB_COPENFAILMSG   	=	1 	;Error on open of autoboot control file 
+ = 0001                      C	DBG_AB_OPENFAILMSG	=	1 	;Error on open of autoboot file 
+ = 0000                      C	DBG_AB_FTEXITMSG	=	0 	;File opened ok, routine exits 
+			     C					  	 
+ = 0000                      C	DBG_AB_CNV_IN	 	=	0 	;Entry to cnv_do 
+ = 0000                      C	DBG_AB_CNV_OUT		=	0 	;Exit from cnv_do  
+			     C	 
+				 
+				include		abblock.inc 
+			     C	AB_BLOCK	struc 
+ 0000  0008[                 C	ab_name		db	8 dup(0) 
+	   00                C	
+			 ]   C	
+			     C	
+ 0008  0000                  C	Heads		dw	0 
+ 000A  0000                  C	SecTrk		dw	0 
+ 000C  0000                  C	Cyl		dw	0 
+ 000E                        C	AB_BLOCK	ends 
+			     C		 
+			     C	 
+				 
+				;include		abmacros.inc 
+				include		janus\pcdisk.inc 
+			     C	;************************************************************************ 
+			     C	;* (PC side file) 
+			     C	;* 
+			     C	;* PCDisk.inc - PCDisk specific data structures 
+			     C	;* 
+			     C	;************************************************************************ 
+			     C	 
+			     C	 
+ = 2200                      C	PCDISK_BUFFER_SIZE   =   8704 
+			     C	 
+			     C	; Disk request structure for higher level Amiga file request from 8086 
+			     C	 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-4
+
+
+			     C	AmigaDiskReq   struc 
+			     C	 
+ 0000  0000                  C	   adr_Fnctn        dw 0      ; Function code (see below) 
+ 0002  0000                  C	   adr_File         dw 0      ; File number (filehandle for PC side) 
+ 0004  0000                  C	   adr_Offset_h     dw 0      ; High byte of offset into file 
+ 0006  0000                  C	   adr_Offset_l     dw 0      ; Low  byte of offset into file 
+ 0008  0000                  C	   adr_Count_h      dw 0      ; High byte of # of bytes to transfer 
+			     C	                              ; Actual number transfered on return 
+ 000A  0000                  C	   adr_Count_l      dw 0      ; Low byte as above 
+ 000C  0000                  C	   adr_BufferOffset dw 0      ; Offset into MEMF_BUFFER memory 
+ 000E  0000                  C	   adr_Err          dw 0      ; Return code (see below) 0 if all OK 
+			     C	 
+ 0010                        C	AmigaDiskReq   ends 
+			     C	 
+			     C	; Function codes for AmigaDiskReq adr_Fnctn word 
+			     C	 
+ = 0000                      C	ADR_FNCTN_INIT     = 0     ; Currently not used 
+ = 0001                      C	ADR_FNCTN_READ     = 1     ; Given file, offset, count, buffer 
+ = 0002                      C	ADR_FNCTN_WRITE    = 2     ; Given file, offset, count, buffer 
+ = 0003                      C	ADR_FNCTN_SEEK     = 3     ; Given file, offset 
+ = 0004                      C	ADR_FNCTN_INFO     = 4     ; Currently not used 
+ = 0005                      C	ADR_FNCTN_OPEN_OLD = 5     ; Given ASCIIZ filespec in buffer 
+ = 0006                      C	ADR_FNCTN_OPEN_NEW = 6     ; Given ASCIIZ filespec in buffer 
+ = 0007                      C	ADR_FNCTN_CLOSE    = 7     ; Given file 
+ = 0008                      C	ADR_FNCTN_DELETE   = 8     ; Given ASCIIZ filespec in buffer 
+			     C	 
+			     C	; Error codes for adr_Err, returned in low byte 
+			     C	 
+ = 0000                      C	ADR_ERR_OK         = 0     ; No error 
+ = 0001                      C	ADR_ERR_OFFSET     = 1     ; Not used 
+ = 0002                      C	ADR_ERR_COUNT      = 2     ; Not used 
+ = 0003                      C	ADR_ERR_FILE       = 3     ; File does not exist 
+ = 0004                      C	ADR_ERR_FNCTN      = 4     ; Illegal function code 
+ = 0005                      C	ADR_ERR_EOF        = 5     ; Offset past end of file 
+ = 0006                      C	ADR_ERR_MULPL      = 6     ; Not used 
+ = 0007                      C	ADR_ERR_FILE_COUNT = 7     ; Too many open files 
+ = 0008                      C	ADR_ERR_SEEK       = 8     ; Seek error 
+ = 0009                      C	ADR_ERR_READ       = 9     ; Read went wrong 
+ = 000A                      C	ADR_ERR_WRITE      = 10    ; Write error 
+ = 000B                      C	ADR_ERR_LOCKED     = 11    ; File is locked 
+			     C	 
+			     C	 
+				 
+				include		janus\services.inc 
+			     C	;* *** services.inc ******************************************************** 
+			     C	;* (PC side file) 
+			     C	;* 
+			     C	;* services.inc -- Service Definitions and Data Structures 
+			     C	;* 
+			     C	;* Copyright (c) 1986, 1987, 1988, Commodore Amiga Inc., All rights reserved 
+			     C	;*  
+			     C	;* HISTORY 
+			     C	;* Date       name               Description 
+			     C	;* ---------  -----------------  ------------------------------------------- 
+			     C	;* early 86 - Burns/Katin clone - Created this file 
+			     C	;* 02-22-88 - RJ Mical          - Added service data structures 
+			     C	;* 07-25-88 - Bill Koester      - Added ServiceCustomer structure 
+			     C	;* 07-26-88 - Bill Koester      - Added sd_PCUserCount to ServiceData 
+			     C	;*                                Changed sd_UserCount to sd_AmigaUserCount 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-5
+
+
+			     C	;*                                Added sd_ReservedByte to ServiceData 
+			     C	;* 10-05-88 - Bill Koester	- Added SERVICE_PCWAIT flag definitions 
+			     C	;* 10-09-88 - Bill Koester      - Added PC/AMIGA_EXCLUSVIE & SERVICE_ADDED 
+			     C	;*                                flag definitions. 
+			     C	;*                              - Added sd_Semaphore field to ServiceData 
+			     C	;* ************************************************************************* 
+			     C	 
+			     C	 
+			     C	;* As a coding convenience, we assume a maximum of 32 handlers. 
+			     C	;* People should avoid using this in their code, because we want 
+			     C	;* to be able to relax this constraint in the future.  All the 
+			     C	;* standard commands' syntactically support any number of interrupts, 
+			     C	;* but the internals are limited to 32. 
+			     C	 
+			     C	 
+ = 0020                      C	MAXHANDLER   =   32 
+			     C	 
+			     C	 
+			     C	;* 
+			     C	;* this is the table of hard coded services.  Other services may exist 
+			     C	;* that are dynamically allocated. 
+			     C	;* 
+			     C	 
+			     C	 
+			     C	;* service numbers constrained by hardware  
+			     C	 
+ = 0000                      C	JSERV_MINT           =      0  ; monochrome display written to 
+ = 0001                      C	JSERV_GINT           =      1  ; color display written to 
+ = 0002                      C	JSERV_CRT1INT        =      2  ; mono display's control registers changed 
+ = 0003                      C	JSERV_CRT2INT        =      3  ; color display's control registers changed 
+ = 0004                      C	JSERV_ENBKB          =      4  ; keyboard ready for next character 
+ = 0005                      C	JSERV_LPT1INT        =      5  ; parallel control register 
+ = 0006                      C	JSERV_COM2INT        =      6  ; serial control register 
+			     C	 
+			     C	;* hard coded service numbers  
+			     C	 
+ = 0007                      C	JSERV_PCBOOTED       =      7  ; PC is ready to service soft interrupts 
+ = 0008                      C	JSERV_SCROLL         =      8  ; PC is scrolling its screen 
+ = 0009                      C	JSERV_HARDDISK       =      9  ; Amiga reading PC hard disk 
+ = 000A                      C	JSERV_READAMIGA      =      10 ; PC reading Amiga mem 
+ = 000B                      C	JSERV_READPC         =      11 ; Amiga reading PC mem 
+ = 000C                      C	JSERV_AMIGACALL      =      12 ; PC causing Amiga function call 
+ = 000D                      C	JSERV_PCCALL         =      13 ; Amiga causing PC interrupt 
+ = 000E                      C	JSERV_AMIGASERVICE   =      14 ; PC initiating Amiga side of a service 
+ = 000F                      C	JSERV_PCSERVICE      =      15 ; Amiga initiating PC side of a service 
+ = 0010                      C	JSERV_PCDISK         =      16 ; PC using AmigaDos files 
+ = 0011                      C	JSERV_AMOUSE         =      17 ; AMouse Communications 
+			     C	 
+			     C	 
+			     C	;--- JANUS PC Function calls ----------- 
+			     C	; 
+			     C	; This is the table of function codes. These functions allow controlling 
+			     C	; of dynamically allocated services (dyn-service). 
+			     C	;  
+			     C	; 1.Generation:	(befor Mai'88) 
+			     C	; 
+ = 0000                      C	JFUNC_GETSERVICE1	=	 0	; not supported any more    	 
+ = 0001                      C	JFUNC_GETBASE		=	 1	; report segments, offset of janus mem 
+ = 0002                      C	JFUNC_ALLOCMEM		=	 2	; allocate janus memory 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-6
+
+
+ = 0003                      C	JFUNC_FREEMEM		=	 3	; free janus memory 
+ = 0004                      C	JFUNC_SETPARAM		=	 4	; set pointer to service parameter 
+ = 0005                      C	JFUNC_SETSERVICE	=	 5	; not supported any more    	 
+ = 0006                      C	JFUNC_STOPSERVICE	=	 6	; not supported any more    	 
+ = 0007                      C	JFUNC_CALLAMIGA		=	 7	; call service on Amiga side 
+ = 0008                      C	JFUNC_WAITAMIGA		=	 8 	; wait for service becomes ready 
+ = 0009                      C	JFUNC_CHECKAMIGA	=	 9	; check service status 
+			     C	;					 
+			     C	; 2.Generation: 
+			     C	; 
+ = 000A                      C	JFUNC_ADDSERVICE	=	10	; add a dyn-service  
+ = 000B                      C	JFUNC_GETSERVICE	=	11	; link to a dyn-service 
+ = 000C                      C	JFUNC_CALLSERVICE	=	12	; call a dyn-service 
+ = 000D                      C	JFUNC_RELEASESERVICE	=	13	; unlink from a dyn-service 
+ = 000E                      C	JFUNC_DELETESERVICE	=	14	; delete a dyn-service 
+ = 000F                      C	JFUNC_LOCKSERVICEDATA	=	15	; lock private mem of a dyn-service 
+ = 0010                      C	JFUNC_UNLOCKSERVICEDATA	=	16	; unlock private mem of a dyn-service 
+			     C	 
+ = 0010                      C	JFUNC_MAX		=	16 	; Last function (for range check only) 
+			     C	 
+ = 000B                      C	JFUNC_JINT		=	0bh 
+			     C	 
+			     C	;* === ServiceData Structure ===============================================  
+			     C	;* The ServiceData structure is used to share data among all callers of  
+			     C	;* all of the Service routines.  One of these is allocated in janus memory  
+			     C	;* for each service.   
+			     C	 
+			     C	ServiceData struc 
+			     C	 
+			     C	   ; The ServiceData ID numbers are used to uniquely identify 
+			     C	   ; application-specific services.  There are two ID numbers: 
+			     C	   ; the global ApplicationID and the application's local LocalID. 
+			     C	   ; 
+			     C	   ; The ApplicationID is a 32-bit number which *must* be assigned to 
+			     C	   ; an application designer by Commodore-Amiga. 
+			     C	   ; Once a service ApplicationID is assigned to an application 
+			     C	   ; designer, that designer "owns" that ID number forever. 
+			     C	   ; Note that this will provide unique ServiceData identification 
+			     C	   ; numbers only for the first 4.3 billion ServiceData designers 
+			     C	   ; after that, there's some risk of a collision. 
+			     C	   ; 
+			     C	   ; The LocalID, defined by the application designer, is a local 
+			     C	   ; subcategory of the global ApplicationID.  These can mean anything 
+			     C	   ; at all.  There are 65,536 of these local ID's. 
+ 0000  00000000              C	   sd_ApplicationID  dd 0 
+ 0004  0000                  C	   sd_LocalID        dw 0 
+			     C	 
+			     C	 
+			     C	   ; The flag bits are defined below.  Some of these are set by the 
+			     C	   ; application programs which use the service, and some are set 
+			     C	   ; by the system. 
+ 0006  0000                  C	   sd_Flags    dw 0 
+			     C	 
+			     C	 
+			     C	   ; This field is initialized by the system for you, and then  
+			     C	   ; is never touched by the system again.  Users of the  
+			     C	   ; service can agree by convention that they have to obtain  
+			     C	   ; this lock before using the service.   
+			     C	   ; If you are the AddService() caller and you want this lock  
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-7
+
+
+			     C	   ; to be locked before the service is linked into the system,  
+			     C	   ; set the AddService() ADDS_LOCKDATA argument flag.   
+ 0008  00                    C	   sd_ServiceDataLock   db 0 
+			     C	 
+			     C	 
+			     C	   ; This tracks the number of users currently connected  
+			     C	   ; to this service. 
+ 0009  00                    C	   sd_AmigaUserCount   db 0 
+ 000A  00                    C	   sd_PCUserCount      db 0 
+ 000B  00                    C	   sd_ReservedByte     db 0 
+			     C	 
+			     C	   ; These are the standard janus memory descriptions, which describe 
+			     C	   ; the parameter memory associated with this service.  This memory 
+			     C	   ; (if any) will be allocated automatically by the system when the 
+			     C	   ; service if first added.  The creator of the service 
+			     C	   ; (the one who calls AddService()) supplies the MemSize and 
+			     C	   ; MemType values; after the service is added the MemPtr field 
+			     C	   ; will point to the parameter memory.  GetService() callers, after 
+			     C	   ; the service comes available, will find all of these fields 
+			     C	   ; filled in with the appropriate values. 
+			     C	   ; The AmigaMemPtr and PCMemPtr both point to the same location 
+			     C	   ; of Janus memory; an Amiga program should use the AmigaMemPtr, 
+			     C	   ; and a PC program should use the PCMemPtr 
+ 000C  0000                  C	   sd_MemSize        dw 0 
+ 000E  0000                  C	   sd_MemType        dw 0 
+ 0010  0000                  C	   sd_MemOffset      dw 0 
+ 0012  00000000              C	   sd_AmigaMemPtr    dd 0 
+ 0016  00000000              C	   sd_PCMemPtr       dd 0 
+			     C	 
+			     C	 
+			     C	   ; This offset is used as the key for calls to AllocServiceMem()  
+			     C	   ; and FreeServiceMem().  This key can be used by any one  
+			     C	   ; who's learned about this service via either AddService()  
+			     C	   ; or GetService().  The system makes no memory allocations  
+			     C	   ; using this key, so it's completely under application control. 
+			     C	   ; Any memory attached to this key by calls to AllocServiceMem()  
+			     C	   ; will be freed automatically after the service has been  
+			     C	   ; deleted and all users of the service have released the service.   
+ 001A  0000                  C	   sd_JRememberKey   dw 0 
+			     C	 
+			     C	 
+			     C	   ; These pointers are for the system-maintained lists of 
+			     C	   ; structures.  If you disturb any of these pointers, you will be 
+			     C	   ; tickling the guru's nose, and when the guru sneezes ... 
+ 001C  0000                  C	   sd_NextServiceData      dw 0 
+ 001E  00000000              C	   sd_FirstPCCustomer      dd 0 
+ 0022  00000000              C	   sd_FirstAmigaCustomer   dd 0 
+			     C	 
+			     C	   ; 
+			     C	   ; Semaphore structure pointer for services that allow multiple customers 
+			     C	   ; 
+ 0026  00000000              C	   sd_Semaphore 	   dd 0 
+			     C	 
+			     C	   ; These fields are reserved for future use  
+ 002A  0004[                 C	   sd_ZaphodReserved    dd 4 dup (0) 
+	   00000000          C	
+			 ]   C	
+			     C	
+			     C	 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-8
+
+
+ 003A                        C	ServiceData ends 
+			     C	 
+			     C	 
+			     C	;* === Flag Definitions ===  
+			     C	 
+ = 0001                      C	SERVICE_DELETED      =   00001h    ; Owner of this service deleted it 
+ = 0000                      C	SERVICE_DELETEDn     =   0 
+ = 0002                      C	EXPUNGE_SERVICE      =   00002h    ; Owner of service should delete 
+ = 0001                      C	EXPUNGE_SERVICEn     =   1 
+ = 0004                      C	SERVICE_AMIGASIDE    =   00004h    ; Set if Amiga created the service 
+ = 0002                      C	SERVICE_AMIGASIDEn   =   2 
+ = 0008                      C	SERVICE_PCWAIT	     =   00008h	   ; Set when PC calls a service 
+ = 0003                      C	SERVICE_PCWAITn      =   3	   ; Cleared when service replys 
+ = 0010                      C	AMIGA_EXCLUSIVE      =   00010h    ; Only one Amiga customer allowed   
+ = 0004                      C	AMIGA_EXCLUSIVEn     =   4 
+ = 0020                      C	PC_EXCLUSIVE         =   00020h    ; Only one PC customer allowed      
+ = 0005                      C	PC_EXCLUSIVEn        =   5 
+ = 0040                      C	SERVICE_ADDED        =   00040h    ; Set when service is added         
+ = 0006                      C	SERVICE_ADDEDn       =   6 
+			     C	 
+			     C	 
+			     C	;* === ServiceCustomer Structure ===========================================  
+			     C	;* A ServiceCustomer structure is created for each "customer" of a given  
+			     C	;* channel 
+			     C	 
+			     C	ServiceCustomer	struc 
+			     C	 
+ 0000  00000000              C		scs_NextCustomer 	dd 0 
+			     C	 
+ 0004  0000                  C		scs_Flags		dw 0 
+			     C	 
+ 0006  00000000              C		scs_Task			dd 0 ;This points to the task of the customer  
+ 000A  00000000              C		scs_SignalBit		dd 0 ;Signal the customer with this bit  
+			     C	 
+ 000E  0004[                 C		scs_JazzReserved  	dd 4 dup (0) 
+	   00000000          C	
+			 ]   C	
+			     C	
+			     C	 
+ 001E                        C	ServiceCustomer	ends 
+			     C	 
+			     C	;* === Flag Definitions === * 
+			     C	;* These flags are set/cleared by the system 
+ = 0100                      C	CALL_TOPC_ONLY       =   0100h 
+ = 0008                      C	CALL_TOPC_ONLYn      =   8 
+ = 0200                      C	CALL_FROMPC_ONLY     =   0200h 
+ = 0009                      C	CALL_FROMPC_ONLYn    =   9 
+ = 0400                      C	CALL_TOAMIGA_ONLY    =   0400h 
+ = 000A                      C	CALL_TOAMIGA_ONLYn   =   10 
+ = 0800                      C	CALL_FROMAMIGA_ONLY  =   0800h 
+ = 000B                      C	CALL_FROMAMIGA_ONLYn =   11 
+			     C	 
+			     C	; === AddService() Flags ================================================== 
+			     C	; These are the definitions of the flag arguments that can be passed to the  
+			     C	; AddService() function. 
+			     C	 
+ = 0001                      C	ADDS_EXCLUSIVE       = 00001h ; You want to be the *only* Amiga customer 
+ = 0000                      C	ADDS_EXCLUSIVEn      = 0 
+ = 0002                      C	ADDS_TOPC_ONLY       = 00002h ; You want to send signals only to the PC 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-9
+
+
+ = 0001                      C	ADDS_TOPC_ONLYn      = 1 
+ = 0004                      C	ADDS_FROMPC_ONLY     = 00004h ; You want to get signals only from the PC 
+ = 0002                      C	ADDS_FROMPC_ONLYn    = 2 
+ = 0008                      C	ADDS_TOAMIGA_ONLY    = 00008h ; You want to send signals only to the Amiga 
+ = 0003                      C	ADDS_TOAMIGA_ONLYn   = 3 
+ = 0010                      C	ADDS_FROMAMIGA_ONLY  = 00010h ; You want to get signals only from the Amiga 
+ = 0004                      C	ADDS_FROMAMIGA_ONLYn = 4 
+ = 0020                      C	ADDS_LOCKDATA        = 00020h ; S'DataLock locked before linking to system 
+ = 0005                      C	ADDS_LOCKDATAn       = 5 
+			     C	 
+			     C	;* These are the system's AddService() Flags  
+ = 0100                      C	SD_CREATED           = 00100h 
+ = 0008                      C	SD_CREATEDn          = 8 
+			     C	 
+			     C	 
+			     C	 
+			     C	; === GetService() Flags ==================================================  
+			     C	; These are the definitions of the flag arguments that can be passed to the  
+			     C	; GetService() function. 
+			     C	 
+ = 0001                      C	GETS_WAIT            = 00001h ; If service not yet available, you'll wait 
+ = 0000                      C	GETS_WAITn           = 0 
+ = 0002                      C	GETS_TOPC_ONLY       = 00002h ; You want to send signals only to the PC 
+ = 0001                      C	GETS_TOPC_ONLYn      = 1 
+ = 0004                      C	GETS_FROMPC_ONLY     = 00004h ; You want to get signals only from the PC 
+ = 0002                      C	GETS_FROMPC_ONLYn    = 2 
+ = 0008                      C	GETS_TOAMIGA_ONLY    = 00008h ; You want to send signals only to the Amiga 
+ = 0003                      C	GETS_TOAMIGA_ONLYn   = 3 
+ = 0010                      C	GETS_FROMAMIGA_ONLY  = 00010h ; You want to get signals only from the Amiga 
+ = 0004                      C	GETS_FROMAMIGA_ONLYn = 4 
+ = 0020                      C	GETS_EXCLUSIVE       = 00020h ; You want to be the *only* Amiga customer 
+ = 0005                      C	GETS_EXCLUSIVEn      = 5 
+ = 0040                      C	GETS_ALOAD_A         = 00040h ; Autoload the service on the Amiga side 
+ = 0006                      C	GETS_ALOAD_An        = 6 
+ = 0080                      C	GETS_ALOAD_PC        = 00080h ; Autoload the service on the PC side 
+ = 0007                      C	GETS_ALOAD_PCn       = 7 
+			     C	 
+			     C	 
+			     C	 
+			     C	; === Service() Result Codes ==========================================  
+			     C	; These are the result codes that may be returned by a call to a Service  
+			     C	; 
+ =-0001                      C	JSERV_NOFUNCTION	= -1 	; Tried to call a not supported function 
+ = 0000                      C	JSERV_OK         	=  0  	; All is well 
+ = 0000                      C	JSERV_PENDING	 	=  0  	; Called service still pending on Amiga side 
+ = 0001                      C	JSERV_FINISHED	 	=  1  	; Called service is finished on Amiga side 
+ = 0002                      C	JSERV_NOJANUSBASE	=  2  	; ServiceBase structure not defined 
+ = 0003                      C	JSERV_NOJANUSMEM 	=  3  	; We ran out of Janus memory 
+ = 0004                      C	JSERV_NOAMIGAMEM 	=  4  	; On the Amiga side we ran out of Amiga memory 
+ = 0005                      C	JSERV_NOPCMEM    	=  5  	; On the PC side we ran out of PC memory 
+ = 0006                      C	JSERV_NOSERVICE  	=  6  	; Tried to get a service that doesn't exist 
+ = 0007                      C	JSERV_DUPSERVICE 	=  7  	; Tried to add a service that already existed 
+ = 0008                      C	JSERV_ILLFUNCTION	=  8	; Tried to call an illegal function 
+ = 0009                      C	JSERV_NOTEXCLUSIVE      =  9  ; Wanted to but couldn't be exclusive user  
+ = 000A                      C	JSERV_BADAUTOLOAD       =  10 ; Wanted to autoload but couldn't 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-10
+
+
+			     C	 
+				 
+					 
+				;************************************************************************* 
+				;* 
+				;*	bill13	       - Autoboot int 13 wedge 
+				;* 
+				;************************************************************************* 
+ 0000				bill13	proc far 
+				 
+ 0000  9C				pushf			;Save state 
+					pushall 
+ 0001  06                    1		push	es 
+ 0002  1E                    1		push	ds 
+ 0003  56                    1		push	si 
+ 0004  57                    1		push	di 
+ 0005  55                    1		push	bp 
+ 0006  52                    2		push	dx 
+ 0007  51                    2		push	cx 
+ 0008  53                    2		push	bx 
+ 0009  50                    2		push	ax 
+ 000A  8B EC				mov	bp,sp		; Set bp for structure access of stack frame 
+				 
+								; Dos redirects the janus int during boot 
+								; So we redirect it EVERY time 
+ 000C  0E				push 	cs 
+ 000D  07				pop  	es		     	; set ES to load segment 
+ 000E  B0 0B				mov  	al,srv_int		; redirect IRQ3  
+ 0010  BF 0000 E			mov  	di,offset JanInt  
+ 0013  E8 0000 E			call 	change_int 
+ 0016  2E: 8C 06 0002 E			mov w 	cs:chain_vec+2,es 	     	; and save old pointer 
+ 001B  2E: 89 3E 0000 E			mov w 	cs:chain_vec,di 
+				 
+				; *** kludge it ! 
+ 0020  8B 46 00				mov	ax,ss:StackFrame.RegAX[bp]	 
+ 0023  80 FC 00				cmp	ah,0 
+ 0026  75 21				jne	nokludge 
+ 0028  8B 56 06				mov	dx,ss:StackFrame.RegDX[bp] 
+ 002B  80 FA 80				cmp	dl,80h 
+ 002E  74 19				je	nokludge 
+ 0030  80 FA 03				cmp	dl,3 
+ 0033  74 14				je	nokludge 
+ 0035  80 FA 02				cmp	dl,2 
+ 0038  74 0F				je	nokludge 
+ 003A  80 FA 01				cmp	dl,1 
+ 003D  74 0A				je	nokludge 
+ 003F  80 FA 00				cmp	dl,0 
+ 0042  74 05				je	nokludge 
+ 0044  B2 00				mov 	dl,0 
+ 0046  89 56 06				mov	ss:StackFrame.RegDX[bp],dx 
+ 0049				nokludge: 
+				 
+					endif 
+				 
+				 
+ 0049  80 FA 80			      	cmp	dl,80h		; Is this a req for drive 80H 
+ 004C  74 03				je	forme 
+ 004E  E9 0121 R			jmp	notme		; No. so call old handler 
+ 0051				forme: 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-11
+
+
+				 
+ 0051  2E: 80 26 0000 E 7F		and b	cs:ActiveFlag,not Dos	; Clear DOS flag so janus int works 
+				 
+ 0057  2E: 83 3E 0000 E 01		cmp w	cs:AB_FileOpen,1	; Is our file open? 
+ 005D  74 05				je	going 
+ 005F  55				push	bp 
+ 0060  E8 03B5 R			call	first_time		; No. so Attempt open 
+ 0063  5D				pop	bp	 
+ 0064				going:	 
+				 
+ 0064  2E: 83 3E 0000 E 01		cmp w	cs:AB_FileOpen,1		;If file not open pretend 
+ 006A  74 03				je	dispatch 			;were not here and call old 
+ 006C  E9 0121 R			jmp	notme				;handler 
+				 
+ 006F				dispatch:  					;Dispatch req to proper func 
+ 006F  8B 46 00				mov	ax,ss:StackFrame.RegAX[bp] 
+ 0072  0A E4				or	ah,ah 
+ 0074  75 03				jne	dp1 
+ 0076  E9 013D R			jmp	func0 
+ 0079  FE CC			dp1:	dec 	ah 
+ 007B  75 03				jne	dp2 
+ 007D  E9 013F R			jmp	func1 
+ 0080  FE CC			dp2:	dec	ah 
+ 0082  75 03				jne	dp3 
+ 0084  E9 0141 R			jmp	func2 
+ 0087  FE CC			dp3:	dec	ah 
+ 0089  75 03				jne	dp4 
+ 008B  E9 01ED R			jmp	func3 
+ 008E  FE CC			dp4:	dec	ah 
+ 0090  75 03				jne	dp5 
+ 0092  E9 0295 R			jmp	func4 
+ 0095  FE CC			dp5:	dec	ah 
+ 0097  75 03				jne	dp6 
+ 0099  E9 0298 R			jmp	func5 
+ 009C  FE CC			dp6:	dec	ah 
+ 009E  75 03				jne	dp7 
+ 00A0  E9 029B R			jmp	func6 
+ 00A3  FE CC			dp7:	dec	ah 
+ 00A5  75 03				jne	dp8 
+ 00A7  E9 029E R			jmp	func7 
+ 00AA  FE CC			dp8:	dec	ah 
+ 00AC  75 03				jne	dp9 
+ 00AE  E9 02A1 R			jmp	func8 
+ 00B1  FE CC			dp9:	dec	ah 
+ 00B3  75 03				jne	dpa 
+ 00B5  E9 02CC R			jmp	func9 
+ 00B8  FE CC			dpa:	dec	ah 
+ 00BA  75 03				jne	dpb 
+ 00BC  E9 02CF R			jmp	funca 
+ 00BF  FE CC			dpb:	dec	ah 
+ 00C1  75 03				jne	dpc 
+ 00C3  E9 02D2 R			jmp	funcb 
+ 00C6  FE CC			dpc:	dec	ah 
+ 00C8  75 03				jne	dpd 
+ 00CA  E9 02D5 R			jmp	funcc 
+ 00CD  FE CC			dpd:	dec	ah 
+ 00CF  75 03				jne	dpe 
+ 00D1  E9 02D8 R			jmp	funcd 
+ 00D4  FE CC			dpe:	dec	ah 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-12
+
+
+ 00D6  75 03				jne	dpf 
+ 00D8  E9 02DB R			jmp	funce 
+ 00DB  FE CC			dpf:	dec	ah 
+ 00DD  75 03				jne	dp10 
+ 00DF  E9 02DE R			jmp	funcf 
+ 00E2  FE CC			dp10:	dec	ah 
+ 00E4  75 03				jne	dp11 
+ 00E6  E9 02E1 R			jmp	func10 
+ 00E9  FE CC			dp11:	dec	ah 
+ 00EB  75 03				jne	dp12 
+ 00ED  E9 02E4 R			jmp	func11 
+ 00F0  FE CC			dp12:	dec	ah 
+ 00F2  75 03				jne	dp13 
+ 00F4  E9 02E7 R			jmp	func12 
+ 00F7  FE CC			dp13:	dec	ah 
+ 00F9  75 03				jne	dp14 
+ 00FB  E9 02EA R			jmp	func13 
+ 00FE  FE CC			dp14:	dec	ah 
+ 0100  75 03				jne	badexit 
+ 0102  E9 02ED R			jmp	func14 
+				 
+ 0105				badexit:			; Generic exit point for returning 
+					popall			; an error with no params 
+ 0105  58                    2		pop	ax 
+ 0106  5B                    2		pop	bx 
+ 0107  59                    2		pop	cx 
+ 0108  5A                    2		pop	dx 
+ 0109  5D                    1		pop	bp 
+ 010A  5F                    1		pop	di 
+ 010B  5E                    1		pop	si 
+ 010C  1F                    1		pop	ds 
+ 010D  07                    1		pop	es 
+ 010E  9D				popf 
+ 010F  B4 01				mov	ah,1 
+ 0111  F9				stc 
+ 0112  CF				iret 
+				 
+ 0113				okexit:				; Generic exit point for returning 
+					popall			; no error and no params 
+ 0113  58                    2		pop	ax 
+ 0114  5B                    2		pop	bx 
+ 0115  59                    2		pop	cx 
+ 0116  5A                    2		pop	dx 
+ 0117  5D                    1		pop	bp 
+ 0118  5F                    1		pop	di 
+ 0119  5E                    1		pop	si 
+ 011A  1F                    1		pop	ds 
+ 011B  07                    1		pop	es 
+ 011C  9D				popf 
+ 011D  32 E4			        xor	ah,ah 
+ 011F  F8				clc 
+ 0120  CF				iret 
+				 
+ 0121				notme:	popall			; Restore state and call old handler 
+ 0121  58                    2		pop	ax 
+ 0122  5B                    2		pop	bx 
+ 0123  59                    2		pop	cx 
+ 0124  5A                    2		pop	dx 
+ 0125  5D                    1		pop	bp 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-13
+
+
+ 0126  5F                    1		pop	di 
+ 0127  5E                    1		pop	si 
+ 0128  1F                    1		pop	ds 
+ 0129  07                    1		pop	es 
+ 012A  9D				popf			; as if we didn't exist 
+				 
+ 012B  9C				pushf 
+ 012C  2E: FF 1E 0000 E		        call 	dword ptr cs:[AB_bill_int13]	 
+					iflags 
+ 0131  55                    1		push	bp			; bp		   [2] 
+ 0132  50                    1		push	ax			; ax  <- [sp]	   [0] 
+ 0133  9C                    1		pushf				; flags to ax 
+ 0134  58                    1		pop	ax 
+ 0135  8B EC                 1		mov	bp,sp			; store current flags 
+ 0137  89 46 08              1		mov	8[bp],ax		; for later iret 
+ 013A  58                    1		pop	ax			; restore used regs 
+ 013B  5D                    1		pop	bp 
+ 013C  CF				iret 
+				 
+				;**************************************************************************** 
+				; 
+				; All functions are entered with a pushall frame on the stack and BP 
+				; pointing to the frame. Original parameters can be accessed via 
+				; 
+				;	mov	reg,ss:StackFrame.RegXX[bp] 
+				; 
+				; On exit, each routine should: 
+				;				popall		; Clean up stack 
+				;				popf 
+				;				stuff return values 
+				;				set or clear carry flag 
+				;				iret 
+				; 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 0  - Reset the disk 
+				; 
+				; Input  Regs:	AH = 00 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 013D				func0:	 
+ 013D  EB D4				jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 1  - Read status of last disk operation 
+				; 
+				; Input  Regs:	AH = 01 
+				;		DL = Drive # 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 013F				func1: 
+ 013F  EB D2				jmp	okexit 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-14
+
+
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 2  - Read specific sectors to memory 
+				; 
+				; Input  Regs:	AH = 02 
+				;	     ES:BX = Address of memory buffer 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				;		AL = # of sectors 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 0141				func2:				;Read specific sectors to memory 
+					;cnv_do, compute ofset and count 
+					;do read and transfer to dest es:bx 
+				 
+ 0141  B4 01				mov	ah,JFUNC_GETBASE			;Wake up services 
+ 0143  B0 10				mov	al,JSERV_PCDISK 
+ 0145  CD 0B				int 	JFUNC_JINT 
+				 
+ 0147  8B 46 00				mov	ax,ss:StackFrame.RegAX[bp] 
+ 014A  32 E4				xor	ah,ah 
+ 014C  2E: A3 0000 E			mov	cs:AB_Secs,ax 
+				 
+ 0150  8E 46 10				mov	es,ss:StackFrame.RegES[bp] 
+ 0153  2E: 8C 06 0000 E			mov	cs:AB_dataseg,es 
+ 0158  8B 5E 02				mov	bx,ss:StackFrame.RegBX[bp] 
+ 015B  2E: 89 1E 0000 E			mov	cs:AB_dataoff,bx		;stash pointers 
+				 
+ 0160  32 FF				xor	bh,bh 
+ 0162  8B 56 06				mov	dx,ss:StackFrame.RegDX[bp] 
+ 0165  8A DE				mov	bl,dh				;bx has head # 
+ 0167  2E: 89 1E 0000 E			mov	cs:AB_Head,bx 
+				 
+ 016C  8B 4E 04				mov	cx,ss:StackFrame.RegCX[bp] 
+ 016F  8B C1				mov	ax,cx 
+ 0171  25 003F				and	ax,03fh 
+ 0174  2E: A3 0000 E			mov	cs:AB_Sec,ax 
+ 0178  80 E1 C0				and	cl,0c0h 
+ 017B  D0 C1				rol	cl,1 
+ 017D  D0 C1				rol	cl,1 
+ 017F  86 E9				xchg	ch,cl 
+ 0181  2E: 89 0E 0000 E			mov	cs:AB_Cyl,cx 
+				 
+ 0186  2E: 8B 0E 0000 E			mov	cx,cs:AB_Secs  
+ 018B  2E: 89 0E 0000 E			mov	cs:AB_SecsDone,cx 
+				 
+ 0190  2E: 8B 1E 0000 E			mov	bx,cs:AB_Head 
+ 0195  2E: A1 0000 E			mov	ax,cs:AB_Cyl 
+ 0199  2E: 8B 0E 0000 E			mov	cx,cs:AB_Sec	 
+ 019E  E8 02F0 R			call	cnv_do 
+										;store offset into param mem 
+										;and compute count  
+										;we assume pcdisks buffer 
+										;can handle 17 secs 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-15
+
+
+ 01A1  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 01A6  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 01AB  26: 89 54 04			mov	es:AmigaDiskReq.adr_Offset_h[si],dx	;offset high 
+ 01AF  26: 89 44 06			mov	es:AmigaDiskReq.adr_Offset_l[si],ax	;offset low 
+				 
+ 01B3  2E: A1 0000 E			mov	ax,cs:AB_Secs 
+ 01B7  B1 11				mov	cl,17 
+ 01B9  F6 F1				div	cl 
+ 01BB  50				push	ax 
+ 01BC  3C 00				cmp	al,0 
+ 01BE  74 12				je	last 
+				 
+ 01C0  2E: C7 06 0000 E 0011		mov	cs:AB_Secs,17 
+ 01C7  33 C9				xor	cx,cx	 
+ 01C9  8A C8				mov	cl,al 
+ 01CB				morer: 
+ 01CB  51				push	cx 
+ 01CC  E8 0362 R			call	DoReadCopy 
+ 01CF  59				pop	cx 
+ 01D0  E2 F9				loop	morer 
+ 01D2				last: 
+ 01D2  58				pop	ax 
+ 01D3  80 FC 00				cmp	ah,0 
+ 01D6  74 0B				je	noremain 
+ 01D8  32 C0				xor	al,al 
+ 01DA  86 E0				xchg	ah,al 
+ 01DC  2E: A3 0000 E			mov 	cs:AB_Secs,ax 
+ 01E0  E8 0362 R			call	DoReadCopy 
+ 01E3				noremain: 
+				 
+ 01E3  2E: A1 0000 E			mov	ax,cs:AB_SecsDone		; return value 
+ 01E7  89 46 00				mov	ss:StackFrame.RegAX[bp],ax 
+				 
+ 01EA  E9 0113 R			jmp	okexit				; normal exit 
+				 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 3  - Write specific sectors from memory 
+				; 
+				; Input  Regs:	AH = 03 
+				;	     ES:BX = Address of memory buffer 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				;		AL = # of sectors 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 01ED				func3:					 
+					;cnv_do, compute offset and count 
+					;do transfer to pcdisk_buf and write 
+				 
+										;copy buff to mem pointer 
+				 
+ 01ED  8B 46 00				mov	ax,ss:StackFrame.RegAX[bp] 
+ 01F0  32 E4				xor	ah,ah 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-16
+
+
+ 01F2  2E: A3 0000 E			mov	cs:AB_Secs,ax 
+				 
+ 01F6  8E 46 10				mov	es,ss:StackFrame.RegES[bp] 
+ 01F9  2E: 8C 06 0000 E			mov	cs:AB_dataseg,es 
+ 01FE  8B 5E 02				mov	bx,ss:StackFrame.RegBX[bp] 
+ 0201  2E: 89 1E 0000 E			mov	cs:AB_dataoff,bx		;stash pointers 
+				 
+ 0206  32 FF				xor	bh,bh 
+ 0208  8B 56 06				mov	dx,ss:StackFrame.RegDX[bp] 
+ 020B  8A DE				mov	bl,dh				;bx has head # 
+ 020D  2E: 89 1E 0000 E			mov	cs:AB_Head,bx 
+				 
+ 0212  8B 4E 04				mov	cx,ss:StackFrame.RegCX[bp] 
+ 0215  8B C1				mov	ax,cx 
+ 0217  25 003F				and	ax,03fh 
+ 021A  2E: A3 0000 E			mov	cs:AB_Sec,ax 
+ 021E  80 E1 C0				and	cl,0c0h 
+ 0221  D0 C1				rol	cl,1 
+ 0223  D0 C1				rol	cl,1 
+ 0225  86 E9				xchg	ch,cl 
+ 0227  2E: 89 0E 0000 E			mov	cs:AB_Cyl,cx 
+				 
+				 
+ 022C  2E: 8B 0E 0000 E			mov	cx,cs:AB_Secs 
+ 0231  2E: 89 0E 0000 E			mov	cs:AB_SecsDone,cx 
+				 
+ 0236  2E: 8B 1E 0000 E			mov	bx,cs:AB_Head 
+ 023B  2E: A1 0000 E			mov	ax,cs:AB_Cyl 
+ 023F  2E: 8B 0E 0000 E			mov	cx,cs:AB_Sec 
+ 0244  55				push	bp 
+ 0245  E8 02F0 R			call	cnv_do 
+ 0248  5D				pop	bp 
+										;store offset into param mem 
+ 0249  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 		;compute count 
+ 024E  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0253  26: 89 54 04			mov	es:AmigaDiskReq.adr_Offset_h[si],dx	;offset high 
+ 0257  26: 89 44 06			mov	es:AmigaDiskReq.adr_Offset_l[si],ax	;offset low 
+				;888 
+ 025B  2E: A1 0000 E			mov	ax,cs:AB_Secs 
+ 025F  B1 11				mov	cl,17 
+ 0261  F6 F1				div	cl 
+ 0263  50				push	ax 
+ 0264  3C 00				cmp	al,0 
+ 0266  74 12				je	last3 
+				 
+ 0268  2E: C7 06 0000 E 0011		mov	cs:AB_Secs,17 
+ 026F  33 C9				xor	cx,cx	 
+ 0271  8A C8				mov	cl,al 
+ 0273				morer3: 
+ 0273  51				push	cx 
+ 0274  E8 030F R			call	DoCopyWrite 
+ 0277  59				pop	cx 
+ 0278  E2 F9				loop	morer3 
+ 027A				last3: 
+ 027A  58				pop	ax 
+ 027B  80 FC 00				cmp	ah,0 
+ 027E  74 0B				je	noremain3 
+ 0280  32 C0				xor	al,al 
+ 0282  86 E0				xchg	ah,al 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-17
+
+
+ 0284  2E: A3 0000 E			mov 	cs:AB_Secs,ax 
+ 0288  E8 030F R			call	DoCopyWrite 
+ 028B				noremain3: 
+				;888 
+				 
+ 028B  2E: A1 0000 E			mov	ax,cs:AB_SecsDone 
+ 028F  89 46 00				mov	ss:StackFrame.RegAX[bp],ax 
+				 
+ 0292  E9 0113 R			jmp okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 4  - Verify specific sectors 
+				; 
+				; Input  Regs:	AH = 04 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				;		AL = # of sectors 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 0295				func4: 
+ 0295  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 5  - Format specific track 
+				; 
+				; Input  Regs:	AH = 05 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				;		AL = # of sectors 
+				;	     ES:BX = Address of format information 
+				;		     (floppy only) 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 0298				func5: 
+ 0298  E9 0113 R			jmp 	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 6  - Unused function 
+				; 
+				; Input  Regs:	AH = 06 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 029B				func6: 
+ 029B  E9 0105 R			jmp	badexit 
+				 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-18
+
+
+				;**************************************************************************** 
+				; 
+				; FUNCTION 7  - Unused function 
+				; 
+				; Input  Regs:	AH = 07 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 029E				func7: 
+ 029E  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 8  - Get the current drive parameters 
+				; 
+				; Input  Regs:	AH = 08 
+				;		DL = Drive # 
+				; 
+				; Output Regs:	AH = Status 
+				;		CL = Sectors per track (bits 0-5) 
+				;		     Maximum cylinders (bits 6-7) 
+				;		CH = Maximum cylinders 
+				;		DH = Maximum heads 
+				;		DL = # of drives 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02A1				func8:				 
+					popall 
+ 02A1  58                    2		pop	ax 
+ 02A2  5B                    2		pop	bx 
+ 02A3  59                    2		pop	cx 
+ 02A4  5A                    2		pop	dx 
+ 02A5  5D                    1		pop	bp 
+ 02A6  5F                    1		pop	di 
+ 02A7  5E                    1		pop	si 
+ 02A8  1F                    1		pop	ds 
+ 02A9  07                    1		pop	es 
+ 02AA  9D				popf 
+				 
+ 02AB  2E: A1 0000 E			mov	ax,cs:AB_NumHeads 
+ 02AF  48				dec	ax 
+ 02B0  8A F0				mov	dh,al 
+ 02B2  B2 01				mov	dl,1				;1 hard drive 
+				 
+				;	mov 	ss:w StackFrame.RegDX[bp],dx 
+				 
+				 
+ 02B4  2E: A1 0000 E			mov	ax,cs:AB_TrackSecs 
+ 02B8  24 3F				and	al,00111111b 
+				 
+				 
+ 02BA  2E: 8B 0E 0000 E			mov	cx,cs:AB_Cyls 
+ 02BF  49			    	dec	cx				;adjust to reflect max cyl # 
+ 02C0  86 E9				xchg	ch,cl 
+ 02C2  D0 C9				ror	cl,1 
+ 02C4  D0 C9				ror	cl,1 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-19
+
+
+ 02C6  0A C8				or	cl,al 
+				 
+				;	mov 	ss:w StackFrame.RegCX[bp],cx 
+				 
+ 02C8  32 E4				xor	ah,ah 
+ 02CA  F8				clc 
+ 02CB  CF				iret 
+				;	jmp	okexit	 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 9  - Initialize drive characteristics 
+				; 
+				; Input  Regs:	AH = 09 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02CC				func9: 
+ 02CC  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION A  - Read long to memory (Read data and 4 ECC bytes) 
+				; 
+				; Input  Regs:	AH = 0A 
+				;	     ES:BX = Address of memory buffer 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				;		AL = # of sectors 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02CF				funca: 
+ 02CF  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION B  - Write long from memory (Write data and 4 ECC bytes) 
+				; 
+				; Input  Regs:	AH = 0B 
+				;	     ES:BX = Address of memory buffer 
+				;		DL = Drive # 
+				;		DH = Head 
+				;		CX = Track or cylinder, sector 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02D2				funcb: 
+ 02D2  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-20
+
+
+				; FUNCTION C  - Seek 
+				; 
+				; Input  Regs:	AH = 0C 
+				;		DL = Drive # 
+				;		DH = head 
+				;		CX = Track or cylinder, sector 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02D5				funcc: 
+ 02D5  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION D  - Reset drive 
+				; 
+				; Input  Regs:	AH = 0D 
+				;		DL = Drive # 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02D8				funcd: 
+ 02D8  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION E  - Unused function 
+				; 
+				; Input  Regs:	AH = 0E 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02DB				funce: 
+ 02DB  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION F  - Unused function 
+				; 
+				; Input  Regs:	AH = 0F 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02DE				funcf: 
+ 02DE  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 10 - Test drive ready 
+				; 
+				; Input  Regs:	AH = 10 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-21
+
+
+				;		DL = Drive # 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02E1				func10: 
+ 02E1  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 11 - Recalibrate 
+				; 
+				; Input  Regs:	AH = 11 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02E4				func11: 
+ 02E4  E9 0113 R			jmp	okexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 12 - Unused function 
+				; 
+				; Input  Regs:	AH = 12 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02E7				func12: 
+ 02E7  E9 0105 R			jmp	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 13 - Unused function 
+				; 
+				; Input  Regs:	AH = 13 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02EA				func13: 
+ 02EA  E9 0105 R			jmp 	badexit 
+				 
+				;**************************************************************************** 
+				; 
+				; FUNCTION 14 - Run controller diagnostic 
+				; 
+				; Input  Regs:	AH = 14 
+				; 
+				; Output Regs:	AH = Status 
+				;		CY = 0	No Error 
+				;		     1	Error 
+				; 
+ 02ED				func14: 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-22
+
+
+ 02ED  E9 0113 R			jmp	okexit 
+				 
+ 02F0				Bill13	endp 
+					 
+				;************************************************************************* 
+				;* 
+				;*	cnv_do		-	Expects: BX	Head 
+				;*			 		 AX     Cyl 
+				;*			 		 CX	Sec 
+				;*			  
+				;*			 	Returns: DX:AX	Offset 
+				;* 
+				;************************************************************************* 
+ 02F0				cnv_do	proc	near	       
+					 
+					endif 
+				 
+				;	cmp	cs:AB_SKIP512,1 
+				;	je	skip	       
+				;	dec	cx 
+ 02F0  2E: F7 26 0000 E		skip:	mul	cs:AB_NumHeads 
+ 02F5  03 C3				add	ax,bx 
+ 02F7  2E: F7 26 0000 E			mul	cs:AB_TrackSecs 
+ 02FC  03 C1				add	ax,cx 
+ 02FE  83 D2 00				adc	dx,0 
+ 0301  41				inc	cx 
+ 0302  8A F2				mov	dh,dl 
+ 0304  8A D4				mov	dl,ah 
+ 0306  8A E0				mov	ah,al 
+ 0308  2A C0				sub	al,al 
+ 030A  D1 E0				shl	ax,1 
+ 030C  D1 D2				rcl	dx,1 
+				 
+					endif 
+				 
+ 030E  C3				ret 
+ 030F				cnv_do	endp 
+				;************************************************************************* 
+				;* 
+				;*	DoCopyWrite	-	Expects: adr_Offset 
+				;*					 cs:dataoff set up 
+				;*			 		 # of secs in cs:AB_Secs 
+				;*			  
+				;************************************************************************* 
+ 030F				DoCopyWrite	proc	near 
+ 030F  FC				cld 
+ 0310  2E: 8E 1E 0000 E			mov	ds,cs:AB_dataseg 
+ 0315  2E: 8B 36 0000 E			mov	si,cs:AB_dataoff 
+ 031A  2E: 8E 06 0000 E			mov	es,cs:AB_jbuffseg 
+ 031F  2E: 8B 3E 0000 E			mov	di,cs:AB_jbuffoff 
+ 0324  2E: A1 0000 E			mov	ax,cs:AB_Secs 
+ 0328  B9 0200				mov	cx,512 
+ 032B  F7 E1				mul	cx 
+ 032D  8B C8				mov	cx,ax 
+ 032F  F3/ A4				rep	movs es:byte ptr[di],ds:[si] 
+ 0331  2E: 89 36 0000 E			mov	cs:AB_dataoff,si 
+				 
+ 0336  2E: A1 0000 E			mov	ax,cs:AB_Secs 
+ 033A  B9 0200				mov	cx,512 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-23
+
+
+ 033D  F7 E1				mul	cx 
+ 033F  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 	        
+ 0344  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0349  26: 89 54 08			mov 	es:AmigaDiskReq.adr_Count_h[si],dx	;count high 
+ 034D  26: 89 44 0A			mov	es:AmigaDiskReq.adr_Count_l[si],ax	;count low = 512 bytes 
+ 0351  26: C7 04 0002			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_WRITE 
+ 0356  2E: A1 0000 E			mov	ax,cs:AB_File 
+ 035A  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax		;File Number 
+				 
+ 035E  E8 055A R			call	DoJanus 
+				;	mov	ah,JFUNC_CALLAMIGA 
+				;	mov	al,JSERV_PCDISK 
+				;	mov	bx,0ffffh 
+				;	int	JFUNC_JINT 
+				; 
+				;	mov	ah,JFUNC_WAITAMIGA 
+				;	mov	al,JSERV_PCDISK 
+				;	int	JFUNC_JINT 
+				 
+ 0361  C3				ret 
+				 
+ 0362				DoCopyWrite	endp 
+				;************************************************************************* 
+				;* 
+				;*	DoReadCopy	-	Expects: adr_Offset 
+				;*					 cs:dataoff set up 
+				;*			 		 # of secs in cs:AB_Secs 
+				;*			  
+				;************************************************************************* 
+ 0362				DoReadCopy	proc	near 
+				 
+ 0362  2E: A1 0000 E			mov 	ax,cs:AB_Secs 
+ 0366  B9 0200				mov	cx,512 
+ 0369  F7 E1				mul	cx 
+				 
+ 036B  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 0370  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0375  26: 89 54 08			mov  	es:AmigaDiskReq.adr_Count_h[si],dx	;count high 
+ 0379  26: 89 44 0A			mov	es:AmigaDiskReq.adr_Count_l[si],ax	;count low = 512 bytes 
+ 037D  26: C7 04 0001			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_READ 
+ 0382  2E: A1 0000 E			mov	ax,cs:AB_File 
+ 0386  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax		;File Number 
+				 
+ 038A  E8 055A R			call	DoJanus 
+										;copy buff to mem pointer 
+ 038D  FC				cld 
+ 038E  2E: 8E 1E 0000 E			mov	ds,cs:AB_jbuffseg 
+ 0393  2E: 8B 36 0000 E			mov	si,cs:AB_jbuffoff 
+ 0398  2E: 8E 06 0000 E			mov	es,cs:AB_dataseg 
+ 039D  2E: 8B 3E 0000 E			mov	di,cs:AB_dataoff 
+ 03A2  2E: A1 0000 E		  	mov 	ax,cs:AB_Secs 
+ 03A6  B9 0200				mov	cx,512 
+ 03A9  F7 E1				mul	cx 
+				 
+ 03AB  8B C8				mov	cx,ax 
+ 03AD  F3/ A4				rep	movs es:byte ptr[di],ds:[si] 
+				 
+ 03AF  2E: 89 3E 0000 E			mov	cs:AB_dataoff,di 
+ 03B4  C3				ret 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-24
+
+
+				 
+ 03B5				DoReadCopy	endp 
+				;************************************************************************* 
+				;* 
+				;*	first_time	-	Entered if AB_FileOpen flag = 0 
+				;*				Call GetBase(pcdisk) once to wake up 
+				;*				services. 
+				;*				If Second call fails - return 
+				;*				PCDisk found. 
+				;*				stash mem pointers. 
+				;* 
+				;* 
+				;************************************************************************* 
+ 03B5				first_time	proc	near 
+					pushall 
+ 03B5  06                    1		push	es 
+ 03B6  1E                    1		push	ds 
+ 03B7  56                    1		push	si 
+ 03B8  57                    1		push	di 
+ 03B9  55                    1		push	bp 
+ 03BA  52                    2		push	dx 
+ 03BB  51                    2		push	cx 
+ 03BC  53                    2		push	bx 
+ 03BD  50                    2		push	ax 
+				 
+ 03BE  B4 01				mov	ah,JFUNC_GETBASE 
+ 03C0  B0 10				mov	al,JSERV_PCDISK 
+ 03C2  CD 0B				int	JFUNC_JINT 
+				 
+ 03C4  B4 01				mov	ah,JFUNC_GETBASE 
+ 03C6  B0 10				mov	al,JSERV_PCDISK 
+ 03C8  CD 0B				int	JFUNC_JINT 
+				 
+ 03CA  83 FF FF				cmp	di,-1				;pcdisk found? 
+ 03CD  75 03				jne	get_ok 
+ 03CF  E9 0550 R			jmp	exit				;not found so exit 
+										;file still flagged as 
+										;closed 
+				 
+ 03D2  2E: 8C 06 0000 E		get_ok:	mov 	cs:AB_jparmseg,es		;Save mem pointers 
+ 03D7  2E: 89 3E 0000 E			mov 	cs:AB_jparmoff,di 
+ 03DC  2E: 89 16 0000 E			mov 	cs:AB_jbuffseg,dx 
+				 
+										;get buff off from parm mem 
+ 03E1  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 03E6  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 03EB  26: 8B 44 0C			mov	ax,es:AmigaDiskReq.adr_BufferOffset[si]	 
+ 03EF  2E: A3 0000 E			mov	cs:AB_jbuffoff,ax 
+				 
+										;copy filename to buffer  
+ 03F3  FC				cld 
+ 03F4  0E				push	cs 
+ 03F5  1F				pop	ds	 
+ 03F6  BE 0000 E			mov	si,offset cs:AB_FileName 
+ 03F9  2E: 8E 06 0000 E			mov	es,cs:AB_jbuffseg 
+ 03FE  2E: 8B 3E 0000 E			mov	di,cs:AB_jbuffoff 
+ 0403  B9 0032				mov	cx,50 
+ 0406  F3/ A4				rep	movs es:byte ptr[di],ds:[si] 
+				 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-25
+
+
+ 0408  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 040D  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0412  26: C7 04 0005			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_OPEN_OLD  
+				 	 
+ 0417  E8 055A R			call	DoJanus 
+				 
+					endif 
+				 
+ 041A  0B C0				or	ax,ax 
+ 041C  74 14				je	opentok 
+				 
+					INFO	AB_COPENFAILMSG  
+ 041E  9C                    1		  pushf 
+ 041F  56                    1		  push 	si 
+ 0420  1E                    1		  push 	ds 
+ 0421  0E                    1		  push 	cs 
+ 0422  1F                    1		  pop  	ds 
+ 0423  BE 0000 E             1		  mov  	si,offset AB_COPENFAILMSG 
+ 0426  E8 0000 E             1		  call 	pstrng 
+ 0429  E8 0000 E             1		  call 	newline 
+ 042C  1F                    1		  pop  	ds 
+ 042D  5E                    1		  pop  	si 
+ 042E  9D                    1		  popf 
+ 042F  E9 0550 R		    	jmp	exit				;File remains closed! 
+										;and flag clear 
+						      
+ 0432				opentok: 
+ 0432  26: 8B 44 02			mov	ax,es:AmigaDiskReq.adr_File[si] 
+ 0436  2E: A3 0000 E			mov	cs:AB_TFile,ax			;save temp handle for close 
+				 
+									;store offset and count into parm mem 
+ 043A  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 043F  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0444  26: C7 44 04 0000		mov 	es:AmigaDiskReq.adr_Offset_h[si],0	;offset high 
+ 044A  26: C7 44 06 0000		mov 	es:AmigaDiskReq.adr_Offset_l[si],0	;offset low 
+ 0450  26: C7 44 08 0000		mov 	es:AmigaDiskReq.adr_Count_h[si],0	;cnt high 
+ 0456  26: C7 44 0A 0200		mov	es:AmigaDiskReq.adr_Count_l[si],0200h	;cnt low = 512 bytes 
+				 
+ 045C  26: C7 04 0001			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_READ 
+ 0461  2E: A1 0000 E			mov	ax,cs:AB_TFile 
+ 0465  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax	 
+				 
+ 0469  E8 055A R			call	DoJanus 
+				 
+ 046C  0B C0				or	ax,ax 
+ 046E  74 1D				je	readcok 
+					 
+ 0470  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 0475  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 047A  26: C7 04 0007			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_CLOSE 
+ 047F  2E: A1 0000 E			mov	ax,cs:AB_TFile 
+ 0483  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax	 
+				 
+ 0487  E8 055A R			call	DoJanus 
+ 048A  E9 0550 R			jmp	exit 
+				 
+ 048D				readcok: 
+				 
+ 048D  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-26
+
+
+ 0492  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 0497  26: C7 04 0007			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_CLOSE 
+ 049C  2E: A1 0000 E			mov	ax,cs:AB_TFile 
+ 04A0  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax	 
+				 
+ 04A4  E8 055A R			call	DoJanus 
+				 
+ 04A7  26: 8B 4C 0A			mov	cx,es:AmigaDiskReq.adr_Count_L[si] 
+ 04AB  06				push	es 
+ 04AC  56				push	si 
+ 04AD  2E: 8E 06 0000 E			mov	es,cs:AB_jbuffseg 
+ 04B2  2E: 8B 36 0000 E			mov	si,cs:AB_jbuffoff 
+						   
+ 04B7				more: ;	cmp	cx,0 
+				      ;	je	endfound 
+ 04B7  26: 80 3C 0A			cmp b	es:[si],00ah 
+ 04BB  74 04				je	endfound 
+ 04BD  46				inc	si 
+ 04BE  49				dec	cx 
+ 04BF  EB F6				jmp	more 
+					 
+ 04C1				endfound: 
+ 04C1  26: C6 04 00			mov b	es:[si],0 
+ 04C5  5E				pop	si 
+ 04C6  07				pop	es 
+				 
+ 04C7  26: C7 04 0005			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_OPEN_OLD  
+				 	 
+ 04CC  E8 055A R			call	DoJanus 
+				 
+					endif 
+				 
+ 04CF  0B C0				or ax,ax 
+ 04D1  74 14				je	openok 
+					INFO	AB_OPENFAILMSG  
+ 04D3  9C                    1		  pushf 
+ 04D4  56                    1		  push 	si 
+ 04D5  1E                    1		  push 	ds 
+ 04D6  0E                    1		  push 	cs 
+ 04D7  1F                    1		  pop  	ds 
+ 04D8  BE 0000 E             1		  mov  	si,offset AB_OPENFAILMSG 
+ 04DB  E8 0000 E             1		  call 	pstrng 
+ 04DE  E8 0000 E             1		  call 	newline 
+ 04E1  1F                    1		  pop  	ds 
+ 04E2  5E                    1		  pop  	si 
+ 04E3  9D                    1		  popf 
+ 04E4  EB 6A 90			    	jmp	exit				;File remains closed! 
+										;and flag clear 
+						   
+ 04E7				openok:	 
+ 04E7  26: 8B 44 02			mov 	ax,es:AmigaDiskReq.adr_File[si]  
+ 04EB  2E: A3 0000 E			mov 	cs:AB_File,ax 
+ 04EF  2E: C7 06 0000 E 0001	      	mov	cs:AB_FileOpen,1 
+				 
+									;Check for ABOOT file and read parms 
+				 
+									;store offset and count into parm mem 
+ 04F6  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 04FB  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-27
+
+
+ 0500  26: C7 44 04 0000		mov 	es:AmigaDiskReq.adr_Offset_h[si],0	;offset high 
+ 0506  26: C7 44 06 0000		mov 	es:AmigaDiskReq.adr_Offset_l[si],0	;offset low 
+ 050C  26: C7 44 08 0000		mov 	es:AmigaDiskReq.adr_Count_h[si],0	;cnt high 
+ 0512  26: C7 44 0A 0200		mov	es:AmigaDiskReq.adr_Count_l[si],0200h	;cnt low = 512 bytes 
+				 
+ 0518  26: C7 04 0001			mov 	es:AmigaDiskReq.adr_Fnctn[si],ADR_FNCTN_READ 
+ 051D  2E: A1 0000 E			mov	ax,cs:AB_File 
+ 0521  26: 89 44 02			mov	es:AmigaDiskReq.adr_File[si],ax	 
+				 
+ 0525  E8 055A R			call	DoJanus 
+					 
+				 
+ 0528  2E: 8E 06 0000 E			mov	es,cs:AB_jbuffseg 
+ 052D  2E: 8B 36 0000 E			mov	si,cs:AB_jbuffoff 
+				;	cmp	es:AB_BLOCK.ab_name[si],'A'	;check file format 
+				;	jne	exit				;accept default as hard 
+										;coded file 
+				 
+										;get params 
+					INFO	AB_READPARMS 
+				;	mov	cs:AB_SKIP512,1 
+				 
+ 0532  26: 8B 44 08			mov	ax,es:AB_BLOCK.Heads[si] 
+ 0536  86 E0				xchg	ah,al 
+ 0538  2E: A3 0000 E			mov	cs:AB_NumHeads,ax 
+				 
+ 053C  26: 8B 44 0A			mov	ax,es:AB_BLOCK.SecTrk[si] 
+ 0540  86 E0				xchg	ah,al 
+ 0542  2E: A3 0000 E			mov	cs:AB_TrackSecs,ax 
+				 
+ 0546  26: 8B 44 0C			mov	ax,es:AB_BLOCK.Cyl[si] 
+ 054A  86 E0				xchg	ah,al 
+ 054C  2E: A3 0000 E			mov	cs:AB_Cyls,ax 
+				 
+ 0550				exit: 	 
+					INFO	AB_FTEXITMSG 
+					popall 
+ 0550  58                    2		pop	ax 
+ 0551  5B                    2		pop	bx 
+ 0552  59                    2		pop	cx 
+ 0553  5A                    2		pop	dx 
+ 0554  5D                    1		pop	bp 
+ 0555  5F                    1		pop	di 
+ 0556  5E                    1		pop	si 
+ 0557  1F                    1		pop	ds 
+ 0558  07                    1		pop	es 
+ 0559  C3				ret 
+				 
+ 055A				first_time	endp 
+				;************************************************************************* 
+				;* 
+				;*	DoJanus	       - Initiate and wait for a pcdisk request 
+				;* 
+				;************************************************************************* 
+ 055A				DoJanus	proc	near 
+				 
+				 
+ 055A  B4 07				mov	ah,JFUNC_CALLAMIGA 
+ 055C  B0 10				mov	al,JSERV_PCDISK 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-28
+
+
+ 055E  CD 0B				int	JFUNC_JINT 
+				 
+ 0560  3C 01				cmp	al,JSERV_FINISHED 
+ 0562  74 0E				je	doexit 
+ 0564  3C 00				cmp	al,JSERV_PENDING 
+ 0566  75 21				jne	error 
+				 
+ 0568  B4 08				mov	ah,JFUNC_WAITAMIGA 
+ 056A  B0 10				mov	al,JSERV_PCDISK 
+ 056C  CD 0B				int	JFUNC_JINT 
+				 
+ 056E  3C 01				cmp	al,JSERV_FINISHED 
+ 0570  75 17				jne	error 
+				 
+ 0572				doexit: 
+ 0572  06				push	es 
+ 0573  56				push	si 
+ 0574  2E: 8E 06 0000 E			mov	es,cs:AB_jparmseg 
+ 0579  2E: 8B 36 0000 E			mov	si,cs:AB_jparmoff 
+ 057E  26: 8B 44 0E			mov	ax,es:AmigaDiskReq.adr_Err[si] 
+ 0582  5E				pop	si 
+ 0583  07				pop	es 
+ 0584  0B C0				or	ax,ax 
+ 0586  75 01				jne	error 
+ 0588  C3				ret 
+				 
+ 0589				error:  
+ 0589  B8 FFFF				mov	ax,-1 
+ 058C  C3				ret 
+					 
+ 058D				DoJanus	endp	 
+				;************************************************************************* 
+				;* 
+				;*	bill19	       - Attempt boot from drive a: 
+				;*						 b: 
+				;*						 c: 
+				;* 
+				;************************************************************************* 
+ 058D				bill19	proc	far	 
+					 
+					pushall 
+ 058D  06                    1		push	es 
+ 058E  1E                    1		push	ds 
+ 058F  56                    1		push	si 
+ 0590  57                    1		push	di 
+ 0591  55                    1		push	bp 
+ 0592  52                    2		push	dx 
+ 0593  51                    2		push	cx 
+ 0594  53                    2		push	bx 
+ 0595  50                    2		push	ax 
+ 0596  2B D2				SUB	DX,DX			; Head=0, Drive = A: 
+ 0598				BOOTNXT: 
+ 0598  B9 0003				MOV	CX,3			; retry 
+ 059B				BOOTDK0: 
+ 059B  51				PUSH	CX 
+				;	STI				; enable interrupts 
+ 059C  32 E4				XOR	AH,AH			; Reset diskette 
+ 059E  CD 13				INT	13h			; .... 
+ 05A0  B8 0000				mov 	ax,0 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Page     1-29
+
+
+ 05A3  8E C0				mov	es,ax 
+ 05A5  BB 7C00				mov	bx,7c00h		; read boot code here 
+ 05A8  B9 0001				MOV	CX,0001H		; CH = Track 0, CL = sector 1 
+ 05AB  B8 0201				MOV	AX,0201H		; AH = read command, AL = read 1 sector 
+ 05AE  CD 13				INT	13h			; do the read 
+ 05B0  59				POP	CX			; count restore 
+ 05B1  72 1C				JC	BOOTDK1 		; failed start again 
+				 
+ 05B3  B8 0000				MOV	AX,0 
+ 05B6  8E C0				MOV	ES,AX 
+ 05B8  26: 81 3E 7DFE AA55		CMP	ES:[7DFEH],0AA55H	; Valid boot block? 
+ 05BF  75 23				JNE	BOOTFAIL 
+				 
+					popall 
+ 05C1  58                    2		pop	ax 
+ 05C2  5B                    2		pop	bx 
+ 05C3  59                    2		pop	cx 
+ 05C4  5A                    2		pop	dx 
+ 05C5  5D                    1		pop	bp 
+ 05C6  5F                    1		pop	di 
+ 05C7  5E                    1		pop	si 
+ 05C8  1F                    1		pop	ds 
+ 05C9  07                    1		pop	es 
+ 05CA  EA				db	0eah			; far jump to 0:7c00h 
+ 05CB  7C00				dw	7c00h 
+ 05CD  0000				dw	0 
+ 05CF				BOOTDK1: 
+				 
+ 05CF  E2 CA				LOOP	BOOTDK0			; Loop for CX retrys 
+ 05D1  FE C2				INC	DL			; Next Drive 
+ 05D3  80 FA 81				CMP	DL,81H			; If 81h then last was c: 80h 
+ 05D6  74 0C				JE	BOOTFAIL 
+ 05D8  80 FA 02				CMP	DL,2			; All drives done ? 
+ 05DB  72 BB				JB	BOOTNXT 		; no if below 
+ 05DD  B2 80				MOV	DL,80H			; Floppys done try hard drive 
+ 05DF  B9 0003				MOV	CX,3			; 3 retrys 
+ 05E2  EB B7				JMP	BOOTDK0 
+				 
+				 
+ 05E4				BOOTFAIL: 
+					popall 
+ 05E4  58                    2		pop	ax 
+ 05E5  5B                    2		pop	bx 
+ 05E6  59                    2		pop	cx 
+ 05E7  5A                    2		pop	dx 
+ 05E8  5D                    1		pop	bp 
+ 05E9  5F                    1		pop	di 
+ 05EA  5E                    1		pop	si 
+ 05EB  1F                    1		pop	ds 
+ 05EC  07                    1		pop	es 
+ 05ED  CD 18				INT	18H			; Call INT 18h but don't return 
+				 
+ 05EF  CF				IRET 
+				 
+ 05F0				Bill19	endp 
+				 
+ 05F0				cseg	ends 
+				  
+				end  
+
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-1
+
+
+Macros:
+
+		N a m e			Lines
+
+ICALL  . . . . . . . . . . . . .  	   2
+IFLAGS . . . . . . . . . . . . .  	  13
+INFO . . . . . . . . . . . . . .  	  13
+INFO_AX  . . . . . . . . . . . .  	  16
+INFO_AX_BX . . . . . . . . . . .  	  20
+JLOCK  . . . . . . . . . . . . .  	   8
+POPAC  . . . . . . . . . . . . .  	   4
+POPALL . . . . . . . . . . . . .  	   6
+PUSHAC . . . . . . . . . . . . .  	   4
+PUSHALL  . . . . . . . . . . . .  	   6
+UNLOCK . . . . . . . . . . . . .  	   1
+
+Structures and Records:
+
+                N a m e                 Width   # fields
+                                        Shift   Width   Mask    Initial
+
+AB_BLOCK . . . . . . . . . . . .  	000E	0004
+  AB_NAME  . . . . . . . . . . .  	0000
+  HEADS  . . . . . . . . . . . .  	0008
+  SECTRK . . . . . . . . . . . .  	000A
+  CYL  . . . . . . . . . . . . .  	000C
+AMIGADISKREQ . . . . . . . . . .  	0010	0008
+  ADR_FNCTN  . . . . . . . . . .  	0000
+  ADR_FILE . . . . . . . . . . .  	0002
+  ADR_OFFSET_H . . . . . . . . .  	0004
+  ADR_OFFSET_L . . . . . . . . .  	0006
+  ADR_COUNT_H  . . . . . . . . .  	0008
+  ADR_COUNT_L  . . . . . . . . .  	000A
+  ADR_BUFFEROFFSET . . . . . . .  	000C
+  ADR_ERR  . . . . . . . . . . .  	000E
+SERVICECUSTOMER  . . . . . . . .  	001E	0005
+  SCS_NEXTCUSTOMER . . . . . . .  	0000
+  SCS_FLAGS  . . . . . . . . . .  	0004
+  SCS_TASK . . . . . . . . . . .  	0006
+  SCS_SIGNALBIT  . . . . . . . .  	000A
+  SCS_JAZZRESERVED . . . . . . .  	000E
+SERVICEDATA  . . . . . . . . . .  	003A	0012
+  SD_APPLICATIONID . . . . . . .  	0000
+  SD_LOCALID . . . . . . . . . .  	0004
+  SD_FLAGS . . . . . . . . . . .  	0006
+  SD_SERVICEDATALOCK . . . . . .  	0008
+  SD_AMIGAUSERCOUNT  . . . . . .  	0009
+  SD_PCUSERCOUNT . . . . . . . .  	000A
+  SD_RESERVEDBYTE  . . . . . . .  	000B
+  SD_MEMSIZE . . . . . . . . . .  	000C
+  SD_MEMTYPE . . . . . . . . . .  	000E
+  SD_MEMOFFSET . . . . . . . . .  	0010
+  SD_AMIGAMEMPTR . . . . . . . .  	0012
+  SD_PCMEMPTR  . . . . . . . . .  	0016
+  SD_JREMEMBERKEY  . . . . . . .  	001A
+  SD_NEXTSERVICEDATA . . . . . .  	001C
+  SD_FIRSTPCCUSTOMER . . . . . .  	001E
+  SD_FIRSTAMIGACUSTOMER  . . . .  	0022
+  SD_SEMAPHORE . . . . . . . . .  	0026
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-2
+
+
+  SD_ZAPHODRESERVED  . . . . . .  	002A
+STACKFRAME . . . . . . . . . . .  	0012	0009
+  REGAX  . . . . . . . . . . . .  	0000
+  REGBX  . . . . . . . . . . . .  	0002
+  REGCX  . . . . . . . . . . . .  	0004
+  REGDX  . . . . . . . . . . . .  	0006
+  REGBP  . . . . . . . . . . . .  	0008
+  REGDI  . . . . . . . . . . . .  	000A
+  REGSI  . . . . . . . . . . . .  	000C
+  REGDS  . . . . . . . . . . . .  	000E
+  REGES  . . . . . . . . . . . .  	0010
+
+Segments and Groups:
+
+                N a m e         	Length	 Align	Combine Class
+
+CSEG . . . . . . . . . . . . . .  	05F0	PARA	PUBLIC	'CODE'
+
+Symbols:            
+
+                N a m e         	Type	 Value	 Attr
+
+AB_ACTIVATE  . . . . . . . . . .  	NUMBER	0001	
+AB_BILLMSG0  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILLMSG1  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILLMSG2  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILLMSG3  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILLMSG4  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILLMSG5  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_BILL_INT13  . . . . . . . . .  	V DWORD	0000	CSEG	External
+AB_COPENFAILMSG  . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_CYL . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_CYLS  . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_DATAOFF . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_DATASEG . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_FILE  . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_FILENAME  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_FILEOPEN  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_FTEXITMSG . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_HEAD  . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_INT13MSG  . . . . . . . . . .  	NUMBER	0000	
+AB_JBUFFOFF  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_JBUFFSEG  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_JPARMOFF  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_JPARMSEG  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_NUMHEADS  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_OKFLAG  . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_OPENFAILMSG . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_READPARMS . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AB_SEC . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_SECS  . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_SECSDONE  . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_TFILE . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+AB_TRACKSECS . . . . . . . . . .  	V WORD	0000	CSEG	External
+ACKINT . . . . . . . . . . . . .  	NUMBER	007F	
+ACTIVEFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+ADDS_EXCLUSIVE . . . . . . . . .  	NUMBER	0001	
+ADDS_EXCLUSIVEN  . . . . . . . .  	NUMBER	0000	
+ADDS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-3
+
+
+ADDS_FROMAMIGA_ONLYN . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLYN  . . . . . . .  	NUMBER	0002	
+ADDS_LOCKDATA  . . . . . . . . .  	NUMBER	0020	
+ADDS_LOCKDATAN . . . . . . . . .  	NUMBER	0005	
+ADDS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+ADDS_TOAMIGA_ONLYN . . . . . . .  	NUMBER	0003	
+ADDS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+ADDS_TOPC_ONLYN  . . . . . . . .  	NUMBER	0001	
+ADR_ERR_COUNT  . . . . . . . . .  	NUMBER	0002	
+ADR_ERR_EOF  . . . . . . . . . .  	NUMBER	0005	
+ADR_ERR_FILE . . . . . . . . . .  	NUMBER	0003	
+ADR_ERR_FILE_COUNT . . . . . . .  	NUMBER	0007	
+ADR_ERR_FNCTN  . . . . . . . . .  	NUMBER	0004	
+ADR_ERR_LOCKED . . . . . . . . .  	NUMBER	000B	
+ADR_ERR_MULPL  . . . . . . . . .  	NUMBER	0006	
+ADR_ERR_OFFSET . . . . . . . . .  	NUMBER	0001	
+ADR_ERR_OK . . . . . . . . . . .  	NUMBER	0000	
+ADR_ERR_READ . . . . . . . . . .  	NUMBER	0009	
+ADR_ERR_SEEK . . . . . . . . . .  	NUMBER	0008	
+ADR_ERR_WRITE  . . . . . . . . .  	NUMBER	000A	
+ADR_FNCTN_CLOSE  . . . . . . . .  	NUMBER	0007	
+ADR_FNCTN_DELETE . . . . . . . .  	NUMBER	0008	
+ADR_FNCTN_INFO . . . . . . . . .  	NUMBER	0004	
+ADR_FNCTN_INIT . . . . . . . . .  	NUMBER	0000	
+ADR_FNCTN_OPEN_NEW . . . . . . .  	NUMBER	0006	
+ADR_FNCTN_OPEN_OLD . . . . . . .  	NUMBER	0005	
+ADR_FNCTN_READ . . . . . . . . .  	NUMBER	0001	
+ADR_FNCTN_SEEK . . . . . . . . .  	NUMBER	0003	
+ADR_FNCTN_WRITE  . . . . . . . .  	NUMBER	0002	
+ALREADYCALLED  . . . . . . . . .  	NUMBER	0054	
+AMIGA  . . . . . . . . . . . . .  	NUMBER	000A	
+AMIGAINT . . . . . . . . . . . .  	NUMBER	0004	
+AMIGA_EXCLUSIVE  . . . . . . . .  	NUMBER	0010	
+AMIGA_EXCLUSIVEN . . . . . . . .  	NUMBER	0004	
+
+B  . . . . . . . . . . . . . . .  	TEXT  byte ptr		
+BADEXIT  . . . . . . . . . . . .  	L NEAR	0105	CSEG
+BELL . . . . . . . . . . . . . .  	NUMBER	0007	
+BILL13 . . . . . . . . . . . . .  	F PROC	0000	CSEG	Global	Length = 02F0
+BILL19 . . . . . . . . . . . . .  	F PROC	058D	CSEG	Global	Length = 0063
+BIOS_INT10 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT13 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT16 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT1C . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BOOTDK0  . . . . . . . . . . . .  	L NEAR	059B	CSEG
+BOOTDK1  . . . . . . . . . . . .  	L NEAR	05CF	CSEG
+BOOTFAIL . . . . . . . . . . . .  	L NEAR	05E4	CSEG
+BOOTNXT  . . . . . . . . . . . .  	L NEAR	0598	CSEG
+BOOT_INT . . . . . . . . . . . .  	NUMBER	0019	
+BS . . . . . . . . . . . . . . .  	NUMBER	0008	
+
+CALLEDFIRST  . . . . . . . . . .  	NUMBER	0042	
+CALL_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0800	
+CALL_FROMAMIGA_ONLYN . . . . . .  	NUMBER	000B	
+CALL_FROMPC_ONLY . . . . . . . .  	NUMBER	0200	
+CALL_FROMPC_ONLYN  . . . . . . .  	NUMBER	0009	
+CALL_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0400	
+CALL_TOAMIGA_ONLYN . . . . . . .  	NUMBER	000A	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-4
+
+
+CALL_TOPC_ONLY . . . . . . . . .  	NUMBER	0100	
+CALL_TOPC_ONLYN  . . . . . . . .  	NUMBER	0008	
+CHAIN_VEC  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+CHANGE_INT . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+CNV_DO . . . . . . . . . . . . .  	N PROC	02F0	CSEG	Length = 001F
+CR . . . . . . . . . . . . . . .  	NUMBER	000D	
+
+DBG_AB_CNV_IN  . . . . . . . . .  	NUMBER	0000	
+DBG_AB_CNV_OUT . . . . . . . . .  	NUMBER	0000	
+DBG_AB_COPENFAILMSG  . . . . . .  	NUMBER	0001	
+DBG_AB_FILEOPENMSG . . . . . . .  	NUMBER	0000	
+DBG_AB_FTEXITMSG . . . . . . . .  	NUMBER	0000	
+DBG_AB_OPENFAILMSG . . . . . . .  	NUMBER	0001	
+DBG_AB_READPARMS . . . . . . . .  	NUMBER	0000	
+DISK_INT . . . . . . . . . . . .  	NUMBER	0013	
+DISPATCH . . . . . . . . . . . .  	L NEAR	006F	CSEG
+DOCOPYWRITE  . . . . . . . . . .  	N PROC	030F	CSEG	Length = 0053
+DOEXIT . . . . . . . . . . . . .  	L NEAR	0572	CSEG
+DOJANUS  . . . . . . . . . . . .  	N PROC	055A	CSEG	Length = 0033
+DOREADCOPY . . . . . . . . . . .  	N PROC	0362	CSEG	Length = 0053
+DOS  . . . . . . . . . . . . . .  	NUMBER	0080	
+DOS12  . . . . . . . . . . . . .  	NUMBER	0001	
+DOS16  . . . . . . . . . . . . .  	NUMBER	0004	
+DOS_INT28  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+DP1  . . . . . . . . . . . . . .  	L NEAR	0079	CSEG
+DP10 . . . . . . . . . . . . . .  	L NEAR	00E2	CSEG
+DP11 . . . . . . . . . . . . . .  	L NEAR	00E9	CSEG
+DP12 . . . . . . . . . . . . . .  	L NEAR	00F0	CSEG
+DP13 . . . . . . . . . . . . . .  	L NEAR	00F7	CSEG
+DP14 . . . . . . . . . . . . . .  	L NEAR	00FE	CSEG
+DP2  . . . . . . . . . . . . . .  	L NEAR	0080	CSEG
+DP3  . . . . . . . . . . . . . .  	L NEAR	0087	CSEG
+DP4  . . . . . . . . . . . . . .  	L NEAR	008E	CSEG
+DP5  . . . . . . . . . . . . . .  	L NEAR	0095	CSEG
+DP6  . . . . . . . . . . . . . .  	L NEAR	009C	CSEG
+DP7  . . . . . . . . . . . . . .  	L NEAR	00A3	CSEG
+DP8  . . . . . . . . . . . . . .  	L NEAR	00AA	CSEG
+DP9  . . . . . . . . . . . . . .  	L NEAR	00B1	CSEG
+DPA  . . . . . . . . . . . . . .  	L NEAR	00B8	CSEG
+DPB  . . . . . . . . . . . . . .  	L NEAR	00BF	CSEG
+DPC  . . . . . . . . . . . . . .  	L NEAR	00C6	CSEG
+DPD  . . . . . . . . . . . . . .  	L NEAR	00CD	CSEG
+DPE  . . . . . . . . . . . . . .  	L NEAR	00D4	CSEG
+DPF  . . . . . . . . . . . . . .  	L NEAR	00DB	CSEG
+DUMMYFLAG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+D_SEG  . . . . . . . . . . . . .  	NUMBER	D000	
+
+ENDFOUND . . . . . . . . . . . .  	L NEAR	04C1	CSEG
+EOI  . . . . . . . . . . . . . .  	NUMBER	0020	
+ERROR  . . . . . . . . . . . . .  	L NEAR	0589	CSEG
+ESC_CHAR . . . . . . . . . . . .  	NUMBER	001B	
+EXIT . . . . . . . . . . . . . .  	L NEAR	0550	CSEG
+EXPUNGE_SERVICE  . . . . . . . .  	NUMBER	0002	
+EXPUNGE_SERVICEN . . . . . . . .  	NUMBER	0001	
+
+FAKEDOSFLAG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+FIRST_TIME . . . . . . . . . . .  	N PROC	03B5	CSEG	Length = 01A5
+FORME  . . . . . . . . . . . . .  	L NEAR	0051	CSEG
+FUNC0  . . . . . . . . . . . . .  	L NEAR	013D	CSEG
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-5
+
+
+FUNC1  . . . . . . . . . . . . .  	L NEAR	013F	CSEG
+FUNC10 . . . . . . . . . . . . .  	L NEAR	02E1	CSEG
+FUNC11 . . . . . . . . . . . . .  	L NEAR	02E4	CSEG
+FUNC12 . . . . . . . . . . . . .  	L NEAR	02E7	CSEG
+FUNC13 . . . . . . . . . . . . .  	L NEAR	02EA	CSEG
+FUNC14 . . . . . . . . . . . . .  	L NEAR	02ED	CSEG
+FUNC2  . . . . . . . . . . . . .  	L NEAR	0141	CSEG
+FUNC3  . . . . . . . . . . . . .  	L NEAR	01ED	CSEG
+FUNC4  . . . . . . . . . . . . .  	L NEAR	0295	CSEG
+FUNC5  . . . . . . . . . . . . .  	L NEAR	0298	CSEG
+FUNC6  . . . . . . . . . . . . .  	L NEAR	029B	CSEG
+FUNC7  . . . . . . . . . . . . .  	L NEAR	029E	CSEG
+FUNC8  . . . . . . . . . . . . .  	L NEAR	02A1	CSEG
+FUNC9  . . . . . . . . . . . . .  	L NEAR	02CC	CSEG
+FUNCA  . . . . . . . . . . . . .  	L NEAR	02CF	CSEG
+FUNCB  . . . . . . . . . . . . .  	L NEAR	02D2	CSEG
+FUNCC  . . . . . . . . . . . . .  	L NEAR	02D5	CSEG
+FUNCD  . . . . . . . . . . . . .  	L NEAR	02D8	CSEG
+FUNCE  . . . . . . . . . . . . .  	L NEAR	02DB	CSEG
+FUNCF  . . . . . . . . . . . . .  	L NEAR	02DE	CSEG
+F_SEG  . . . . . . . . . . . . .  	NUMBER	F000	
+
+GETS_ALOAD_A . . . . . . . . . .  	NUMBER	0040	
+GETS_ALOAD_AN  . . . . . . . . .  	NUMBER	0006	
+GETS_ALOAD_PC  . . . . . . . . .  	NUMBER	0080	
+GETS_ALOAD_PCN . . . . . . . . .  	NUMBER	0007	
+GETS_EXCLUSIVE . . . . . . . . .  	NUMBER	0020	
+GETS_EXCLUSIVEN  . . . . . . . .  	NUMBER	0005	
+GETS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+GETS_FROMAMIGA_ONLYN . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLYN  . . . . . . .  	NUMBER	0002	
+GETS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+GETS_TOAMIGA_ONLYN . . . . . . .  	NUMBER	0003	
+GETS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+GETS_TOPC_ONLYN  . . . . . . . .  	NUMBER	0001	
+GETS_WAIT  . . . . . . . . . . .  	NUMBER	0001	
+GETS_WAITN . . . . . . . . . . .  	NUMBER	0000	
+GET_OK . . . . . . . . . . . . .  	L NEAR	03D2	CSEG
+GOING  . . . . . . . . . . . . .  	L NEAR	0064	CSEG
+
+HANDLERPTR . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+
+IDLE . . . . . . . . . . . . . .  	NUMBER	0000	
+IDLEDOS  . . . . . . . . . . . .  	NUMBER	0010	
+IDLE_INT . . . . . . . . . . . .  	NUMBER	0028	
+INFOLEVEL  . . . . . . . . . . .  	NUMBER	000A	
+INTCOUNT . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+INTEN_REG  . . . . . . . . . . .  	NUMBER	0379	
+INT_ACTIVE . . . . . . . . . . .  	NUMBER	0001	
+INT_ENABLE . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+INT_REQ  . . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+IRQ3EN . . . . . . . . . . . . .  	NUMBER	FFF7	
+IRQ3RESET  . . . . . . . . . . .  	NUMBER	03B0	
+
+JANINT . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+JANINT8  . . . . . . . . . . . .  	NUMBER	0008	
+JANPCINT . . . . . . . . . . . .  	NUMBER	0040	
+JANUS  . . . . . . . . . . . . .  	NUMBER	0040	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-6
+
+
+JANUS_BASE_SEG . . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_BUFFER_SEG . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PARAM_SEG  . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PART_BASE  . . . . . . . .  	V WORD	0000	CSEG	External
+JFUNC_ADDSERVICE . . . . . . . .  	NUMBER	000A	
+JFUNC_ALLOCMEM . . . . . . . . .  	NUMBER	0002	
+JFUNC_CALLAMIGA  . . . . . . . .  	NUMBER	0007	
+JFUNC_CALLSERVICE  . . . . . . .  	NUMBER	000C	
+JFUNC_CHECKAMIGA . . . . . . . .  	NUMBER	0009	
+JFUNC_DELETESERVICE  . . . . . .  	NUMBER	000E	
+JFUNC_FREEMEM  . . . . . . . . .  	NUMBER	0003	
+JFUNC_GETBASE  . . . . . . . . .  	NUMBER	0001	
+JFUNC_GETSERVICE . . . . . . . .  	NUMBER	000B	
+JFUNC_GETSERVICE1  . . . . . . .  	NUMBER	0000	
+JFUNC_JINT . . . . . . . . . . .  	NUMBER	000B	
+JFUNC_LOCKSERVICEDATA  . . . . .  	NUMBER	000F	
+JFUNC_MAX  . . . . . . . . . . .  	NUMBER	0010	
+JFUNC_RELEASESERVICE . . . . . .  	NUMBER	000D	
+JFUNC_SETPARAM . . . . . . . . .  	NUMBER	0004	
+JFUNC_SETSERVICE . . . . . . . .  	NUMBER	0005	
+JFUNC_STOPSERVICE  . . . . . . .  	NUMBER	0006	
+JFUNC_UNLOCKSERVICEDATA  . . . .  	NUMBER	0010	
+JFUNC_WAITAMIGA  . . . . . . . .  	NUMBER	0008	
+JSERV_AMIGACALL  . . . . . . . .  	NUMBER	000C	
+JSERV_AMIGASERVICE . . . . . . .  	NUMBER	000E	
+JSERV_AMOUSE . . . . . . . . . .  	NUMBER	0011	
+JSERV_BADAUTOLOAD  . . . . . . .  	NUMBER	000A	
+JSERV_COM2INT  . . . . . . . . .  	NUMBER	0006	
+JSERV_CRT1INT  . . . . . . . . .  	NUMBER	0002	
+JSERV_CRT2INT  . . . . . . . . .  	NUMBER	0003	
+JSERV_DUPSERVICE . . . . . . . .  	NUMBER	0007	
+JSERV_ENBKB  . . . . . . . . . .  	NUMBER	0004	
+JSERV_FINISHED . . . . . . . . .  	NUMBER	0001	
+JSERV_GINT . . . . . . . . . . .  	NUMBER	0001	
+JSERV_HARDDISK . . . . . . . . .  	NUMBER	0009	
+JSERV_ILLFUNCTION  . . . . . . .  	NUMBER	0008	
+JSERV_LPT1INT  . . . . . . . . .  	NUMBER	0005	
+JSERV_MINT . . . . . . . . . . .  	NUMBER	0000	
+JSERV_NOAMIGAMEM . . . . . . . .  	NUMBER	0004	
+JSERV_NOFUNCTION . . . . . . . .  	NUMBER	-0001	
+JSERV_NOJANUSBASE  . . . . . . .  	NUMBER	0002	
+JSERV_NOJANUSMEM . . . . . . . .  	NUMBER	0003	
+JSERV_NOPCMEM  . . . . . . . . .  	NUMBER	0005	
+JSERV_NOSERVICE  . . . . . . . .  	NUMBER	0006	
+JSERV_NOTEXCLUSIVE . . . . . . .  	NUMBER	0009	
+JSERV_OK . . . . . . . . . . . .  	NUMBER	0000	
+JSERV_PCBOOTED . . . . . . . . .  	NUMBER	0007	
+JSERV_PCCALL . . . . . . . . . .  	NUMBER	000D	
+JSERV_PCDISK . . . . . . . . . .  	NUMBER	0010	
+JSERV_PCSERVICE  . . . . . . . .  	NUMBER	000F	
+JSERV_PENDING  . . . . . . . . .  	NUMBER	0000	
+JSERV_READAMIGA  . . . . . . . .  	NUMBER	000A	
+JSERV_READPC . . . . . . . . . .  	NUMBER	000B	
+JSERV_SCROLL . . . . . . . . . .  	NUMBER	0008	
+
+KEYB_INT . . . . . . . . . . . .  	NUMBER	0016	
+
+LAST . . . . . . . . . . . . . .  	L NEAR	01D2	CSEG
+LAST3  . . . . . . . . . . . . .  	L NEAR	027A	CSEG
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-7
+
+
+LF . . . . . . . . . . . . . . .  	NUMBER	000A	
+
+MAXHANDLER . . . . . . . . . . .  	NUMBER	0020	
+MAXINT . . . . . . . . . . . . .  	NUMBER	0020	
+MEMLOCK  . . . . . . . . . . . .  	NUMBER	00FF	
+MEMUNLOCK  . . . . . . . . . . .  	NUMBER	007F	
+MORE . . . . . . . . . . . . . .  	L NEAR	04B7	CSEG
+MORER  . . . . . . . . . . . . .  	L NEAR	01CB	CSEG
+MORER3 . . . . . . . . . . . . .  	L NEAR	0273	CSEG
+
+NEWLINE  . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+NOKLUDGE . . . . . . . . . . . .  	L NEAR	0049	CSEG
+NOREMAIN . . . . . . . . . . . .  	L NEAR	01E3	CSEG
+NOREMAIN3  . . . . . . . . . . .  	L NEAR	028B	CSEG
+NOTME  . . . . . . . . . . . . .  	L NEAR	0121	CSEG
+NULL . . . . . . . . . . . . . .  	NUMBER	0000	
+
+OKEXIT . . . . . . . . . . . . .  	L NEAR	0113	CSEG
+OPENOK . . . . . . . . . . . . .  	L NEAR	04E7	CSEG
+OPENTOK  . . . . . . . . . . . .  	L NEAR	0432	CSEG
+OUTHXB . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+OUTHXW . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+PCDISK_BUFFER_SIZE . . . . . . .  	NUMBER	2200	
+PC_EXCLUSIVE . . . . . . . . . .  	NUMBER	0020	
+PC_EXCLUSIVEN  . . . . . . . . .  	NUMBER	0005	
+PIC_00 . . . . . . . . . . . . .  	NUMBER	0020	
+PIC_01 . . . . . . . . . . . . .  	NUMBER	0021	
+PSTRNG . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+READCOK  . . . . . . . . . . . .  	L NEAR	048D	CSEG
+
+SCROLL . . . . . . . . . . . . .  	NUMBER	0000	
+SCROLLFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SCROLLING  . . . . . . . . . . .  	NUMBER	0006	
+SD_CREATED . . . . . . . . . . .  	NUMBER	0100	
+SD_CREATEDN  . . . . . . . . . .  	NUMBER	0008	
+SERIAL_INT . . . . . . . . . . .  	NUMBER	0014	
+SERVICE_ADDED  . . . . . . . . .  	NUMBER	0040	
+SERVICE_ADDEDN . . . . . . . . .  	NUMBER	0006	
+SERVICE_AMIGASIDE  . . . . . . .  	NUMBER	0004	
+SERVICE_AMIGASIDEN . . . . . . .  	NUMBER	0002	
+SERVICE_DELETED  . . . . . . . .  	NUMBER	0001	
+SERVICE_DELETEDN . . . . . . . .  	NUMBER	0000	
+SERVICE_PCWAIT . . . . . . . . .  	NUMBER	0008	
+SERVICE_PCWAITN  . . . . . . . .  	NUMBER	0003	
+SERVSTATTAB  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SIGNALCUSTOMER . . . . . . . . .  	NUMBER	0055	
+SKIP . . . . . . . . . . . . . .  	L NEAR	02F0	CSEG
+SPACE  . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SRV_INT  . . . . . . . . . . . .  	NUMBER	000B	
+SSTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+STACKLENGTH  . . . . . . . . . .  	NUMBER	4000	
+STATUSREG  . . . . . . . . . . .  	NUMBER	0062	
+STOPSCROLL . . . . . . . . . . .  	NUMBER	00FF	
+
+TICKS  . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+TIME_INT . . . . . . . . . . . .  	NUMBER	001C	
+
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:53
+                                                             Symbols-8
+
+
+UPDATERATE . . . . . . . . . . .  	NUMBER	0BB8	
+USTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+
+VIDEO_INT  . . . . . . . . . . .  	NUMBER	0010	
+
+W  . . . . . . . . . . . . . . .  	TEXT  word ptr		
+WAITFLAG . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+WAIT_FREE_LOOP . . . . . . . . .  	NUMBER	0064	
+WRITE_TTY  . . . . . . . . . . .  	NUMBER	000E	
+
+@FILENAME  . . . . . . . . . . .  	TEXT  abhandle		
+
+
+   1948 Source  Lines
+   2121 Total   Lines
+    388 Symbols
+
+  47622 + 189882 Bytes symbol space free
+
+      0 Warning Errors
+      0 Severe  Errors

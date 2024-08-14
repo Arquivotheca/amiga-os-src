@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'26.10.92'
+	ENDM
+VERS	MACRO
+		dc.b	'overscan 39.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'overscan 39.5 (26.10.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: overscan 39.5 (26.10.92)',0
+	ENDM

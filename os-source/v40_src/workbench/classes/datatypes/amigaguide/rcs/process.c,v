@@ -1,0 +1,1611 @@
+head     39.15;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.15; strict;
+comment  @ * @;
+
+
+39.15
+date     93.08.23.14.12.52;  author davidj;  state Exp;
+branches ;
+next     39.14;
+
+39.14
+date     93.06.17.14.12.56;  author davidj;  state Exp;
+branches ;
+next     39.13;
+
+39.13
+date     93.05.25.13.12.59;  author davidj;  state Exp;
+branches ;
+next     39.12;
+
+39.12
+date     93.04.30.16.10.15;  author davidj;  state Exp;
+branches ;
+next     39.11;
+
+39.11
+date     93.03.22.16.26.59;  author davidj;  state Exp;
+branches ;
+next     39.10;
+
+39.10
+date     92.12.04.17.12.50;  author davidj;  state Exp;
+branches ;
+next     39.9;
+
+39.9
+date     92.08.31.17.12.02;  author davidj;  state Exp;
+branches ;
+next     39.8;
+
+39.8
+date     92.08.13.13.32.19;  author davidj;  state Exp;
+branches ;
+next     39.7;
+
+39.7
+date     92.08.10.16.29.59;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.08.03.17.00.46;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.07.15.22.50.28;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.06.23.03.55.33;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.06.22.11.11.40;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.19.04.12.50;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.05.04.27.16;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.37.47;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.15
+log
+@finally managed to check in the new version
+@
+text
+@/* process.c
+ *
+ */
+
+#include "amigaguidebase.h"
+
+/*****************************************************************************/
+
+/* This used to be -1, but then that was before the days of DTA_Sync */
+#define	DEF_TOP		0
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+
+/*****************************************************************************/
+
+static Object *pr_gotoMethod (struct AGLib * ag, Class * cl, Object * o, STRPTR name, LONG line, LONG column, LONG act)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    struct ClientData *cd = INST_DATA (cl, o);
+    LONG oline, ocolumn, oact;
+    struct DatabaseData *dbd;
+    struct NodeData *nd;
+    struct History *hs;
+    BOOL newNode;
+    Object *nob;
+    Object *cob;
+    ULONG msize;
+
+    BOOL busy = FALSE;
+
+    /* First see if we can really do this */
+    while (si->si_Flags & (DTSIF_LAYOUTPROC | DTSIF_PRINTING))
+    {
+	/* Delay two seconds */
+	busy = TRUE;
+	Delay (100);
+    }
+
+    /* Wait just a little longer if we had been printing */
+    if (busy)
+	Delay (100);
+
+    /* Show that we are busy */
+    cd->cd_Flags |= AGF_BUSY;
+
+    /* Get the current settings */
+    cob     = cd->cd_CurrentNode;
+    oline   = si->si_TopVert;
+    ocolumn = si->si_TopHoriz;
+    oact    = cd->cd_ActiveNum;
+
+    /* Tell them to go busy */
+    notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+		       GA_ID,		G (o)->GadgetID,
+		       DTA_Busy,	TRUE,
+		       DTA_Title,	LVOGetAGString (ag, TITLE_LOADING),
+		       TAG_DONE);
+
+    /* See if we can find the node */
+    if (nob = ObtainNode (ag, cl, o, name, line, column))
+    {
+	/* Remember what they are set to */
+	line   = si->si_TopVert;
+	column = si->si_TopHoriz;
+
+	cd->cd_Flags |= AGF_SYNC;
+
+	/* See if this is a new node or location */
+	/* This used to JUST look at cob==nob */
+	newNode = TRUE;
+	DB (kprintf ("cob=%08lx, nob=%08lx : %ld %ld : %ld %ld\n", cob, nob, line, oline, column, ocolumn));
+	if ((cob == nob) && (line == oline) && (column == ocolumn))
+	    newNode = FALSE;
+
+	/* Is this a new node? */
+	if (newNode && !(cd->cd_Flags & AGF_RETRACE))
+	{
+	    /* Build the complete name */
+	    nd    = INST_DATA (ag->ag_NodeClass, cob);
+	    dbd   = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+	    sprintf (cd->cd_WorkName, "%s/%s", dbd->dbd_Name, nd->nd_Name);
+	    msize = sizeof (struct History) + strlen (cd->cd_WorkName) + 1;
+
+	    /* Create a history node */
+	    if (hs = AllocVec (msize, MEMF_PUBLIC))
+	    {
+		/* Initialize the fields of the history record */
+		hs->hs_Name = MEMORY_FOLLOWING (hs);
+		strcpy (hs->hs_Name, cd->cd_WorkName);
+		hs->hs_Node.ln_Name = hs->hs_Name;
+		hs->hs_Object       = cob;
+		hs->hs_CurLine      = oline;
+		hs->hs_CurColumn    = ocolumn;
+		hs->hs_ActiveKey    = oact;
+
+		/* Add the history node to the list */
+		AddTail ((struct List *) &cd->cd_HistoryList, &hs->hs_Node);
+		DB (kprintf ("add %08lx, %ld, %ld to history\n", cob, oline, ocolumn));
+	    }
+	}
+
+	/* Clear the retrace flag */
+	cd->cd_Flags &= ~AGF_RETRACE;
+
+	/* Release the current node */
+	ReleaseNode (ag, cl, o, cob);
+
+	/* Get a pointer to the node data */
+	nd  = INST_DATA (ag->ag_NodeClass, nob);
+
+	/* Set the current node and database */
+	cd->cd_CurrentDatabase = nd->nd_Database;
+	cd->cd_CurrentNode = nob;
+	cd->cd_ActiveNum = act;
+
+	/* Layout the new node */
+	ObtainSemaphore (&si->si_Lock);
+	si->si_Flags |= DTSIF_LAYOUT;
+	si->si_Flags &= ~DTSIF_NEWSIZE;
+	layoutMethod (ag, cl, o, 1);
+	si->si_Flags &= ~(DTSIF_LAYOUT | DTSIF_NEWSIZE);
+	ReleaseSemaphore (&(si->si_Lock));
+
+	/* This is the way we have to have it */
+	si->si_TopVert  = line;
+	si->si_TopHoriz = column;
+    }
+    else
+    {
+	/* Tell about the error and the fact that we aren't busy anymore */
+	notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+			   GA_ID,		G (o)->GadgetID,
+			   DTA_Busy,		FALSE,
+			   DTA_ErrorLevel,	cd->cd_ErrorLevel,
+			   DTA_ErrorNumber,	cd->cd_ErrorNumber,
+			   DTA_ErrorString,	cd->cd_ErrorString,
+			   TAG_DONE);
+
+	/* Show that we aren't busy */
+	cd->cd_Flags &= ~AGF_BUSY;
+    }
+    return (nob);
+}
+
+/*****************************************************************************/
+
+static ULONG pr_triggerMethod (struct AGLib * ag, Class * cl, Object * o, struct dtTrigger * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct _Object *rob = NULL;
+    struct NodeData *nd = NULL;
+    LONG line = 0, column = 0;
+    struct DatabaseData *dbd;
+    STRPTR mainName = "Main";
+    struct _Object *ob;
+    struct History *hs;
+    struct List *list;
+    ULONG retval = 0;
+    LONG act = 1;
+    STRPTR name;
+
+    dbd = INST_DATA (ag->ag_DatabaseClass, cd->cd_CurrentDatabase);
+    list = (struct List *) &dbd->dbd_NodeList;
+
+    if (cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+	ob = _OBJECT (cd->cd_CurrentNode);
+    }
+
+    name = NULL;
+
+    switch (msg->dtt_Function)
+    {
+	case STM_CONTENTS:
+	    if (nd)
+	    {
+		if (nd->nd_TOC)
+		    name = nd->nd_TOC;
+		else if (Stricmp (nd->nd_Name, mainName) != 0)
+		    name = mainName;
+	    }
+	    else
+		name = mainName;
+	    break;
+
+	case STM_INDEX:
+	    if (dbd->dbd_Index)
+		name = dbd->dbd_Index;
+	    break;
+
+	case STM_HELP:
+	    if (dbd->dbd_Help)
+		name = dbd->dbd_Help;
+	    else
+		name = MASTER_HELPNODE;
+	    break;
+
+	case STM_RETRACE:
+	    if (hs = (struct History *) RemTail ((struct List *) &cd->cd_HistoryList))
+	    {
+#if 0
+		while (hs->hs_Object == cd->cd_CurrentNode)
+		{
+		    FreeVec (hs);
+		    hs = (struct History *) RemTail ((struct List *) &cd->cd_HistoryList);
+		}
+#endif
+
+		if (hs)
+		{
+		    /* Get the current object */
+		    strcpy (cd->cd_WorkName, hs->hs_Name);
+		    name   = cd->cd_WorkName;
+		    line   = hs->hs_CurLine;
+		    column = hs->hs_CurColumn;
+		    act    = hs->hs_ActiveKey;
+
+		    cd->cd_Flags |= AGF_RETRACE;
+		    FreeVec (hs);
+		}
+	    }
+	    else
+		DisplayBeep (NULL);
+	    break;
+
+	case STM_BROWSE_PREV:
+	    if (nd)
+	    {
+		if (nd->nd_Prev)
+		    name = nd->nd_Prev;
+		else if (ob != (struct _Object *) list->lh_Head)
+		    rob = (struct _Object *) ob->o_Node.mln_Pred;
+	    }
+	    break;
+
+	case STM_BROWSE_NEXT:
+	    if (nd)
+	    {
+		if (nd->nd_Next)
+		    name = nd->nd_Next;
+		else if (ob != (struct _Object *) list->lh_TailPred)
+		    rob = (struct _Object *) ob->o_Node.mln_Succ;
+	    }
+	    break;
+
+	case STM_NEXT_FIELD:
+	    r_activateLink (ag, cl, o, cd, 1);
+	    break;
+
+	case STM_PREV_FIELD:
+	    r_activateLink (ag, cl, o, cd, -1);
+	    break;
+    }
+
+    if (rob)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, BASEOBJECT (rob));
+	name = nd->nd_Name;
+    }
+
+    if (name)
+    {
+	pr_gotoMethod (ag, cl, o, name, line, column, act);
+	retval = 1L;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+static ULONG pr_initProcess (struct AGLib *ag, Class *cl, Object *o, struct ClientData *cd)
+{
+    ULONG retval = ERROR_NO_FREE_STORE;
+
+    /* Create our communication port */
+    if (cd->cd_SIPCPort = CreateMsgPort ())
+    {
+	/* Initialize the ARexx port */
+	if (ag->ag_RexxSysBase)
+	    cd->cd_ARexxContext = InitARexx (ag, cd->cd_ARexxPortName, "guide", FALSE);
+
+	/* Indicate success */
+	retval = 0;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+#undef	SysBase
+
+/*****************************************************************************/
+
+void ObjectHandler (void)
+{
+    struct ExecBase *SysBase = (*((struct ExecBase **) 4));
+    struct DTSpecialInfo *si;
+    LONG error = RETURN_OK;
+    UBYTE parseBuffer[512];
+    UBYTE workBuffer[512];
+    struct StartupMsg *sm;
+    struct ClientData *cd;
+    BOOL changed = FALSE;
+    struct RexxMsg *rmsg;
+    struct SIPCMsg *sim;
+    STRPTR argv[MAXARG];
+    struct NodeData *nd;
+    STRPTR text = NULL;
+    struct Process *pr;
+    BOOL parse = FALSE;
+    APTR oldptr = NULL;
+    LONG line, column;
+    struct AGLib *ag;
+    STRPTR nodename;
+    ULONG tagsync;
+    UWORD cmdofs;
+    BOOL notify;
+    ULONG sigr;
+    ULONG sigp;
+    ULONG argc;
+    Class *cl;
+    Object *o;
+    Msg msg;
+
+    /* Find out who we are */
+    pr = (struct Process *) FindTask (NULL);
+
+    /* Get the startup message */
+    WaitPort (&pr->pr_MsgPort);
+    sm = (struct StartupMsg *) GetMsg (&pr->pr_MsgPort);
+
+    /* Pull all the information from the startup message */
+    ag = sm->sm_AG;
+    cl = sm->sm_Class;
+    o  = sm->sm_Object;
+    cd = INST_DATA (cl, o);
+    si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+
+    /* Try initializing the process */
+    sm->sm_Return = pr_initProcess (ag, cl, o, cd);
+
+    /* Reply to the message */
+    ReplyMsg ((struct Message *) sm);
+
+    /* Show that we are running */
+    cd->cd_Flags |= AGF_RUNNING;
+
+    /* Continue if no errors */
+    if (sm->sm_Return == 0)
+    {
+	/* Get the ARexx signal bit */
+	sigp = ARexxSignal (ag, cd->cd_ARexxContext);
+
+	/* Clear the notify flag */
+	notify = FALSE;
+
+	/* Keep going until we are told to stop */
+	while (cd->cd_Going)
+	{
+	    /* Wait for something to happen */
+	    sigr = Wait ((1L << cd->cd_SIPCPort->mp_SigBit) | sigp | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+
+	    /*****************/
+	    /* ARexx message */
+	    /*****************/
+	    if (cd->cd_ARexxContext && (sigr & sigp))
+	    {
+		/* Get the ARexx message */
+		rmsg = GetARexxMsg (ag, cd->cd_ARexxContext);
+
+		/* Make sure it is something we can handle */
+		if (rmsg == REXX_RETURN_ERROR)
+		{
+		}
+		else if (rmsg)
+		{
+		    struct DatabaseData *dbd;
+		    UBYTE tmpBuffer[20];
+		    struct dtTrigger dtt;
+
+		    /* Copy the message */
+		    strcpy (parseBuffer, ARG0 (rmsg));
+
+		    /* See if we have something that has a return value */
+		    if (Stricmp (parseBuffer, "getnodecount") == 0)
+		    {
+			/* Get a pointer to the database object */
+			dbd = INST_DATA (ag->ag_DatabaseClass, cd->cd_Database);
+
+			/* Make the return value */
+			sprintf (tmpBuffer, "%ld", dbd->dbd_NumNodes);
+			text = tmpBuffer;
+		    }
+		    else if (Stricmp (parseBuffer, "next") == 0)
+		    {
+			dtt.dtt_Function = STM_BROWSE_NEXT;
+			if (pr_triggerMethod (ag, cl, o, &dtt))
+			    notify = TRUE;
+		    }
+		    else if (Stricmp (parseBuffer, "previous") == 0)
+		    {
+			dtt.dtt_Function = STM_BROWSE_PREV;
+			if (pr_triggerMethod (ag, cl, o, &dtt))
+			    notify = TRUE;
+		    }
+		    else if (Stricmp (parseBuffer, "retrace") == 0)
+		    {
+			dtt.dtt_Function = STM_RETRACE;
+			if (pr_triggerMethod (ag, cl, o, &dtt))
+			    notify = TRUE;
+		    }
+		    else if (Stricmp (parseBuffer, "print") == 0)
+		    {
+			union printerIO *pio;
+			struct MsgPort *mp;
+
+			if (mp = CreateMsgPort ())
+			{
+			    if (pio = (union printerIO *) CreateIORequest (mp, sizeof (union printerIO)))
+			    {
+				if (OpenDevice ("printer.device", 0, (struct IORequest *) pio, 0) == 0)
+				{
+				    /* Dump the node */
+				    dumpNode (ag, 255, pio, o, cd);
+
+				    /* Form Feed */
+				    pio->ios.io_Length = 2;
+				    pio->ios.io_Data = (APTR) "\n";
+				    pio->ios.io_Command = CMD_WRITE;
+				    DoIO ((struct IORequest *) pio);
+
+				    CloseDevice ((struct IORequest *) pio);
+				}
+				DeleteIORequest ((struct IORequest *) pio);
+			    }
+			    DeleteMsgPort (mp);
+			}
+		    }
+		    else
+			parse = TRUE;
+		    cmdofs = 0;
+
+		    /* Reply the message */
+		    ReplyARexxMsg (ag, cd->cd_ARexxContext, rmsg, text, error);
+		    text = NULL;
+		}
+	    }
+
+	    if (sigr & SIGBREAKF_CTRL_E)
+	    {
+		/* Remove from the window */
+		if (changed)
+		    pr->pr_WindowPtr = oldptr;
+		changed = FALSE;
+	    }
+
+	    /* Was that something a ^C */
+	    if (sigr & SIGBREAKF_CTRL_C)
+	    {
+		cd->cd_Going = FALSE;
+	    }
+	    else
+	    {
+		/* Pull all the control information */
+		while (sim = (struct SIPCMsg *) GetMsg (cd->cd_SIPCPort))
+		{
+		    switch (sim->sm_Type)
+		    {
+			case SIPCT_COMMAND:
+			    strcpy (parseBuffer, sim->sm_Data);
+			    parse = TRUE;
+			    cmdofs = 1;
+			    break;
+
+			case SIPCT_MESSAGE:
+			    msg = (Msg) sim->sm_Data;
+			    switch (msg->MethodID)
+			    {
+				case DTM_GOTO:
+				    line   = GetTagData (DTA_TopVert,  DEF_TOP, ((struct dtGoto *)msg)->dtg_AttrList);
+				    column = GetTagData (DTA_TopHoriz, DEF_TOP, ((struct dtGoto *)msg)->dtg_AttrList);
+				    nodename = ((struct dtGoto *)msg)->dtg_NodeName;
+				    if (pr_gotoMethod (ag, cl, o, nodename, line, column, 1))
+					notify = TRUE;
+				    break;
+
+				case DTM_TRIGGER:
+				    {
+					struct dtTrigger *dtt = (struct dtTrigger *) msg;
+
+					if (dtt->dtt_Function == STM_COMMAND)
+					{
+					    strcpy (parseBuffer, dtt->dtt_Data);
+					    parse = TRUE;
+					    cmdofs = 0;
+					}
+					else if (dtt->dtt_Function == STM_ACTIVATE_FIELD)
+					{
+					    if (cd->cd_ActiveLine)
+					    {
+						strcpy (parseBuffer, cd->cd_ActiveLine->ln_Data);
+						parse = TRUE;
+						cmdofs = 1;
+					    }
+					}
+					else if (pr_triggerMethod (ag, cl, o, dtt))
+					    notify = TRUE;
+				    }
+
+				    break;
+
+				case GM_LAYOUT:
+				    if (!changed)
+				    {
+					changed = TRUE;
+					oldptr = pr->pr_WindowPtr;
+					pr->pr_WindowPtr = cd->cd_Window;
+				    }
+
+				    if (cd->cd_CurrentNode)
+				    {
+					ObtainSemaphore (&si->si_Lock);
+					do
+					{
+					    si->si_Flags &= ~DTSIF_NEWSIZE;
+					    layoutMethod (ag, cl, o, 0);
+					} while (si->si_Flags & DTSIF_NEWSIZE);
+
+					si->si_Flags &= ~(DTSIF_LAYOUT | DTSIF_NEWSIZE);
+					ReleaseSemaphore (&(si->si_Lock));
+					notify = TRUE;
+				    }
+				    break;
+
+				default:
+				    break;
+			    }
+			    break;
+
+			case SIPCT_QUIT:
+			    /* Time to quit! */
+			    cd->cd_Going = FALSE;
+			    break;
+
+			default:
+			    break;
+		    }
+
+		    /* Do we have a command string to parse? */
+		    if (parse)
+		    {
+			/* Parse it */
+			if ((argc = ParseString (ag, parseBuffer, argv, MAXARG)) > 1)
+			{
+			    /* Link to a node? */
+			    if ((Stricmp (argv[cmdofs], "link") == 0) || (Stricmp (argv[cmdofs], "alink") == 0))
+			    {
+				line = column = DEF_TOP;
+				if (argc > cmdofs + 2)
+				{
+				    StrToLong (argv[cmdofs+2],(LONG *)&line);
+				    if (line)
+					line--;
+				    if (argc > cmdofs + 3)
+				    {
+					StrToLong (argv[cmdofs+3],(LONG *)&column);
+					if (column)
+					    column--;
+				    }
+				}
+				nodename = argv[cmdofs+1];
+				if (pr_gotoMethod (ag, cl, o, nodename, line, column, 1))
+				    notify = TRUE;
+			    }
+			    else if (Stricmp (argv[cmdofs], "beep") == 0)
+			    {
+				DisplayBeep (NULL);
+			    }
+			    else if (Stricmp (argv[cmdofs], "close") == 0)
+			    {
+				/* Time to quit! */
+				cd->cd_Going = FALSE;
+			    }
+#if 0
+			    else if (Stricmp (argv[cmdofs], "next") == 0)
+			    {
+			    }
+			    else if (Stricmp (argv[cmdofs], "previous") == 0)
+			    {
+			    }
+#endif
+			    else if (Stricmp (argv[cmdofs], "quit") == 0)
+			    {
+				/* Time to quit! */
+				cd->cd_Going = FALSE;
+			    }
+			    else if (Stricmp (argv[cmdofs], "rxs") == 0)
+			    {
+				if (argc > cmdofs + 1)
+				{
+				    if (!(SendARexxMsg (ag, cd->cd_ARexxContext, argv[cmdofs+1], TRUE)))
+				    {
+					notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+							   GA_ID,		G (o)->GadgetID,
+							   DTA_ErrorLevel,	RETURN_WARN,
+							   DTA_ErrorNumber,	DTERROR_COULDNT_SEND_MESSAGE,
+							   DTA_ErrorString,	(ULONG)argv[cmdofs+1],
+							   TAG_DONE);
+				    }
+				}
+			    }
+			    else if (Stricmp (argv[cmdofs], "rx") == 0)
+			    {
+				if (argc > cmdofs + 1)
+				{
+				    if (!(SendARexxMsg (ag, cd->cd_ARexxContext, argv[cmdofs+1], FALSE)))
+				    {
+					notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+							   GA_ID,		G (o)->GadgetID,
+							   DTA_ErrorLevel,	RETURN_WARN,
+							   DTA_ErrorNumber,	DTERROR_COULDNT_SEND_MESSAGE,
+							   DTA_ErrorString,	(ULONG)argv[cmdofs+1],
+							   TAG_DONE);
+				    }
+				}
+			    }
+			    else if (Stricmp (argv[cmdofs], "system") == 0)
+			    {
+				STRPTR cmd = argv[cmdofs + 1];
+				BPTR fh = NULL;
+
+				/* Do they need a console? */
+				if ((argc > 2) && (Stricmp (argv[cmdofs + 1], "CONSOLE")) == 0)
+				{
+				    /* Build the console string */
+				    strcpy (workBuffer, "CON:0/0/320/50/AmigaGuide/CLOSE/AUTO/WAIT");
+
+				    /* Open the console */
+				    fh = Open (workBuffer, MODE_NEWFILE);
+
+				    /* Command is in next field */
+				    cmd = argv[cmdofs + 2];
+				}
+
+				/* Add a stack to the command */
+				sprintf (workBuffer, "stack 40000\n%s", cmd);
+
+				/* Execute the command */
+				Execute (workBuffer, NULL, fh);
+
+				if (fh)
+				    Close (fh);
+			    }
+			}
+			parse = FALSE;
+		    }
+
+		    /* Free the message */
+		    FreeVec (sim);
+		}
+
+		if (notify)
+		{
+		    tagsync = (cd->cd_Flags & AGF_SYNC) ? DTA_Sync : TAG_IGNORE;
+		    cd->cd_Flags &= ~AGF_SYNC;
+
+		    /* Tell someone about the new information. */
+		    nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+		    notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+				       GA_ID,		G (o)->GadgetID,
+				       DTA_TopVert,	si->si_TopVert,
+				       DTA_VisibleVert,	si->si_VisVert,
+				       DTA_TotalVert,	si->si_TotVert,
+				       DTA_NominalVert,	si->si_TotVert,
+				       DTA_TopHoriz,	si->si_TopHoriz,
+				       DTA_VisibleHoriz,si->si_VisHoriz,
+				       DTA_TotalHoriz,	si->si_TotHoriz,
+				       DTA_NominalHoriz,si->si_TotHoriz,
+				       DTA_Title,	nd->nd_Title,
+				       DTA_Busy,	FALSE,
+				       tagsync,		TRUE,
+				       TAG_DONE);
+
+		    /* Show that we aren't busy */
+		    cd->cd_Flags &= ~AGF_BUSY;
+
+		    notify = FALSE;
+		}
+	    }
+	}
+
+	/* Free the ARexx context */
+	FreeARexx (ag, cd->cd_ARexxContext);
+
+	/* Clear the SIPC port */
+	while (sim = (struct SIPCMsg *) GetMsg (cd->cd_SIPCPort))
+	    FreeVec (sim);
+
+	/* Delete our message port */
+	DeleteMsgPort (cd->cd_SIPCPort);
+    }
+
+    /* Exit now */
+    Forbid ();
+
+    /* Show that we aren't running anymore */
+    cd->cd_Flags &= ~AGF_RUNNING;
+}
+@
+
+
+39.14
+log
+@*** empty log message ***
+@
+text
+@d31 14
+d54 1
+d382 4
+d388 58
+a445 1
+		    parse = TRUE;
+d450 1
+d589 8
+@
+
+
+39.13
+log
+@made retrace work properly
+@
+text
+@d269 1
+a269 1
+	    cd->cd_ARexxContext = InitARexx (ag, "agDaemon", "guide", NULL);
+@
+
+
+39.12
+log
+@clean up
+@
+text
+@d26 1
+d55 7
+d63 1
+a63 1
+	if ((cob != nob) && !(cd->cd_Flags & AGF_RETRACE))
+d85 1
+d189 1
+d195 1
+@
+
+
+39.11
+log
+@clean up
+@
+text
+@d18 255
+a274 3
+#ifdef	SysBase
+#undef	SysBase
+#endif
+d314 1
+a314 1
+    o = sm->sm_Object;
+d318 11
+a328 2
+    /* Create our communication port */
+    if (cd->cd_SIPCPort = CreateMsgPort ())
+a329 4
+	/* Initialize the ARexx port */
+	if (ag->ag_RexxSysBase)
+	    cd->cd_ARexxContext = InitARexx (ag, "agDaemon", "guide", NULL);
+
+d333 1
+a333 3
+	/* Show that we are running */
+	cd->cd_Flags |= AGF_RUNNING;
+
+d400 1
+a400 1
+				    if (gotoMethod (ag, cl, o, nodename, line, column))
+d414 10
+a423 1
+					else if (triggerMethod (ag, cl, o, dtt))
+d489 1
+a489 1
+				if (gotoMethod (ag, cl, o, nodename, line, column))
+a616 237
+}
+
+#ifdef	SysBase
+#undef	SysBase
+#endif
+
+#define	SysBase		 ag->ag_SysBase
+
+/*****************************************************************************/
+
+Object *gotoMethod (struct AGLib * ag, Class * cl, Object * o, STRPTR name, LONG line, LONG column)
+{
+    struct DTSpecialInfo *si = (struct DTSpecialInfo *) G (o)->SpecialInfo;
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct DatabaseData *dbd;
+    LONG oline, ocolumn;
+    struct NodeData *nd;
+    struct History *hs;
+    Object *nob;
+    Object *cob;
+    ULONG msize;
+
+    /* Show that we are busy */
+    cd->cd_Flags |= AGF_BUSY;
+
+    /* Get the current settings */
+    cob     = cd->cd_CurrentNode;
+    oline   = si->si_TopVert;
+    ocolumn = si->si_TopHoriz;
+
+    notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+		       GA_ID,		G (o)->GadgetID,
+		       DTA_Busy,	TRUE,
+		       DTA_Title,	LVOGetAGString (ag, TITLE_LOADING),
+		       TAG_DONE);
+
+    /* See if we can find the node */
+    if (nob = ObtainNode (ag, cl, o, name, line, column))
+    {
+	/* Remember what they are set to */
+	line   = si->si_TopVert;
+	column = si->si_TopHoriz;
+
+	cd->cd_Flags |= AGF_SYNC;
+
+	/* Is this a new node? */
+	if ((cob != nob) && !(cd->cd_Flags & AGF_RETRACE))
+	{
+	    /* Build the complete name */
+	    nd    = INST_DATA (ag->ag_NodeClass, cob);
+	    dbd   = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+	    sprintf (cd->cd_WorkName, "%s/%s", dbd->dbd_Name, nd->nd_Name);
+	    msize = sizeof (struct History) + strlen (cd->cd_WorkName) + 1;
+
+	    /* Create a history node */
+	    if (hs = AllocVec (msize, MEMF_PUBLIC))
+	    {
+		/* Initialize the fields of the history record */
+		hs->hs_Name = MEMORY_FOLLOWING (hs);
+		strcpy (hs->hs_Name, cd->cd_WorkName);
+		hs->hs_Node.ln_Name = hs->hs_Name;
+		hs->hs_Object       = cob;
+		hs->hs_CurLine      = oline;
+		hs->hs_CurColumn    = ocolumn;
+
+		/* Add the history node to the list */
+		AddTail (&cd->cd_HistoryList, &hs->hs_Node);
+	    }
+	}
+
+	/* Clear the retrace flag */
+	cd->cd_Flags &= ~AGF_RETRACE;
+
+	/* Release the current node */
+	ReleaseNode (ag, cl, o, cob);
+
+	/* Get a pointer to the node data */
+	nd  = INST_DATA (ag->ag_NodeClass, nob);
+
+	/* Set the current node and database */
+	cd->cd_CurrentDatabase = nd->nd_Database;
+	cd->cd_CurrentNode = nob;
+
+	/* Layout the new node */
+	ObtainSemaphore (&si->si_Lock);
+	si->si_Flags |= DTSIF_LAYOUT;
+	si->si_Flags &= ~DTSIF_NEWSIZE;
+	layoutMethod (ag, cl, o, 1);
+	si->si_Flags &= ~(DTSIF_LAYOUT | DTSIF_NEWSIZE);
+	ReleaseSemaphore (&(si->si_Lock));
+
+	/* This is the way we have to have it */
+	si->si_TopVert  = line;
+	si->si_TopHoriz = column;
+    }
+    else
+    {
+	/* Tell about the error and the fact that we aren't busy anymore */
+	notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+			   GA_ID,		G (o)->GadgetID,
+			   DTA_Busy,		FALSE,
+			   DTA_ErrorLevel,	cd->cd_ErrorLevel,
+			   DTA_ErrorNumber,	cd->cd_ErrorNumber,
+			   DTA_ErrorString,	cd->cd_ErrorString,
+			   TAG_DONE);
+
+	/* Show that we aren't busy */
+	cd->cd_Flags &= ~AGF_BUSY;
+    }
+    return (nob);
+}
+
+/*****************************************************************************/
+
+ULONG triggerMethod (struct AGLib * ag, Class * cl, Object * o, struct dtTrigger * msg)
+{
+    struct ClientData *cd = INST_DATA (cl, o);
+    struct _Object *rob = NULL;
+    struct NodeData *nd = NULL;
+    LONG line = 0, column = 0;
+    struct DatabaseData *dbd;
+    STRPTR mainName = "Main";
+    struct _Object *ob;
+    struct History *hs;
+    struct List *list;
+    ULONG retval = 0;
+    STRPTR name;
+
+    dbd = INST_DATA (ag->ag_DatabaseClass, cd->cd_CurrentDatabase);
+    list = &dbd->dbd_NodeList;
+
+    if (cd->cd_CurrentNode)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+	ob = _OBJECT (cd->cd_CurrentNode);
+    }
+
+    name = NULL;
+
+    switch (msg->dtt_Function)
+    {
+	case STM_CONTENTS:
+	    if (nd)
+	    {
+		if (nd->nd_TOC)
+		    name = nd->nd_TOC;
+		else if (Stricmp (nd->nd_Name, mainName) != 0)
+		    name = mainName;
+	    }
+	    else
+		name = mainName;
+	    break;
+
+	case STM_INDEX:
+	    if (dbd->dbd_Index)
+		name = dbd->dbd_Index;
+	    break;
+
+	case STM_HELP:
+	    if (dbd->dbd_Help)
+		name = dbd->dbd_Help;
+	    else
+		name = MASTER_HELPNODE;
+	    break;
+
+	case STM_RETRACE:
+	    if (hs = (struct History *) RemTail (&cd->cd_HistoryList))
+	    {
+		while (hs->hs_Object == cd->cd_CurrentNode)
+		{
+		    FreeVec (hs);
+		    hs = (struct History *) RemTail (&cd->cd_HistoryList);
+		}
+
+		if (hs)
+		{
+		    /* Get the current object */
+		    strcpy (cd->cd_WorkName, hs->hs_Name);
+		    name   = cd->cd_WorkName;
+		    line   = hs->hs_CurLine;
+		    column = hs->hs_CurColumn;
+
+		    cd->cd_Flags |= AGF_RETRACE;
+		    FreeVec (hs);
+		}
+	    }
+	    else
+		DisplayBeep (NULL);
+	    break;
+
+	case STM_BROWSE_PREV:
+	    if (nd)
+	    {
+		if (nd->nd_Prev)
+		{
+		    name = nd->nd_Prev;
+		}
+		else if (ob != (struct _Object *) list->lh_Head)
+		{
+		    rob = (struct _Object *) ob->o_Node.mln_Pred;
+		}
+	    }
+	    break;
+
+	case STM_BROWSE_NEXT:
+	    if (nd)
+	    {
+		if (nd->nd_Next)
+		{
+		    name = nd->nd_Next;
+		}
+		else if (ob != (struct _Object *) list->lh_TailPred)
+		{
+		    rob = (struct _Object *) ob->o_Node.mln_Succ;
+		}
+	    }
+	    break;
+
+	case STM_NEXT_FIELD:
+	case STM_PREV_FIELD:
+	case STM_ACTIVATE_FIELD:
+	    break;
+    }
+
+    if (rob)
+    {
+	nd = INST_DATA (ag->ag_NodeClass, BASEOBJECT (rob));
+	name = nd->nd_Name;
+    }
+
+    if (name)
+    {
+	gotoMethod (ag, cl, o, name, line, column);
+	retval = 1L;
+    }
+
+    return (retval);
+@
+
+
+39.10
+log
+@render speedup.
+@
+text
+@d9 2
+a10 6
+#define	DA(x)	;
+#define	DB(x)	;
+#define	DL(x)	;
+#define	DC(x)	;
+#define	DR(x)	;
+#define	DX(x)	;
+d14 1
+a14 2
+/* This used to be -1, but then that was before the days of DTA_Sync */
+#define	DEF_TOP		0
+d20 4
+a132 1
+			    DC (kprintf ("command := '%s'\n", sim->sm_Data));
+a144 1
+				    DB (kprintf ("\nDTM_GOTO %s,%ld,%ld\n", nodename, line, column));
+a145 1
+				    {
+a146 10
+				    }
+				    else
+				    {
+					notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+							   GA_ID,		G (o)->GadgetID,
+							   DTA_ErrorLevel,	cd->cd_ErrorLevel,
+							   DTA_ErrorNumber,	cd->cd_ErrorNumber,
+							   DTA_ErrorString,	cd->cd_ErrorString,
+							   TAG_DONE);
+				    }
+a159 1
+					{
+a160 1
+					}
+a165 1
+				    DL (kprintf ("proc : gm_layout\n"));
+a174 1
+					DL (kprintf ("  obtain semaphore\n"));
+a178 1
+					    DL (kprintf ("  layoutMethod\n"));
+a181 1
+					DL (kprintf ("  release semaphore\n"));
+d202 1
+a202 1
+
+d205 1
+d208 1
+d215 2
+a216 1
+				    line--;
+d220 2
+a221 1
+					column--;
+a224 1
+				DB (kprintf ("\ngoto %s, %ld,%ld\n", nodename, line, column));
+a225 1
+				{
+a226 10
+				}
+				else
+				{
+				    notifyAttrChanges (ag, o, cd->cd_Window, cd->cd_Requester, NULL,
+							GA_ID,		G (o)->GadgetID,
+							DTA_ErrorLevel,	cd->cd_ErrorLevel,
+							DTA_ErrorNumber,cd->cd_ErrorNumber,
+							DTA_ErrorString,cd->cd_ErrorString,
+							TAG_DONE);
+				}
+a245 1
+				    DA (kprintf ("RXS := '%s'\n", argv[cmdofs+1]));
+a260 1
+				    DA (kprintf ("RX := '%s'\n", argv[cmdofs+1]));
+a309 1
+		    DX (kprintf ("tagsync=%08lx\n", tagsync));
+a313 2
+
+		    DX (kprintf ("notify line=%ld, column=%ld, sync=%ld\n", cd->cd_TopVert, cd->cd_TopHoriz, tagsync));
+d316 8
+a323 8
+				       DTA_TopVert,	cd->cd_TopVert,
+				       DTA_VisibleVert,	cd->cd_VisVert,
+				       DTA_TotalVert,	cd->cd_TotVert,
+				       DTA_NominalVert,	cd->cd_TotVert,
+				       DTA_TopHoriz,	cd->cd_TopHoriz,
+				       DTA_VisibleHoriz,cd->cd_VisHoriz,
+				       DTA_TotalHoriz,	cd->cd_TotHoriz,
+				       DTA_NominalHoriz,cd->cd_TotHoriz,
+d355 6
+d378 5
+d389 1
+a389 6
+    cob     = cd->cd_CurrentNode;
+    oline   = cd->cd_TopVert;
+    ocolumn = cd->cd_TopHoriz;
+    cd->cd_TopVert  = line;
+    cd->cd_TopHoriz = column;
+
+d392 4
+d443 4
+d450 1
+a450 1
+	DB (kprintf ("notify not busy\n"));
+d452 5
+a456 2
+			   GA_ID, G (o)->GadgetID,
+			   DTA_Busy, FALSE,
+a461 1
+
+a533 1
+		    DR (kprintf ("\nRETRACE %s, row=%ld, col=%ld\n", name, line, column));
+@
+
+
+39.9
+log
+@check GetARexxMsg return value for errors.
+@
+text
+@d7 2
+d14 6
+d144 2
+a145 2
+				    line   = GetTagData (DTA_TopVert,  -1, ((struct dtGoto *)msg)->dtg_AttrList);
+				    column = GetTagData (DTA_TopHoriz, -1, ((struct dtGoto *)msg)->dtg_AttrList);
+d229 1
+a229 5
+#if 0
+				line = column = 0;
+#else
+				line = column = -1;
+#endif
+d340 1
+a340 1
+		    DL (kprintf ("tagsync=%08lx\n", tagsync));
+a344 1
+		    DL (kprintf ("notify line=%ld, column=%ld, sync=%ld\n", cd->cd_TopVert, cd->cd_TopHoriz, tagsync));
+d346 1
+@
+
+
+39.8
+log
+@tracks help group
+@
+text
+@a59 1
+    DB (kprintf ("create sipc port\n"));
+d62 1
+d64 1
+a64 16
+	{
+	    /* Create our ARexx context */
+	    DB (kprintf ("create arexx port\n"));
+	    if (cd->cd_ARexxContext = InitARexx (ag, "agDaemon", "guide", NULL))
+	    {
+		DA (kprintf ("ARexx initialized\n"));
+	    }
+	    else
+	    {
+		DA (kprintf ("unable to initialize our ARexx context\n"));
+	    }
+	}
+	else
+	{
+	    DA (kprintf ("rexxsyslib.library not present\n"));
+	}
+d66 1
+a67 1
+	DB (kprintf ("sigp=0x%lx\n", sigp));
+a74 1
+	DB (kprintf ("handle input\n"));
+a77 1
+	    DB (kprintf ("wait : sipc=0x%lx (0x%lx), sigp=0x%lx\n", (1L << cd->cd_SIPCPort->mp_SigBit), cd->cd_SIPCPort, sigp));
+a78 1
+	    DB (kprintf ("received 0x%lx\n", sigr));
+d85 8
+a92 2
+		DB (kprintf ("get arexx msg\n"));
+		if (rmsg = GetARexxMsg (ag, cd->cd_ARexxContext))
+d94 2
+a95 2
+		    DA (kprintf ("received ARexx command := '%s'\n", ARG0 (rmsg)));
+		    strcpy (parseBuffer, ARG0 (rmsg) );
+d98 2
+a106 1
+		DB (kprintf ("break ^E\n"));
+a114 1
+		DB (kprintf ("break ^C\n"));
+a119 1
+		DB (kprintf ("handle SIPC message\n"));
+a135 4
+#if 0
+				    line   = GetTagData (DTA_TopVert,  0, ((struct dtGoto *)msg)->dtg_AttrList);
+				    column = GetTagData (DTA_TopHoriz, 0, ((struct dtGoto *)msg)->dtg_AttrList);
+#else
+a137 1
+#endif
+@
+
+
+39.7
+log
+@no changes
+@
+text
+@a35 1
+    ULONG errmsg;
+a201 3
+					DL (kprintf ("  get instance data\n"));
+					nd = INST_DATA (ag->ag_NodeClass, cd->cd_CurrentNode);
+
+a467 1
+	dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+@
+
+
+39.6
+log
+@*** empty log message ***
+@
+text
+@d11 1
+d364 1
+d379 4
+d420 3
+d494 2
+a533 1
+		{
+a534 1
+		}
+a535 1
+		{
+a536 1
+		}
+a538 1
+	    {
+a539 1
+	    }
+d570 1
+a570 1
+		    DB (kprintf ("\nRETRACE %s, row=%ld, col=%ld\n", name, line, column));
+a576 1
+	    {
+a577 1
+	    }
+@
+
+
+39.5
+log
+@*** empty log message ***
+@
+text
+@d149 4
+d155 1
+d192 1
+d202 1
+d205 1
+d210 1
+d213 2
+d242 3
+d246 1
+d357 1
+@
+
+
+39.4
+log
+@error returns are now sent to the host.
+@
+text
+@d60 1
+d66 1
+d82 1
+d90 1
+d94 1
+d96 1
+d103 1
+d117 1
+d126 1
+d132 1
+d229 1
+a229 2
+			    if ((Stricmp (argv[cmdofs], "LINK") == 0) ||
+				(Stricmp (argv[cmdofs], "ALINK") == 0))
+@
+
+
+39.3
+log
+@*** empty log message ***
+@
+text
+@d33 1
+d35 1
+d141 15
+a155 3
+				    DB (kprintf ("\nDTM_GOTO %ld,%ld\n", line, column));
+				    gotoMethod (ag, cl, o, ((struct dtGoto *) msg)->dtg_NodeName, line, column);
+				    notify = TRUE;
+d233 3
+a235 3
+
+				DB (kprintf ("\ngoto %ld,%ld\n", line, column));
+				if (gotoMethod (ag, cl, o, argv[cmdofs + 1], line, column))
+d241 6
+a246 1
+				    DisplayBeep (NULL);
+d270 6
+a275 1
+					DisplayBeep (NULL);
+d286 6
+a291 1
+					DisplayBeep (NULL);
+d390 3
+a392 2
+		       GA_ID, G (o)->GadgetID,
+		       DTA_Busy, TRUE,
+@
+
+
+39.2
+log
+@*** empty log message ***
+@
+text
+@d137 1
+a137 1
+				    line   = GetTagData (DTA_TopVert, -1, ((struct dtGoto *)msg)->dtg_AttrList);
+@
+
+
+39.1
+log
+@*** empty log message ***
+@
+text
+@d7 1
+d10 1
+d17 1
+d23 1
+d27 1
+d37 1
+d60 19
+d88 16
+a103 1
+	    sigr = Wait ((1L << cd->cd_SIPCPort->mp_SigBit) | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+d127 1
+d246 8
+d257 8
+d328 3
+d407 2
+a408 1
+	nd = INST_DATA (ag->ag_NodeClass, nob);
+d444 1
+d465 11
+a475 2
+	    if (nd && nd->nd_TOC)
+		name = nd->nd_TOC;
+d477 3
+a479 2
+		name = "Main";
+	    retval = 1L;
+d483 9
+a513 1
+		    retval = 1L;
+a527 1
+		    retval = 1L;
+a541 1
+		    retval = 1L;
+a559 1
+	retval = 1L;
+d565 1
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d7 1
+a8 1
+#define	DW(x)	;
+d19 1
+a19 1
+    struct gpRender gpr;
+d26 1
+a26 1
+    BOOL changed = FALSE;
+d28 1
+a56 5
+	/* Initialize the Render message */
+	gpr.MethodID = GM_RENDER;
+	gpr.gpr_GInfo = NULL;
+	gpr.gpr_RPort = &cd->cd_RPort;
+	gpr.gpr_Redraw = GREDRAW_REDRAW;
+d96 4
+a99 1
+				    gotoMethod (ag, cl, o, ((struct dtGoto *) msg)->dtg_NodeName);
+a136 1
+#if 1
+a137 12
+#else
+					    if (nd->nd_Object)
+					    {
+						DL (kprintf ("do async layout\n"));
+						msg->MethodID = DTM_ASYNCLAYOUT;
+						DoGadgetMethodA ((struct Gadget *) nd->nd_Object, cd->cd_Window, cd->cd_Requester, msg);
+					    }
+					    else
+					    {
+						layoutMethod (ag, cl, o, 0);
+					    }
+#endif
+a151 1
+			    DL (kprintf ("sipct_quit\n"));
+a161 1
+			DL (kprintf ("parsestring\n"));
+d164 2
+a165 1
+			    if (Stricmp (argv[cmdofs], "link") == 0)
+d167 15
+a181 1
+				if (gotoMethod (ag, cl, o, argv[cmdofs + 1]))
+d183 1
+d185 1
+d187 1
+d246 3
+a249 1
+		    DL (kprintf ("notify changes\n"));
+d251 1
+d253 12
+a264 11
+				       GA_ID, G (o)->GadgetID,
+				       DTA_TopVert, 0L,
+				       DTA_VisibleVert, si->si_VisVert,
+				       DTA_TotalVert, si->si_TotVert,
+				       DTA_NominalVert, si->si_TotVert,
+				       DTA_TopHoriz, 0L,
+				       DTA_VisibleHoriz, si->si_VisHoriz,
+				       DTA_TotalHoriz, si->si_TotHoriz,
+				       DTA_NominalHoriz, si->si_TotHoriz,
+				       DTA_Title, nd->nd_Title,
+				       DTA_Busy, FALSE,
+a271 1
+	DL (kprintf ("clear SIPC port\n"));
+a275 1
+	DL (kprintf ("delete message port\n"));
+d288 1
+a288 1
+Object *gotoMethod (struct AGLib * ag, Class * cl, Object * o, STRPTR name)
+d293 1
+d305 7
+a311 2
+    cob = cd->cd_CurrentNode;
+    if (nob = ObtainNode (ag, cl, o, name))
+d313 2
+d331 3
+a333 2
+
+		hs->hs_Object = cob;
+d363 1
+d381 1
+d426 4
+a429 1
+		    name = cd->cd_WorkName;
+d487 1
+a487 1
+	gotoMethod (ag, cl, o, name);
+@

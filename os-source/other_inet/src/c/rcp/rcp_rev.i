@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	3
+DATE	MACRO
+		dc.b	'8.11.93'
+	ENDM
+VERS	MACRO
+		dc.b	'rcp 37.3'
+	ENDM
+VSTRING	MACRO
+		dc.b	'rcp 37.3 (8.11.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: rcp 37.3 (8.11.93)',0
+	ENDM

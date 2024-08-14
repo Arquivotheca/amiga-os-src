@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	20
+DATE	MACRO
+		dc.b	'18.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'scsidisk 40.20'
+	ENDM
+VSTRING	MACRO
+		dc.b	'scsidisk 40.20 (18.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: scsidisk 40.20 (18.2.94)',0
+	ENDM

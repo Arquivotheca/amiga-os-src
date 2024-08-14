@@ -1,0 +1,14 @@
+VERSION		EQU	3
+REVISION	EQU	7
+DATE	MACRO
+		dc.b	'6.8.91'
+	ENDM
+VERS	MACRO
+		dc.b	'nfsc 3.7'
+	ENDM
+VSTRING	MACRO
+		dc.b	'nfsc 3.7 (6.8.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: nfsc 3.7 (6.8.91)',0
+	ENDM

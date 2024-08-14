@@ -1,0 +1,236 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     90.04.26.21.48.53;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@   
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*
+ * rlogin.c - simple rlogin protocol client.
+ *
+ * Copyright 1989 Ameristar Technology, Inc.  All rights reserved.
+*/
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <pwd.h>
+
+#include <libraries/dos.h>
+#include <stdio.h>
+#include <errno.h>
+
+/*
+ * Messages sent via out-of-band data.
+ */
+#define TIOCPKT_FLUSHREAD 	0x01	/* flush pending kybd data	*/
+#define TIOCPKT_FLUSHWRITE 	0x02	/* flush all data to mark 	*/
+#define TIOCPKT_STOP		0x04
+#define TIOCPKT_START		0x08
+#define TIOCPKT_NOSTOP		0x10
+#define TIOCPKT_DOSTOP		0x20
+#define TIOCPKT_WINDOW		0x80	/* request window size		*/
+
+static char buf[1024];
+
+
+void usage()
+{
+	fprintf(stderr, "usage: rlogin host [-l username] [-w]\n");
+	exit(RETURN_WARN);
+}
+
+char *nullstring = "\0";
+
+main(argc, argv)
+	int	argc;
+	char	**argv;
+{
+	char c, *host, *remuser, *localuser;
+	extern int cons_kybd_sigF;
+	fd_set ibits, ebits;
+	struct passwd *pwd;
+	int s, cc, ns;
+	int screen=1;
+	long event;
+
+	if(argc < 2 || argc > 5){
+		usage();
+	}
+
+	pwd = getpwuid(getuid());
+	if(pwd){
+		localuser = pwd->pw_name;
+	} else {
+		/*localuser = "nobody";*/
+		localuser = nullstring;
+	}
+
+	/*remuser = localuser;	*/
+	remuser = nullstring;
+
+	if(argc >2){
+		if(argv[2][0] != '-')
+			usage();
+		switch(argv[2][1]) {
+		case 'l':
+			remuser = argv[3];
+			break;
+		case 'w':
+			screen=0;
+			break;
+		default:
+			usage();
+		}
+		if (argc==5) {
+			if(argv[4][1] == 'w')
+				screen=0;
+			else
+				usage();
+		}
+	}
+
+	host = argv[1];
+	s = rcmd(&host, 513, localuser, remuser, nullstring, 0);
+	if(s < 0){
+		exit(RETURN_FAIL);
+	}
+
+	cc = -1;
+	if(ioctl(s, FIONBIO, &cc) < 0){
+		perror("ioctl");
+	}
+
+	if(console_init(host,screen) < 0){
+		printf("Could not initialize console\n");
+		exit(RETURN_FAIL);
+	}
+
+	do {
+		FD_ZERO(&ibits);
+		FD_ZERO(&ebits);
+		FD_SET(s, &ibits);
+		FD_SET(s, &ebits);
+		event = cons_kybd_sigF | SIGBREAKF_CTRL_C;
+
+    		ns = selectwait(s+1, &ibits, 0L, &ebits, 0L, &event);
+
+		if(event & cons_kybd_sigF){
+			c = console_getchar();
+			send(s, &c, 1, 0);
+		}
+		if(FD_ISSET(s, &ebits)){
+			handle_oob(s);
+		}
+		if(FD_ISSET(s, &ibits)){
+			cc = recv(s, buf, sizeof(buf), 0);
+			if(cc <= 0){
+				if(cc < 0 && errno == EWOULDBLOCK){
+					continue;
+				}
+				console_close();
+				printf("Connection closed.\n");
+				event |= SIGBREAKF_CTRL_C;
+			} else {
+				console_write(buf, cc);
+			}
+		}
+	} while (!(event & SIGBREAKF_CTRL_C));
+
+	console_close();
+	exit(RETURN_OK);
+}
+
+static 
+send_window_size(s)
+	int	s;
+{
+	struct {
+		char ws_magic[4];		/* magic escape sequence */
+		unsigned short ws_row, ws_col;	/* screen size in chars	 */
+		unsigned short ws_width, ws_height;/* screen size in pixels */
+	} ws;
+	int rows, cols, width, height;
+
+	console_get_window_sizes(&width, &height, &cols, &rows);
+
+	ws.ws_magic[0] = 0377;
+	ws.ws_magic[1] = 0377;
+	ws.ws_magic[2] = 's';
+	ws.ws_magic[3] = 's';
+	ws.ws_row = htons(rows);
+	ws.ws_col = htons(cols);
+	ws.ws_width = htons(width);
+	ws.ws_height = htons(height);
+	return (send(s, &ws, sizeof(ws), 0) != sizeof(ws) ? -1 : 0);
+}
+
+static
+handle_oob(s)
+	int	s;
+{
+	char c;
+
+	if(recv(s, &c, sizeof(c), MSG_OOB) > 0){
+		if(c & TIOCPKT_WINDOW){
+			send_window_size(s);
+		}
+		if(c & TIOCPKT_FLUSHWRITE){
+			for (;;) {
+				static char waste[512];
+				long atmark;
+				int n;
+
+				atmark = 0;
+				if (ioctl(s, SIOCATMARK, &atmark) < 0) {
+					perror("ioctl");
+					break;
+				}
+				if (atmark){
+					break;
+				}
+
+    				n = read(s, waste, sizeof(waste));
+				if(n <= 0){
+					break;
+				}
+			}
+		}
+		if(c & TIOCPKT_NOSTOP){
+			/* Not implemented */
+		}
+		if(c & TIOCPKT_DOSTOP){
+			/* Not implemented */
+		}
+		if(c & TIOCPKT_FLUSHREAD){
+			/* Not implemented */
+		}
+		if(c & TIOCPKT_STOP){
+			/* Not implemented */
+		}
+		if(c & TIOCPKT_START){
+			/* Not implemented */
+		}
+	}
+}
+
+@

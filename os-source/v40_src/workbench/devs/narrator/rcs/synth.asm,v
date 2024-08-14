@@ -1,0 +1,1454 @@
+head     36.7;
+branch   ;
+access   ;
+symbols  L36_8:36.0;
+locks    ; strict;
+comment  @*   @;
+
+
+36.7
+date     91.05.28.10.30.58;  author eric;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     91.04.05.14.44.34;  author eric;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     91.03.06.16.03.22;  author eric;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     90.12.17.14.53.39;  author eric;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     90.08.21.16.59.05;  author eric;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     90.06.04.20.36.27;  author andy;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     90.04.03.12.09.33;  author andy;  state Exp;
+branches ;
+next     36.0;
+
+36.0
+date     88.03.01.15.02.04;  author kodiak;  state Exp;
+branches ;
+next     35.0;
+
+35.0
+date     88.02.23.16.11.33;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+36.7
+log
+@New from Joe Katz 23 May 1991
+Changed TRACK RATE to #82 to match speed of old narrator (was 75 = 150wpm/2)
+@
+text
+@	FAR	DATA
+	TTL	'SYNTH.ASM'
+
+
+*************************************************************************	
+*                                                                    	*
+*   Copyright 1990, Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted, or stored   *
+*   in any language or computer system, in any form, whatsoever,	*
+*   without the prior written permission of the authors.   		*
+*                                                                    	*
+*************************************************************************
+
+           SECTION      speech
+
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*                                                        ;
+*                 MAIN MODULE 'SYNTH'                    ;
+*                                                        ;
+* SYNTHESIZES VOCAL WAVEFORM IN REAL TIME FROM DATA THAT ;
+*       IS CONTAINED IN THE COEFFICIENT BUFFER.          ;
+*                                                        ;
+*;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*
+*           REGISTER USAGE
+*
+* D0 HALFPITCH,PITCH    D4 FLAGS,MICFRAME
+* D1 AMP1               D5 FRIC INDEX
+* D2 AMP2               D6 SCRATCH
+* D3 HALFAMP3,AMP3      D7 OUTPUT
+*
+* A0 OUTPUT BUFFER++    A4 MULT
+* A1 F1REC              A5 VARIABLES
+* A2 F2REC              A6 COEF. BUFFER
+* A3 F3REC
+*
+* COEF. BUFFER = F1,F2,F3,AMP1,AMP2,AMP3,FF,F0...
+*
+
+	INCLUDE 'assembly.i'
+	INCLUDE 'exec/types.i'
+	INCLUDE 'exec/nodes.i'
+	INCLUDE 'exec/lists.i'
+	INCLUDE 'exec/strings.i'
+	INCLUDE 'exec/initializers.i'
+	INCLUDE 'exec/memory.i'
+	INCLUDE 'exec/interrupts.i'
+	INCLUDE 'exec/ports.i'
+	INCLUDE 'exec/libraries.i'
+	INCLUDE 'exec/devices.i'
+	INCLUDE 'exec/io.i'
+	INCLUDE 'exec/tasks.i'
+	INCLUDE 'exec/resident.i'
+	INCLUDE 'hardware/custom.i'
+	INCLUDE 'hardware/dmabits.i'
+	INCLUDE 'exec/execbase.i'
+	INCLUDE 'exec/ables.i'
+	INCLUDE 'exec/errors.i'
+
+_AbsExecBase	EQU	4
+io_Size		EQU	IO_SIZE
+
+        INCLUDE    'gloequs.i'
+	INCLUDE	   'devices/audio.i'
+	INCLUDE    'narrator.i'
+	INCLUDE    'private.i'
+
+        EXTERN_SYS AbortIO
+        EXTERN_SYS DoIO
+        EXTERN_SYS AllocMem
+        EXTERN_SYS GetMsg
+        EXTERN_SYS Disable
+        EXTERN_SYS Enable
+        EXTERN_SYS WaitIO
+        EXTERN_SYS ReplyMsg
+
+	EXTERN_DATA _intena
+
+        XDEF       SYNTH,DMANodeName
+        XREF       MULT,FRICtable,F1table,F2table,F3table
+	XREF	   SYNDBG_AllocBuffer,SYNDBG_SaveOutput
+
+
+UnitFlags       EQU     F0START
+COEFWORDBIT	EQU	$01		;Word sync bit in coef bfr (see phonet)
+COEFSYLBIT	EQU	$02		;Syl sync bit in coef bfr
+SYNCFLAGS	EQU	$06		;Mast for identifying word and syl sync
+
+BUFFLEN		EQU	OUTBUFF2-OUTBUFF1
+
+
+* Bits in the hi word of d4
+NASAL		equ	20
+ASPIR		equ	21
+FRIC		equ	22
+VOICED		equ	23
+RECEND		equ	28
+
+*	Offsets into a frame of coef -- n(a6)
+F1		equ	0
+F2		equ	1
+F3		equ	2
+AMP1		equ	3
+AMP2		equ	4
+AMP3		equ	5
+FLAGS		equ	6
+F0		equ	7
+
+SYNTH:
+
+	MOVE.L	_AbsExecBase,A6
+
+*	;------	Cache the address of IO_FLAGS
+	MOVE.L	USERIORB(A5),A2
+	MOVE.L	IO_DEVICE(A2),A4
+	LEA	ND_UNIT+UNIT_FLAGS(A4),A3
+	MOVE.L	A3,UnitFlags(A5)
+
+
+*	;------	Check to see if we've been aborted
+*	;	CAUTION....A2, not A1 -> IORB.  Also,
+*	;	other regs may not be correctly setup.
+*	;	Check carefully if this code is put
+*	;	back into action.
+*	BTST	#IOB_ABORT,IO_FLAGS(A2)
+*	BNE	SYABORTED
+
+
+        MOVE.L    #3579000,D0      ;COLOR CLOCK
+        DIVU      SampFreq(A5),D0  ;DIVIDE BY SAMPLING FREQ
+        MOVE.W    D0,AudPer(A5)    ;SAVE AS PERIOD
+
+	BSET	#IOB_FIRST,IO_FLAGS(A2)		;First time bit
+
+*	;------	Stop all audio DMA channels.  This code was
+*	;	originally in MultChan (qv) but was moved here
+*	;	because on overflows the processing loop does
+*	;	not contain the allocation and freeing of audio
+*	;	channels.  This should cure the loss of stereo
+*	;	sync when overflow occurs.
+	LEA	ND_IORB3(A4),A1	
+	MOVE.B	#ADIOF_NOWAIT+IOF_QUICK,IO_FLAGS(A1)
+	MOVE.L	NDI_CHMASKS(A2),ioa_Data(A1)
+	MOVE.W	NDI_NUMMASKS(A2),ioa_Length+2(A1)
+	MOVE.W	#CMD_STOP,IO_COMMAND(A1)
+	CALLSYS	DoIO
+
+*	;------	Setup DMA IORBs
+	MOVE.L	ND_AUDDMAIORB(A4),A1
+	LEA	DMANodeName,A2
+	MOVE.L	A2,IO+LN_NAME(A1)
+	MOVE.L	ND_MSGPORT(A4),A3
+	MOVE.L	A3,IO+MN_REPLYPORT(A1)
+	MOVE.W	#CMD_WRITE,IO_COMMAND(A1)
+	MOVE.W	#BUFFLEN,ioa_Length+2(A1)
+	MOVEQ	#0,D0
+	MOVE.B	Volume(A5),D0
+	MOVE.W	D0,ioa_Volume(A1)
+	MOVE.W	#1,ioa_Cycles(A1)
+	MOVE.W	AudPer(A5),ioa_Period(A1)
+	LEA	OUTBUFF1(A5),A2
+	MOVE.L	A2,ioa_Data(A1)
+	MOVE.B	#ADIOF_PERVOL,IO_FLAGS(A1)
+
+	MOVE.L	A1,A0
+	LEA	ioa_Size(A1),A2
+	MOVE.L	USERIORB(A5),A3
+	MOVE.B	NDI_NUMCHAN(A3),D0
+	ADD.W	D0,D0
+	SUBQ.W	#2,D0					;Adjust for DBF
+
+SYN_IORBLoop:
+	MOVE.W	#(ioa_Size/2)-1,D1			;Copy word at a time
+	MOVE.L	A0,A1					;UNNECESSARY
+
+SYN_CopyLoop:
+	MOVE.W	(A1)+,(A2)+
+	DBF	D1,SYN_CopyLoop
+
+	DBF	D0,SYN_IORBLoop
+
+
+*	;------	Set address of buffer in 2nd set
+*	;	of IORBs
+	MOVE.L	ND_AUDDMAIORB(A4),A1		;Point to 2nd set
+	MOVEQ	#0,D0
+	MOVE.B	NDI_NUMCHAN(A3),D0
+	MOVE.W	D0,D1				;Save for DBF
+	MULU	#ioa_Size,D0
+	ADD.L	D0,A1
+	LEA	ioa_Data(A1),A1			;Where to put bfr addr
+
+	LEA	OUTBUFF2(A5),A2			;Buffer address
+	SUBQ.W	#1,D1				;Number of IORBs
+
+SYN_ALoop:
+	MOVE.L	A2,(A1)
+	LEA	ioa_Size(A1),A1			;Next IORB
+	DBF	D1,SYN_ALoop
+	
+
+*	;------	Set the channel mask in the IORB
+
+	MOVE.L	ND_AUDDMAIORB(A4),A1
+	LEA	IO_UNIT+3(A1),A1
+	MOVEQ	#1,D2
+
+SYN_CM:
+	MOVEQ	#3,D0
+	MOVE.B	NDI_CHANMASK(A3),D1
+
+SYN_CLoop:
+	BTST	D0,D1
+	BEQ.S	SYN_CDBF
+	CLR.B	(A1)
+	BSET	D0,(A1)
+	LEA	ioa_Size(A1),A1
+SYN_CDBF:
+	DBF	D0,SYN_CLoop
+
+	DBF	D2,SYN_CM
+
+*	Here starts SYNTH
+
+	 MOVE.L	  MOTHPTR(A5),CURMOUTH(A5)	;Current mouth shape bfr pos
+
+	 LEA	  MULT,A4	  		;Address of multiplication table
+         MOVE.L   COEFPTR(A5),A6  		;Point to coef buffer
+ 	 CLR.B	  SYNC(A5)			;Clear word/syl sync indicator
+
+         MOVE.L   A5,-(SP)
+         MOVEQ    #VARLEN-1,D0    		;CLEAR SYNTH VARIABLES
+SYNINIT  CLR.W    (A5)+
+         DBF      D0,SYNINIT
+         MOVE.L   (SP)+,A5
+
+*
+* COMPUTE SAMPLES/FRAME
+*
+	MOVE.W	  SampFreq(A5),D1  		;NORMALLY 22200
+        MULU      #75,D1           		;TRACK RATE (150 wpm is nominal)
+        DIVU      RATE(A5),D1
+        AND.L     #$FFFF,D1
+        DIVU      #60,D1
+        LSR.W     #1,D1           		;SAMPERFRAME(A5) IS IN WORDS
+*	lsl.w	  #2,d1				;slow down frame rate for test
+  	MOVE.W	  D1,SAMPERFRAME(A5)          
+
+	JSR	  SYNDBG_AllocBuffer		;Allocate buffer for synth output
+
+        MOVE.L    COEFPTR(A5),A6  		;RESTORE POINTER TO COEF BUFFER 
+
+	MOVEQ     #0,D0           		;CLEAR EVAHBODY
+        MOVE.L    D0,D1
+        MOVE.L    D0,D2
+        MOVE.L    D0,D3
+        MOVE.L    D0,D4
+        MOVE.L    D0,D5
+        MOVE.L    D0,D6
+        MOVE.L    D0,D7
+
+
+*
+* Initialize some variables
+*
+	move.w	#BUFFLEN/2,SAMPCNT(a5)	;init sample count
+	lea	OUTBUFF1(a5),a0		;use first buffer
+	clr.w	BUFFLAG(a5)		;   and don't switch yet
+	move.w	SAMPERFRAME(a5),d4
+	move.w	#127,RECLEN(a5)
+	move.w	#511,FRICLEN(a5)
+	move.w	#1,FRINC(A5)    	;initialize fric recording direction +
+	move.w	#1,UPDATE(a5)		;update to 1st frame
+	lea	F1table,a1		;so 1st frame makes sense
+	lea	F2table,a2
+	lea	F3table,a3
+	lea	MULT,a4
+
+
+*
+* Branch to frame update for 1st frame
+*
+	bra	syn4a
+
+*
+* Synthesis routines
+*
+	include 'syn.i'
+
+
+*	;------ New pitch pulse code.
+
+NewPulse	TST.W	UPDATE(A5)		;Update frame?
+		BEQ	FUbypass		;  No, skip frame update
+
+*
+* Frame update
+*
+nxtframe:
+	addq.l	#8,a6		;point to next frame
+
+syn4a:
+	MOVE.B  FLAGS(A6),D7	;Added for word/syllable sync	    * 4/12/89
+	AND.B	#SYNCFLAGS,D7	;Isolate word/syllable sync flags   * 4/12/89
+	OR.B	D7,SYNC(A5)	;Store in globals area		    * 4/12/89
+	ADDQ.L	#1,CURMOUTH(A5)	;Update mouth shape buffer position * 4/12/89
+	
+	moveq	#0,d7
+	move.b	(a6),d7		;get f1 index
+	bmi	SYNEXIT		;branch if end of coef
+	subq.w	#1,UPDATE(a5)	;check to see if we skip a frame
+	bne	nxtframe	;branch if we do
+	swap	d4		;get the flags from FLAGS(a6)
+	clr.w	d4
+	move.b	FLAGS(a6),d4
+	swap	d4
+* F1 update	
+FU1	lsl.w	#7,d7		;mult index by 128
+	move.l	#F1table,d6	;get F1 base address
+	add.l	d6,d7		;point to specific record
+	move.l	d7,F1REC(a5)	;save it
+* F2 update
+	moveq	#0,d7
+	move.b	F2(a6),d7
+	btst	#FRIC,d4	;fricative?
+	bne.s	FU2		;yes, branch
+	lsl.w	#7,d7		;no, compute F2 address
+	move.l	#F2table,d6	;get F2 base address
+	bra.s	FU3
+FU2	lsl.w	#6,d7		;CONVERT has shifted 3 already (total 9)
+	move.l	#FRICtable,d6	;get FRIC base address
+FU3	add.l	d6,d7		;point to specific record
+	move.l	d7,F2REC(a5)	;save it
+* F3 update
+	moveq	#0,d7
+	move.b	F3(a6),d7
+	btst	#ASPIR,d4	;aspirant?
+	bne.s	FU4		;yes, branch
+	lsl.w	#7,d7		;no, compute F3 address
+	move.l	#F3table,d6	;get F3 base address
+	bra.s	FU5
+FU4	lsl.w	#6,d7		;CONVERT has shifted 3 already (total 9)
+	move.l	#FRICtable,d6	;get FRIC (asp) base address
+FU5	add.l	d6,d7		;point to specific record
+	move.l	d7,F3REC(a5)
+* Get & justify amplitudes
+	clr.w	d1		;Clr lower word of D1 (preserves F1 delay elem)
+	moveq	#0,d2
+	clr.w	d3
+	move.b	AMP1(a6),d1
+	move.b	AMP2(a6),d2
+	move.b	AMP3(a6),d3
+	move.w	d2,d7		;save amp2 in scratch
+	swap	d2
+	move.w	d7,d2		;duplicate amp2 in d2 upper word
+	btst	#FRIC,d4	;check for VOICED & FRIC
+	beq.s	FU7		;branch if not a fricative
+	btst	#VOICED,d4
+	beq.s	FU7		;branch if not voiced
+	lsr.w	#1,d2		;voiced fric -6db for half a pitch period
+FU7	lsl.w	#5,d1		;justify amplitudes
+	lsl.l	#5,d2		; for
+	lsl.w	#5,d3		; multiplication table
+	move.b	F0(a6),PITCH+1(a5) ;get and save pitch period
+* End frame update
+
+FUbypass:
+	move.l	F1REC(a5),a1	;point back to start
+	move.l	F2REC(a5),a2	;     of appropriate
+	move.l	F3REC(a5),a3	;         recordings
+	move.w	#127,RECLEN(a5)	;reset record length
+	bclr	#RECEND,d4	;clear record end flag bit
+	move.w	PITCH(a5),d0	;restore pitchcount
+	move.w	d0,d7		;pitch to scratch
+	lsr.w	#1,d7		;1/2 pitch period
+	swap	d0
+	move.w	d7,d0		;1/2 pitch period to upper word
+	swap	d0
+	swap	d2		;position -6db fric amplitude
+
+
+* Synthesis steering logic
+	MOVE.L	D4,D7		;Copy flags to D7
+	SWAP	D7		;Get flags in lower word
+	AND.W	#$00F0,D7	;Isolate VFAN flags
+	LSR.W	#2,D7		;Shift to form index into branch table
+				;    index = VFAN  (voiced, fric, asp, nasal)
+	ADDQ.W	#2,D7		;**KLUDGE**  MANX 3.6b barfs on "JMP 2(PC,D7)"
+	JMP	0(PC,D7.W)	;Jump to the correct table entry
+
+	BRA	SIL		;0000
+	BRA	SIL		;0001	   N
+	BRA	AH		;0010	  A
+	BRA	SIL		;0011	  AN
+	BRA	FF		;0100	 F
+	BRA	SIL		;0101 	 F N
+	BRA	FFAH		;0110	 FA
+	BRA	SIL		;0111	 FAN
+	BRA	F123		;1000	V
+	BRA	AN		;1001	V  N
+	BRA	F1AH		;1010	V A
+	BRA	SIL		;1011	V AN
+	BRA	F1FF		;1100	VF
+	BRA	F1FF		;1101	VF N
+	BRA	SIL		;1110	VFA
+	BRA	SIL		;1111	VFAN
+
+* End steering logic
+
+         DC.B     'COPYRIGHT 1990 MARK BARTON & JOSEPH KATZ'
+	 CNOP     0,2
+
+SYNEXIT:
+	MOVE.L	_AbsExecBase,A6
+	MOVE.L	USERIORB(A5),A0
+	MOVE.L	IO_DEVICE(A0),A3
+	MOVE.L	ND_AUDDMAIORB(A3),A1
+	MOVEQ	#0,D3
+	MOVE.B	NDI_NUMCHAN(A0),D3
+	MOVE.L	D3,D0
+	MULU	#ioa_Size,D0
+	TST.W	BUFFLAG(A5)
+	BNE.S	SYNEX2
+	ADD.L	D0,A1
+
+SYNEX2	SUBQ.W	#1,D3
+
+	MOVE.L	_AbsExecBase,A6
+SYNEXL	MOVE.L	A1,-(SP)
+	CALLSYS	WaitIO
+	MOVE.L	(SP)+,A1
+	LEA	ioa_Size(A1),A1
+	DBF	D3,SYNEXL
+
+	MOVEQ	#0,D3
+	BRA.S	SYN_Return
+
+SYN_AbortIt:
+	MOVEQ	  #IOERR_ABORTED,D3
+
+SYN_Return:
+	RTS
+
+
+*************************************************************************
+*									*
+* 			Output subroutine				*
+*									*
+*    This subroutine is called from the various systhesis routines.	*
+*    It calls subroutines to handle read and write requests.		*
+*									*
+*    On return:								*
+*									*
+*    D7 = 0 ==> No error						*
+*         1 ==> User abort of write request				*
+*									*
+*************************************************************************
+
+Output	MOVE.W    #BUFFLEN/2,SAMPCNT(A5)  	;Restore sample count
+	SUB.L     #BUFFLEN,A0		  	;Pt back to beginning of buffer
+	MOVEM.L   A0-A6/D0-D5,-(SP)		;Save some registers
+	MOVE.L	  USERIORB(A5),A3		;Get user's IORB
+	MOVE.L	  IO_DEVICE(A3),A4		;Get device pointer
+	MOVE.L	  _AbsExecBase,A6		;Setup exec base
+	BSR	  DoRead			;Handle user read requests
+	BSR	  SYN_Write			;Send buffer to audio device
+	MOVEM.L	  (SP)+,A0-A6/D0-D5		;Restore registers
+	MOVE.L	  A3,D7				;Save A3
+	MOVE.L	  USERIORB(A5),A3		;Get user IORB
+	BTST	  #IOB_ABORT,IO_FLAGS(A3)	;Abort request?
+	BEQ.S	  OutNoAb			;  No, continue
+	MOVEQ	  #1,D7				;  Yes, set cc and return
+	BRA.S	  OutRTS				
+
+OutNoAb	JSR	  SYNDBG_SaveOutput		;Save the synth output in buffer
+
+	MOVE.L	  D7,A3				;Restore A3
+	LEA       OUTBUFF1(A5),A0       	;Initialize to buffer 1
+	NOT.W     BUFFLAG(A5)           	;Invert buffer flag
+        BEQ.S     OutCCOK			;If 0, use buffer 1
+	LEA       OUTBUFF2(A5),A0       	;Otherwise, use buffer 2
+OutCCOK	MOVEQ	  #0,D7				;Set cc to indicate no error
+OutRTS	RTS
+
+
+*************************************************************************
+*									*
+* 			DoRead subroutine				*
+*									*
+*************************************************************************
+
+DoRead	MOVEQ	#0,D0				;D0=sync flags returned to user
+
+	TST.B	Mouth(A5)			;Do we want mouths?
+	BEQ.S	ReadWordSync			;   No, try word sync
+	MOVEQ	#1,D0				;   Yes, Bit 1 ==> mouth change
+						;     Note: also must test if
+						;           mouth has actually
+						;           changed.  Done below
+ReadWordSync:
+	BTST	#NDB_WORDSYNC,NDI_FLAGS(A3)	;Do we want word sync?
+	BEQ.S	ReadSylSync			;   No, try syllable sync
+	BTST	#COEFWORDBIT,SYNC(A5)		;   Yes, do we have it?
+	BEQ.S	ReadSylSync			;      No, try syllable sync
+	OR.B	#$02,D0				;      Yes, Bit 2 ==> word sync 
+
+ReadSylSync:
+	BTST	#NDB_SYLSYNC,NDI_FLAGS(A3)	;Do we want syllable sync?
+	BEQ.S	ReadAnything			;   No, anthing to do?
+	BTST	#COEFSYLBIT,SYNC(A5)		;   Yes, do we have it?
+	BEQ.S	ReadAnything			;      No, anything to do?
+	OR.B	#$04,D0				;      Yes, Bit 3 ==> syl sync 
+
+ReadAnything:
+	TST.B	D0				;Anything to do?
+	BNE.S	ReadCheckQueue			;   Yes, go to it
+	RTS					;   No, just return
+
+
+*	;------	Is there a read on the read queue for this write?
+ReadCheckQueue:
+	DISABLE
+	LEA	ND_UNIT+MP_MSGLIST(A4),A0
+	CMP.L	LH_TAILPRED(A0),A0
+	BEQ.S	ReadReturn			;Input queue empty, just return
+	MOVE.L	(A0),A1				;Look at first entry on list
+	CMP.W	#CMD_READ,IO_COMMAND(A1)	;Is it a read?
+	BNE.S	ReadReturn			;No, just return
+	MOVE.L	IO_UNIT(A1),D1			;Does the read match the 
+	CMP.L	IO_UNIT(A3),D1			;          current write?
+	BNE.S	ReadReturn			;No, just return
+
+
+*	;------	If the mouth shape has changed send msg to user.  This works
+	;       even if we only wanted word/syllable syncs because the "mouth
+	;       has changed" bit in the SYNC field will not be set.  If the
+	;       mouth shape has not changed, turn that bit off, and if no
+	;       other bit in the SYNC field is set, return without sending
+	;       anything to the user.  To allow for backward compatability
+	;	between new and old IORBs, we add the length of the write IORB,
+	;	the offsets (defined in private.i) of the mouth and sync
+	;	fields, and the start of the read IORB to get the correct
+	;	read IORB fields.
+	MOVE.W	MN_LENGTH(A3),D2		;Get length of write IORB
+	MOVE.L	CURMOUTH(A5),A2			;Get current mouth bfr pos
+	MOVE.B	(A2),D1				;Get current mouth shape
+	CMP.B	MRB_SHAPE-MRB_WIDTH(A1,D2),D1	;Has mouth shape changed?
+	BNE.S	ReadSend			;Yes
+	AND.B	#$FE,D0				;No, reset mouth changed bit
+	BEQ.S	ReadReturn			;If no other flag, just return
+
+
+*	;------ Set the SYNC field in the user's read IORB to indicate which
+	;       condition(s) we are responding to, remove the read request
+	;	from the queue, and reply to the user.
+ReadSend:
+	MOVE.B	D0,MRB_SYNC-MRB_WIDTH(A1,D2)	;Store sync flags in SYNC byte
+	MOVE.B	D1,MRB_SHAPE-MRB_WIDTH(A1,D2)	;Store in IORB (internal use)
+	MOVE.B	D1,D0
+	AND.B	#$0F,D0				;Compute mouth width
+	MOVE.B	D0,MRB_WIDTH-MRB_WIDTH(A1,D2)
+	LSR.B	#4,D1
+	MOVE.B	D1,MRB_HEIGHT-MRB_WIDTH(A1,D2)	;Compute mouth height
+	CLR.B	IO_ERROR(A1)
+	REMHEADQ A0,A1,A2			;Remove IORB from queue
+	ENABLE
+	CALLSYS	ReplyMsg			;Reply to it
+	CLR.B	  SYNC(A5)			;Clear word/syl sync indicator
+	RTS
+
+ReadReturn:
+	ENABLE
+	RTS
+
+
+
+*************************************************************************
+*									*
+* 			SYN_Write subroutine				*
+*									*
+*************************************************************************
+
+SYN_Write:
+	MOVEQ	#0,D2
+	MOVE.B	NDI_NUMCHAN(A3),D2
+	MOVE.L	D2,D7
+	MULU	#ioa_Size,D7
+
+	TST.W	BUFFLAG(A5)
+	BNE.S	SYN_Buff2
+	MOVE.L	ND_AUDDMAIORB(A4),A1
+	MOVE.L	A1,A2
+	ADD.L	D7,A2
+	BRA.S	SYN_SetLoop
+
+SYN_Buff2:
+	MOVE.L	ND_AUDDMAIORB(A4),A2
+	MOVE.L	A2,A1
+	ADD.L	D7,A1
+
+SYN_SetLoop:
+	MOVE.W	D2,D7
+	SUBQ.W	#1,D7
+
+SYN_OutLoop:
+	BSET	#IOB_QUICK,IO_FLAGS(A1)
+	MOVE.L  A1,-(SP)
+	BEGINIO
+	MOVE.L  (SP)+,A1
+	LEA	ioa_Size(A1),A1
+	DBF	D7,SYN_OutLoop
+
+	BCLR	#IOB_FIRST,IO_FLAGS(A3)
+	BEQ.S	SYN_Wait
+	LEA	ND_IORB3(A4),A1
+	MOVE.W	#CMD_START,IO_COMMAND(A1)
+	CALLSYS	DoIO
+	BRA.S	SYN_WReturn
+
+SYN_Wait:
+	MOVE.W	D2,D7
+	SUBQ.W	#1,D7
+	MOVE.L	A2,A1
+
+SYN_WLoop:
+	MOVE.L	A1,-(SP)
+	CALLSYS	WaitIO
+	MOVE.L	(SP)+,A1
+	TST.B	IO_ERROR(A1)
+	BNE.S	SYN_WDie
+	LEA	ioa_Size(A1),A1
+	DBF	D7,SYN_WLoop
+
+
+SYN_WReturn:
+	RTS
+
+
+SYN_WDie:
+	BSET	#IOB_ABORT,IO_FLAGS(A3)
+	BRA.S	SYN_WReturn
+
+
+DMANodeName:
+	DC.B	'Speech IORB',0
+	CNOP	0,2
+
+	END 
+@
+
+
+36.6
+log
+@Update from Joe Katz 29 Mar 91
+@
+text
+@d241 1
+a241 2
+        MULU      #82,D1           		;TRACK RATE (150 wpm is nominal)
+* Change to #82 made to match speed of old narrator (was 75 = 150wpm/2)
+d290 5
+a294 6
+*
+* New pitch pulse
+*
+newpulse:
+	tst.w	UPDATE(a5)	;update frame?
+	beq	FUbypass	;no, branch around frame update
+@
+
+
+36.5
+log
+@Update from Joe Katz 5 Mar 91
+@
+text
+@d241 2
+a242 1
+        MULU      #75,D1           		;FORCE RATE TO TRACK
+@
+
+
+36.4
+log
+@Fixes scratch register dependency problem (B10795).
+@
+text
+@d81 1
+d240 8
+a247 8
+	  MOVE.W   SampFreq(A5),D1  ;NORMALLY 22200
+          MULU     #75,D1           ;FORCE RATE TO TRACK
+          DIVU     RATE(A5),D1
+          AND.L    #$FFFF,D1
+          DIVU     #60,D1
+          LSR.W    #1,D1           ;SAMPERFRAME(A5) IS IN WORDS
+*	lsl.w	#2,d1		;slow down frame rate for test
+          MOVE.W   D1,SAMPERFRAME(A5)          
+d249 1
+a249 1
+     
+d251 1
+a251 1
+         MOVE.L   COEFPTR(A5),A6  		;RESTORE POINTER TO COEF BUFFER 
+d253 8
+a260 8
+	 MOVEQ    #0,D0           		;CLEAR EVAHBODY
+         MOVE.L   D0,D1
+         MOVE.L   D0,D2
+         MOVE.L   D0,D3
+         MOVE.L   D0,D4
+         MOVE.L   D0,D5
+         MOVE.L   D0,D6
+         MOVE.L   D0,D7
+d468 7
+a474 7
+	MOVEM.L	(SP)+,A0-A6/D0-D5		;Restore registers
+	MOVE.L	A3,D7				;Save A3
+	MOVE.L	USERIORB(A5),A3			;Get user IORB
+	BTST	#IOB_ABORT,IO_FLAGS(A3)		;Abort request?
+	BEQ.S	OutNoAb				;  No, continue
+	MOVEQ	#1,D7				;  Yes, set cc and return
+	BRA.S	OutRTS				
+d476 3
+a478 1
+OutNoAb MOVE.L	  D7,A3				;Restore A3
+@
+
+
+36.3
+log
+@New version: 36.10
+@
+text
+@d429 3
+a431 1
+SYNEXL	CALLSYS	WaitIO
+d624 1
+d626 1
+@
+
+
+36.2
+log
+@removed debugging info
+@
+text
+@d410 1
+a410 1
+         DC.B     'COPYRIGHT 1984,1989 MARK BARTON & JOSEPH KATZ'
+@
+
+
+36.1
+log
+@*** empty log message ***
+@
+text
+@d4 2
+a5 1
+*************************************************************************
+d7 4
+a10 7
+*   Copyright 1986,1989 Joseph Katz/Mark Barton.  All rights reserved.	*
+*   No part of this program may be reproduced, transmitted,          	*
+*   transcribed, stored in retrieval system, or translated into      	*
+*   any language or computer language, in any form or by any         	*
+*   means, electronic, mechanical, magnetic, optical, chemical,      	*
+*   manual or otherwise, without the prior written permission of     	*
+*   the authors.							*
+d13 1
+a249 21
+	  MOVE.L   USERIORB(A5),A3		    ;Get IORB
+	  BTST	   #NDB_KEEPSYNTH,NDI_FLAGS(A3)     ;Check keep synth bfr bit
+	  BEQ.S	   No_Synth_Buffer		    ;Not on, skip it
+	  CLR.L    NDI_SYNTHBFR(A3)
+	  CLR.L	   NDI_SYNSIZ(A3)
+ 	  MOVE.L   COEFSIZE(A5),D0		    ;Number of bytes in coef
+	  LSR.L	   #3,D0		            ;Convert to frames
+	  SUBQ.L   #1,D0			    ;Ignore last frame (FF's)
+	  MULU     D1,D0			    ;Mult by samps per frame
+*	  LSL.L	   #1,D0			    ; (store every other samp)
+	  MOVE.L   D0,D2			    ;Save (AllocMem trashes D0)
+	  MOVE.L   #MEMF_PUBLIC+MEMF_CLEAR,D1       ;Use non-chip mem and clear
+	  MOVE.L   _AbsExecBase,A6
+          CALLSYS  AllocMem 		            ;Try to allocate 
+          TST.L    D0                               ;OK?
+	  BEQ.S	   No_Synth_Buffer		    ;No, skip it
+	  MOVE.L   D0,NDI_SYNTHBFR(A3)		    ;Yes, save output bfr ptr
+	  MOVE.L   D2,NDI_SYNSIZ(A3)		    ;  and buffer size in IORB
+	  MOVE.L   D0,SYNTHBFR(A5)                  ;Initialize bfr pointer
+
+No_Synth_Buffer:
+a471 22
+OutNoAb	BTST	#NDB_KEEPSYNTH,NDI_FLAGS(A3)  	;Check keep synth bfr bit
+	BEQ.S	SYNOUT2			    	;Not on, skip copying of bfr
+	TST.L	NDI_SYNTHBFR(A3)			;Did we get a synth buffer?
+	BEQ.S	SYNOUT2				;No, skip copying of bfr
+	MOVE.L	SYNTHBFR(A5),A3			;Yes, get current pointer
+	MOVE.W	#BUFFLEN,D6			;Length of buffer (words)
+	LSR.W	#3,D6				;Adjust for 4 MOVE'S of bytes
+	SUBQ.W  #1,D6				;Adjust for DBF
+	MOVE.W	D1,-(SP)
+SYNCOPY	MOVE.W	(A0)+,D1			;Copy every other byte of output
+	MOVE.B	D1,(A3)+			;  buffer to KEEPSYNTH buffer
+	MOVE.W	(A0)+,D1
+	MOVE.B	D1,(A3)+
+	MOVE.W	(A0)+,D1
+	MOVE.B	D1,(A3)+
+	MOVE.W	(A0)+,D1
+	MOVE.B	D1,(A3)+
+	DBF	D6,SYNCOPY
+	MOVE.W	(SP)+,D1
+	MOVE.L	A3,SYNTHBFR(A5)			;Update buffer pointer
+	
+SYNOUT2	MOVE.L	D7,A3				;Restore A3
+d473 1
+@
+
+
+36.0
+log
+@do not turn off blitter dma during synthesis
+@
+text
+@d1 14
+a14 27
+	TTL	'$Header: synth.asm,v 35.0 88/02/23 16:11:33 kodiak Exp $'
+**********************************************************************
+*                                                                    *
+*   Copyright 1986, Commodore-Amiga Inc.   All rights reserved.      *
+*   No part of this program may be reproduced, transmitted,          *
+*   transcribed, stored in retrieval system, or translated into      *
+*   any language or computer language, in any form or by any         *
+*   means, electronic, mechanical, magnetic, optical, chemical,      *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030                                     *
+*                                                                    *
+**********************************************************************
+*
+* $Header: synth.asm,v 35.0 88/02/23 16:11:33 kodiak Exp $
+*
+* $Locker: kodiak $
+*
+* $Log:	synth.asm,v $
+*   Revision 35.0  88/02/23  16:11:33  kodiak
+*   initial from V33.old
+*   
+* Revision 32.1  86/01/22  00:24:51  sam
+* placed under source control
+* 
+*
+**********************************************************************
+d16 1
+a16 1
+_AbsExecBase EQU 	4
+d26 1
+a26 1
+*           REGISTER USAGE (NOT TRUE)
+d28 4
+a31 4
+* D0 PITCH,MICFRAME     D4 AMP3,AMP2
+* D1 F1X,F2X            D5 SCRATCH
+* D2 F0X,F3X            D6 SCRATCH
+* D3 AMP2,AMP1          D7 OUTPUT
+d33 4
+a36 4
+* A0 SIN TABLE          A4 FRICS
+* A1 MULT TABLE         A5 VARIABLES
+* A2 MOUTHS             A6 COEF. BUFFER
+* A3 OUTPUT BUFFER+
+a40 3
+
+*
+
+d61 3
+a63 2
+io_Size	EQU	IO_SIZE
+        INCLUDE    'featequ.i'
+a68 3
+
+
+*
+d71 1
+d81 1
+a81 2
+        XREF       MULT,SIN,FRICS
+	XREF	   _custom		;for blitter ops
+d83 1
+d85 3
+a87 2
+BUFFLEN		EQU	512
+OUTBUFF2 	EQU	PHON+BUFFLEN
+d89 1
+a90 1
+SYNTH:
+d92 6
+a97 1
+*------- Compute addresses of fricatives
+d99 9
+a107 7
+         LEA      FRICS,A4
+         MOVE.L   A4,D0
+         LEA      FRADDR(A5),A4
+         MOVEQ    #7,D1           ;LOOP COUNT=8
+SYNFFA   MOVE.L   D0,(A4)+        ;MOVE ADDR INTO TABLE
+         ADD.L    #480,D0
+         DBF      D1,SYNFFA	
+d109 2
+a112 1
+
+a132 1
+
+a134 1
+
+a147 1
+
+d155 1
+a155 2
+*	MOVE.W	#BUFFLEN,ioa_Length(A1)		*!!!sam 7/12/85!!!
+	MOVE.W	#BUFFLEN,ioa_Length+2(A1)	*!!!sam 7/12/85!!!
+d170 1
+a170 2
+	SUBQ.W	#1,D0
+	BRA.S	SYN_CopyEnd
+d172 3
+a174 3
+SYN_IORBCopy:
+	MOVE.W	#(ioa_Size/2)-1,D1
+	MOVE.L	A0,A1
+d180 1
+a180 2
+SYN_CopyEnd:
+	DBF	D0,SYN_IORBCopy
+a184 1
+
+d225 6
+a230 3
+         LEA      SIN,A0
+         LEA      MULT,A1
+         MOVE.L   COEFPTR(A5),A6  ;POINT TO COEF BUFFER 
+d232 1
+a232 1
+         MOVEQ    #VARLEN-1,D0    ;CLEAR SYNTH VARIABLES
+d236 1
+a236 4
+         MOVE.W   #1,FRINC(A5)    ;INIT RECORDING DIRECTION+
+         MOVE.W   #BUFFLEN/2,SAMPCNT(A5) ;INIT SAMP CT
+         LEA      OUTBUFF1(A5),A3 ;USE FIRST BUFFER
+         CLR.W    BUFFLAG(A5)     ; AND DON'T SWITCH YET
+d240 35
+a274 16
+	  MOVE.W   SampFreq(A5),D0  ;NORMALLY 22200
+          MULU     #75,D0           ;FORCE RATE TO TRACK
+          DIVU     RATE(A5),D0
+          AND.L    #$FFFF,D0
+          DIVU     #60,D0
+          LSR.W    #1,D0            ;SPEED(A5) IS IN WORDS
+          MOVE.W   D0,SPEED(A5)          
+*
+* INITIALIZE BANDWIDTH PARAMETER
+*
+	 CLR.W    BANWID(A5)
+	 MOVE.W   #9,BANWID(A5)
+	 CMP.W    #MALE,SEX(A5)
+         BNE.S    SYNBWSET
+         ADDQ.W   #2,BANWID(A5)   ;IF MALE, ADD 3
+SYNBWSET MOVEQ    #0,D0           ;CLEAR EVAHBODY
+d282 2
+a283 2
+         MOVE.B   (A6)+,F1INC+1(A5) ;GET PARMS FROM COEF
+         BMI      SYNEXIT           ;BRANCH IF END (F1>127)
+d285 14
+a298 3
+         TST.B    Mouth(A5)
+         BEQ.S    SYNIFF
+         MOVE.L   MOTHPTR(A5),A2    ;PT TO MOUTHS IF WE'RE MAKING THEM 
+d300 1
+a300 17
+* Cache the state of the blitter and turn it off
+*	KODIAK 2/23/88	This is not worth it for two reasons:
+*	KODIAK 2/23/88	This code is neither disabled, forbid, nor running at
+*	KODIAK 2/23/88	a particularly high priority, so there are lots of
+*	KODIAK 2/23/88	other reasons that cycles may be lost than to the
+*	KODIAK 2/23/88	blitter.  More importantly, the old chips do not
+*	KODIAK 2/23/88	set BLTDONE in DMACONR when the blitter dma is off,
+*	KODIAK 2/23/88	so WaitBlit is fooled into thinking blits are
+*	KODIAK 2/23/88	immediately performed.  This would have to be upgraded
+*	KODIAK 2/23/88	to include a dma test in too many places to make it
+*	KODIAK 2/23/88	reasonable to do.
+SYNIFF:
+*	MOVE.L  A0,-(SP)			; KODIAK 2/23/88
+*	LEA	_custom,A0			; KODIAK 2/23/88
+*	MOVE.W	dmaconr(A0),MySig(A5)		; KODIAK 2/23/88
+*	MOVE.W  #DMAF_BLITTER,dmacon(A0)	; KODIAK 2/23/88
+*	MOVE.L  (SP)+,A0			; KODIAK 2/23/88
+d302 1
+a302 1
+* INSTALL FIRST FRAME
+d304 2
+a305 11
+	 MOVE.B   (A6)+,F2INC+1(A5)
+         CLR.W    F3INC(A5)
+         MOVE.B   (A6)+,F3INC+1(A5)
+         ASL.W    F3INC(A5)       ;DOUBLE F3 FREQ
+         ADDQ.L   #3,A6           ;SKIP AMPL PARMS
+         MOVE.B   (A6)+,FRFLAG(A5) ;GET FRIC FLAG
+         MOVE.B   (A6)+,D5
+         MOVE.B   D5,PITCH(A5)
+         MOVE.W   SPEED(A5),D0    ;RESET MICFRAME
+         SWAP     D0              ;POSITION PITCH LO
+         BRA      SYN0            ;PITCH SYNCHRONOUS ENTRY PT
+d307 1
+a307 1
+* ALL DATA ARE IN REGISTERS.
+d309 2
+a310 18
+SYN3     TST.B    FRFLAG(A5)  ;FRICATIVE?
+         BNE      FRIC1       ;YES, BRANCH
+SYN4     MOVEQ    #0,D7       ;NO, CLEAR OUTPUT  <<try removing this instr>>
+         MOVE.W   D1,D5       ;F1X TO SCR
+         LSR.W    #4,D5       ;JUSTIFY F1X
+         MOVE.W   D3,D6       ;AMPL1 TO SCRATCH
+         OR.B     0(A0,D5),D6 ;OVERLAY SIN F1
+         MOVE.B   0(A1,D6),D7 ;GET PROD F1
+         MOVE.L   D2,D5       ;F2X,F3X TO SCRATCH
+         LSR.L    #4,D5       ;JUSTIFY F3X,F2X
+         AND.W    #$0FFF,D5   ;REMOVE EXTRANEOUS BITS FROM F2X
+         MOVE.L   D4,D6       ;AMP3,AMPL2 TO SCRATCH
+         OR.B     0(A0,D5),D6 ;OVERLAY SIN F2
+         ADD.B    0(A1,D6),D7 ;ADD PROD F2 TO OUTPUT
+         SWAP     D5
+         SWAP     D6
+         OR.B     0(A0,D5),D6 ;OVERLAY SIN F3
+         ADD.B    0(A1,D6),D7 ;ADD PROD F3 TO OUTPUT
+d312 1
+a312 1
+* First output routine
+d314 4
+a317 4
+	MOVE.B    D7,(A3)+
+	MOVE.B    D7,(A3)+
+	SUBQ.W    #1,SAMPCNT(A5)
+	BNE       FRIC6
+d319 1
+a319 1
+* Let's waste some time
+d321 2
+a322 16
+*	MOVE.L    D0,-(SP)
+*WASTE   MOVE.W    #$1BE5,D0
+*WASTE1  NOP
+*	DBF       D0,WASTE1
+*	MOVE.L    (SP)+,D0
+*
+	MOVE.W    #BUFFLEN/2,SAMPCNT(A5)  ;restore sample count
+	SUB.L     #BUFFLEN,A3		  ;pt back to beginning of buffer
+	MOVEM.L   A0/A1/A2/A4/A6/D0/D1/D2,-(SP)
+	MOVE.L	USERIORB(A5),A3
+	MOVE.L	IO_DEVICE(A3),A4
+	MOVE.L	_AbsExecBase,A6
+	TST.B     Mouth(A5)             ;making mouths?
+	BEQ.S     SYNOUT1		;no branch
+	BSR	  DoMouth
+SYNOUT1	BSR	  SYN_Write
+d324 64
+a387 4
+	MOVEM.L	(SP)+,A0/A1/A2/A4/A6/D0/D1/D2
+	MOVE.L	USERIORB(A5),A3			;Abort request?
+	BTST	#IOB_ABORT,IO_FLAGS(A3)
+	BNE	SYN_AbortIt			;    yes
+d389 13
+a402 58
+	NOT.W     BUFFLAG(A5)           ;switch buffers
+        BNE.S     SYNSW1
+	LEA       OUTBUFF1(A5),A3       ;choose buffer 1
+	BRA.S     FRIC6
+SYNSW1	LEA       OUTBUFF2(A5),A3       ;choose buffer 2     
+*
+* INCREMENT POINTERS
+*
+FRIC6    MOVE.L   #$03FF03FF,D7 ;FOR MODULO ARITH
+         ADD.W    F1INC(A5),D1
+         SWAP     D2
+         ADD.L    F2INC(A5),D2
+         SWAP     D2
+         AND.W    D7,D1       ;MOD 64 + 4 BIT FRACTION
+         AND.L    D7,D2
+         SUBQ.W   #1,BW(A5)   ;DECR BANDWIDTH COUNT
+         BNE.S    SYN8
+         ADD.L    #64,A0      ;USE NEXT SIN TABLE (-2db)
+         MOVE.W   BANWID(A5),BW(A5) ;RESTORE BW COUNTER
+SYN8     SUBQ.W   #1,D0       ;DECR MICFRAME
+         BPL.S    SYN1        ;BRANCH IF SAME FRAME
+* FRAME UPDATE
+SYN5     MOVE.B   (A6)+,F1INC+1(A5) ;MOVE PARMS FROM COEF
+         BMI      SYNEXIT     ;BRANCH IF END
+         MOVE.B   (A6)+,F2INC+1(A5)
+         CLR.W    F3INC(A5)
+         MOVE.B   (A6)+,F3INC+1(A5)
+         ASL.W    F3INC(A5)      ;DOUBLE F3 FREQ
+*         MOVE.B   (A6)+,AMP1(A5) ;AMP1 TO HOLDING LOC
+*         MOVE.B   (A6)+,AMP2(A5) ;AMP2
+*         MOVE.B   (A6)+,AMP3(A5) ;AMP3
+         ADDQ.L   #3,A6           ;SKIP AMPL PARMS
+         MOVE.B   (A6)+,FRFLAG(A5) ;GET FRIC FLAG
+         BLE.S    SYN7A        ;BRANCH IF NOT AN UNVOICED FRIC
+         CLR.B    4(A6)        ;CLEAR AMPLS OF FOLLOWING FRAME
+         CLR.W    5(A6)
+         CLR.B    -4(A6)       ;AND CURRENT FRAME
+         CLR.W    -3(A6)       ; ( KLUDGE TO STOP CLAVE' POPPING )
+SYN7A    TST.B    FRFLAG(A5)   ;FRICATIVE?
+         BEQ.S    SYN7         ;NO, BRANCH
+         CLR.W    D5
+         MOVE.B   FRFLAG(A5),D5 ;YES, COMPUTE FRIC ADDR
+         BTST     #7,D5       ;VFRIC?
+         BEQ.S    FRIC5       ;NO, BRANCH
+         BSET     #31,D6      ;YES, USE AS VFRIC FLAG
+         BRA.S    FRIC5A      ;KEEP AMPL1
+FRIC5    MOVEQ    #0,D3       ;CLEAR FORMANT AMPL1
+FRIC5A   MOVE.B   D5,D6
+         AND.W    #$F,D6      ;D6 = FRIC AMPL
+         ASL.W    #5,D6       ;JUSTIFY AMPL
+         LSR.B    #2,D5       ;JUSTIFY I.D. TO ID*4
+         AND.B    #$1C,D5     ;REMOVE VFRIC & AMPL BITS
+         ADD.W    #FRADDR,D5
+         MOVE.L   0(A5,D5),A4 ;A4=CORRECT FRIC ADDR
+SYN7	 ADDQ.L   #1,A2       ;BUMP MOUTH POINTER
+         MOVE.B   (A6)+,D5
+         MOVE.B   D5,PITCH(A5)
+         MOVE.W   SPEED(A5),D0 ;RESET MICFRAME
+d404 8
+a411 19
+SYN1     SWAP     D0          ;POSITION PITCH LO
+         SUBQ.W   #1,D0       ;DECR PITCH
+         BPL.S    SYN2        ;BRANCH IF SAME PITCH PULSE
+SYN0     MOVEQ    #0,D1       ;RESET F1X
+         MOVEQ    #0,D2       ;RESET F2X,F3X
+         LEA      SIN,A0      ;RESET SIN TABLE ADDR
+         MOVE.W   BANWID(A5),BW(A5) ;RESTORE BW COUNTER
+         MOVEQ    #0,D3       ;CLEAR AMPL1
+         MOVEQ    #0,D4       ;CLEAR AMPL3,AMPL2
+         CLR.W    D0          ;INIT PITCH
+         MOVE.B   PITCH(A5),D0
+         MOVE.B   -5(A6),D3   ;UPDATE AMPLS
+         LSL.W    #5,D3       ;JUSTIFY AMPL
+         MOVE.B   -3(A6),D4
+         SWAP     D4          ;POSITION AMP3 HI
+         MOVE.B   -4(A6),D4
+         LSL.L    #5,D4
+SYN2     SWAP     D0          ;RESTORE PITCH,MICFRAME
+         BRA      SYN3        ;NEXT SAMPLE
+d413 20
+a432 1
+         DC.B     'COPYRIGHT 1984 MARK BARTON & JOSEPH KATZ'
+a433 56
+*
+* FRICATIVE PLAYBACK
+*
+FRIC1    MOVEQ    #0,D4       ;CLEAR FORMANT AMPL 2,3
+         MOVEQ    #0,D5       ;CLEAR SCRATCH
+         MOVE.W   FRIDEX(A5),D5 ;GET OLD REC INDEX
+FRIC2    MOVEQ    #0,D7       ;CLEAR OUTPUT SAMPLE
+         BTST     #31,D6      ;VFRIC?
+         BEQ.S    FRNF1       ;NO, BRANCH
+         MOVE.W   D1,D4       ;YES, COMPUTE F1 SAMPLE
+         LSR.W    #4,D4       ;JUSTIFY FOR SIN TABLE
+         MOVE.B   0(A0,D4),D4 ;GET SIN
+         AND.W    #$1F,D4     ;CLEAR STRAY BITS
+         OR.W     D3,D4       ;OR IN AMPLITUDE
+         MOVE.B   0(A1,D4),D7 ;GET PRODUCT F1
+FRNF1    MOVE.W   D7,-(SP)    ;SAVE PRODUCT (IF ANY)
+         CLR.W    D4
+         MOVE.B   0(A4,D5),D4 ;GET NOISE SAMPLE
+         MOVE.W   D4,-(SP)    ;SAVE FOR 2ND SAMPLE
+         AND.W    #$F,D4      ;ISOLATE 1ST SAMPLE
+         ADD.B    D4,D4       ;POSN SIGN BIT ( ASL.B #1 )
+         OR.W     D6,D4       ;OR IN AMPL
+         ADD.B    0(A1,D4),D7 ;ADD NOISE
+         MOVE.B   D7,(A3)+    ;PLACE IN OUTPUT BUFFER
+         MOVE.W   (SP)+,D4    ;RETRIEVE FRIC SAMPLE
+         AND.B    #$F0,D4     ;ISOLATE 2ND SAMPLE
+         LSR.B    #3,D4       ;POSN
+         OR.W     D6,D4       ;OR IN AMPLITUDE
+         MOVE.B   0(A1,D4),D7 ;GET NOISE PRODUCT
+         ADD.W    (SP)+,D7    ;ADD F1 VALUE (IF ANY)
+         MOVE.B   D7,(A3)+    ;PLACE IN OUTPUT BUFFER
+         MOVEQ    #0,D4       ;CLEAN UP D4 (AMPL2,3)
+*
+* Second output routine
+*
+	SUBQ.W    #1,SAMPCNT(A5)
+	BNE       OUTRTN2
+*
+* Let's waste some time
+*
+*	MOVE.L    D0,-(SP)
+*WASTE2  MOVE.W    #$1BE5,D0
+*WASTE3  NOP
+*	DBF       D0,WASTE3
+*	MOVE.L    (SP)+,D0
+*
+	MOVE.W    #BUFFLEN/2,SAMPCNT(A5)  ;restore sample count
+	SUB.L     #BUFFLEN,A3		;pt back to beginning of buffer
+	MOVEM.L   A0/A1/A2/A4/A6/D0/D1/D2/D7,-(SP)
+	MOVE.L	  USERIORB(A5),A3
+	MOVE.L	  IO_DEVICE(A3),A4
+	MOVE.L	  _AbsExecBase,A6
+	TST.B	  Mouth(A5)
+	BEQ.S	  SYNOUT2
+	BSR	  DoMouth
+SYNOUT2	BSR	  SYN_Write
+a434 27
+	MOVEM.L   (SP)+,A0/A1/A2/A4/A6/D0/D1/D2/D7
+        MOVE.L	  USERIORB(A5),A3
+	BTST	  #IOB_ABORT,IO_FLAGS(A3)
+	BNE	  SYN_AbortIt
+	NOT.W     BUFFLAG(A5)           ;switch buffers
+        BNE.S     SYNSW2
+	LEA       OUTBUFF1(A5),A3       ;choose buffer 1
+	BRA.S     OUTRTN2
+SYNSW2	LEA       OUTBUFF2(A5),A3       ;choose buffer 2     
+*
+OUTRTN2  ADD.W    FRINC(A5),D5 ;INCR RECORDING
+         BEQ      FRIC3        ;HIT BEGINNING?
+         CMP.W    #479,D5      ;HIT END?
+         BNE.S    FRIC4
+FRIC3    NEG.W    FRINC(A5)    ;REVERSE DIRECTION
+FRIC4    BTST     #31,D6       ;VFRIC?
+         BEQ.S    FRIC8        ;NO, BRANCH
+         ADD.W    F1INC(A5),D1   ; **** ADDED 2/16 TO INCREASE SPEED OF VFRIC
+         AND.W    #$3FF,D1       ;                  '
+         MOVEQ    #0,D2          ;                  '
+         MOVE.W   D5,FRIDEX(A5)  ;SAVE POSITION
+         BRA      SYN8    ;DO A FRAME UPDATE (CHGED 2/16 FROM FRIC6 FOR SPEED)
+FRIC8    SUBQ.W   #1,D0         ;DECR MICFRAME
+         BPL      FRIC2         ;DO ANOTHER 2 SAMPS
+         MOVE.W   D5,FRIDEX(A5) ;SAVE POSITION
+         BRA      SYN5          ;DO A FRAME UPDATE
+
+d450 1
+a450 9
+*   Turn blitter back on, if it was on.
+*	MOVE.W	MySig(A5),D0				; KODIAK 2/23/88
+*	BTST    #DMAB_BLITTER,D0			; KODIAK 2/23/88
+*	BEQ.S	SYNEXL					; KODIAK 2/23/88
+*	CLR.W	MySig(A5)				; KODIAK 2/23/88
+*	LEA     _custom,A6				; KODIAK 2/23/88
+*	MOVE.W	#DMAF_SETCLR+DMAF_BLITTER,dmacon(A6)	; KODIAK 2/23/88
+*	MOVE.L	_AbsExecBase,A6				; KODIAK 2/23/88
+
+a461 8
+*   Turn blitter back on, if it was on.
+*	MOVE.W	MySig(A5),D0				; KODIAK 2/23/88
+*	BTST    #DMAB_BLITTER,D0			; KODIAK 2/23/88
+*	BEQ.S	SYNXIT					; KODIAK 2/23/88
+*	LEA     _custom,A6				; KODIAK 2/23/88
+*	MOVE.W	#DMAF_SETCLR+DMAF_BLITTER,dmacon(A6)	; KODIAK 2/23/88
+
+*SYNXIT
+d465 13
+d479 37
+a515 5
+DoMouth:
+	DISABLE
+	MOVE.B	(A2),D0			;Here's the new mouth
+	CMP.B	CURMOUTH(A5),D0		;Same as the old mouth
+	BEQ.S	DoMouth_Rtn		;Read won't get sent again
+d517 6
+a522 1
+	MOVE.B	D0,CURMOUTH(A5)		;Store the new mouth
+d524 35
+d560 2
+d564 2
+a565 2
+	BEQ.S	DoMouth_Rtn		;Input queue empty, just return
+	MOVE.L	(A0),A1			;Look at first entry on list
+d567 4
+a570 4
+	BNE.S	DoMouth_Rtn			;No, just return
+	MOVE.L	IO_UNIT(A1),D1		;does the read match the current write?
+	CMP.L	IO_UNIT(A3),D1
+	BNE.S	DoMouth_Rtn		;Read not for this write, just return
+a571 3
+*	;------	Are the mouth shapes different?
+	CMP.B	MRB_SHAPE(A1),D0
+	BEQ.S	DoMouth_Rtn		;Same shape, just return
+d573 28
+a600 5
+*	;------ Remove the read request from the queue and reply to user.
+	MOVE.B	D0,MRB_SHAPE(A1)
+	MOVE.B	D0,D1
+	AND.B	#$0F,D0
+	MOVE.B	D0,MRB_WIDTH(A1)
+d602 1
+a602 1
+	MOVE.B	D1,MRB_HEIGHT(A1)
+d604 1
+a604 1
+	REMHEADQ A0,A1,A2
+d606 2
+a607 1
+	CALLSYS	ReplyMsg
+d610 1
+a610 1
+DoMouth_Rtn:
+d615 7
+d646 1
+a646 1
+	MOVE.L  A1,-(SP)		*!!!sam 7/12/85!!!
+d648 1
+a648 1
+	MOVE.L  (SP)+,A1		*!!!sam 7/12/85!!!
+a663 9
+
+*	;------	Turn on the blitter, if it was on before
+*	MOVE.W	MySig(A5),D0	;get blitter state	; KODIAK 2/22/88
+*	BTST	#DMAB_BLITTER,D0			; KODIAK 2/22/88
+*	BEQ.S   SYN_WLoop				; KODIAK 2/22/88
+*	LEA	_custom,A0				; KODIAK 2/22/88
+*	MOVE.W  #DMAF_SETCLR+DMAF_BLITTER,dmacon(A0)	; KODIAK 2/22/88
+	
+
+a670 5
+*	;------	Save blitter's state and turn it off
+*BLITOFF
+*	LEA	_custom,A0				; KODIAK 2/22/88
+*	MOVE.W	dmaconr(A0),MySig(A5)			; KODIAK 2/22/88
+*	MOVE.W  #DMAF_BLITTER,dmacon(A0)		; KODIAK 2/22/88
+a685 1
+
+@
+
+
+35.0
+log
+@initial from V33.old
+@
+text
+@d1 1
+a1 1
+	TTL	'$Header: synth.asm,v 32.1 86/01/22 00:24:51 sam Exp $'
+d15 1
+a15 1
+* $Header: synth.asm,v 32.1 86/01/22 00:24:51 sam Exp $
+d17 1
+a17 1
+* $Locker:  $
+d20 3
+d286 16
+a301 5
+SYNIFF	MOVE.L  A0,-(SP)
+	LEA	_custom,A0
+	MOVE.W	dmaconr(A0),MySig(A5)
+	MOVE.W  #DMAF_BLITTER,dmacon(A0)
+	MOVE.L  (SP)+,A0
+d551 7
+a557 7
+	MOVE.W	MySig(A5),D0				;!!!sam 10/26/85!!!
+	BTST    #DMAB_BLITTER,D0			;!!!sam 10/26/85!!!
+	BEQ.S	SYNEXL					;!!!sam 10/26/85!!!
+	CLR.W	MySig(A5)				;!!!sam 10/26/85!!!
+	LEA     _custom,A6				;!!!sam 10/26/85!!!
+	MOVE.W	#DMAF_SETCLR+DMAF_BLITTER,dmacon(A6)	;!!!sam 10/26/85!!!
+	MOVE.L	_AbsExecBase,A6				;!!!sam 10/26/85!!!
+d571 5
+a575 5
+	MOVE.W	MySig(A5),D0
+	BTST    #DMAB_BLITTER,D0
+	BEQ.S	SYNXIT
+	LEA     _custom,A6
+	MOVE.W	#DMAF_SETCLR+DMAF_BLITTER,dmacon(A6)
+d577 2
+a578 1
+SYNXIT	RTS
+d667 5
+a671 5
+	MOVE.W	MySig(A5),D0	;get blitter state
+	BTST	#DMAB_BLITTER,D0
+	BEQ.S   SYN_WLoop
+	LEA	_custom,A0
+	MOVE.W  #DMAF_SETCLR+DMAF_BLITTER,dmacon(A0)
+d682 4
+a685 4
+BLITOFF
+	LEA	_custom,A0
+	MOVE.W	dmaconr(A0),MySig(A5)
+	MOVE.W  #DMAF_BLITTER,dmacon(A0)
+@

@@ -1,0 +1,459 @@
+#!/bin/sh
+#
+# DOCCHECK - validates autodocs SYNOPSIS lines against fd's for
+#		- public functions missing from autodoc
+#		- private functions in autodoc
+#		- argument count mismatches
+
+COMMAND="doccheck"
+USAGE="USAGE: $COMMAND [subsys [fddir autodocdir oldfddir]]"
+
+DEBUG=
+DEBUG2=
+DEBUG3=
+
+VER1="V36"
+VER2="V37"
+
+TMPAWK1="$HOME/.tmpawk1"
+TMPAWK2="$HOME/.tmpawk2"
+TMPAWK3="$HOME/.tmpawk3"
+TMPAWK4="$HOME/.tmpawk4"
+TMPAWK5="$HOME/.tmpawk5"
+TMPAWK6="$HOME/.tmpawk6"
+
+
+TMPFILE1="$HOME/.tmpfile1"
+TMPFILE2="$HOME/.tmpfile2"
+TMPFILE3="$HOME/.tmpfile3"
+TMPFILE4="$HOME/.tmpfile4"
+BADFILE="$HOME/.tmpfile5"
+
+# for VAX
+# DOCDIR="/usr/commodore/amiga/V/doc"
+# FDDIR="/usr/commodore/amiga/V/fd"
+# OLDFDDIR="/users/cats/carolyn/fd1.3"
+
+# For heartofgold
+DOCDIR="/usr/commodore/amiga/V/doc"
+FDDIR="/usr/commodore/amiga/V/fd"
+OLDFDDIR="/usr/skipper/carolyn/fd1.3"
+
+# For local check
+# DOCDIR="/users/cats/carolyn/doc"
+# FDDIR="/users/cats/carolyn/fd2.0"
+# OLDFDDIR="/users/cats/carolyn/fd1.3"
+
+FDPAT="*"
+
+MISSING="missing doc or bad synopsis for public function"
+PRIVATE="has autodoc for private function"
+BADARGS="possible argument count mismatch"
+NEWLIBNOVERS="new library - functions with no version !!!"
+NEWFUNCNOVERS="new function with no version !!!"
+PROBABLYOK="not in FD file, probably OK"
+PLEASE="PLEASE UPDATE THIS AUTODOC TO STANDARD FORMAT !!!"
+
+# Check that correct pattern has been provided
+case $# in
+   0)	
+	;;
+
+   1)   FDPAT="${1}*"
+	;;
+   2)
+	echo "$USAGE"
+	exit
+	;;
+   3)
+	FDPAT="$1"
+	FDDIR="$2"
+	DOCDIR="$3"
+	;;
+   4)
+	FDPAT="$1"
+	FDDIR="$2"
+	DOCDIR="$3"
+	OLDFDDIR="$4"
+	;;
+
+   *)
+	echo "$USAGE"
+	exit
+	;;
+
+esac
+
+
+# BUILD AWK SCRIPT FOR CHOPPING FD NAME
+cat >$TMPAWK1 << !!EOF!!
+BEGIN {RS="_"; FS="/"}  {print \$(NF)}
+!!EOF!!
+
+
+# BUILD AWK SCRIPT FOR GETTING SYNOPSES
+cat >$TMPAWK2 << !!EOF!!
+BEGIN { FS = "="; funcdesc = "" }
+
+	{ if (v == 1)
+		{
+		if (\$0~/$VER1/)	{ hasv = "VVV" }
+		if (\$0~/$VER2/)	{ hasv = "VVV" }
+		}
+	  if (s == 2)
+		{
+		print funcdesc hasv
+		s = 0
+		funcdesc = ""
+		}
+	  else if (s == 1)
+		{
+		if (NF > 1)
+			{
+			funcdesc = funcdesc \$2
+			}
+		else
+			{
+			funcdesc = funcdesc \$0
+			}
+		fcp = index(funcdesc,"(")
+		if (fcp)
+			{
+			rest = substr(funcdesc,fcp+1,length(funcdesc))
+			scp = index(rest,")")
+			if (scp)
+				{
+				s = 2
+				}
+			}
+		}
+	  else if (\$1~/SYNOPSIS/)
+		{
+		s = 1
+		v = 0
+		}
+	  else if (\$1~/SYNOPSYS/)
+		{
+		s = 1
+		v = 0
+		}
+	  else
+		{
+		s = 0
+		}
+	  if (\$1~/NAME/)
+		{
+		hasv = ""
+		v = 1
+		}
+	}
+!!EOF!!
+# END OF AWK SCRIPT
+
+
+# BUILD AWK SCRIPT FOR FIXING commodities.doc
+cat >$TMPAWK3 << !!EOF!!
+BEGIN { n=0 }
+
+	{ if (n == 1)
+		{
+		print "  SYNOPSIS"
+		n = 0
+		}
+	  print \$0
+	}
+/NAME/	{ n=1 }
+!!EOF!!
+
+# BUILD AWK SCRIPT FOR counting commas
+cat >$TMPAWK4 << !!EOF!!
+BEGIN { n=1 }
+
+	{ for (k=1; k<=length; k++)
+		{
+		if(substr(\$0,k,1) == ",")
+			{
+			n=n+1
+			}
+		}
+	}
+END { print n }
+!!EOF!!
+
+# BUILD AWK SCRIPT FOR discarding initial fields without "(" (like APTR)
+cat >$TMPAWK5 << !!EOF!!
+	{
+	opp = index(\$1,"(")
+	if (opp)
+		{
+		print \$0
+		}
+	else
+		{
+		opp = 0
+		rest = ""
+		for (k=1; k<=NF; k++)
+			{
+			if (opp == 0)
+				{
+				opp = index(\$k,"(")
+				}
+			if (opp > 0)
+				{
+				rest = rest \$k
+				}
+			}
+		firstc = substr(rest,1,1)
+		if ( firstc == "*" )
+			{
+			print substr(rest,2,length(rest)-1)
+			}
+		else
+			{
+			print rest
+			}
+		}
+	}
+
+!!EOF!!
+
+# BUILD AWK SCRIPT FOR complaining about non-vanilla synopses
+cat >$TMPAWK6 << !!EOF!!
+	{
+	opp = index(\$1,"(")
+	if (opp == 0)
+		{
+		n = index(\$0,"(")
+		part = substr(\$0,1,n)
+		print "NON-standard SYNOPSIS contains: " part
+		}
+	}
+!!EOF!!
+
+
+#
+# THE MAIN LOOP
+#
+
+for FDNAME in $FDDIR/$FDPAT
+do
+	echo " "
+	# this is the file where we keep track of badness
+	# because variables don't seem to survive this piping stuff
+	if [ -r $BADFILE ]
+	then
+		rm $BADFILE
+	fi
+
+# cut the library name out of filename "path/library_lib.fd"
+
+        LIBNAME=`echo $FDNAME |  awk -f $TMPAWK1`
+
+# make the doc name
+
+	DOCNAME="$DOCDIR/$LIBNAME.doc"
+
+# is this a screwed up commodities.doc ?
+	if [ "${LIBNAME}" = "commodities" ]
+	then
+	    if grep -s "SYNOPSIS" $DOCNAME
+ 	    then
+		a=1
+	    else
+		echo "BAD" >$BADFILE
+		cp $DOCNAME $TMPFILE1
+		echo "commodities: Autodocs NONSTANDARD !!!!!"
+		echo "                 Need MAJOR formatting changes!!!!"
+		echo "                 I'll munge the .doc so I can check it."
+		echo "                 $PLEASE"
+		awk -f $TMPAWK3 $TMPFILE1 |
+		sed -e 's/NAME/NAME\
+/g' |
+		sed -e 's/DESCRIPTION/FUNCTION/g' >$TMPFILE2
+		DOCNAME="${TMPFILE2}"
+	    fi
+	fi
+
+
+# is this a screwed up mathffp.doc ?
+	if [ "${LIBNAME}" = "mathffp" ]
+	then
+	    if grep -s "C USAGE" $DOCNAME
+ 	    then
+		echo "BAD" >$BADFILE
+		cp $DOCNAME $TMPFILE1
+		echo "mathffp: Autodocs NONSTANDARD !!!!!"
+		echo "             Using C USAGE instead of SYNOPSIS !!!!"
+		echo "             I'll munge the .doc so I can check it."
+		echo "             $PLEASE"
+		sed -e 's/C USAGE/SYNOPSIS/g' $TMPFILE1 >$TMPFILE2
+		DOCNAME="${TMPFILE2}"
+	    fi
+	fi
+
+
+# get all synopsis lines from an autodoc
+
+	if grep -s "SYNOPSYS" $DOCNAME
+	then
+		echo "BAD" >$BADFILE
+		echo "$LIBNAME: SYNOPSIS spelled wrong in autodoc !"
+	fi
+
+	awk -f $TMPAWK2 $DOCNAME | expand -1 |
+	 sed -e 's/^ //g' | sed -e 's/ (/(/g' >$TMPFILE3
+
+	if [ "${DEBUG2}" ]
+	then
+		echo "Synopsis lines before munging:"
+		more $TMPFILE3
+	fi
+
+	awk -f $TMPAWK5 $TMPFILE3 |
+	sed -e 's/ //g' | sed -e 's/;//' >$TMPFILE1
+
+
+if [ "${DEBUG}" ]
+then
+	echo "after TMPAWK5"
+	more $TMPFILE1
+fi
+
+	# Check for non-standard SYNOPSIS lines
+	echo "$LIBNAME: checking..."
+	awk -f $TMPAWK6 $TMPFILE3
+
+
+	# Check for new functions with no version marked
+	# I tagged all that had versions with "VVV"
+
+if [ "${DEBUG}" ]
+then
+	echo "old fd is $OLDFDDIR/${LIBNAME}_lib.fd"
+	more ${OLDFDDIR}/${LIBNAME}_lib.fd
+fi
+
+	# if this is a not a new library	
+	if [ -r $OLDFDDIR/${LIBNAME}_lib.fd ]
+	then
+	    # check all non-versionated functions against old FD
+	    cat $TMPFILE1 |
+	    while L="`line`"
+	    do
+		# if function versionated
+	    	if echo "$L" | grep -s "VVV"
+		then
+		   a=1
+		# else look for it in old fd file
+		else
+		    funcname="`echo "${L}" | cut -f1 -d'('`"
+		    if grep -s "${funcname}" ${OLDFDDIR}/${LIBNAME}_lib.fd 
+		    # if it's in the old fd file, then OK
+		    then
+			a=1
+		    # else see if really a function...
+		    else
+			# not in old fd, how about new ?
+			if grep -s "${funcname}" ${FDDIR}/${LIBNAME}_lib.fd
+			then
+			    # Is a new func in new FD but NOT versionated
+			    echo "BAD" >$BADFILE
+			    echo "${LIBNAME}.doc: ${NEWFUNCNOVERS}: ${funcname}"
+			else
+			    # Not in new nor old FD
+			    echo "${LIBNAME}.doc: ${PROBABLYOK}: ${funcname}"
+			fi
+		    fi
+		fi
+	    done
+	else
+	    # Is a new library... if there are no VVV's then OK
+	    if grep -s "VVV" $TMPFILE1
+	    then
+		a=1
+	    # else just complain once
+	    else
+		echo "BAD" >$BADFILE
+		echo "${LIBNAME}.doc: $NEWLIBNOVERS"
+	    fi
+	fi
+	
+
+# Now - the validation of autodoc functions against current FD file
+# get the matching FD file one line at a time!
+#
+	pub=1
+	cat $FDNAME |
+	while L="`line`"
+	do
+		init1="`echo "${L}" | cut -c1`"
+		init3="`echo "${L}" | cut -c3-5`"
+
+		if [ "${init3}" = "pri" ]
+		then
+			pub=0
+		fi
+		if [ "${init3}" = "pub" ]
+		then
+			pub=1
+		fi
+		if [ "${init1}" = "#" -o "${init1}" = "*" ]
+		then
+			# do nothing
+			a=1
+		else
+		 	funcname="`echo "${L}" | cut -f1 -d'('`"
+			fdargs="`echo "${L}" | cut -f2-2 -d'(' | cut -f1-1 -d')'`"
+			
+			# count commas in fdargs
+			fdac="`echo "${fdargs}" | awk -f $TMPAWK4`"
+
+			if [ "${DEBUG3}" ]
+			then
+				echo "$funcname: args=$fdargs: count=$fdac"
+			fi
+
+			# get match in autodocs
+			amatch="`grep "\^${funcname}\(" ${TMPFILE1}`"
+
+			if [ $pub = 0 ]
+			then
+				if [ "${amatch}" ]
+				then
+					echo "BAD" >$BADFILE
+					echo "$LIBNAME: $PRIVATE: $funcname"
+				fi
+			else
+				if [ "${amatch}" ]
+				then
+					adargs="`echo "${amatch}" | cut -f2-2 -d'(' | cut -f1-1 -d')'`"
+					adac="`echo "${adargs}" | awk -f $TMPAWK4`"
+
+				if [ "${DEBUG3}" ]
+				then
+					echo "autodoc: amatch=$amatch args=$adargs: count=$adac"
+				fi
+
+					if [ ! "${fdac}" = "${adac}" ]
+					then
+						echo "BAD" >$BADFILE
+						echo "$LIBNAME: $BADARGS: $funcname"
+						echo "     FD  args = ${fdargs}"
+						echo "     Doc args = ${adargs}"
+					fi
+				else
+					echo "BAD" >$BADFILE
+					echo "$LIBNAME: $MISSING: $funcname"
+				fi
+			fi
+#		 echo "line is $L, pub is $pub, func is $funcname"
+		fi
+	done
+
+	if [ -r $BADFILE ]
+	then
+		echo "$LIBNAME: Autodoc appears to have problems"
+	else
+		echo "$LIBNAME: OK"
+	fi
+done

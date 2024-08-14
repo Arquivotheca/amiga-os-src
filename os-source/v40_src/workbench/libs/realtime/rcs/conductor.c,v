@@ -1,0 +1,1192 @@
+head     40.3;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+40.3
+date     93.04.05.13.54.43;  author vertex;  state Exp;
+branches ;
+next     40.2;
+
+40.2
+date     93.03.26.13.30.13;  author vertex;  state Exp;
+branches ;
+next     40.1;
+
+40.1
+date     93.03.16.11.11.55;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@realtime.library conductor/player handling code
+@
+
+
+40.3
+log
+@*** empty log message ***
+@
+text
+@
+#include <exec/memory.h>
+#include <string.h>
+#include <stddef.h>
+
+#include <clib/exec_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/alib_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+#include "realtimebase.h"
+#include "timerinit.h"
+
+
+/*****************************************************************************/
+
+
+typedef VOID ASM (*STATEFUNC)(REG(a0) struct Hook *, REG(a1) struct pmState *, REG(a2) struct ExtPlayer *);
+typedef VOID ASM (*TIMEFUNC)(REG(a0) struct Hook *, REG(a1) struct pmTime *, REG(a2) struct ExtPlayer *);
+
+
+/*****************************************************************************/
+
+
+/* notify_players - Calls Player hooks to inform of Conductor play
+ *	            state change.
+ */
+
+static VOID notify_players(struct ExtConductor *cond, ULONG oldState)
+{
+struct ExtPlayer *player;
+struct pmState     msg;
+
+    msg.pms_Method   = PM_STATE;
+    msg.pms_OldState = oldState;
+
+    SCANLIST(&cond->ec_Players,player)
+    {
+        if (player->ep_Hook)
+            ((STATEFUNC)player->ep_Hook->h_Entry)(player->ep_Hook,&msg,player);
+    }
+
+}
+
+
+/*****************************************************************************/
+
+
+/* clear_ready -  Clears ready bits of Player's with hooks. */
+
+static VOID clear_ready(struct ExtConductor *cond)
+{
+struct ExtPlayer *player;
+
+    cond->ec_Flags &= ~CONDUCTF_GOTTICK;
+
+    if (cond->ec_Flags & CONDUCTF_EXTERNAL)
+	cond->ec_Stopped |= CONDSTOPF_NOTICK;
+
+    SCANLIST(&cond->ec_Players,player)
+    {
+	if (player->ep_Hook)
+            player->ep_Flags &= ~PLAYERF_READY;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* check_ready - Checks ready bits to see if should go from LOCATING to
+ *	         RUNNING.
+ */
+
+static VOID check_ready(struct ExtConductor *cond)
+{
+struct ExtPlayer *player;
+
+    if (cond->ec_State == CONDSTATE_LOCATE)
+    {
+	SCANLIST(&cond->ec_Players,player)
+	{
+	    if (player->ep_Hook && !(player->ep_Flags & PLAYERF_READY))
+                return;
+	}
+
+	cond->ec_State    = CONDSTATE_RUNNING;
+	cond->ec_Stopped &= ~CONDSTOPF_STOPPED;
+	notify_players(cond,CONDSTATE_LOCATE);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* notify_conducted_players - Calls Player hooks to inform of Conductor
+ * 			      play state change
+ */
+
+static VOID notify_conducted_players(struct ExtPlayer *maestro, ULONG oldState)
+{
+struct ExtPlayer *player;
+struct pmState     msg;
+
+    msg.pms_Method   = PM_STATE;
+    msg.pms_OldState = oldState;
+
+    SCANLIST(&maestro->ep_Link,player)
+    {
+	if (player->ep_Flags & PLAYERF_CONDUCTED)
+            ((STATEFUNC)player->ep_Hook->h_Entry)(player->ep_Hook,&msg,player);
+    }
+
+}
+
+
+/*****************************************************************************/
+
+
+/* notify_locate_players - Calls Player hooks to inform of Conductor play
+ *	                   state change
+ */
+
+static VOID notify_locate_players(struct ExtConductor *cond, ULONG oldState)
+{
+struct ExtPlayer *player;
+struct pmState     msg;
+
+    msg.pms_Method   = PM_STATE;
+    msg.pms_OldState = oldState;
+
+    SCANLIST(&cond->ec_Players,player)
+    {
+        if (player->ep_Hook)
+            ((STATEFUNC)player->ep_Hook->h_Entry)(player->ep_Hook,&msg,player);
+
+	if (player->ep_Flags & PLAYERF_CONDUCTED)
+            return;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* find_maestro - Attempts to locate Player with highest priority.
+ *                If no such Player exists, return NULL.
+ */
+
+static struct ExtPlayer *find_maestro(struct ExtConductor *cond)
+{
+struct ExtPlayer *player;
+
+    SCANLIST(&cond->ec_Players,player)
+    {
+	if (player->ep_Flags & PLAYERF_CONDUCTED)
+            return(player);
+    }
+
+    return(NULL);
+}
+
+
+/*****************************************************************************/
+
+
+/* find_conductor - Attempts to locate a conductor by name on the
+ *		    ConductorList. If no such conductor exists, it will be
+ *		    created by this function.
+ *
+ *                  Pass this the name of the Conductor to find or create.
+ *                  If ~0, never match existing Conductor, always create one.
+ *
+ *                  Pass this a NULL name, and you get NULL back.
+ */
+
+static struct ExtConductor *find_conductor(STRPTR name, struct RealTimeLib *RealTimeBase)
+{
+struct ExtConductor *cond;
+
+    if (!name)
+        return(NULL);
+
+    if (name != (STRPTR)~0)
+    {
+	if (cond = (struct ExtConductor *)FindName((struct List *)&RealTimeBase->rtl_ConductorList,name))
+            return cond;
+    }
+    else
+    {
+        name = "";
+    }
+
+    if (cond = ALLOCVEC(sizeof(struct ExtConductor) + strlen(name) + 1,MEMF_CLEAR))
+    {
+        cond->ec_Link.ln_Name = (STRPTR)&cond[1];
+        strcpy(cond->ec_Link.ln_Name,name);
+        cond->ec_Stopped = CONDSTOPF_STOPPED;
+        NewList((struct List *)&cond->ec_Players);
+
+        if (!name[0])
+            cond->ec_Flags = CONDUCTF_PRIVATE;
+
+        AddHead((struct List *)&RealTimeBase->rtl_ConductorList,cond);
+    }
+
+    return(cond);
+}
+
+
+/*****************************************************************************/
+
+
+/* flush_conductor - Flushes a conductor if its Player list is empty. */
+
+static VOID flush_conductor(struct ExtConductor *cond, struct RealTimeLib *RealTimeBase)
+{
+    if (IsListEmpty((struct List *)&cond->ec_Players))
+    {
+	Remove(cond);
+	FREEVEC(cond);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+static VOID SetErrorCode(struct TagItem *tagList, ULONG error,
+                         struct RealTimeLib *RealTimeBase)
+{
+ULONG *errbuf;
+
+    if (errbuf = (ULONG *)GETTAGDATA(PLAYER_ErrorCode, NULL, tagList))
+        *errbuf = error;
+}
+
+
+/*****************************************************************************/
+
+
+BOOL ASM LIBSetPlayerAttrsA(REG(a0) struct ExtPlayer *player,
+                            REG(a1) struct TagItem *tagList,
+                            REG(a6) struct RealTimeLib *RealTimeBase)
+{
+ULONG                err;
+BOOL	             no_cond;
+BOOL	             ready;
+struct ExtConductor *cond;
+struct TagItem      *tag;
+struct TagItem      *tags = tagList;
+ULONG                data;
+
+    err   = 0;
+    ready = FALSE;
+
+    LockCond();
+    LockPlayerList();
+
+    no_cond = IsListEmpty((struct List *)&RealTimeBase->rtl_ConductorList);
+
+    while (tag = NEXTTAGITEM(&tags))
+    {
+        data = tag->ti_Data;
+
+        switch (tag->ti_Tag)
+        {
+            case PLAYER_Name        : player->ep_Link.ln_Name = (STRPTR)data;
+                                      break;
+
+	    case PLAYER_AlarmSigTask: player->ep_Task = (struct Task *)data;
+				      break;
+
+	    case PLAYER_AlarmSigBit : player->ep_AlarmSigBit  = (BYTE)data;
+	                              player->ep_AlarmSigMask = (1 << data);
+                                      break;
+
+	    case PLAYER_UserData    : player->ep_UserData = (VOID *)data;
+				      break;
+
+	    case PLAYER_ID          : player->ep_PlayerID = (UWORD)data;
+				      break;
+
+            case PLAYER_Hook        : player->ep_Hook = (struct Hook *)data;
+				      break;
+
+	    case PLAYER_AlarmTime   : player->ep_AlarmTime = (LONG)data;
+                                      player->ep_Flags     |= PLAYERF_ALARMSET;
+                                      break;
+
+            case PLAYER_Priority    : player->ep_Link.ln_Pri = (BYTE)data;
+                                      if (cond = (struct ExtConductor *)player->ep_Source)
+                                      {
+                                          Remove(&player->ep_Link);
+                                          Enqueue((struct List *)&cond->ec_Players,player);
+                                      }
+                                      break;
+
+            case PLAYER_Conductor   : cond = find_conductor((STRPTR)data,RealTimeBase);
+                                      if (cond != player->ep_Source)
+                                      {
+                                          if (player->ep_Source)
+                                          {
+                                              Remove(player);
+                                              if (player->ep_Flags & PLAYERF_EXTSYNC)
+                                              {
+                                                  player->ep_Flags &= ~PLAYERF_EXTSYNC;
+                                                  ((struct ExtConductor *)player->ep_Source)->ec_Flags &= ~CONDUCTF_EXTERNAL;
+                                              }
+                                              flush_conductor(player->ep_Source,RealTimeBase);
+                                          }
+                                          player->ep_Source = cond;
+
+                                          if (cond)
+                                              Enqueue((struct List *)&cond->ec_Players,player);
+                                      }
+
+                                      if (!cond && data)
+                                      {
+                                          err = RTE_NOMEMORY;
+                                      }
+                                      break;
+
+            case PLAYER_ExtSync     : if (cond = player->ep_Source)
+                                      {
+                                          if (data)
+                                          {
+                                              if (!(cond->ec_Flags & CONDUCTF_EXTERNAL))
+                                              {
+                                                  player->ep_Flags |= PLAYERF_EXTSYNC;
+                                                  cond->ec_Flags |= CONDUCTF_EXTERNAL;
+                                              }
+                                              else
+                                              {
+                                                  /* !!! error? !!! */
+                                              }
+                                          }
+                                          else
+                                          {
+                                              if (player->ep_Flags & PLAYERF_EXTSYNC)
+                                              {
+                                                  player->ep_Flags &= ~PLAYERF_EXTSYNC;
+                                                  cond->ec_Flags &= ~CONDUCTF_EXTERNAL;
+                                              }
+                                          }
+                                      }
+                                      break;
+
+            case PLAYER_Ready       : if (data)
+                                      {
+			                  player->ep_Flags |= PLAYERF_READY;
+                                          ready = TRUE;
+                                      }
+                                      else
+                                      {
+                                          player->ep_Flags &= ~PLAYERF_READY;
+                                      }
+                                      break;
+
+	    case PLAYER_Quiet       : if (data)
+                                      {
+                                          player->ep_Flags |= PLAYERF_QUIET;
+                                      }
+                                      else
+                                      {
+                                          player->ep_Flags &= ~PLAYERF_QUIET;
+                                      }
+                                      break;
+
+	    case PLAYER_Alarm       : if (data)
+                                      {
+                                          player->ep_Flags |= PLAYERF_ALARMSET;
+                                      }
+                                      else
+                                      {
+                                          player->ep_Flags &= ~PLAYERF_ALARMSET;
+                                      }
+                                      break;
+
+	    case PLAYER_Conducted   : if (data)
+                                      {
+                                          player->ep_Flags |= PLAYERF_CONDUCTED;
+                                      }
+                                      else
+                                      {
+                                          player->ep_Flags &= ~PLAYERF_CONDUCTED;
+                                      }
+                                      break;
+        }
+
+        if (err)
+            break;
+    }
+
+    if (player->ep_Hook == NULL)
+    {
+        player->ep_Flags &= ~PLAYERF_CONDUCTED;
+    }
+    else if (ready && player->ep_Source)
+    {
+        check_ready(player->ep_Source);
+    }
+
+    if ((player->ep_Task == NULL) || (player->ep_AlarmSigBit == -1))
+    {
+        player->ep_Flags &= ~PLAYERF_ALARMSET;
+    }
+
+    if (no_cond != IsListEmpty((struct List *)&RealTimeBase->rtl_ConductorList))
+    {
+	if (no_cond)
+	{
+            err = OpenTimer(RealTimeBase);
+        }
+	else
+	{
+            CloseTimer(RealTimeBase);
+        }
+    }
+
+    UnlockPlayerList();
+    UnlockCond();
+
+    if (err)
+    {
+        SetErrorCode(tagList, err, RealTimeBase);
+        return(FALSE);
+    }
+
+    return(TRUE);
+}
+
+
+/*****************************************************************************/
+
+
+ULONG ASM LIBGetPlayerAttrsA(REG(a0) struct ExtPlayer *player,
+                             REG(a1) struct TagItem *tagList,
+                             REG(a6) struct RealTimeLib *RealTimeBase)
+{
+ULONG	             count;
+struct TagItem      *tag;
+struct TagItem      *tags = tagList;
+ULONG                data;
+struct ExtConductor *cond;
+
+    count = 0;
+
+    if (player)
+    {
+        LockCond();
+        LockPlayerList();
+
+        while (tag = NEXTTAGITEM(&tags))
+        {
+            count++;
+            data = tag->ti_Data;
+
+            switch (tag->ti_Tag)
+            {
+                case PLAYER_Name       : *(STRPTR *)data = player->ep_Link.ln_Name;
+                                         break;
+
+                case PLAYER_AlarmSigTask: *(struct Task **)data = player->ep_Task;
+                                          break;
+
+                case PLAYER_AlarmSigBit: *(LONG *)data = player->ep_AlarmSigBit;
+                                         break;
+
+                case PLAYER_UserData   : *(VOID **)data = player->ep_UserData;
+                                         break;
+
+                case PLAYER_ID         : *(LONG *)data = player->ep_PlayerID;
+                                         break;
+
+                case PLAYER_Hook       : *(struct Hook **)data = player->ep_Hook;
+                                         break;
+
+                case PLAYER_AlarmTime  : *(LONG *)data = player->ep_AlarmTime;
+                                         break;
+
+                case PLAYER_Priority   : *(LONG *)data = player->ep_Link.ln_Pri;
+                                         break;
+
+                case PLAYER_Conductor  : *(STRPTR *)data = (cond = (struct ExtConductor *)player->ep_Source ? cond->ec_Link.ln_Name : NULL);
+                                         break;
+
+                case PLAYER_ExtSync    : *(ULONG *)data = ((player->ep_Flags | PLAYERF_EXTSYNC) != 0);
+                                         break;
+
+                case PLAYER_Ready      : *(ULONG *)data = ((player->ep_Flags | PLAYERF_READY) != 0);
+                                         break;
+
+                case PLAYER_Quiet      : *(ULONG *)data = ((player->ep_Flags | PLAYERF_QUIET) != 0);
+                                         break;
+
+                case PLAYER_Alarm      : *(ULONG *)data = ((player->ep_Flags | PLAYERF_ALARMSET) != 0);
+                                         break;
+
+                case PLAYER_Conducted  : *(ULONG *)data = ((player->ep_Flags | PLAYERF_CONDUCTED) != 0);
+                                         break;
+
+                default                : count--;
+            }
+        }
+
+        UnlockPlayerList();
+        UnlockCond();
+    }
+
+    return(count);
+}
+
+
+/*****************************************************************************/
+
+
+struct ExtPlayer * ASM LIBCreatePlayerA(REG(a0) struct TagItem *tagList,
+				     REG(a6) struct RealTimeLib *RealTimeBase)
+{
+struct ExtPlayer *player;
+
+    if (player = AllocMem(sizeof(struct ExtPlayer),MEMF_CLEAR))
+    {
+        player->ep_AlarmSigBit = -1;
+
+        if (SetPlayerAttrsA(player,tagList))
+            return(player);
+
+        DeletePlayer(player);
+    }
+    else
+    {
+        SetErrorCode(tagList, RTE_NOMEMORY, RealTimeBase);
+    }
+
+    return(NULL);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM LIBDeletePlayer(REG(a0) struct ExtPlayer *player,
+			 REG(a6) struct RealTimeLib *RealTimeBase)
+{
+    if (player)
+    {
+	SetPlayerAttrs(player,PLAYER_Conductor,NULL,
+                              TAG_DONE);
+
+	FreeMem(player, sizeof(struct ExtPlayer));
+    }
+}
+
+
+/*****************************************************************************/
+
+
+struct ExtConductor * ASM LIBNextConductor(REG(a0) struct ExtConductor *last,
+					REG(a6) struct RealTimeLib *RealTimeBase)
+{
+struct ExtConductor *cond;
+
+    if (!last)
+        last = (struct ExtConductor *)&RealTimeBase->rtl_ConductorList;
+
+    cond = (struct ExtConductor *)last->ec_Link.ln_Succ;
+    if (!cond->ec_Link.ln_Succ)
+        cond = NULL;
+
+    return(cond);
+}
+
+
+/*****************************************************************************/
+
+
+struct ExtConductor * ASM LIBFindConductor(REG(a0) STRPTR name,
+					REG(a6) struct RealTimeLib *RealTimeBase)
+{
+    return((struct ExtConductor *)FindName((struct List *)&RealTimeBase->rtl_ConductorList,name));
+}
+
+
+/*****************************************************************************/
+
+
+BOOL ASM LIBExternalSync(REG(a0) struct ExtPlayer *player,
+                         REG(d0) LONG minTime,
+                         REG(d1) LONG maxTime,
+			 REG(a6) struct RealTimeLib *RealTimeBase)
+{
+struct ExtConductor *cond;
+
+    cond = player->ep_Source;
+    if (cond && (player->ep_Flags & PLAYERF_EXTSYNC))
+    {
+        cond->ec_Flags          |= CONDUCTF_GOTTICK;
+        cond->ec_Stopped        &= ~CONDSTOPF_NOTICK;
+        cond->ec_ExternalTime    = minTime;
+        cond->ec_MaxExternalTime = maxTime;
+        return(TRUE);
+    }
+
+    return(FALSE);
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM LIBSetConductorState(REG(a0) struct ExtPlayer *player,
+                              REG(d0) ULONG state,
+                              REG(d1) LONG time,
+			      REG(a6) struct RealTimeLib *RealTimeBase)
+{
+struct ExtConductor *cond;
+struct ExtPlayer    *maestro;
+UBYTE             oldState;
+LONG              err;
+
+    err = 0;
+
+    if (cond = player->ep_Source)
+    {
+        LockCond();
+
+	oldState = cond->ec_State;
+
+	switch (state)
+        {
+            case CONDSTATE_LOCATE : cond->ec_State = CONDSTATE_STOPPED;
+                                    clear_ready(cond);
+                                    cond->ec_StartTime = RealTimeBase->rtl_Time - time;
+                                    cond->ec_ClockTime = time;
+                                    cond->ec_State     = state;
+                                    cond->ec_Stopped  |= CONDSTOPF_STOPPED;
+                                    notify_locate_players(cond,oldState);
+                                    break;
+
+            case CONDSTATE_RUNNING: if (oldState != CONDSTATE_PAUSED)
+                                    {
+                                        cond->ec_State = CONDSTATE_STOPPED;
+                                        clear_ready(cond);
+                                        cond->ec_StartTime = RealTimeBase->rtl_Time - time;
+                                        cond->ec_ClockTime = time;
+                                    }
+                                    cond->ec_State = state;
+                                    cond->ec_Stopped &= ~CONDSTOPF_STOPPED;
+                                    notify_players(cond,oldState);
+                                    break;
+
+            case CONDSTATE_STOPPED:
+            case CONDSTATE_PAUSED : cond->ec_State    = state;
+                                    cond->ec_Stopped |= CONDSTOPF_STOPPED;
+                                    notify_players(cond,oldState);
+                                    break;
+
+            case CONDSTATE_METRIC : if (maestro = find_maestro(cond))
+                                    {
+                                    struct pmTime msg;
+
+                                        msg.pmt_Method = PM_POSITION;
+                                        msg.pmt_Time   = time;
+
+                                        if (maestro->ep_Hook)
+                                            ((TIMEFUNC)maestro->ep_Hook->h_Entry)(maestro->ep_Hook,&msg,maestro);
+                                    }
+                                    break;
+
+            case CONDSTATE_SHUTTLE: if ((oldState == CONDSTATE_STOPPED) || (oldState == CONDSTATE_PAUSED))
+                                    {
+                                    struct ExtPlayer *player;
+                                    struct pmTime  msg;
+
+                                        msg.pmt_Method = PM_SHUTTLE;
+                                        msg.pmt_Time   = time;
+
+                                        SCANLIST(&cond->ec_Players,player)
+                                        {
+                                            if (player->ep_Hook)
+                                                ((TIMEFUNC)player->ep_Hook->h_Entry)(player->ep_Hook,&msg,player);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        err = RTE_PLAYING;
+                                    }
+                                    break;
+
+            case CONDSTATE_LOCATE_SET: if (find_maestro(cond) == player)
+                                           notify_conducted_players(player,oldState);
+
+                                       break;
+	}
+
+        UnlockCond();
+    }
+    else
+    {
+        err = RTE_NOCONDUCTOR;
+    }
+
+    return (err);
+}
+@
+
+
+40.2
+log
+@*** empty log message ***
+@
+text
+@d373 1
+a373 1
+	    case PLAYER_AlarmOn     : if (data)
+d500 1
+a500 1
+                case PLAYER_AlarmOn    : *(ULONG *)data = ((player->ep_Flags | PLAYERF_ALARMSET) != 0);
+@
+
+
+40.1
+log
+@Initial V40 RCS checkin
+@
+text
+@d20 2
+a21 2
+typedef VOID ASM (*STATEFUNC)(REG(a0) struct Hook *, REG(a1) struct pmState *, REG(a2) struct Player *);
+typedef VOID ASM (*TIMEFUNC)(REG(a0) struct Hook *, REG(a1) struct pmTime *, REG(a2) struct Player *);
+d31 1
+a31 1
+static VOID notify_players(struct Conductor *cond, ULONG oldState)
+d33 1
+a33 1
+struct Player *player;
+d39 1
+a39 1
+    SCANLIST(&cond->cdt_Players,player)
+d41 2
+a42 2
+        if (player->pl_Hook)
+            ((STATEFUNC)player->pl_Hook->h_Entry)(player->pl_Hook,&msg,player);
+d53 1
+a53 1
+static VOID clear_ready(struct Conductor *cond)
+d55 1
+a55 1
+struct Player *player;
+d57 1
+a57 1
+    cond->cdt_Flags &= ~CONDUCTF_GOTTICK;
+d59 2
+a60 2
+    if (cond->cdt_Flags & CONDUCTF_EXTERNAL)
+	cond->cdt_Stopped |= CONDSTOPF_NOTICK;
+d62 1
+a62 1
+    SCANLIST(&cond->cdt_Players,player)
+d64 2
+a65 2
+	if (player->pl_Hook)
+            player->pl_Flags &= ~PLAYERF_READY;
+d77 1
+a77 1
+static VOID check_ready(struct Conductor *cond)
+d79 1
+a79 1
+struct Player *player;
+d81 1
+a81 1
+    if (cond->cdt_State == CONDSTATE_LOCATE)
+d83 1
+a83 1
+	SCANLIST(&cond->cdt_Players,player)
+d85 1
+a85 1
+	    if (player->pl_Hook && !(player->pl_Flags & PLAYERF_READY))
+d89 2
+a90 2
+	cond->cdt_State    = CONDSTATE_RUNNING;
+	cond->cdt_Stopped &= ~CONDSTOPF_STOPPED;
+d103 1
+a103 1
+static VOID notify_conducted_players(struct Player *maestro, ULONG oldState)
+d105 1
+a105 1
+struct Player *player;
+d111 1
+a111 1
+    SCANLIST(&maestro->pl_Link,player)
+d113 2
+a114 2
+	if (player->pl_Flags & PLAYERF_CONDUCTED)
+            ((STATEFUNC)player->pl_Hook->h_Entry)(player->pl_Hook,&msg,player);
+d127 1
+a127 1
+static VOID notify_locate_players(struct Conductor *cond, ULONG oldState)
+d129 1
+a129 1
+struct Player *player;
+d135 1
+a135 1
+    SCANLIST(&cond->cdt_Players,player)
+d137 2
+a138 2
+        if (player->pl_Hook)
+            ((STATEFUNC)player->pl_Hook->h_Entry)(player->pl_Hook,&msg,player);
+d140 1
+a140 1
+	if (player->pl_Flags & PLAYERF_CONDUCTED)
+d153 1
+a153 1
+static struct Player *find_maestro(struct Conductor *cond)
+d155 1
+a155 1
+struct Player *player;
+d157 1
+a157 1
+    SCANLIST(&cond->cdt_Players,player)
+d159 1
+a159 1
+	if (player->pl_Flags & PLAYERF_CONDUCTED)
+d180 1
+a180 1
+static struct Conductor *find_conductor(STRPTR name, struct RealTimeLib *RealTimeBase)
+d182 1
+a182 1
+struct Conductor *cond;
+d189 1
+a189 1
+	if (cond = (struct Conductor *)FindName((struct List *)&RealTimeBase->rtb_ConductorList,name))
+d197 1
+a197 1
+    if (cond = AllocVec(sizeof(struct Conductor) + strlen(name) + 1,MEMF_CLEAR))
+d199 4
+a202 4
+        cond->cdt_Link.ln_Name = (STRPTR)&cond[1];
+        strcpy(cond->cdt_Link.ln_Name,name);
+        cond->cdt_Stopped = CONDSTOPF_STOPPED;
+        NewList((struct List *)&cond->cdt_Players);
+d205 1
+a205 1
+            cond->cdt_Flags = CONDUCTF_PRIVATE;
+d207 1
+a207 1
+        AddHead((struct List *)&RealTimeBase->rtb_ConductorList,cond);
+d219 1
+a219 1
+static VOID flush_conductor(struct Conductor *cond, struct RealTimeLib *RealTimeBase)
+d221 1
+a221 1
+    if (IsListEmpty((struct List *)&cond->cdt_Players))
+d224 1
+a224 1
+	FreeVec(cond);
+d237 1
+a237 1
+    if (errbuf = (ULONG *)GetTagData(PLAYER_ErrorCode, NULL, tagList))
+d245 1
+a245 1
+BOOL ASM LIBSetPlayerAttrsA(REG(a0) struct Player *player,
+d249 7
+a255 7
+ULONG             err;
+BOOL	          no_cond;
+BOOL	          ready;
+struct Conductor *cond;
+struct TagItem   *tag;
+struct TagItem   *tags = tagList;
+ULONG             data;
+d263 1
+a263 1
+    no_cond = IsListEmpty((struct List *)&RealTimeBase->rtb_ConductorList);
+d265 1
+a265 1
+    while (tag = NextTagItem(&tags))
+d271 1
+a271 1
+            case PLAYER_Name        : player->pl_Link.ln_Name = (STRPTR)data;
+d274 1
+a274 1
+	    case PLAYER_AlarmSigTask: player->pl_Task = (struct Task *)data;
+d277 2
+a278 2
+	    case PLAYER_AlarmSigBit : player->pl_AlarmSigBit  = (BYTE)data;
+	                              player->pl_AlarmSigMask = (1 << data);
+d281 1
+a281 1
+	    case PLAYER_UserData    : player->pl_UserData = (VOID *)data;
+d284 1
+a284 1
+	    case PLAYER_ID          : player->pl_PlayerID = (UWORD)data;
+d287 1
+a287 1
+            case PLAYER_Hook        : player->pl_Hook = (struct Hook *)data;
+d290 2
+a291 2
+	    case PLAYER_AlarmTime   : player->pl_AlarmTime = (LONG)data;
+                                      player->pl_Flags     |= PLAYERF_ALARMSET;
+d294 5
+a298 5
+            case PLAYER_Priority    : player->pl_Link.ln_Pri = (BYTE)data;
+                                      if (player->pl_Source)
+                                      {
+                                          Remove(&player->pl_Link);
+                                          Enqueue((struct List *)&player->pl_Source->cdt_Players,player);
+d303 1
+a303 1
+                                      if (cond != player->pl_Source)
+d305 1
+a305 1
+                                          if (player->pl_Source)
+d308 1
+a308 1
+                                              if (player->pl_Flags & PLAYERF_EXTSYNC)
+d310 2
+a311 2
+                                                  player->pl_Flags &= ~PLAYERF_EXTSYNC;
+                                                  player->pl_Source->cdt_Flags &= ~CONDUCTF_EXTERNAL;
+d313 1
+a313 1
+                                              flush_conductor(player->pl_Source,RealTimeBase);
+d315 1
+a315 1
+                                          player->pl_Source = cond;
+d318 1
+a318 1
+                                              Enqueue((struct List *)&cond->cdt_Players,player);
+d327 1
+a327 1
+            case PLAYER_ExtSync     : if (cond = player->pl_Source)
+d331 1
+a331 1
+                                              if (!(cond->cdt_Flags & CONDUCTF_EXTERNAL))
+d333 2
+a334 2
+                                                  player->pl_Flags |= PLAYERF_EXTSYNC;
+                                                  cond->cdt_Flags |= CONDUCTF_EXTERNAL;
+d343 1
+a343 1
+                                              if (player->pl_Flags & PLAYERF_EXTSYNC)
+d345 2
+a346 2
+                                                  player->pl_Flags &= ~PLAYERF_EXTSYNC;
+                                                  cond->cdt_Flags &= ~CONDUCTF_EXTERNAL;
+d354 1
+a354 1
+			                  player->pl_Flags |= PLAYERF_READY;
+d359 1
+a359 1
+                                          player->pl_Flags &= ~PLAYERF_READY;
+d365 1
+a365 1
+                                          player->pl_Flags |= PLAYERF_QUIET;
+d369 1
+a369 1
+                                          player->pl_Flags &= ~PLAYERF_QUIET;
+d375 1
+a375 1
+                                          player->pl_Flags |= PLAYERF_ALARMSET;
+d379 1
+a379 1
+                                          player->pl_Flags &= ~PLAYERF_ALARMSET;
+d385 1
+a385 1
+                                          player->pl_Flags |= PLAYERF_CONDUCTED;
+d389 1
+a389 1
+                                          player->pl_Flags &= ~PLAYERF_CONDUCTED;
+d398 1
+a398 1
+    if (player->pl_Hook == NULL)
+d400 1
+a400 1
+        player->pl_Flags &= ~PLAYERF_CONDUCTED;
+d402 8
+a409 3
+    else if (ready && player->pl_Source)
+    {
+        check_ready(player->pl_Source);
+d412 1
+a412 1
+    if (no_cond != IsListEmpty((struct List *)&RealTimeBase->rtb_ConductorList))
+d440 1
+a440 1
+ULONG ASM LIBGetPlayerAttrsA(REG(a0) struct Player *player,
+d444 5
+a448 4
+ULONG	        count;
+struct TagItem *tag;
+struct TagItem *tags = tagList;
+ULONG           data;
+d457 1
+a457 1
+        while (tag = NextTagItem(&tags))
+d464 1
+a464 1
+                case PLAYER_Name       : *(STRPTR *)data = player->pl_Link.ln_Name;
+d467 1
+a467 1
+                case PLAYER_AlarmSigTask: *(struct Task **)data = player->pl_Task;
+d470 1
+a470 1
+                case PLAYER_AlarmSigBit: *(LONG *)data = player->pl_AlarmSigBit;
+d473 1
+a473 1
+                case PLAYER_UserData   : *(VOID **)data = player->pl_UserData;
+d476 1
+a476 1
+                case PLAYER_ID         : *(LONG *)data = player->pl_PlayerID;
+d479 1
+a479 1
+                case PLAYER_Hook       : *(struct Hook **)data = player->pl_Hook;
+d482 1
+a482 1
+                case PLAYER_AlarmTime  : *(LONG *)data = player->pl_AlarmTime;
+d485 1
+a485 1
+                case PLAYER_Priority   : *(LONG *)data = player->pl_Link.ln_Pri;
+d488 1
+a488 1
+                case PLAYER_Conductor  : *(STRPTR *)data = (player->pl_Source ? player->pl_Source->cdt_Link.ln_Name : NULL);
+d491 1
+a491 1
+                case PLAYER_ExtSync    : *(ULONG *)data = ((player->pl_Flags | PLAYERF_EXTSYNC) != 0);
+d494 1
+a494 1
+                case PLAYER_Ready      : *(ULONG *)data = ((player->pl_Flags | PLAYERF_READY) != 0);
+d497 1
+a497 1
+                case PLAYER_Quiet      : *(ULONG *)data = ((player->pl_Flags | PLAYERF_QUIET) != 0);
+d500 1
+a500 1
+                case PLAYER_AlarmOn    : *(ULONG *)data = ((player->pl_Flags | PLAYERF_ALARMSET) != 0);
+d503 1
+a503 1
+                case PLAYER_Conducted  : *(ULONG *)data = ((player->pl_Flags | PLAYERF_CONDUCTED) != 0);
+d521 1
+a521 1
+struct Player * ASM LIBCreatePlayerA(REG(a0) struct TagItem *tagList,
+d524 1
+a524 1
+struct Player *player;
+d526 1
+a526 1
+    if (player = AllocMem(sizeof(struct Player),MEMF_CLEAR))
+d528 1
+a528 1
+        player->pl_AlarmSigBit = -1;
+d547 1
+a547 1
+VOID ASM LIBDeletePlayer(REG(a0) struct Player *player,
+d555 1
+a555 1
+	FreeMem(player, sizeof(struct Player));
+d563 1
+a563 1
+struct Conductor * ASM LIBNextConductor(REG(a0) struct Conductor *last,
+d566 1
+a566 1
+struct Conductor *cond;
+d569 1
+a569 1
+        last = (struct Conductor *)&RealTimeBase->rtb_ConductorList;
+d571 2
+a572 2
+    cond = (struct Conductor *)last->cdt_Link.ln_Succ;
+    if (!cond->cdt_Link.ln_Succ)
+d582 1
+a582 1
+struct Conductor * ASM LIBFindConductor(REG(a0) STRPTR name,
+d585 1
+a585 1
+    return((struct Conductor *)FindName((struct List *)&RealTimeBase->rtb_ConductorList,name));
+d592 1
+a592 1
+BOOL ASM LIBExternalSync(REG(a0) struct Player *player,
+d597 1
+a597 1
+struct Conductor *cond;
+d599 2
+a600 2
+    cond = player->pl_Source;
+    if (cond && (player->pl_Flags & PLAYERF_EXTSYNC))
+d602 4
+a605 4
+        cond->cdt_Flags          |= CONDUCTF_GOTTICK;
+        cond->cdt_Stopped        &= ~CONDSTOPF_NOTICK;
+        cond->cdt_ExternalTime    = minTime;
+        cond->cdt_MaxExternalTime = maxTime;
+d616 1
+a616 1
+LONG ASM LIBSetConductorState(REG(a0) struct Player *player,
+d621 2
+a622 2
+struct Conductor *cond;
+struct Player    *maestro;
+d628 1
+a628 1
+    if (cond = player->pl_Source)
+d632 1
+a632 1
+	oldState = cond->cdt_State;
+d636 1
+a636 1
+            case CONDSTATE_LOCATE : cond->cdt_State = CONDSTATE_STOPPED;
+d638 4
+a641 4
+                                    cond->cdt_StartTime = RealTimeBase->rtb_Time - time;
+                                    cond->cdt_ClockTime = time;
+                                    cond->cdt_State     = state;
+                                    cond->cdt_Stopped  |= CONDSTOPF_STOPPED;
+d647 1
+a647 1
+                                        cond->cdt_State = CONDSTATE_STOPPED;
+d649 2
+a650 2
+                                        cond->cdt_StartTime = RealTimeBase->rtb_Time - time;
+                                        cond->cdt_ClockTime = time;
+d652 2
+a653 2
+                                    cond->cdt_State = state;
+                                    cond->cdt_Stopped &= ~CONDSTOPF_STOPPED;
+d658 2
+a659 2
+            case CONDSTATE_PAUSED : cond->cdt_State    = state;
+                                    cond->cdt_Stopped |= CONDSTOPF_STOPPED;
+d663 6
+a668 3
+            case CONDSTATE_METRIC: if (maestro = find_maestro(cond))
+                                   {
+                                   struct pmTime msg;
+d670 4
+a673 7
+                                       msg.pmt_Method = PM_POSITION;
+                                       msg.pmt_Time   = time;
+
+                                       if (maestro->pl_Hook)
+                                           ((TIMEFUNC)maestro->pl_Hook->h_Entry)(maestro->pl_Hook,&msg,maestro);
+                                   }
+                                   break;
+d677 1
+a677 1
+                                    struct Player *player;
+d683 1
+a683 1
+                                        SCANLIST(&cond->cdt_Players,player)
+d685 2
+a686 2
+                                            if (player->pl_Hook)
+                                                ((TIMEFUNC)player->pl_Hook->h_Entry)(player->pl_Hook,&msg,player);
+@

@@ -1,0 +1,325 @@
+		Virtual Memory Proposal, 22 Feb 1990.
+
+			TABLE OF CONTENTS
+
+1.0  Introduction
+
+     1.1  Facts
+     1.2  Hopes
+
+2.0  Computer independent items
+
+     2.1  Bus error exception handler
+     2.2  Page replacement algorithm
+
+3.0  Computer dependent items
+
+     3.1  User interface
+     3.2  Programmer interface
+     3.3  Operating system "VM hooks"
+     3.4  Disk I/O
+
+----------------------------------------------------------------------------
+1.0  Introduction
+
+1.1  Facts
+
+This proposal covers a proposed implementation of virtual memory for the
+Amiga. It includes the internal mechanisms to be used, the interface to the
+operating system, the programmer to operating system interface as well as
+the user (installation) interface.
+
+Virtual memory, as it currently stands, was develloped as fourth year
+univerity project. It included a 68020/68851 interface board to a 68020
+socket in addition to the software involved.
+
+The software currently consists of two modules, a C file of about 300 lines
+plus comments, and an assembler file of about 250 lines plus comments.
+
+1.2  Hopes
+
+The aim of this document is to come to a concensus as to what hooks need to
+be put into the operating system, so that virtual memory may be added as an
+interim optional package between the release of Workbench 1.4 and 1.5.
+
+Your review should also make sure that no irreversible design mistakes
+are being made. Although remarkably small, only over 500 lines long of
+source code plus comments, the marketing impact of virtual memory gives
+it unusual importance.
+
+---------------------------------------------------------------------------- 
+2.0  Computer independent items
+
+2.1  Bus error exception handler
+
+Virtual memory is obtained by allocating a large chunk of physical memory
+and mapping a much larger portion of the addressing space into that chunk,
+using the MMU. Of course, not all pages of the large mapped portion fit
+into the physical memory chunk, so some pages are invalidated by the MMU.
+
+When the CPU tries to access one of the invalid pages, a bus error exception
+occurs. (Guru 00000002) The page fault handler then:
+
+1. Saves all registers on the user stack.
+2. Transfers the exception stack frame created by the bus error exception
+   onto the user stack.
+3. Drops into user mode (from supervisor mode)
+
+At this point multitasking is reenabled as it was before, except that the
+task which encountered the page fault now follows a different thread of
+execution, through the page fault handler.
+
+The page fault handler will now check whether interrupt or multitasking was
+disabled and put up an Alert if so.
+
+An ObtainSemaphore(MMUsemaphore) call is made, and after the semaphore is
+obtained, a check is made on whether the page has already been loaded
+meanwhile. If so the page fault handler completes.
+
+If not, a free physical page is selected according to the page replacement
+algoriithm, and the needed page is loaded from the disk. If a used page
+gets stolen, it is written to disk. See  "2.2 Page replacement algorithm".
+
+Finally once the needed page is loaded into physical memory and the
+translation table is updated, the faulting task is allowed to continue its
+normal thread of execution by:
+
+1. Going into supervisor mode usind the Supervisor() call.
+2. Discarding the exception stack frame thus created.
+3. Transferring the initial page fault exception stack frame from the
+   user stack to the supervisor stack.
+4. Restoring the registers from the user stack and executing an RTE.
+
+
+2.2  Page fault replacement algorithm.
+
+The algorithm is optimized to minimize the time necessary to handle sporadic
+page faults, and is similar to the one used by SVR3. A static queue of free
+pages is maintained, so that no time would be wasted by having to swap out a
+currently used page.
+
+Four times a second, a background process will check whether the amount of
+free pages currently in the queue has gone below a low-water mark. If so, it
+goes through the list of valid virtual pages and increases the age of all
+those that have not been used since the last pass. If a page's age goes over
+a threshold, it is swapped out and its physical correspondent is put in the
+queue. If a page has been used meanwhile, its age is reset to zero if it was
+also written to, or INITUSED if it was merely read from. This process will
+repeat itself until the queue has reached a high-water mark. 
+
+Once every 5 seconds, the background process will go through the list of
+pages currently valid and update their ages, regardless of whether the
+low-water mark has been reached or not.
+
+Both sporadic and burst page faults are optimized by the useage of the free
+page queue. Burst faults would also be helped by a track cache, where an
+entire disk track would be cached when a page on that track is read in.
+Track caching will not be implemented though because 
+
+a) The Quantum 40S which ships with the 2091 and the 3000 already has a
+   built in 64K cache.
+b) Such caching belongs in the driver (or FileSystem) anyway.
+
+Currently not implemented, but highly desirable, is an output queue. Once a
+page has reached the treshold age, rather than writing out its contents
+immediately to disk (if modified), it is preferable to copy it into a
+buffer, and write that out to disk along with other pages' contents at the
+same time. This is what SVR3 does. What a DMA transfer from memory to disk
+still uses less CPU cycles than a copy from memory to memory, the seek
+waiting time is avoided. The MOVE16 instruction of the 68040 makes this
+scheme even more palatable.
+
+---------------------------------------------------------------------------
+3.0  Computer dependent items
+
+3.1  User interface
+
+The demo virtual memory handler currently available requires the user to
+type in:
+
+1> virtue RAMamount DeviceName DeviceUnit DiskOffset DiskEnd
+            in K      ASCII     integer    in bytes   bytes
+
+For example,
+
+1> virtue 10 trackdisk.device 0 0 800000
+
+will AddMem() 800000 bytes of virtual memory, use 10K to map it into, and
+use the internal disk drive as swap device.
+
+As a commercial product, the user interface will consist of a preferences
+editor allowing the user to select
+
+a) The page size used.
+b) i)  The SWAP partition used, or
+   ii) the size of the SWAP file and the partition on which it is located.
+c) The amount of physical ram used to map virtual memory into
+d) The maximum percentage of virtual memory that can be locked into ram at
+   any one time.
+
+
+3.2  Programmer interface
+
+Virtual memory cannot be simply linked into the Exec memory lists and
+allocated by default because of the mutual exclusion scheme used on the
+Amiga. Calls to Forbid() and Disable() are made when mutual exclusion
+to a system resource is wanted. The memory list is such one resource.
+
+When a page fault occurs, the page fault handler tries to restore multi-
+tasking in order to perform disk I/O. If multitasking was disabled when the
+page fault occured, the handler is not allowed to restore multitasking
+because it does not know why multitasking was disabled. Was it in order
+to modify an Exec list?
+
+The Forbid()'s used in the memory allocation routines will therefore be
+replaced with calls to semaphores.
+
+It is now obvious that programmers need to write programs that are
+"VMfriendly". Some simple guidelines must be folowed:
+
+1. Any code that disables multitasking using any of the methods availabe,
+   must be loaded in physical (MEMF_PUBLIC) memory.
+2. Any data that is accessed while multitasking is disabled must be in
+   MEMF_PUBLIC memory.
+3. The Exec memory lists must not be traversed within a Forbid() call
+   anymore. The new proper method of traversing the memory lists in a
+   backwards compatible manner is to first check whether (Execbase->
+   MemListSemaphore == NULL), and if so use Forbid() for mutual exclusion,
+   otherwise use ObtainSemaphore(Execbase->MemListSemaphore);
+
+
+3.3  Swapping to disk
+
+Currently, swapping is made by accessing the hard disk driver direcly. That
+way FileSystem overhead is avoided, and tasks, not just processes, are
+allowed to create page faults.  A new SigBit will be reserved for the
+page fault handler in order to avoid the need for calling AllocSignal every
+time a page fault occurs. 
+
+
+The pages will be reserved on a partition in sequential order. The disk
+allocation for virtual memory must be static, because on the Amiga as soon
+as memory is AddMem()'ed, it must immediately be available in its entirety
+to the system.
+
+Swapping a page from physical memory to disk and back can be DMA'ed, if the
+disk driver and controller support DMA. In order to avoid semaphore
+deadlocks, the disk driver used for swapping may not allocate memory
+dynamically.
+
+If swapping to a file rather than a disk is implemented, the FileSystem may
+not allocate memory dynamically.
+
+
+3.4  Disk I/O for the programmer
+
+The simplest way for a programmer to perform disk I/O is to provide a buffer
+that is in physical memory (MEMF_PUBLIC) to the CMD_WRITE command or the DOS
+Read() call, and then copy the data into virtual memory.
+
+By setting a MASK value in the mountlist to exclude virtual memory, the DOS
+Read() call can be supplied with a buffer in virtual memory. The FileSystem
+in such a case asks the device driver to load the data in public memory, and
+then copies it from there into the virtual memory buffer. If the current
+FileSystem copies the data while disabling multitasking, then it must be
+updated to not fo that anymore.
+
+A set of Exec calls will be provided to allow device drivers to DMA directly
+into virtual memory.
+
+    actual = LockVirtual(address,length)
+
+	Lock a block of virtual memory into physical memory. 'actual' is the
+	amount in bytes that were successfully locked in sequential order.
+	In the initial 1.4 release, this function will return 'length', in
+	order to allow programmers to write device drivers using this call
+	immediately.
+
+    physical = TranslateVirtual(address)
+
+	Returns the physical address of the virtual address given. The
+	virtual address should be locked into physical memory first. In the
+	intitial 1.4 release, 'physical' equal the address supplied.
+
+    error = UnLockVirtual(address,error)
+
+	Returns a NULL if the call succeeded, 1 otherwise. In the initial
+	1.4 release, this function return NULL.
+
+
+3.5  Allocation of virtual memory
+
+Because the large majority of programs for the Amiga are not VMfriendly,
+AllocMem() will be modified to return virtual memory only when specifically
+asked to.
+
+VM friendly programs will be identified by the TF_VMFRIENDLY flag of the
+tc_Flags entry of the task control block. When this flag is set, AllocMem()
+will allocate virtual memory by default, and physical memory only when
+specifically asked to.
+
+The TF_VMFRIENDLY flag will be set by the AddTask() function after a
+TypeOfMem(initialPC) call. If the MEMF_VIRTUAL flag is set for that address,
+the TF_VMFRIENDLY flag is set.
+
+LoadSeg will identify VMfriendly programs by the data in the hunk header.
+The two most significant bits in the hunk header, if both set, will indicate
+that the next long word is to be used as memory flag attributes. Currently
+these two bits are used as follows:
+
+	0  0	Load hunk in any memory
+	0  1	Load hunk in chip memory
+	1  0	Load hunk in fast memory
+	1  1	Undefined
+
+Three Exec functions will be provided for managing the TF_VMFRIENDLY flag.
+
+    flag = IsVMFriendly(task)
+
+	Returns TRUE if the 'task' is a VM friendly task.
+
+    BeVMFriendly(task)
+
+	Sets the TF_VMFRIENDLY flag in the task's TCB.
+
+    NotVMFriendly(task)
+
+	Clears the TF_VMFRIENDLY flag in the tasks's TCB.
+
+----------------------------------------------------------------------------
+4.0  Overview
+
+In order to allow virtual memory to be added as an option after the release
+of WB 1.4, the following should be put into the 1.4 release:
+
+a) For allowing DMA'ing into virtual memory, the functions LockVirtual(),
+   TranslateVirtual() and UnLockVirtual as described above.
+
+b) The IsVMFriendly(), BeVMFriendly() and NotVMFriendly() are put in.
+
+c) Execbase gets two new entries:
+
+   Execbase->MMUSemaphore	; points to the MMU semphore
+   Execbase->MemListSemaphore	; points to the memory list semaphore
+
+d) The exec/tasks.h include file gets four new entries:
+
+   #define TB_VMFRIENDLY 3	; for identifying VM friendly tasks
+   #define TF_VMFRIENDLY (1<<3)
+   #define SIGB_VM 9		; for internal use of the page fault handler
+   #define SIGF_VM (1<<9)
+
+e) The exec/memory.h include file get a new entry:
+
+   #define MEMF_VIRTUAL (1<<3)	; for identifying virtual memory
+
+f) Another 4 empty functions are added to Exec for possible future
+   expansion through the SetFunction() call.
+
+g) LoadSeg() has the two most significant bits redefined.
+
+h) The AddTask() call will call TypeOfMem(initPC) and then BeVMFriendly()
+   if the MEMF_VIRTUAL bit is set. (this does not need to be done
+   immediately)
+
+----------------------------------------------------------------------------

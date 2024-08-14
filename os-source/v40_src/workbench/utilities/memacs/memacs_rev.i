@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	11
+DATE	MACRO
+		dc.b	'10.5.91'
+	ENDM
+VERS	MACRO
+		dc.b	'memacs 37.11'
+	ENDM
+VSTRING	MACRO
+		dc.b	'memacs 37.11 (10.5.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: memacs 37.11 (10.5.91)',0
+	ENDM

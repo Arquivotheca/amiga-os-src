@@ -1,0 +1,909 @@
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-1
+
+
+				TITLE	HDPART  -  COPYRIGHT (C) 1986 - 1988 Co
+				mmodore Amiga Inc.  
+				PAGE	60,132	 
+				;****************************************************************************** 
+				; 
+				;      HDPART : This routine looks for partitions on attached harddisks, 
+				;		fills the amiga harddisk partition structure with found  
+				;		datas and adjusts pointer to first partition structure. 
+				; 
+				; 
+				;    New code :  10-apr-86  TB 
+				;    1.Update :  
+				; 
+				;****************************************************************************** 
+				 
+				public		hdpart	        
+				  
+				;****************************************************************************** 
+				 
+ 0000				CSEG	SEGMENT PARA PUBLIC 'CODE' 
+					ASSUME	cs:cseg,ds:cseg,es:cseg,ss:nothing 
+				 
+				include		janus\harddisk.inc 
+			     C	;************************************************************************* 
+			     C	; (PC side file) 
+			     C	; 
+			     C	; HardDisk.inc -- Structures for using the PC hard disk with JSERV_HARDISK 
+			     C	; 
+			     C	; Copyright (c) 1986, Commodore Amiga Inc.,  All rights reserved. 
+			     C	; 
+			     C	;************************************************************************* 
+			     C	 
+			     C	 
+			     C	; disk request structure for raw amiga access to 8086's disk 
+			     C	; goes directly to PC BOIS (via PC int 13 scheduler) 
+			     C	 
+			     C	HDskAbsReq struc 
+			     C	 
+ 0000  0000                  C	    har_FktCode dw 0   ; bios function code (see ibm tech ref) 
+ 0002  0000                  C	    har_Count   dw 0   ; sector count 
+ 0004  0000                  C	    har_Track   dw 0   ; cylinder # 
+ 0006  0000                  C	    har_Sector  dw 0   ; sector # 
+ 0008  0000                  C	    har_Drive   dw 0   ; drive 
+ 000A  0000                  C	    har_Head    dw 0   ; head 
+ 000C  0000                  C	    har_Offset  dw 0   ; offset of buffer in MEMF_BUFFER memory 
+ 000E  0000                  C	    har_Status  dw 0   ; return status 
+			     C	 
+ 0010                        C	HDskAbsReq  ends 
+			     C	 
+			     C	 
+			     C	; definition of an AMIGA disk partition.  returned by info function 
+			     C	 
+			     C	HDskPartition  struc 
+			     C	 
+ 0000  0000                  C	    hdp_Next     dw 0   ; 8088 ptr to next part.  0 -> end of list 
+ 0002  0000                  C	    hdp_BaseCyl  dw 0   ; cyl # where partition starts 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-2
+
+
+ 0004  0000                  C	    hdp_EndCyl   dw 0   ; last cyclinder # of this partition 
+ 0006  0000                  C	    hdp_DrvNum   dw 0   ; DOS drive number (80H, 81H, ...) 
+ 0008  0000                  C	    hdp_NumHeads dw 0   ; number of heads for this drive 
+ 000A  0000                  C	    hdp_NumSecs  dw 0   ; number of sectors per track for this drive 
+			     C	 
+ 000C                        C	HDskPartition  ends 
+			     C	 
+			     C	 
+			     C	; disk request structure for higher level amiga disk request to 8086 
+			     C	 
+			     C	HardDskReq  struc 
+			     C	 
+ 0000  0000                  C	    hdr_Fnctn      dw 0 ; function code (see below) 
+ 0002  0000                  C	    hdr_Part       dw 0 ; partition number (0 is first partition) 
+ 0004  00000000              C	    hdr_Offset     dd 0 ; byte offset into partition 
+ 0008  00000000              C	    hdr_Count      dd 0 ; number of bytes to transfer 
+ 000C  0000                  C	    hdr_BufferAddr dw 0 ; offset into MEMF_BUFFER memory for buffer 
+ 000E  0000                  C	    hdr_Err        dw 0 ; return code, 0 if all OK 
+			     C	 
+ 0010                        C	HardDskReq  ends 
+			     C	 
+			     C	 
+			     C	; function codes for HardDskReq hdr_Fnctn word 
+			     C	 
+ = 0000                      C	HDR_FNCTN_INIT       =   0  ; given nothings, sets adr_Part to # partitions 
+ = 0001                      C	HDR_FNCTN_READ       =   1  ; given partition, offset, count, buffer 
+ = 0002                      C	HDR_FNCTN_WRITE      =   2  ; given partition, offset, count, buffer 
+ = 0003                      C	HDR_FNCTN_SEEK       =   3  ; given partition, offset 
+ = 0004                      C	HDR_FNCTN_INFO       =   4  ; given part, buff adr, cnt, copys in a 
+			     C	                            ;   DskPartition structure. cnt set to actual 
+			     C	                            ;   number of bytes copied. 
+			     C	 
+			     C	 
+			     C	; error codes for hdr_Err, returned in low byte 
+			     C	 
+ = 0000                      C	HDR_ERR_OK           =   0  ; no error 
+ = 0001                      C	HDR_ERR_OFFSET       =   1  ; offset not on sector boundary 
+ = 0002                      C	HDR_ERR_COUNT        =   2  ; dsk_count not a multiple of sector size 
+ = 0003                      C	HDR_ERR_PART         =   3  ; partition does not exist 
+ = 0004                      C	HDR_ERR_FNCT         =   4  ; illegal function code 
+ = 0005                      C	HDR_ERR_EOF          =   5  ; offset past end of partition 
+ = 0006                      C	HDR_ERR_MULPL        =   6  ; multiple calls while pending service 
+ = 0007                      C	HDR_ERR_FILE_COUNT   =   7  ; too many open files 
+			     C	 
+			     C	; error condition from IBM-PC BIOS, returned in high byte 
+			     C	 
+ = 00FF                      C	HDR_ERR_SENSE_FAIL      =   0ffh 
+ = 00BB                      C	HDR_ERR_UNDEF_ERR       =   0bbh 
+ = 0080                      C	HDR_ERR_TIME_OUT        =   080h 
+ = 0040                      C	HDR_ERR_BAD_SEEK        =   040h 
+ = 0020                      C	HDR_ERR_BAD_CNTRLR      =   020h 
+ = 0011                      C	HDR_ERR_DATA_CORRECTED  =   011h   ; data corrected 
+ = 0010                      C	HDR_ERR_BAD_ECC         =   010h 
+ = 000B                      C	HDR_ERR_BAD_TRACK       =   00bh 
+ = 0009                      C	HDR_ERR_DMA_BOUNDARY    =   009h 
+ = 0007                      C	HDR_ERR_INIT_FAIL       =   007h 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-3
+
+
+ = 0005                      C	HDR_ERR_BAD_RESET       =   005h 
+ = 0004                      C	HDR_ERR_RECRD_NOT_FOUND =   004h 
+ = 0002                      C	HDR_ERR_BAD_ADDR_MARK   =   002h 
+ = 0001                      C	HDR_ERR_BAD_CMD         =   001h 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include 	hdpart.inc 
+			     C	;**************************************************************************** 
+			     C	; File: HDpart.inc 
+			     C	; 
+			     C	; Structures for accessing the partition block of DOS harddisk drives 
+			     C	; 
+			     C	;**************************************************************************** 
+			     C	; HD Partition structure	 
+			     C	;**************************************************************************** 
+			     C	 
+			     C	 
+			     C	HDPart0 	struc 
+			     C	 
+ 0000  ??                    C	BootFlag	db	? 
+ 0001  ??                    C	HeadStart	db	? 
+ 0002  ??                    C	SecStart	db	? 
+ 0003  ??                    C	CylStart	db	? 
+ 0004  ??                    C	SysFlag 	db	? 
+ 0005  ??                    C	HeadEnd 	db	? 
+ 0006  ??                    C	SecEnd		db	? 
+ 0007  ??                    C	CylEnd		db	? 
+ 0008  ????                  C	SecOffLow	dw	? 
+ 000A  ????                  C	SecOffHigh	dw	? 
+ 000C  ????                  C	SecNumLow	dw	? 
+ 000E  ????                  C	SecNumHigh	dw	? 
+			     C	 
+ 0010                        C	HDPart0 	ends 
+			     C	 
+ = 0004                      C	MaxPart		=    	04	; maximum number of partitions on harddisk 
+ = 0200                      C	sectorsize	=    	200h	; 512 BYTE/SECTOR 
+			     C	 
+			     C	;**************************************************************************** 
+			     C	 
+				 
+				include 	macros.inc 
+			     C	;***************************************************************************** 
+			     C	; 
+			     C	; macros.inc	        
+			     C	; 
+			     C	;***************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+				 
+				include 	vars_ext.inc 
+			     C	;***************************************************************************** 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-4
+
+
+			     C	; 
+			     C	; vars_ext.inc declares variable datas of PC janus handler as external; 
+			     C	;	       these datas are defined in vars.inc	    
+			     C	; 
+			     C	;--- external data ----------------------------------------------------------- 
+			     C	.list 
+			     C	 
+			     C	 
+				 
+				include		debug.inc 
+			     C	;****************************************************************************** 
+			     C	; 
+			     C	; Debug.inc contains flag to enable debug messageses  
+			     C	; 
+			     C	;****************************************************************************** 
+			     C	 
+			     C	include		mes.inc			; includes all message offsets 
+			     C	;**************************************************************************** 
+			     C	; 
+			     C	; mes.inc contains external messages for PC janus handler 
+			     C	; 
+			     C	;**************************************************************************** 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+			     C	 
+			     C	.list 
+			     C	 
+			     C	 
+			     C	 
+				 
+				 
+				;****************************************************************************** 
+				; 
+				; external utilities 
+				; 
+				extrn		pstrng:near 
+				extrn		newline:near 
+				extrn		outhxw:near 
+				 
+				;****************************************************************************** 
+				; 
+				;	Partition structures	     
+				;    
+				extrn		BootBlock:byte 
+				extrn		HDPart1:byte 
+				extrn		HDPart2:byte 
+				extrn		HDPart3:byte 
+				extrn		HDPart4:byte 
+				extrn		PartMarker:word 
+				 
+				;****************************************************************************** 
+				; 
+				;	VARIABLES :  USED BY ADISK 
+				; 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-5
+
+
+				extrn		Max_drive:byte 
+				extrn		Max_head:byte 
+				extrn		Max_cyl:word 
+				extrn		Max_sec:byte  
+				extrn		CurDrive:byte 
+				extrn		CurTable:word  
+				extrn		PartCount:byte 
+				extrn		AM_HD:byte    
+				 
+				;****************************************************************************** 
+				; 
+				;	PROGRAM STARTS HERE 
+				; 
+				;****************************************************************************** 
+ 0000				entry: 
+ 0000				hdpart	proc	near  
+				 
+					pushall        
+ 0000  06                    1		push	es 
+ 0001  1E                    1		push	ds 
+ 0002  56                    1		push	si 
+ 0003  57                    1		push	di 
+ 0004  55                    1		push	bp 
+ 0005  52                    2		push	dx 
+ 0006  51                    2		push	cx 
+ 0007  53                    2		push	bx 
+ 0008  50                    2		push	ax 
+				 
+ 0009  8C C8				mov	ax,cs 
+ 000B  8E D8				mov	ds,ax 
+ 000D  8E C0				mov	es,ax 
+				 
+ 000F  B8 0000 E			mov	ax,offset Am_HD 	; prepare pointer 
+ 0012  A3 0000 E			mov	janus_part_base,ax 
+ 0015  A3 0000 E			mov	CurTable,ax	       
+				  
+ 0018  E8 005B R			CALL	DRIVE			; LOAD DRIVE PARAMETERS 
+ 001B  73 06				JNC	FD13			; ERROR HAPPENED ? 
+ 001D  BE 0000 E			mov	si,offset NoDriveMsg 
+ 0020  EB 2F 90				Jmp	PrintMes 
+				 
+ 0023				FD13: 
+ 0023  E8 009D R			CALL	L_PAT			; LOAD PARTITION TABLE 
+ 0026  73 06				JNC	FD11			; ERROR HAPPENED ? 
+ 0028  BE 0000 E			mov	si,offset LoadErrMsg 
+ 002B  EB 24 90				Jmp	PrintMes     
+				  
+ 002E				FD11: 
+ 002E  81 3E 0000 E AA55		CMP	PartMarker,0AA55H       
+ 0034  74 09				JE	FD14 
+ 0036  B8 EE00				mov	ax,0ee00h 
+ 0039  BE 0000 E			mov	si,offset NoPartMsg 
+ 003C  EB 13 90				Jmp	PrintMes     
+				  
+ 003F				FD14: 
+ 003F  E8 00CC R			call	BuildTable 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-6
+
+
+				 
+ 0042  FE 06 0000 E			inc	CurDrive 
+ 0046  A0 0000 E			mov	al,Max_drive 
+ 0049  3A 06 0000 E			cmp	al,CurDrive 
+ 004D  74 02				je	done 
+ 004F  EB D2				jmp	fd13			; read partition table of second drive 
+				 
+ 0051				PrintMes: 
+					endif 
+				 
+ 0051				done: 
+					popall 
+ 0051  58                    2		pop	ax 
+ 0052  5B                    2		pop	bx 
+ 0053  59                    2		pop	cx 
+ 0054  5A                    2		pop	dx 
+ 0055  5D                    1		pop	bp 
+ 0056  5F                    1		pop	di 
+ 0057  5E                    1		pop	si 
+ 0058  1F                    1		pop	ds 
+ 0059  07                    1		pop	es 
+ 005A  C3				ret 
+				 
+ 005B				hdpart	endp  
+				 
+				 
+				;****************************************************************************** 
+				; 
+				;	DRIVE :  READ DRIVE PARAMETERS	     
+				;		 EXSPECTS CUR_DRIVE # 
+				;		 SAVE ALL REGISTERS 
+				;		 ERROR CODE IN AX AND SET CARRY IF ERROR 
+				; 
+				;****************************************************************************** 
+				 
+ 005B				DRIVE	PROC	NEAR			; READ DRIVE PARAMETERS 
+				 
+ 005B  53				PUSH	BX 
+ 005C  51				PUSH	CX 
+ 005D  52				PUSH	DX 
+				 
+ 005E  B9 0003				MOV	CX,3			; NUMBER OF RETRYS 
+ 0061				DR1: 
+ 0061  51				PUSH	CX 
+ 0062  8A 16 0000 E			MOV	DL,CurDrive		; SET DRIVE NUMBER 
+ 0066  80 CA 80				OR	DL,80H 
+ 0069  B4 08				MOV	AH,08H			; SET MODE 
+ 006B  CD 13				INT	disk_int		; READ DISK PARAMETERS 
+				 
+ 006D  88 16 0000 E			MOV	Max_drive,dl 
+ 0071  88 36 0000 E			MOV	Max_head,dh 
+ 0075  8A D9				MOV	BL,CL 
+ 0077  80 E3 3F				AND	BL,3FH			; MASK MAX_SEC 
+ 007A  88 1E 0000 E			MOV	Max_sec,bl 
+ 007E  8A F9				MOV	BH,CL			; BUILD MAX_CYL 
+ 0080  B1 06				MOV	CL,6 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-7
+
+
+ 0082  D2 EF				SHR	BH,CL 
+ 0084  8A DD				MOV	BL,CH 
+ 0086  43				INC	BX		   
+ 0087  89 1E 0000 E			MOV	Max_cyl,bx		; SAVE IT 
+				        
+ 008B  59				POP	CX			; RESTORE COUNTER 
+ 008C  0A E4				OR	AH,AH			; ERROR ? (INCLUDE RESET C-FLAG) 
+ 008E  74 09				JZ	DR2 
+ 0090  50				push	ax			; save error code in ax 
+ 0091  33 C0				XOR	AX,AX 
+ 0093  CD 13				INT	disk_int 		; RESET DISK 
+ 0095  58				pop	ax 
+ 0096  E2 C9				LOOP	DR1			; TRY IT AGAIN 
+				 
+ 0098  F9				STC				; SET C-FLAG FOR ERROR 
+ 0099				DR2: 
+ 0099  5A				POP	DX 
+ 009A  59				POP	CX 
+ 009B  5B				POP	BX 
+ 009C  C3				RET 
+				 
+ 009D				DRIVE	ENDP 
+				 
+				 
+				;****************************************************************************** 
+				; 
+				;	LOAD PARTITION TABLE INTO MEMORY 
+				; 
+				;	EXSPECTS CUR_DRIVE # 
+				;	SAVES ALL REGISTERS 
+				;	ERROR CODE IN AX AND SET CARRY IF ERROR 
+				; 
+				;****************************************************************************** 
+				 
+ 009D				L_PAT	PROC	NEAR 
+				 
+ 009D  53				PUSH	BX 
+ 009E  51				PUSH	CX 
+ 009F  52				PUSH	DX 
+				 
+ 00A0  B9 000A				MOV	CX,10			; NUMBER OF RETRYS 
+ 00A3				L1: 
+ 00A3  51				PUSH	CX 
+ 00A4  8A 16 0000 E			MOV	DL,CurDrive		; SET DRIVE NUMBER 
+ 00A8  80 CA 80				OR	DL,80H 
+				 
+ 00AB  BB 0000 E			MOV	BX,OFFSET BootBlock	; RESERVED MEMORY 
+ 00AE  B9 0001				MOV	CX,0001H		; READ SECTOR 1 , CYLINDER 0 
+ 00B1  2A F6				SUB	DH,DH			; HEAD 0 
+ 00B3  B0 01				MOV	AL,1			; READ ONE SECTOR 
+ 00B5  B4 02				MOV	AH,02H			; SET MODE 
+ 00B7  CD 13				INT	disk_int		; READ DISK SECTOR     
+				 
+ 00B9  59				POP	CX			; RESTORE COUNTER 
+ 00BA  F8				CLC 
+ 00BB  0A E4				OR	AH,AH			; ERROR ? (INCLUDE RESET C-FLAG) 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-8
+
+
+ 00BD  74 09				JZ	L2  
+				 
+ 00BF  50				push	ax			; save error code 
+ 00C0  33 C0				XOR	AX,AX 
+ 00C2  CD 13				INT	disk_int 		; RESET DISK AND 
+ 00C4  58				pop	ax 
+ 00C5  E2 DC				LOOP	L1			; TRY IT AGAIN 
+				 
+ 00C7  F9				STC				; SET C-FLAG FOR ERROR 
+ 00C8				L2:  
+ 00C8  5A				POP	DX 
+ 00C9  59				POP	CX 
+ 00CA  5B				POP	BX 
+ 00CB  C3				RET 
+				 
+ 00CC				L_PAT	ENDP 
+				 
+				 
+				 
+				;****************************************************************************** 
+				; 
+				;	SHOW :	PREPARES PARTITION PARAMETERS FOR PRINT OUT 
+				; 
+				;****************************************************************************** 
+				 
+ 00CC				BuildTable	proc	near 
+				 
+ 00CC  50				PUSH	AX 
+ 00CD  53				PUSH	BX 
+ 00CE  51				PUSH	CX 
+ 00CF  52				PUSH	DX 
+ 00D0  56				PUSH	SI 
+ 00D1  57				PUSH	DI 
+ 00D2  55				PUSH	BP 
+				 
+ 00D3  BB 0000 E			MOV	BX,OFFSET HDPart1 
+ 00D6  8B 36 0000 E			mov	si,CurTable 
+ 00DA  B9 0004				MOV	cx,MaxPart				; MAX. PARTITION NUMBER 
+ 00DD				SW2: 
+ 00DD  51				PUSH	CX					; SAVE LOOP COUNTER 
+ 00DE  80 7F 04 0A			CMP	BYTE PTR [BX+HDPart0.SysFlag],Amiga	; PART. TYPE ? 
+ 00E2  75 43				JNE	SW3					; FOUND OTHER OS 
+				 
+ 00E4  8A 77 02				MOV	DH,BYTE PTR [BX+HDPart0.SecStart]	; BUILD BaseCylinder 
+ 00E7  B1 06				MOV	CL,6 
+ 00E9  D2 EE				SHR	DH,CL 
+ 00EB  8A 57 03				MOV	DL,BYTE PTR [BX+HDPart0.CylStart] 
+ 00EE  89 54 02				MOV	[si+HDskPartition.hdp_baseCyl],DX	; SAVE IT 
+				  
+ 00F1  8A 67 06				MOV	AH,BYTE PTR [BX+HDPart0.SecEnd] 	; BUILD END CYL. 
+ 00F4  B1 06				MOV	CL,6 
+ 00F6  D2 EC				SHR	AH,CL 
+ 00F8  8A 47 07				MOV	AL,BYTE PTR [BX+HDPart0.CylEnd] 
+ 00FB  89 44 04				MOV	[si+HDskPartition.hdp_endCyl],ax	; SAVE IT 
+				  
+ 00FE  32 E4				xor	ah,ah					; build drive number 
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Page     1-9
+
+
+ 0100  A0 0000 E			mov	al,CurDrive 
+ 0103  0C 80				or	al,80h 
+ 0105  89 44 06				mov	[si+HDskPartition.hdp_drvnum],ax 
+													     
+ 0108  A0 0000 E			mov	al,Max_head				; build head number 
+ 010B  FE C0				inc	al 
+ 010D  89 44 08				mov	[si+HDskPartition.hdp_numheads],ax 
+				 
+ 0110  A0 0000 E			mov	al,Max_sec				; build sector number 
+ 0113  89 44 0A				mov	[si+HDskPartition.hdp_numsecs],ax 
+				 
+ 0116  81 FE 0000 E			cmp	si,offset Am_Hd 			; first table ? 
+ 011A  74 08				je	sw5					; yes ! 
+				 
+ 011C  8B C6				mov	ax,si					; build pointer to this 
+ 011E  83 EE 0C				sub	si,size HDskPartition			; partition structure   
+ 0121  89 04				mov	[si+HDskPartition.hdp_next],ax 	; in the previous one 
+ 0123  96				xchg	ax,si 
+				 
+ 0124				sw5: 
+ 0124  83 C6 0C				add	si,size HDskPartition			; si points to 
+											; next dsk struct. 
+ 0127				SW3: 
+ 0127  83 C3 10				add	BX,size HDPart0 			; BX points to  
+											; next partition 
+ 012A  59				POP	CX					; RESTORE COUNTER 
+ 012B  E2 B0				LOOP	SW2 
+ 012D  89 36 0000 E			mov	CurTable,si				; set pointer to 
+											; next partition 
+				  
+ 0131  5D				POP	BP 
+ 0132  5F				POP	DI 
+ 0133  5E				POP	SI 
+ 0134  5A				POP	DX 
+ 0135  59				POP	CX 
+ 0136  5B				POP	BX 
+ 0137  58				POP	AX 
+ 0138  C3				RET 
+				 
+ 0139				BuildTable	endp 
+				 
+				 
+				;****************************************************************************** 
+				 
+ 0139				CSEG	ENDS 
+					END ENTRY 
+
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-1
+
+
+Macros:
+
+		N a m e			Lines
+
+ICALL  . . . . . . . . . . . . .  	   2
+IFLAGS . . . . . . . . . . . . .  	  13
+INFO . . . . . . . . . . . . . .  	  13
+INFO_AX  . . . . . . . . . . . .  	  16
+INFO_AX_BX . . . . . . . . . . .  	  20
+JLOCK  . . . . . . . . . . . . .  	   8
+POPAC  . . . . . . . . . . . . .  	   4
+POPALL . . . . . . . . . . . . .  	   6
+PUSHAC . . . . . . . . . . . . .  	   4
+PUSHALL  . . . . . . . . . . . .  	   6
+UNLOCK . . . . . . . . . . . . .  	   1
+
+Structures and Records:
+
+                N a m e                 Width   # fields
+                                        Shift   Width   Mask    Initial
+
+HARDDSKREQ . . . . . . . . . . .  	0010	0006
+  HDR_FNCTN  . . . . . . . . . .  	0000
+  HDR_PART . . . . . . . . . . .  	0002
+  HDR_OFFSET . . . . . . . . . .  	0004
+  HDR_COUNT  . . . . . . . . . .  	0008
+  HDR_BUFFERADDR . . . . . . . .  	000C
+  HDR_ERR  . . . . . . . . . . .  	000E
+HDPART0  . . . . . . . . . . . .  	0010	000C
+  BOOTFLAG . . . . . . . . . . .  	0000
+  HEADSTART  . . . . . . . . . .  	0001
+  SECSTART . . . . . . . . . . .  	0002
+  CYLSTART . . . . . . . . . . .  	0003
+  SYSFLAG  . . . . . . . . . . .  	0004
+  HEADEND  . . . . . . . . . . .  	0005
+  SECEND . . . . . . . . . . . .  	0006
+  CYLEND . . . . . . . . . . . .  	0007
+  SECOFFLOW  . . . . . . . . . .  	0008
+  SECOFFHIGH . . . . . . . . . .  	000A
+  SECNUMLOW  . . . . . . . . . .  	000C
+  SECNUMHIGH . . . . . . . . . .  	000E
+HDSKABSREQ . . . . . . . . . . .  	0010	0008
+  HAR_FKTCODE  . . . . . . . . .  	0000
+  HAR_COUNT  . . . . . . . . . .  	0002
+  HAR_TRACK  . . . . . . . . . .  	0004
+  HAR_SECTOR . . . . . . . . . .  	0006
+  HAR_DRIVE  . . . . . . . . . .  	0008
+  HAR_HEAD . . . . . . . . . . .  	000A
+  HAR_OFFSET . . . . . . . . . .  	000C
+  HAR_STATUS . . . . . . . . . .  	000E
+HDSKPARTITION  . . . . . . . . .  	000C	0006
+  HDP_NEXT . . . . . . . . . . .  	0000
+  HDP_BASECYL  . . . . . . . . .  	0002
+  HDP_ENDCYL . . . . . . . . . .  	0004
+  HDP_DRVNUM . . . . . . . . . .  	0006
+  HDP_NUMHEADS . . . . . . . . .  	0008
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-2
+
+
+  HDP_NUMSECS  . . . . . . . . .  	000A
+STACKFRAME . . . . . . . . . . .  	0012	0009
+  REGAX  . . . . . . . . . . . .  	0000
+  REGBX  . . . . . . . . . . . .  	0002
+  REGCX  . . . . . . . . . . . .  	0004
+  REGDX  . . . . . . . . . . . .  	0006
+  REGBP  . . . . . . . . . . . .  	0008
+  REGDI  . . . . . . . . . . . .  	000A
+  REGSI  . . . . . . . . . . . .  	000C
+  REGDS  . . . . . . . . . . . .  	000E
+  REGES  . . . . . . . . . . . .  	0010
+
+Segments and Groups:
+
+                N a m e         	Length	 Align	Combine Class
+
+CSEG . . . . . . . . . . . . . .  	0139	PARA	PUBLIC	'CODE'
+
+Symbols:            
+
+                N a m e         	Type	 Value	 Attr
+
+ACKINT . . . . . . . . . . . . .  	NUMBER	007F	
+ACTIVEFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+ALLOCPARAM . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+ALREADYCALLED  . . . . . . . . .  	NUMBER	0054	
+AMIGA  . . . . . . . . . . . . .  	NUMBER	000A	
+AMIGAADDMSG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGACALLMSG . . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGADELETEMSG . . . . . . . . .  	V BYTE	0000	CSEG	External
+AMIGAINT . . . . . . . . . . . .  	NUMBER	0004	
+AM_HD  . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+BASEMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+BELL . . . . . . . . . . . . . .  	NUMBER	0007	
+BIOS_INT10 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT13 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT16 . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BIOS_INT1C . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+BOOTBLOCK  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+BOOT_INT . . . . . . . . . . . .  	NUMBER	0019	
+BS . . . . . . . . . . . . . . .  	NUMBER	0008	
+BUFFERMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+BUILDTABLE . . . . . . . . . . .  	N PROC	00CC	CSEG	Length = 006D
+
+CALLAMIGASERVICE . . . . . . . .  	V BYTE	0000	CSEG	External
+CALLEDFIRST  . . . . . . . . . .  	NUMBER	0042	
+CHAIN_VEC  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+CHANNELMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+CR . . . . . . . . . . . . . . .  	NUMBER	000D	
+CURDRIVE . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+CURTABLE . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+
+DBG_ALLOCPARAM . . . . . . . . .  	NUMBER	0000	
+DBG_AMIGAADDMSG  . . . . . . . .  	NUMBER	0000	
+DBG_AMIGACALLMSG . . . . . . . .  	NUMBER	0000	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-3
+
+
+DBG_AMIGADELETEMSG . . . . . . .  	NUMBER	0000	
+DBG_BASEMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_BLOCKMOVE  . . . . . . . . .  	NUMBER	0000	
+DBG_BUFFERMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_CALLAMIGASERVICE . . . . . .  	NUMBER	0000	
+DBG_COPYMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_DISKMSG1 . . . . . . . . . .  	NUMBER	0000	
+DBG_DOSMSGA  . . . . . . . . . .  	NUMBER	0000	
+DBG_DOSMSGN  . . . . . . . . . .  	NUMBER	0000	
+DBG_EXEINTMES  . . . . . . . . .  	NUMBER	0000	
+DBG_EXITSDMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_FOUNDINTMES  . . . . . . . .  	NUMBER	0000	
+DBG_GOTSERVICEINT  . . . . . . .  	NUMBER	0000	
+DBG_HANDLERMSG . . . . . . . . .  	NUMBER	0000	
+DBG_HANDLERVERSIONMSG  . . . . .  	NUMBER	0001	
+DBG_HDPART . . . . . . . . . . .  	NUMBER	0000	
+DBG_HWMSGP . . . . . . . . . . .  	NUMBER	0000	
+DBG_HWMSGPC  . . . . . . . . . .  	NUMBER	0000	
+DBG_HWMSGR . . . . . . . . . . .  	NUMBER	0000	
+DBG_IDLEMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_INITPOINTERS . . . . . . . .  	NUMBER	0000	
+DBG_INITWAITPOINTERS . . . . . .  	NUMBER	0000	
+DBG_INTCTRLMES . . . . . . . . .  	NUMBER	0000	
+DBG_INTSMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_INTTBLMES  . . . . . . . . .  	NUMBER	0000	
+DBG_JPARTBASE  . . . . . . . . .  	NUMBER	0000	
+DBG_LIBVERSIONMSG  . . . . . . .  	NUMBER	0001	
+DBG_LOADMSG  . . . . . . . . . .  	NUMBER	0000	
+DBG_MAKESERVICE  . . . . . . . .  	NUMBER	0000	
+DBG_MEMCHUNK . . . . . . . . . .  	NUMBER	0000	
+DBG_NEXTSLOTMSG  . . . . . . . .  	NUMBER	0000	
+DBG_NOBASEMSG  . . . . . . . . .  	NUMBER	0001	
+DBG_NOINTMES . . . . . . . . . .  	NUMBER	0000	
+DBG_NOSERVICEBASEMSG . . . . . .  	NUMBER	0001	
+DBG_PARASMSG . . . . . . . . . .  	NUMBER	0000	
+DBG_PASTLOCK . . . . . . . . . .  	NUMBER	0000	
+DBG_PRELOCK  . . . . . . . . . .  	NUMBER	0000	
+DBG_REGMSG . . . . . . . . . . .  	NUMBER	0000	
+DBG_REMOVEMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_SCROLL . . . . . . . . . . .  	NUMBER	0000	
+DBG_SERVICEADDED . . . . . . . .  	NUMBER	0000	
+DBG_SERVICEAVAILABLE . . . . . .  	NUMBER	0000	
+DBG_SERVICEDELETED . . . . . . .  	NUMBER	0000	
+DBG_SERVICESEARCH  . . . . . . .  	NUMBER	0000	
+DBG_UCOUNTMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_UPDATEMSG  . . . . . . . . .  	NUMBER	0000	
+DBG_WAITSTATUS . . . . . . . . .  	NUMBER	0000	
+DBG_WRONGVERSIONMSG  . . . . . .  	NUMBER	0001	
+DISKMSG1 . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+DISK_INT . . . . . . . . . . . .  	NUMBER	0013	
+DONE . . . . . . . . . . . . . .  	L NEAR	0051	CSEG
+DOS  . . . . . . . . . . . . . .  	NUMBER	0080	
+DOS12  . . . . . . . . . . . . .  	NUMBER	0001	
+DOS16  . . . . . . . . . . . . .  	NUMBER	0004	
+DOSMSGA  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+DOSMSGN  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-4
+
+
+DOS_INT28  . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+DR1  . . . . . . . . . . . . . .  	L NEAR	0061	CSEG
+DR2  . . . . . . . . . . . . . .  	L NEAR	0099	CSEG
+DRIVE  . . . . . . . . . . . . .  	N PROC	005B	CSEG	Length = 0042
+DUMMYFLAG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+D_SEG  . . . . . . . . . . . . .  	NUMBER	D000	
+
+ENTRY  . . . . . . . . . . . . .  	L NEAR	0000	CSEG
+EOI  . . . . . . . . . . . . . .  	NUMBER	0020	
+ESC_CHAR . . . . . . . . . . . .  	NUMBER	001B	
+ESDI_MES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+EXEINTMES  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+EXITSDMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+FAKEDOSFLAG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+FD11 . . . . . . . . . . . . . .  	L NEAR	002E	CSEG
+FD13 . . . . . . . . . . . . . .  	L NEAR	0023	CSEG
+FD14 . . . . . . . . . . . . . .  	L NEAR	003F	CSEG
+FOUNDINTMES  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+F_SEG  . . . . . . . . . . . . .  	NUMBER	F000	
+
+GOTSERVICEINT  . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+HANDLERMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HANDLERPTR . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+HANDLERVERSIONMSG  . . . . . . .  	V BYTE	0000	CSEG	External
+HDPART . . . . . . . . . . . . .  	N PROC	0000	CSEG	Global	Length = 005B
+HDPART1  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HDPART2  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HDPART3  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HDPART4  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HDR_ERR_BAD_ADDR_MARK  . . . . .  	NUMBER	0002	
+HDR_ERR_BAD_CMD  . . . . . . . .  	NUMBER	0001	
+HDR_ERR_BAD_CNTRLR . . . . . . .  	NUMBER	0020	
+HDR_ERR_BAD_ECC  . . . . . . . .  	NUMBER	0010	
+HDR_ERR_BAD_RESET  . . . . . . .  	NUMBER	0005	
+HDR_ERR_BAD_SEEK . . . . . . . .  	NUMBER	0040	
+HDR_ERR_BAD_TRACK  . . . . . . .  	NUMBER	000B	
+HDR_ERR_COUNT  . . . . . . . . .  	NUMBER	0002	
+HDR_ERR_DATA_CORRECTED . . . . .  	NUMBER	0011	
+HDR_ERR_DMA_BOUNDARY . . . . . .  	NUMBER	0009	
+HDR_ERR_EOF  . . . . . . . . . .  	NUMBER	0005	
+HDR_ERR_FILE_COUNT . . . . . . .  	NUMBER	0007	
+HDR_ERR_FNCT . . . . . . . . . .  	NUMBER	0004	
+HDR_ERR_INIT_FAIL  . . . . . . .  	NUMBER	0007	
+HDR_ERR_MULPL  . . . . . . . . .  	NUMBER	0006	
+HDR_ERR_OFFSET . . . . . . . . .  	NUMBER	0001	
+HDR_ERR_OK . . . . . . . . . . .  	NUMBER	0000	
+HDR_ERR_PART . . . . . . . . . .  	NUMBER	0003	
+HDR_ERR_RECRD_NOT_FOUND  . . . .  	NUMBER	0004	
+HDR_ERR_SENSE_FAIL . . . . . . .  	NUMBER	00FF	
+HDR_ERR_TIME_OUT . . . . . . . .  	NUMBER	0080	
+HDR_ERR_UNDEF_ERR  . . . . . . .  	NUMBER	00BB	
+HDR_FNCTN_INFO . . . . . . . . .  	NUMBER	0004	
+HDR_FNCTN_INIT . . . . . . . . .  	NUMBER	0000	
+HDR_FNCTN_READ . . . . . . . . .  	NUMBER	0001	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-5
+
+
+HDR_FNCTN_SEEK . . . . . . . . .  	NUMBER	0003	
+HDR_FNCTN_WRITE  . . . . . . . .  	NUMBER	0002	
+HWMSGP . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HWMSGPC  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+HWMSGR . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+IDLE . . . . . . . . . . . . . .  	NUMBER	0000	
+IDLEDOS  . . . . . . . . . . . .  	NUMBER	0010	
+IDLEMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+IDLE_INT . . . . . . . . . . . .  	NUMBER	0028	
+INFOLEVEL  . . . . . . . . . . .  	NUMBER	000A	
+INITPOINTERS . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INITWAITPOINTERS . . . . . . . .  	V BYTE	0000	CSEG	External
+INTCOUNT . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+INTCTRLMES . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INTEN_REG  . . . . . . . . . . .  	NUMBER	0379	
+INTSMSG  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INTTBLMES  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+INT_ACTIVE . . . . . . . . . . .  	NUMBER	0001	
+INT_ENABLE . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+INT_REQ  . . . . . . . . . . . .  	V DWORD	0000	CSEG	External
+IRQ3EN . . . . . . . . . . . . .  	NUMBER	FFF7	
+IRQ3RESET  . . . . . . . . . . .  	NUMBER	03B0	
+
+JANINT8  . . . . . . . . . . . .  	NUMBER	0008	
+JANPCINT . . . . . . . . . . . .  	NUMBER	0040	
+JANUS  . . . . . . . . . . . . .  	NUMBER	0040	
+JANUS_BASE_SEG . . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_BUFFER_SEG . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PARAM_SEG  . . . . . . . .  	V WORD	0000	CSEG	External
+JANUS_PART_BASE  . . . . . . . .  	V WORD	0000	CSEG	External
+
+KEYB_INT . . . . . . . . . . . .  	NUMBER	0016	
+
+L1 . . . . . . . . . . . . . . .  	L NEAR	00A3	CSEG
+L2 . . . . . . . . . . . . . . .  	L NEAR	00C8	CSEG
+LF . . . . . . . . . . . . . . .  	NUMBER	000A	
+LIBVERSIONMSG  . . . . . . . . .  	V BYTE	0000	CSEG	External
+LOADERRMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+L_PAT  . . . . . . . . . . . . .  	N PROC	009D	CSEG	Length = 002F
+
+MAKESERVICE  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MAXINT . . . . . . . . . . . . .  	NUMBER	0020	
+MAXPART  . . . . . . . . . . . .  	NUMBER	0004	
+MAX_CYL  . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+MAX_DRIVE  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MAX_HEAD . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MAX_SEC  . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MEMCHUNK . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+MEMLOCK  . . . . . . . . . . . .  	NUMBER	00FF	
+MEMUNLOCK  . . . . . . . . . . .  	NUMBER	007F	
+
+NEWLINE  . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+NEXTSLOTMSG  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOBASEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NODRIVEMSG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-6
+
+
+NOHANMES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOINTMES . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOPARTMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+NOSERVICEBASEMSG . . . . . . . .  	V BYTE	0000	CSEG	External
+NULL . . . . . . . . . . . . . .  	NUMBER	0000	
+
+OUTHXW . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+PARASMSG . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+PARTCOUNT  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+PARTMARKER . . . . . . . . . . .  	V WORD	0000	CSEG	External
+PIC_00 . . . . . . . . . . . . .  	NUMBER	0020	
+PIC_01 . . . . . . . . . . . . .  	NUMBER	0021	
+PRINTMES . . . . . . . . . . . .  	L NEAR	0051	CSEG
+PSTRNG . . . . . . . . . . . . .  	L NEAR	0000	CSEG	External
+
+REGMSG . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+REMOVEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+
+SCROLL . . . . . . . . . . . . .  	NUMBER	0000	
+SCROLLFLAG . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SCROLLING  . . . . . . . . . . .  	NUMBER	0006	
+SECTORSIZE . . . . . . . . . . .  	NUMBER	0200	
+SERIAL . . . . . . . . . . . . .  	NUMBER	0000	
+SERIAL_INT . . . . . . . . . . .  	NUMBER	0014	
+SERVICEADDED . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICEAVAILABLE . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICEDELETED . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVICESEARCH  . . . . . . . . .  	V BYTE	0000	CSEG	External
+SERVSTATTAB  . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SIGNALCUSTOMER . . . . . . . . .  	NUMBER	0055	
+SPACE  . . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+SRV_INT  . . . . . . . . . . . .  	NUMBER	000B	
+SSTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+STACKLENGTH  . . . . . . . . . .  	NUMBER	4000	
+STATUSREG  . . . . . . . . . . .  	NUMBER	0062	
+STOPSCROLL . . . . . . . . . . .  	NUMBER	00FF	
+SW2  . . . . . . . . . . . . . .  	L NEAR	00DD	CSEG
+SW3  . . . . . . . . . . . . . .  	L NEAR	0127	CSEG
+SW5  . . . . . . . . . . . . . .  	L NEAR	0124	CSEG
+
+TESTINTMES . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+TICKS  . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+TIME_INT . . . . . . . . . . . .  	NUMBER	001C	
+
+UCOUNTMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+UPDATEMSG  . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+UPDATERATE . . . . . . . . . . .  	NUMBER	0BB8	
+USTACK . . . . . . . . . . . . .  	V WORD	0000	CSEG	External
+
+VIDEO  . . . . . . . . . . . . .  	NUMBER	0001	
+VIDEO_INT  . . . . . . . . . . .  	NUMBER	0010	
+
+WAITFLAG . . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+WAITSTATUS . . . . . . . . . . .  	V BYTE	0000	CSEG	External
+WAIT_FREE_LOOP . . . . . . . . .  	NUMBER	0064	
+Microsoft (R) Macro Assembler Version 5.00                  10/10/88 17:36:20
+HDPART  -  COPYRIGHT (C) 1986 - 1988 Commodore Amiga Inc.   Symbols-7
+
+
+WRITE_TTY  . . . . . . . . . . .  	NUMBER	000E	
+WRONGVERSIONMSG  . . . . . . . .  	V BYTE	0000	CSEG	External
+
+@FILENAME  . . . . . . . . . . .  	TEXT  HDPART		
+
+
+    928 Source  Lines
+    955 Total   Lines
+    304 Symbols
+
+  47512 + 198216 Bytes symbol space free
+
+      0 Warning Errors
+      0 Severe  Errors

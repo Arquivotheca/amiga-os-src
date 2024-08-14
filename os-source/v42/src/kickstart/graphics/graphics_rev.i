@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	20
+DATE	MACRO
+		dc.b	'5.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'graphics 40.20'
+	ENDM
+VSTRING	MACRO
+		dc.b	'graphics 40.20 (5.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: graphics 40.20 (5.5.93)',0
+	ENDM

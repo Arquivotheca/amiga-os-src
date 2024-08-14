@@ -1,0 +1,14 @@
+VERSION		EQU	4
+REVISION	EQU	6
+DATE	MACRO
+		dc.b	'21.5.93'
+	ENDM
+VERS	MACRO
+		dc.b	'socket 4.6'
+	ENDM
+VSTRING	MACRO
+		dc.b	'socket 4.6 (21.5.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: socket 4.6 (21.5.93)',0
+	ENDM

@@ -1,0 +1,1967 @@
+head     8.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+8.1
+date     91.03.28.15.06.01;  author kodiak;  state Exp;
+branches ;
+next     8.0;
+
+8.0
+date     91.03.24.12.17.06;  author kodiak;  state Exp;
+branches ;
+next     7.0;
+
+7.0
+date     91.03.19.18.36.28;  author kodiak;  state Exp;
+branches ;
+next     6.0;
+
+6.0
+date     91.03.18.15.27.09;  author kodiak;  state Exp;
+branches ;
+next     5.1;
+
+5.1
+date     91.03.18.08.57.35;  author kodiak;  state Exp;
+branches ;
+next     5.0;
+
+5.0
+date     91.02.26.10.36.59;  author kodiak;  state Exp;
+branches ;
+next     3.1;
+
+3.1
+date     91.02.07.15.39.47;  author kodiak;  state Exp;
+branches ;
+next     3.0;
+
+3.0
+date     90.11.09.17.10.28;  author kodiak;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     90.10.10.04.16.42;  author kodiak;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.10.10.03.10.41;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+8.1
+log
+@check for 0 Open() error (not -1)
+@
+text
+@/*
+**	$Id: ix.c,v 8.0 91/03/24 12:17:06 kodiak Exp $
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	$Log:	ix.c,v $
+ * Revision 8.0  91/03/24  12:17:06  kodiak
+ * Phase 2 Beta 1 (38.2)
+ * 
+ * Revision 7.0  91/03/19  18:36:28  kodiak
+ * after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+ * 
+ * Revision 6.0  91/03/18  15:27:09  kodiak
+ * folded in Bullet 1.30
+ * 
+ * Revision 5.1  91/03/18  08:57:35  kodiak
+ * eliminate old style symbol table lookup
+ * 
+ * Revision 5.0  91/02/26  10:36:59  kodiak
+ * Phase 2 Alpha 1
+ * 
+ * Revision 3.1  91/02/07  15:39:47  kodiak
+ * Kodiak Phase 1 Final Release
+ * 
+*/
+/* ix.c */
+/* Copyright (C) Agfa Compugraphic, 1989, 1990. All rights reserved. */
+/*   12-Apr-90   jfd   In routine IXget_fnt_index, filter out bit 2
+ *                     (italic/nonitalic flag) of "bucket_num" because
+ *                     it is being used as an index into "plugin"
+ *    05-May-90  awr   Character buffer is fixed size- allocated once
+ *    07-Jun-90  dah   Modified FMalloc_rd() and FMseek_read(); added
+ *                     parameters for font library compression.
+ *    01-Jul-90  awr   Add "screen_fnt_ct" to determine if generic
+ *                     screen fonts were installed.
+ *    23-Jul-90  awr   Merged Blake's default typeface path code in
+ *    18-Aug-90  awr   Correct buildpath() to not insert a "\" at the
+ *                     beginning if source1 is null.
+ *    04-Sep-90  awr   Removed find_compound()- no longer referenced.
+ *    03-Dec-90  awr   In BUCKfree(), reset if_init_face (last face processed
+ *                     by if_init())
+ *    04-Dec-90  jfd   Moved "include" statement for  "cgconfig.h" to line
+ *                     following "port.h"
+ *		14-Jan-91  tnc   Window-ized file "close" and "read".
+ *
+ */
+
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <dos/dos.h>
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+
+#include "debug.h"
+#include "port.h"
+#include "cgconfig.h"
+#include "segments.h"
+#include "cgif.h"
+#include "ix.h"
+
+
+#define ZERO      0    /* constant 0 */
+#define NO_CMP    0    /* no compression code indicator */
+
+extern struct Library *SysBase;
+extern struct Library *DOSBase;
+
+/* gid rid of - make same for regular and compound */
+EXTERN WORD  h_esc;                  /* Horizontal escapement of character */
+EXTERN WORD  v_esc;                  /* Vertical       "      "     "      */
+EXTERN WORD  num_parts;              /* Number of parts of character       */
+EXTERN BOOLEAN is_compound;
+
+
+
+
+/* mem.c */
+EXTERN VOID *MemAlloc();
+EXTERN VOID MemFree();
+
+/* maker.c */
+EXTERN VOID    clear_mem();
+EXTERN LONG    if_init_face;
+
+/* fm.c */
+EXTERN BOOLEAN     FMseek_read();
+EXTERN UBYTE      *FMalloc_rd();
+EXTERN UWORD       FMload_font();
+EXTERN WORD        FMchar_index();
+
+MLOCAL VOID        buildpath();
+
+/* Character buffer */
+
+GLOBAL UBYTE *char_buf = 0;
+
+/* Open files */
+
+MLOCAL UWORD num_open_files;      /* current number of open library files */
+GLOBAL UWORD max_open_files;      /* maximum   "     "   "     "      "   */
+GLOBAL BYTE  typePath[PATHNAMELEN] = { 0 };
+
+/* Buckets */
+
+#if SCREEN_FONTS
+GLOBAL UWORD screen_fnt_ct;       /*  Number of Generic screen fonts
+                                   *  installed. Must be 2 to enable screen
+                                   *  font substitution
+                                   */
+#endif
+GLOBAL struct MinList lBUCKlru;   /*  Least recently used list for BUCKETs */
+MLOCAL INDEX_ENTRY *plugin[5];
+MLOCAL BOOLEAN small_plugins;     /*  True if small plugin set is used.
+                                   *  This set has the universals and the
+                                   *  normal lim sens serif and sans serif.
+                                   *  It does not have the bold lim sens
+                                   *  serif and sans serif.
+                                   */
+
+GLOBAL FONTINDEX   *fi = 0;        /* Font Index */
+
+/* Symbol set */
+
+MLOCAL UWORD         symbol_set_size;
+MLOCAL SS_ENTRY      *symbol_set;         /* current symbol set            */
+
+
+
+
+
+/*------------------*/
+/* IXmak_font_index */
+/*------------------*/
+GLOBAL UWORD
+IXmak_font_index(fname)
+    BYTE *fname;        /*  file name of font index file     */
+{
+    BPTR        f;
+    UWORD       index_size;
+    BYTE       *buf;
+    BYTE        pathname[PATHNAMELEN];
+    BYTE        *s1, *s2;
+    WORD           i;
+    INDEX_ENTRY   *p;
+
+    DBG1("IXmak_font_index(%s)\n", fname);
+
+  /* Build full pathname */
+
+    buildpath (pathname, "Fonts:_Bullet", fname);
+    
+  /* Read font index table */
+
+    DBG1("open \"%s\"\n", pathname);
+    if ((f = Open(pathname, MODE_OLDFILE)) == 0)
+    {
+        DBG1("Font index file %s not found\n", pathname);
+        return ERR_no_font_index;
+    }
+    DBG1("  file %ld\n", f);
+    Seek(f, 0, OFFSET_END);
+    index_size = (UWORD)Seek(f, 0, OFFSET_CURRENT);
+    DBG1("index_size = %ld\n", index_size);
+
+    buf = FMalloc_rd(f, ((index_size+sizeof(INDEX_ENTRY)+PATHNAMELEN+
+	    sizeof(FONTINDEX))+1)&0xfffffffe,
+	    (LONG)0, index_size, ZERO, NO_CMP);
+    Close(f);
+    if(!buf)
+    {
+        DBG("read font index failed\n");
+        return ERR_rd_font_index;
+    }
+
+    fi = (FONTINDEX *)
+	    (buf + ((index_size+sizeof(INDEX_ENTRY)+PATHNAMELEN+1)&0xfffe));
+    fi->fnt_index = buf;
+    fi->entry_ct = (*((WORD*)buf))+1;
+    fi->index_entry = (INDEX_ENTRY *) (buf+2);
+    fi->libnames  = buf+2+(fi->entry_ct*sizeof(INDEX_ENTRY));
+    fi->cur_tf_num = 0;
+    /* make space for another face */
+    for (i = 0, p = (INDEX_ENTRY *) (buf+2); i < fi->entry_ct-1; i++, p++)
+	p->name_off += PATHNAMELEN;
+    s1 = buf + index_size;
+    s2 = s1 + (sizeof(INDEX_ENTRY)+PATHNAMELEN);
+    while (s1 != ((char *) p))
+	*--s2 = *--s1;
+    p->name_off = 0;
+    p->tfnum = 0x8000000;	/* impossible value for now */
+	
+#ifdef DEBUG
+        DBG("\n\nF o n t    I n d e x\n");
+        DBG1("entry_ct = %ld\n", fi->entry_ct);
+        DBG1("    size of entry = %ld\n", sizeof(INDEX_ENTRY));
+        for(i=0, p = fi->index_entry; i<fi->entry_ct-1; i++, p++)
+            DBG5("%ld %s %ld %ld %ld\n", p->tfnum,
+                    fi->libnames+p->name_off,
+                    p->fhoff, p->fhcount, p->bucket_num);
+#endif
+
+    return SUCCESS;
+}
+
+/*------------------*/
+/*  init_font_index */
+/*------------------*/
+GLOBAL UWORD
+init_font_index()
+{
+    UWORD         status;
+    WORD          i;
+    INDEX_ENTRY  *p;
+    UWORD         plug_ct;
+
+    DBG("init_font_index\n");
+
+  /* Allocate and read font index table */
+
+    if(status = IXmak_font_index("if.fnt")) return status;   
+
+  /* Find plugins and generic screen fonts */
+
+#if SCREEN_FONTS
+    screen_fnt_ct = 0;
+#endif
+    plug_ct = 0;
+    small_plugins = TRUE;
+    p = fi->index_entry;
+    for(i=0; i<fi->entry_ct; i++)
+    {
+             if(p->tfnum == FACE_UNIV)       {plugin[0] = p;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_S_NORM)  {plugin[1] = p;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_S_BOLD)  {plugin[2] = p;  plug_ct++;
+                                                    small_plugins = FALSE;}
+        else if(p->tfnum == FACE_LS_SS_NORM) {plugin[3] = p;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_SS_BOLD) {plugin[4] = p;  plug_ct++;
+                                                    small_plugins = FALSE;}
+#if SCREEN_FONTS
+        else if(p->tfnum == FACE_S_SCR)      {screen_fnt_ct++;}
+        else if(p->tfnum == FACE_SS_SCR)     {screen_fnt_ct++;}
+#endif
+
+        p++;
+    }
+    if((plug_ct < 5 && !small_plugins) || (plug_ct != 3 && small_plugins))
+    {
+        DBG("    missing plugin\n");
+        return ERR_missing_plugin;
+    }
+
+    return SUCCESS;
+}
+
+
+/*------------------*/
+/*  IXinit          */
+/*------------------*/
+GLOBAL UWORD
+IXinit()
+{
+    ULONG         f;                    /* symbol set file */
+    ULONG         ss_long;
+    BYTE          pathname[PATHNAMELEN];
+
+    UWORD         status;
+
+    DBG("IXinit()\n");
+    num_open_files = 0;                   /* number of open library files */
+    if_init_face = 0;                 /* Last face processed by if_init() */
+    NewList(&lBUCKlru);                     /*  Set BUCKET lru to empty.  */
+
+  /* Allocate character buffer */
+
+    if(!(char_buf = AllocVec(CHARBUFSIZE, 0)))
+        return ERR_mem_char_buf;
+
+  /* Initialize font index and find the plugins */
+
+    if(status = init_font_index())
+	return status;   
+
+  /* Symbol set */
+
+    DBG("init_symbol_set()\n");
+
+    /* Build full pathname */
+
+    buildpath (pathname, "Fonts:_Bullet", "if.uc");
+
+    /* Open symbol set file and read number of entries */
+
+    if ((f = Open(pathname, MODE_OLDFILE)) == 0)
+    {
+        DBG("Symbol set file if.uc not found\n");
+        return ERR_no_symbol_set;
+    }
+    if ((Read(f, (BYTE*) &ss_long, 4) != 4) || (ss_long != 0x55430000) ||
+	    (Read(f, (BYTE*)&symbol_set_size, 2) != 2)) {
+        DBG("problem w/ if.uc\n");
+        status = ERR_rd_symbol_set;
+    }
+    else {
+	symbol_set = (SS_ENTRY *) FMalloc_rd(f,
+		symbol_set_size*sizeof(SS_ENTRY), 8,
+		symbol_set_size*sizeof(SS_ENTRY), ZERO, NO_CMP);
+	if (!symbol_set)
+	    status = FAILURE;
+    }
+    Close(f);
+
+    return(status);
+}
+
+
+/*------------------*/
+/*  IXget_fnt_index */
+/*------------------*/
+/*  Search the FONTINDEX whose handle is the GLOBAL hfi for the typeface
+ *  INDEX_ENTRY matching tfnum. Set 4 fields in the FONTINDEX:
+ *
+ *        fi->cur_tf_num
+ *        fi->hcur_index[0]
+ *        fi->hcur_index[1]
+ *        fi->hcur_index[2]
+ */
+
+GLOBAL UWORD
+IXget_fnt_index(tfnum)
+    LONG tfnum;
+{
+    WORD           i;
+    INDEX_ENTRY   *p;
+    WORD           bucket_num;
+
+    DBG1("\nIXget_fnt_index(tfnum = %ld)\n", tfnum);
+
+  /*  If we've changed type faces, then find the font index entry
+   *  for the new face.
+   */
+
+    if(fi->cur_tf_num == tfnum) return SUCCESS;
+
+    p = fi->index_entry;
+    for(i=0; i<fi->entry_ct;  i++)
+    {
+        if(tfnum == p->tfnum)
+        {
+#if !COMPRESS
+          /*  If library file compression is not enabled, then return
+           *  failure if this is a compressed file.
+           */
+            if(p->bucket_num & B_COMPRESS)
+                return ERR_no_fi_entry;
+#endif
+
+            fi->cur_tf_num = tfnum;
+            fi->cur_index[UNIVERSAL]     = plugin[0];
+            fi->cur_index[TF_SENSITIVE]  = p;
+
+           /*  Limited sensitive codes from font index entry:
+            *      serif      0 normal, 1 bold,
+            *      sans serif 2 normal, 3 bold
+            *  If(small_plugins) the bolds aren't loaded so use normals
+            *  instead.
+            */
+
+            bucket_num = p->bucket_num & 3;     /* 04-12-90 jfd */
+            if(small_plugins) bucket_num &= 2;
+            fi->cur_index[LIM_SENSITIVE] = plugin[bucket_num + 1];
+            return SUCCESS;
+        }
+        p++;
+    }
+    DBG("    not found\n");
+    return ERR_no_fi_entry;
+}
+
+
+
+
+
+/*-------------------*/
+/*   IXclose_file    */
+/*-------------------*/
+GLOBAL VOID
+IXclose_file(b)
+    BUCKET   *b;
+{
+    Close(b->f);
+    b->f = -1;                               /* just in case */
+    b->file_open = FALSE;
+    num_open_files--;
+}
+
+
+
+
+/*-------------------*/
+/*   IXopen_file     */
+/*-------------------*/
+GLOBAL UWORD
+IXopen_file(ix, bucket)
+    INDEX_ENTRY *ix;
+    BUCKET      *bucket;
+{
+    BUCKET      *b;
+    BYTE        pathname[PATHNAMELEN];
+
+    if(bucket->file_open) return SUCCESS;
+
+  /*  Make sure too many files aren't open  */
+
+    while(num_open_files >= max_open_files)
+    {
+	DBG("IXopen_file -- too many files open\n");
+        b = (BUCKET *) lBUCKlru.mlh_Tail;     /* lru BUCKET in lru list */
+        while(b->mn.mln_Pred)
+        {
+            if(b->file_open)
+            {
+                IXclose_file(b);
+                break;
+            }
+            b = (BUCKET *) b->mn.mln_Pred;    /* previous BUCKET in the list */
+        }
+        if(!b->mn.mln_Pred)
+        {
+            DBG("    couldn't close file\n");
+            return ERR_IXopen_file;
+        }
+    }
+
+  /*  Open the file  */
+
+    buildpath (pathname, typePath, fi->libnames + ix->name_off);
+    if((bucket->f = Open(pathname, MODE_OLDFILE)) == 0)
+    {
+        DBG("        Open lib file failed\n");
+        return ERR_open_lib;
+    }
+    bucket->file_open = TRUE;
+    num_open_files++;
+    return SUCCESS;
+}
+
+
+
+
+/*-------------------*/
+/*    BUCKfree       */
+/*-------------------*/
+GLOBAL VOID
+BUCKfree(b)
+    BUCKET *b;
+{
+
+    DBG1("BUCKfree $%lx\n", b);
+    if (b->file_open)
+        IXclose_file(b);
+
+    if (b->tfnum == if_init_face) /* Since we are freeing this bucket, make */
+       if_init_face = 0;          /* make sure we reset if_init_face (last  */
+                                  /* face processed by if_init()) 12-03-90 awr */ 
+
+    MemFree(b->pface_header_seg);
+    MemFree(b->pfgseg);
+
+    Remove((struct Node *) b);    /* remove from active lru list */
+    MemFree(b);
+}
+
+
+
+/*-------------------*/
+/*    BUCKnew        */
+/*-------------------*/
+MLOCAL UWORD
+BUCKnew(ix, p_bucket)
+    INDEX_ENTRY  *ix;
+    BUCKET      **p_bucket;
+{
+    BUCKET  *b;
+    UWORD    status;
+
+    DBG("BUCKnew()\n");
+
+    b = MemAlloc(sizeof(BUCKET));
+    if (!b)
+	return(ERR_no_buck_mem);
+    *p_bucket = b;
+    clear_mem(b, (ULONG)sizeof(BUCKET));
+
+    if(status = FMload_font(b, ix))
+    {
+        DBG("    BUCKnew() failed\n");
+	MemFree(b);
+    }
+    else
+	/* link at start of BUCKET lru list */
+        AddTail((struct List *) &lBUCKlru, (struct Node *) b);
+    return status;
+}
+
+
+
+
+/*-------------------*/
+/*  IXfind_bucket    */
+/*-------------------*/
+GLOBAL UWORD
+IXfind_bucket(i, p_bucket)
+    UWORD i;
+    BUCKET **p_bucket;
+{
+    INDEX_ENTRY *ix;
+    BUCKET      *b;
+    UWORD        status;
+
+    DBG1("IXfind_bucket(%ld)\n", i);
+
+    ix = fi->cur_index[i];
+    DBG5("    INDEX_ENTRY: %ld %s %ld %ld %ld\n", ix->tfnum,
+                             fi->libnames+ix->name_off,
+                             ix->fhoff, ix->fhcount, ix->bucket_num);
+
+  /* Search for BUCKET containing ix->tfnum */
+
+    b = (BUCKET *) lBUCKlru.mlh_Head;   /* first BUCKET in lru list */
+    while(b->mn.mln_Succ)
+    {
+        if(b->tfnum == ix->tfnum) break;
+        b = (BUCKET *) b->mn.mln_Succ;  /* next BUCKET in the list */
+    }
+    if(b->mn.mln_Succ)
+    {                                                    /* found it */
+      /*  Make BUCKET most recently used */
+        DBG("    search succeeded\n");
+        Remove((struct Node *) b);
+        AddTail((struct List *) &lBUCKlru, (struct Node *) b);
+    }
+    else                                 /* not found, make a new one */
+    {
+        DBG("    search failed- making new BUCKET\n");
+        if(status = BUCKnew(ix, &b)) return status;
+    }
+    *p_bucket = b;
+    return SUCCESS;
+}
+
+
+
+
+/*-------------------*/
+/* IXsetup_chr_def   */
+/*-------------------*/
+/*  Setup chr_def, the character definition structure for chId.
+ *  Returns a pointer to the BUCKET in which chId was found.
+ *  If chId references a compound character, then all parts of
+ *  the compound character must be in the same bucket that listed
+ *  chId in its compound character segment.
+ */
+/*!!! here is where unicode matching will take place */
+GLOBAL UWORD
+IXsetup_chr_def(chId, chr_def, p_bucket)
+    UWORD    chId;
+    CHR_DEF *chr_def;
+    BUCKET  **p_bucket;
+{
+    WORD         a, i, j, k, m;
+    WORD	 poke0, poke, lo, hi, ucCnt;
+    UWORD	 ucMap[MAX_UC_MAPS];
+    UWORD        cgnum;
+    UWORD        status;
+    BUCKET      *b;
+    BYTE        *p;
+    UWORD        num_cc;    /* number of cc defs */
+    UWORD        cc_cgnum;
+    CHR_DEF     *cd;
+
+    DBG1("IXsetup_chr_def(chId = %ld)\n", chId);
+
+   /*  Search symbol map for corresponding cgnum[s] */
+    lo = 0;
+    hi = symbol_set_size - 1;
+    ucCnt = 0;
+    while (lo <= hi) {
+	poke = poke0 = (lo + hi) / 2;
+	DBG4("%ld .. %ld .. %ld: $%04lx\n", lo, poke, hi,
+		symbol_set[poke].unicode);
+	while ((cgnum = symbol_set[poke].unicode) == 0xffff) {
+	    poke--;
+	    DBG2("  .. %ld .. : $%04lx\n", poke, symbol_set[poke].unicode);
+	}
+	if (cgnum == chId) {
+	    do {
+		ucMap[ucCnt++] = symbol_set[poke++].cgnum;
+		DBG2("  cgnum #%ld: %ld\n", ucCnt, ucMap[ucCnt-1]);
+	    }
+		while (symbol_set[poke].unicode == 0xffff);
+	    break;
+	}
+	else
+	    if (cgnum < chId)
+		lo = poke0+1;
+	    else
+		hi = poke-1;
+    }
+
+
+    /* search for each cgnum alternative */
+    for (a = 0; a < ucCnt; a++) {
+	DBG1("cgnum = %ld\n", cgnum);
+	cgnum = ucMap[a];
+       /*  Search each BUCKET for cgnum. The order of the search is
+	*  typeface sensitive, limited sensitive, universal.
+	*/
+	for(i=0; i<3; i++) {
+	    if(status = IXfind_bucket(i, p_bucket))
+		return status;
+
+	    if(cgnum == 812) return SUCCESS;
+	    if((chr_def->index = FMchar_index(*p_bucket, cgnum)) >= 0)
+	    {
+		DBG("    found as primary\n");
+		is_compound = FALSE;
+		num_parts = 1;
+		chr_def->cgnum    = cgnum;
+		chr_def->bucknum  = i;
+		chr_def->offset.x = 0;
+		chr_def->offset.y = 0;
+		return SUCCESS;
+	    }
+	    else
+	    {
+		DBG("    searching compound\n");
+
+		is_compound = TRUE;
+		b = *p_bucket;
+		if(!b->pcompound_seg) continue;
+		p = b->pcompound_seg;
+
+		num_cc = *(UWORD*)p;    p += 2;
+		DBG1("    num_cc %ld\n", num_cc);
+
+		for(j=0; j<num_cc; j++)
+		{
+		    cc_cgnum  = *(UWORD*)p;    p += 2;
+		    h_esc     = *(WORD*)p;     p += 2;
+		    v_esc     = *(WORD*)p;     p += 2;
+		    num_parts = *(WORD*)p;     p += 2;
+
+		  /*  Protect against over-running chr_def array. This means
+		   *  we won't process characters in a font that contains
+		   *  compound characters with too many parts even if these
+		   *  complex compound characters are never used.
+		   */
+
+		    if(num_parts > MAX_CC_PARTS) return ERR_cc_complex;
+
+		  /* speed up by skiping if no match */
+
+		    cd = chr_def;
+		    for(k=0; k<num_parts; k++)
+		    {
+			cd->cgnum = *(UWORD*)p;             p += 2;
+			cd->offset.x   = *(WORD*)p;         p += 2;
+			cd->offset.y   = *(WORD*)p;         p += 2;
+			cd++;
+		    }
+		    if(cc_cgnum == cgnum)
+		    {
+		      /*  Found the compound character. */
+
+			DBG4("cgnum %ld, h_esc %ld, v_esc %ld, num_parts %ld\n",
+				cgnum, h_esc, v_esc, num_parts);
+
+		      /*  For each compound character part, fill in its
+		       *  bucket number and its character index.
+		       */
+
+			cd = chr_def;
+			for(m=0; m<num_parts; m++)
+			{
+			    DBG3("  cgnum %ld, xoffset %ld, yoffset %ld\n",
+				    cd->cgnum, cd->offset.x, cd->offset.y);
+
+			    cd->bucknum  = i;
+			    if((cd->index = FMchar_index(b, cd->cgnum)) < 0)
+				return ERR_no_cc_part;
+			    cd++;
+			}
+
+			return SUCCESS;
+		    }
+		}
+	    }
+	}
+    }
+    DBG("    ... not found\n");
+    return ERR_find_cgnum;
+}
+
+
+
+
+/*------------------*/
+/*  IXexit          */
+/*------------------*/
+GLOBAL VOID
+IXexit()
+{
+    DBG("\n\nIXexit()\n");
+
+  /* Free the character buffer */
+
+    DBG1("  Free char_buf $%lx\n", char_buf);
+    FreeVec(char_buf);
+    char_buf = 0;
+
+   /* Free all BUCKETs */
+
+    while(lBUCKlru.mlh_Head->mln_Succ) {
+	DBG1("  Free lBUCKlru element $%lx\n", lBUCKlru.mlh_Head);
+        BUCKfree(lBUCKlru.mlh_Head);
+    }
+  /* Free FONTINDEX */
+
+    DBG1("  Free fi->fnt_index $%lx\n", fi->fnt_index);
+    MemFree(fi->fnt_index);
+
+  /* Free symbol set directory */
+
+    DBG1("  Free symbol_set $%lx\n", symbol_set);
+    MemFree(symbol_set);
+}
+
+
+
+/*------------------*/
+/*  buildpath       */
+/*------------------*/
+/*  Build the a full pathname in dest.  Assume source2 is either a simple
+ *  filename or already the full pathname. Use the presence of a "\" to
+ *  determine. source1 if the default directory path.
+ *  If source1 is null or source2 contains a slash, copy source2 to dest.
+ *  Otherwise, concatinate source1 and source2 in dest making sure that
+ *  there is a "\" between them.
+ */
+MLOCAL VOID
+buildpath(dest, source1, source2)
+   BYTE  *dest,*source1, *source2;
+{
+    DBG3("buildpath(0x%lx, \"%s\", \"%s\")", dest, source1, source2);
+
+    if (strchr(source2, ':'))
+	strcpy(dest, source2);
+    else {
+	strcpy(dest, source1);
+	AddPart(dest, source2, 256);
+    }
+    DBG1(": \"%s\"\n", dest);
+}
+@
+
+
+8.0
+log
+@Phase 2 Beta 1 (38.2)
+@
+text
+@d2 1
+a2 1
+**	$Id: ix.c,v 7.0 91/03/19 18:36:28 kodiak Exp $
+d8 3
+a132 44
+/* use the WINDOWS file open function if MSWINDOWS is defined  */
+/* Cannot include "windows.h" because of the type redefinition */
+
+#ifdef MSWINDOWS
+typedef struct tagOFSTRUCT
+  {
+    BYTE    cBytes;
+    BYTE    fFixedDisk;
+    WORD    nErrCode;
+    BYTE    reserved[4];
+    BYTE    szPathName[128];
+  } OFSTRUCT;
+
+typedef OFSTRUCT       *POFSTRUCT;
+typedef OFSTRUCT near  *NPOFSTRUCT;
+typedef OFSTRUCT far   *LPOFSTRUCT;
+
+/* OpenFile() Flags */
+#define OF_READ             0x0000
+#define OF_WRITE            0x0001
+#define OF_READWRITE        0x0002
+#define OF_SHARE_COMPAT     0x0000
+#define OF_SHARE_EXCLUSIVE  0x0010
+#define OF_SHARE_DENY_WRITE 0x0020
+#define OF_SHARE_DENY_READ  0x0030
+#define OF_SHARE_DENY_NONE  0x0040
+#define OF_PARSE            0x0100
+#define OF_DELETE           0x0200
+#define OF_VERIFY           0x0400
+#define OF_CANCEL           0x0800
+#define OF_CREATE           0x1000
+#define OF_PROMPT           0x2000
+#define OF_EXIST            0x4000
+#define OF_REOPEN           0x8000
+                      
+int  far pascal OpenFile(char far *, LPOFSTRUCT, int);
+int  far cdecl  wsprintf(char far *,char far *,...);
+int  far pascal _lclose( int );
+LONG far pascal _llseek( int, long, int );
+WORD far pascal _lread( int, char far *, int );
+
+MLOCAL  OFSTRUCT ofFile;
+#endif
+
+a158 3
+#ifdef MSWINDOWS
+    if ((f = OpenFile(pathname, &ofFile, OF_READ | OF_SHARE_COMPAT)) == -1)
+#else
+d160 1
+a160 2
+    if ((f = Open(pathname, MODE_OLDFILE)) == -1)
+#endif
+a165 3
+#ifdef MSWINDOWS
+    index_size = (UWORD)_llseek(f, 0L, 2);
+#else
+a167 1
+#endif
+d298 1
+a298 1
+    if ((f = Open(pathname, MODE_OLDFILE)) == -1)
+d442 1
+a442 6
+#ifdef MSWINDOWS
+    if((bucket->f = OpenFile(pathname, &ofFile,
+                             OF_READ | OF_SHARE_COMPAT)) == -1)
+#else
+    if((bucket->f = Open(pathname, MODE_OLDFILE)) == -1)
+#endif
+@
+
+
+7.0
+log
+@after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+@
+text
+@d2 1
+a2 1
+**	$Id: ix.c,v 6.0 91/03/18 15:27:09 kodiak Exp Locker: kodiak $
+d8 3
+d358 3
+a360 2
+	symbol_set = (SS_ENTRY *) FMalloc_rd(f, symbol_set_size, 8,
+		symbol_set_size, ZERO, NO_CMP);
+d630 2
+a631 1
+    UWORD	 poke0, poke, lo, hi, ucMap[MAX_UC_MAPS], ucCnt;
+d648 3
+a650 1
+	while ((cgnum = symbol_set[poke].unicode) == 0xffff)
+d652 2
+d657 1
+@
+
+
+6.0
+log
+@folded in Bullet 1.30
+@
+text
+@d2 1
+a2 1
+**	$Id: ix.c,v 5.1 91/03/18 08:57:35 kodiak Exp $
+d8 3
+d25 1
+a25 1
+ *                     it is being used as an index into "hplugin"
+a26 1
+ *    28-May-90  awr   if.fnt and if.ss are in directory bulletPath[].
+a30 1
+ *    22-Jul-90  awr   Initialized bulletPath = "" for multicaller.
+a31 2
+ *    29-Jul-90  awr   changed conditional compile on MEMstat() from DEBUG
+ *                     to MEM_TRACE
+a33 1
+ *    24-Aug-90  awr   Initialize BUCKET's "my_handle" field in BUCKnew()
+d45 2
+a60 2
+#define MEM_TRACE 0    /* set to 1 to trace memory */
+
+d76 3
+a83 14
+/* mem.c */
+EXTERN BYTE       *MEMptr();
+EXTERN MEM_HANDLE  MEMalloc();
+EXTERN VOID        MEMfree();
+#if MEM_TRACE
+EXTERN VOID        MEMstat();
+#endif
+
+/* dll.c */
+EXTERN BOOLEAN dll_empty ();           /* Returns TRUE if p is empty list */
+EXTERN VOID    dll_null();             /* Makes p an empty list           */
+EXTERN VOID    dll_remove ();          /* Removes p from a list           */
+EXTERN VOID    dll_after ();           /* Links q into p's list after p   */
+
+d86 1
+a86 1
+EXTERN MEM_HANDLE  FMalloc_rd();
+d94 1
+a94 1
+EXTERN MEM_HANDLE hchar_buf;
+a99 1
+GLOBAL BYTE  bulletPath[PATHNAMELEN] = { 0 };
+d110 2
+a111 2
+GLOBAL MEM_HANDLE hBUCKlru = 0;   /*  Least recently used list for BUCKETs */
+MLOCAL MEM_HANDLE hplugin[5];
+d119 1
+a119 1
+GLOBAL MEM_HANDLE  hfi = 0;        /* Font Index */
+d121 1
+a121 1
+/* Symbol sets */
+d123 2
+a124 3
+GLOBAL UWORD         ss_symSetCode;
+GLOBAL UWORD         ss_type;
+GLOBAL UWORD         ss_class;
+a125 4
+GLOBAL UWORD         curssnum;            /* current symbol set number     */
+MLOCAL UWORD         num_symsets;         /* number of symbol sets in file */
+GLOBAL MEM_HANDLE    hss_directory = 0;   /* directory of "    "    "   "  */
+GLOBAL SS_ENTRY      *symbol_set;         /* current symbol set            */
+a126 1
+
+a182 1
+    MEM_HANDLE  hbuf;
+a183 1
+    FONTINDEX  *fi;
+d193 1
+a193 1
+    buildpath (pathname, bulletPath, fname);
+d216 1
+a216 1
+    hbuf = FMalloc_rd(f, ((index_size+sizeof(INDEX_ENTRY)+PATHNAMELEN+
+d220 1
+a220 1
+    if(!hbuf)
+a225 3
+    buf = MEMptr(hbuf);
+
+    hfi = hbuf + ((index_size+sizeof(INDEX_ENTRY)+PATHNAMELEN+1)&0xfffe);
+d228 1
+a228 1
+    fi->hfnt_index = hbuf;
+d230 2
+a231 2
+    fi->hindex_entry = hbuf+2;
+    fi->hlibnames  = hbuf+2+(fi->entry_ct*sizeof(INDEX_ENTRY));
+d247 1
+a247 2
+        for(i=0, p = (INDEX_ENTRY*)MEMptr(fi->hindex_entry);
+                                            i<fi->entry_ct-1;  i++, p++)
+d249 1
+a249 1
+                    MEMptr(fi->hlibnames)+p->name_off,
+a262 1
+    FONTINDEX    *fi;
+a263 1
+    MEM_HANDLE    hp;
+d280 1
+a280 3
+    fi = (FONTINDEX*)MEMptr(hfi);
+    hp = fi->hindex_entry;
+    p = (INDEX_ENTRY*)MEMptr(hp);
+d283 3
+a285 3
+             if(p->tfnum == FACE_UNIV)       {hplugin[0] = hp;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_S_NORM)  {hplugin[1] = hp;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_S_BOLD)  {hplugin[2] = hp;  plug_ct++;
+d287 2
+a288 2
+        else if(p->tfnum == FACE_LS_SS_NORM) {hplugin[3] = hp;  plug_ct++;}
+        else if(p->tfnum == FACE_LS_SS_BOLD) {hplugin[4] = hp;  plug_ct++;
+a294 1
+        hp += sizeof(INDEX_ENTRY);
+a306 2
+
+
+d308 1
+a308 1
+/* init_symbol_set  */
+d311 1
+a311 1
+init_symbol_set()
+d313 2
+a314 2
+    ULONG          f;                    /* symbol set file */
+    UWORD         ssdir_size;
+a315 4
+#ifdef DEBUG
+    WORD          i;
+    SS_DIRECTORY *s;
+#endif
+a316 58
+    DBG("init_symbol_set()\n");
+
+  /* Build full pathname */
+
+#if 0	/* !!! */
+  buildpath (pathname, bulletPath, "if.uc");
+
+  /* Open symbol set file and read number of entries */
+
+#ifdef MSWINDOWS
+    if ((f = OpenFile(pathname, &ofFile, OF_READ|OF_SHARE_COMPAT)) == -1)
+#else
+    if ((f = Open(pathname, MODE_OLDFILE)) == -1)
+#endif
+    {
+        DBG("Symbol set file if.ss not found\n");
+        return ERR_no_symbol_set;
+    }
+    if(Read(f, (BYTE*)&num_symsets, 2) !=2)
+    {
+        DBG("    read error\n");
+        Close(f);
+        return ERR_rd_symbol_set;
+    }
+
+  /*  Get symbol set directory memory. There's one more because
+   *  of the dummy entry at the end.
+   */
+    ssdir_size = (num_symsets + 1) * sizeof(SS_DIRECTORY);
+    hss_directory = FMalloc_rd(f, ssdir_size, (LONG)2, ssdir_size, ZERO, NO_CMP);
+    Close(f);
+    if(!hss_directory)
+    {
+        DBG("    loading symbol set directory failed\n");
+        return ERR_rd_symbol_set;
+    }
+
+#ifdef DEBUG
+        for(i=0, s = (SS_DIRECTORY*)MEMptr(hss_directory);
+                                         i<num_symsets+1; i++, s++)
+            DBG5("    %c%c:  num= %ld   offset= %ld\n",
+                     (BYTE)(s->ss_code & 0xff), (BYTE)(s->ss_code >> 8),
+                     s->num_codes, s->offset);
+#endif
+#endif	/* !!! */
+
+    return SUCCESS;
+}
+
+
+
+
+/*------------------*/
+/*  IXinit          */
+/*------------------*/
+GLOBAL UWORD
+IXinit()
+{
+d322 1
+a322 1
+    dll_null(hBUCKlru);                     /*  Set BUCKET lru to empty.  */
+d326 1
+a326 1
+    if(!(hchar_buf = MEMalloc(BUFFER_POOL, CHARBUFSIZE)))
+d331 2
+a332 1
+    if(status = init_font_index()) return status;   
+d336 1
+a336 3
+    curssnum = 0;               /* no symbol set is loaded  */
+    return init_symbol_set();     /* load symbol set directory */
+}
+d338 1
+d340 1
+d342 1
+d344 1
+a344 27
+/*------------------*/
+/*  IXnew_ss        */
+/*------------------*/
+/*  If font f's symbol set is different than the current symbol set,
+ *  then read in the new symbol set and set f's first_code and
+ *  last_code fields.
+ *  Errors:
+ *       Can't find symbol set referenced by f->ss_code
+ *       Can't open symbol set file if.ss
+ *       Can't seek to new symbol set in if.ss
+ *       Can't read new symbol set from if.ss
+ */
+
+GLOBAL BOOLEAN
+IXnew_ss(new_ss_num)
+    UWORD  new_ss_num;
+{
+    WORD           i;
+    SS_DIRECTORY  *s;
+    UWORD          ss_size;        /* size of new symbol set */
+    BPTR           ssf;            /* symbol set file handle */
+    BYTE           pathname[PATHNAMELEN];
+
+  /* Change symbol set if necessary */
+
+#if 0	/*!!!*/
+    if(new_ss_num != curssnum)
+d346 15
+a360 1
+      /* Search symbol set directory for new symbol set */
+d362 1
+a362 51
+        DBG1("New symbol set %ld\n", new_ss_num);
+
+        for(i=0, s = (SS_DIRECTORY*)MEMptr(hss_directory);
+                                                  i<num_symsets;  i++, s++)
+        {
+            if(new_ss_num == s->ss_code)
+                break;
+        }
+        if(i == num_symsets)
+        {
+            DBG("    symbol set not found\n");
+            return FALSE;
+        }
+
+        ss_size = (UWORD)((s+1)->offset - s->offset);
+        DBG1("    symbol set size %ld\n", ss_size);
+
+      /* read in new symbol set */
+
+      /* Build full pathname */
+
+        buildpath (pathname, bulletPath, "if.ss");
+
+#ifdef MSWINDOWS
+        if ((ssf = OpenFile(pathname,&ofFile,OF_READ|OF_SHARE_COMPAT)) == -1)
+#else
+        if ((ssf = Open(pathname, MODE_OLDFILE)) == -1)
+#endif
+        {
+            DBG("Symbol set file ss.s not found\n");
+            return FALSE;
+        }
+
+        if(!FMseek_read(ssf, s->offset, ss_size, 
+                           (BYTE*)&symbol_set[0], ZERO, NO_CMP))
+        {
+            DBG("    symbol set read failed\n");
+            curssnum = 0;    /* may have trashed old symbol set */
+            Close(ssf);
+            return FALSE;
+        }
+
+        Close(ssf);
+        curssnum = new_ss_num;   /*  Success- a new symbol set */
+
+        ss_symSetCode = s->symSetCode;
+        ss_type       = s->type;
+        ss_class      = s->class;
+    }
+#endif /*!!!*/
+    return TRUE;
+a365 2
+
+
+a382 2
+    FONTINDEX     *fi;
+    MEM_HANDLE     hp;
+a391 1
+    fi = (FONTINDEX*)MEMptr(hfi);
+d394 1
+a394 2
+    hp = fi->hindex_entry;
+    p = (INDEX_ENTRY*)MEMptr(hp);
+d408 2
+a409 2
+            fi->hcur_index[UNIVERSAL]     = hplugin[0];
+            fi->hcur_index[TF_SENSITIVE]  = hp;
+d420 1
+a420 1
+            fi->hcur_index[LIM_SENSITIVE] = hplugin[bucket_num + 1];
+a422 1
+        hp += sizeof(INDEX_ENTRY);
+a456 1
+    HBUCKET      hb;
+a457 1
+    FONTINDEX   *fi;
+d467 2
+a468 2
+        hb = ((DLL*)MEMptr(hBUCKlru))->b;       /* lru BUCKET in lru list */
+        while(hb != hBUCKlru)
+a469 1
+            b  = (BUCKET*)MEMptr(hb);
+d475 1
+a475 1
+            hb = b->link.b;                /* previous BUCKET in the list */
+d477 1
+a477 1
+        if(hb == hBUCKlru)
+d486 1
+a486 2
+    fi = (FONTINDEX*)MEMptr(hfi);
+    buildpath (pathname, typePath, MEMptr(fi->hlibnames) + ix->name_off);
+d509 2
+a510 2
+BUCKfree(hb)
+    HBUCKET hb;
+a511 1
+    BUCKET *b;
+d513 1
+a513 18
+    DBG1("BUCKfree $%lx\n", hb);
+#ifdef	DEBUG
+    DBG("hBUCKlru list before...\n");
+    {
+	ULONG h;
+	DLL *p;
+
+	h = hBUCKlru;
+	p = (DLL *) MEMptr(h);
+	while (p->f != hBUCKlru) {
+	    DBG2("  $%lx @@ $%lx\n", h, p);
+	    h = p->f;
+	    p = (DLL *) MEMptr(h);
+	}
+    }
+#endif
+    b = (BUCKET*)MEMptr(hb);
+
+d521 2
+a522 2
+    MEMfree(BUFFER_POOL, b->hface_header_seg);
+    MEMfree(BUFFER_POOL, b->hfgseg);
+d524 2
+a525 17
+    dll_remove(hb);                        /* remove from active lru list */
+    MEMfree(BUFFER_POOL, hb);
+#ifdef	DEBUG
+    DBG("hBUCKlru list after...\n");
+    {
+	ULONG h;
+	DLL *p;
+
+	h = hBUCKlru;
+	p = (DLL *) MEMptr(h);
+	while (p->f != hBUCKlru) {
+	    DBG2("  $%lx @@ $%lx\n", h, p);
+	    h = p->f;
+	    p = (DLL *) MEMptr(h);
+	}
+    }
+#endif
+d538 1
+a538 1
+    HBUCKET  hb;
+a541 5
+#ifdef	DEBUG
+    DBG("hBUCKlru list before...\n");
+    {
+	ULONG h;
+	DLL *p;
+d543 5
+a547 9
+	h = hBUCKlru;
+	p = (DLL *) MEMptr(h);
+	while (p->f != hBUCKlru) {
+	    DBG2("  $%lx @@ $%lx\n", h, p);
+	    h = p->f;
+	    p = (DLL *) MEMptr(h);
+	}
+    }
+#endif
+d549 1
+a549 1
+    while(!(hb = (HBUCKET)MEMalloc(BUFFER_POOL, sizeof(BUCKET))))
+a550 9
+        if(dll_empty(hBUCKlru)) return ERR_no_buck_mem;
+        BUCKfree( ((DLL*)MEMptr(hBUCKlru))->b );       /* free lru BUCKET */
+    }
+    *p_bucket = (BUCKET*)MEMptr(hb);
+    clear_mem(*p_bucket, (ULONG)sizeof(BUCKET));
+    (*p_bucket)->my_handle = hb;   /* remember who I am for freeing */
+
+    if(status = FMload_font(*p_bucket, ix))
+    {
+d552 1
+a552 1
+        MEMfree(BUFFER_POOL, hb);
+d555 2
+a556 16
+        dll_after(hBUCKlru, hb);      /* link at start of BUCKET lru list */
+#ifdef	DEBUG
+    DBG("hBUCKlru list after...\n");
+    {
+	ULONG h;
+	DLL *p;
+
+	h = hBUCKlru;
+	p = (DLL *) MEMptr(h);
+	while (p->f != hBUCKlru) {
+	    DBG2("  $%lx @@ $%lx\n", h, p);
+	    h = p->f;
+	    p = (DLL *) MEMptr(h);
+	}
+    }
+#endif
+a571 2
+    FONTINDEX   *fi;
+    HBUCKET      hb;
+d577 1
+a577 2
+    fi = (FONTINDEX*)MEMptr(hfi);
+    ix = (INDEX_ENTRY*)MEMptr(fi->hcur_index[i]);
+d579 1
+a579 1
+                             MEMptr(fi->hlibnames)+ix->name_off,
+d584 2
+a585 2
+    hb = ((DLL*)MEMptr(hBUCKlru))->f;     /* first BUCKET in lru list */
+    while(hb != hBUCKlru)
+a586 1
+        b = (BUCKET*)MEMptr(hb);
+d588 1
+a588 1
+        hb = b->link.f;                    /* next BUCKET in the list */
+d590 1
+a590 1
+    if(hb != hBUCKlru)
+d594 2
+a595 2
+        dll_remove(hb);
+        dll_after(hBUCKlru, hb);
+d612 3
+a614 3
+/*  Setup chr_def, the character definition structure for cgnum.
+ *  Returns a pointer to the BUCKET in which cgnum was found.
+ *  If cgnum references a compound character, then all parts of
+d616 1
+a616 1
+ *  cgnum in its compound character segment.
+d618 1
+d620 2
+a621 2
+IXsetup_chr_def(cgnum, chr_def, p_bucket)
+    UWORD    cgnum;
+d625 3
+a627 1
+    WORD         i, j, k, m;
+d635 1
+a635 1
+    DBG1("IXsetup_chr_def(cgnum = %ld)\n", cgnum);
+d637 21
+a657 6
+  /*  Search each BUCKET for cgnum. The order of the search is
+   *  typeface sensitive, limited sensitive, universal.
+   */
+    for(i=0; i<3; i++)
+    {
+        if(status = IXfind_bucket(i, p_bucket)) return status;
+a658 15
+        if(cgnum == 812) return SUCCESS;
+        if((chr_def->index = FMchar_index(*p_bucket, cgnum)) >= 0)
+        {
+            DBG("    found as primary\n");
+            is_compound = FALSE;
+            num_parts = 1;
+            chr_def->cgnum    = cgnum;
+            chr_def->bucknum  = i;
+            chr_def->offset.x = 0;
+            chr_def->offset.y = 0;
+            return SUCCESS;
+        }
+        else
+        {
+            DBG("    searching compound\n");
+d660 10
+a669 4
+            is_compound = TRUE;
+            b = *p_bucket;
+            if(!b->hcompound_seg) continue;
+            p = MEMptr(b->hcompound_seg);
+d671 15
+a685 2
+            num_cc = *(UWORD*)p;    p += 2;
+            DBG1("    num_cc %ld\n", num_cc);
+d687 4
+a690 6
+            for(j=0; j<num_cc; j++)
+            {
+                cc_cgnum  = *(UWORD*)p;    p += 2;
+                h_esc     = *(WORD*)p;     p += 2;
+                v_esc     = *(WORD*)p;     p += 2;
+                num_parts = *(WORD*)p;     p += 2;
+d692 2
+a693 5
+              /*  Protect against over-running chr_def array. This means
+               *  we won't process characters in a font that contains
+               *  compound characters with too many parts even if these
+               *  complex compound characters are never used.
+               */
+d695 6
+a700 1
+                if(num_parts > MAX_CC_PARTS) return ERR_cc_complex;
+d702 5
+a706 1
+              /* speed up by skiping if no match */
+d708 1
+a708 11
+                cd = chr_def;
+                for(k=0; k<num_parts; k++)
+                {
+                    cd->cgnum = *(UWORD*)p;             p += 2;
+                    cd->offset.x   = *(WORD*)p;         p += 2;
+                    cd->offset.y   = *(WORD*)p;         p += 2;
+                    cd++;
+                }
+                if(cc_cgnum == cgnum)
+                {
+                  /*  Found the compound character. */
+d710 1
+a710 2
+                    DBG4("    cgnum %ld    h_esc %ld v_esc %ld    num_parts %ld\n",
+                                  cgnum, h_esc, v_esc, num_parts);
+d712 11
+a722 3
+                  /*  For each compound character part, fill in its
+                   *  bucket number and its character index.
+                   */
+d724 2
+a725 5
+                    cd = chr_def;
+                    for(m=0; m<num_parts; m++)
+                    {
+                        DBG3("        cgnum%ld   xoffset %ld yoffset %ld\n",
+                                      cd->cgnum, cd->offset.x, cd->offset.y);
+d727 3
+a729 5
+                        cd->bucknum  = i;
+                        if((cd->index = FMchar_index(b, cd->cgnum)) < 0)
+                            return ERR_no_cc_part;
+                        cd++;
+                    }
+d731 17
+a747 4
+                    return SUCCESS;
+                }
+            }
+        }
+a761 2
+    FONTINDEX  *fi;
+
+d766 3
+a768 3
+    DBG1("  Free hchar_buf $%lx\n", hchar_buf);
+    MEMfree(BUFFER_POOL, hchar_buf);
+    hchar_buf = (MEM_HANDLE)0L;
+d772 3
+a774 3
+    while(!dll_empty(hBUCKlru)) {
+	DBG1("  Free hBUCKlru $%lx\n", ((DLL*)MEMptr(hBUCKlru))->b);
+        BUCKfree(((DLL*)MEMptr(hBUCKlru))->b);
+d778 2
+a779 3
+    fi = (FONTINDEX*)MEMptr(hfi);
+    DBG1("  Free fi->hfnt_index $%lx\n", fi->hfnt_index);
+    MEMfree(BUFFER_POOL, fi->hfnt_index);
+d783 2
+a784 6
+    DBG1("  Free hss_directory $%lx\n", hss_directory);
+    MEMfree(BUFFER_POOL, hss_directory);
+
+#if MEM_TRACE
+    MEMstat(BUFFER_POOL);
+#endif
+@
+
+
+5.1
+log
+@eliminate old style symbol table lookup
+@
+text
+@d2 1
+a2 1
+**	$Id: ix.c,v 5.0 91/02/26 10:36:59 kodiak Exp Locker: kodiak $
+d8 3
+d37 5
+d55 1
+a58 1
+#include "cgconfig.h"
+d700 5
+@
+
+
+5.0
+log
+@Phase 2 Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id: ix.c,v 3.1 91/02/07 15:39:47 kodiak Exp Locker: kodiak $
+d8 3
+a128 2
+EXTERN UWORD         ss_first_code;      /* current symbol set first code  */
+EXTERN UWORD         ss_last_code;       /*  "        "     "  last code   */
+d136 1
+a136 1
+GLOBAL SS_ENTRY      symbol_set[256];     /* current symbol set            */
+d350 2
+a351 1
+  buildpath (pathname, bulletPath, "if.ss");
+d386 1
+a386 1
+            DBG5("    %c%c:  first= %ld   num= %ld   offset= %ld\n",
+d388 1
+a388 1
+                     s->first_code, s->num_codes, s->offset);
+d390 1
+d454 1
+a503 2
+        ss_first_code = s->first_code;
+        ss_last_code  = s->first_code + s->num_codes - 1;
+a506 2
+	DBG2("ss first code $%lx, last code $%lx\n",
+		ss_first_code, ss_last_code)
+d508 1
+@
+
+
+3.1
+log
+@Kodiak Phase 1 Final Release
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d7 4
+a10 1
+**	$Log$
+d39 2
+d55 2
+a57 1
+
+d113 1
+a113 1
+GLOBAL MEM_HANDLE hBUCKlru;       /*  Least recently used list for BUCKETs */
+d122 1
+a122 1
+GLOBAL MEM_HANDLE  hfi;              /* Font Index */
+d134 1
+a134 1
+GLOBAL MEM_HANDLE    hss_directory;       /* directory of "    "    "   "  */
+d505 2
+d1000 1
+a1000 1
+    DBG2("buildpath(, \"%s\", \"%s\")", source1, source2);
+@
+
+
+3.0
+log
+@Kodiak's Alpha 1
+@
+text
+@d192 1
+a192 1
+#ifdef DEBUG
+a194 1
+#endif
+d223 2
+a224 1
+    hbuf = FMalloc_rd(f, ((index_size+sizeof(FONTINDEX))+1)&0xfffffffe,
+d232 1
+d235 3
+a237 2
+    hfi = hbuf + ((index_size+1)&0xffff);
+    fi = (FONTINDEX*)(buf + ((index_size+1)&0xffff));
+d239 1
+a239 2
+    fi->entry_ct = *((WORD*)buf);
+
+d241 1
+a241 1
+    fi->hlibnames  = hbuf + 2 + (fi->entry_ct * sizeof(INDEX_ENTRY));
+d243 10
+a252 1
+
+d258 1
+a258 1
+                                            i<fi->entry_ct;  i++, p++)
+d378 1
+a378 1
+            DBG5("    %c%c:  first= %ld   num= %ld   offset= %lu\n",
+d790 1
+a790 1
+    DBG5("    INDEX_ENTRY: %ld %s %lu %ld %ld\n", ix->tfnum,
+d994 6
+a999 3
+    strcpy(dest, source1);
+    AddPart(dest, source2, 256);
+
+@
+
+
+2.0
+log
+@from AGFA Bullet 1.20Beta, 02-Oct-90
+@
+text
+@d1 8
+d32 5
+a36 3
+#include <stdio.h>
+#include <fcntl.h>
+#include <io.h>
+a46 1
+#define MAXNAME  80    /* max size name includes drive, path and file */
+d96 2
+a97 2
+GLOBAL BYTE  bulletPath[PATHNAMELEN] = "";
+GLOBAL BYTE  typePath[PATHNAMELEN] = "";
+d186 1
+a186 1
+    WORD        f;
+d191 1
+a191 1
+    BYTE        pathname[MAXNAME];
+d208 2
+a209 1
+    if ((f = open(pathname, O_BINARY | O_RDONLY)) == -1)
+d215 1
+a215 1
+
+d217 1
+a217 1
+    index_size = (UWORD)_llseek(f, 0L, SEEK_END);
+d219 2
+a220 1
+    index_size = (UWORD)lseek(f, 0L, SEEK_END);
+d222 1
+a222 1
+    DBG1("index_size = %d\n", index_size);
+d224 3
+a226 2
+    hbuf = FMalloc_rd(f, index_size+sizeof(FONTINDEX), (LONG)0, index_size, ZERO, NO_CMP);
+    close(f);
+d234 2
+a235 2
+    hfi = hbuf + index_size;
+    fi = (FONTINDEX*)(buf + index_size);
+d244 3
+a246 5
+    if(trace_sw)
+    {
+        printf("\n\nF o n t    I n d e x\n");
+        printf("entry_ct = %d\n", fi->entry_ct);
+        printf("    size of entry = %d\n", sizeof(INDEX_ENTRY));
+d249 3
+a251 4
+            printf("%ld %s %lu %u %d\n", p->tfnum,
+                                         MEMptr(fi->hlibnames)+p->name_off,
+                                         p->fhoff, p->fhcount, p->bucket_num);
+    }
+d321 1
+a321 1
+    WORD          f;                    /* symbol set file */
+d323 1
+a323 1
+    BYTE          pathname[MAXNAME];
+d340 1
+a340 1
+    if ((f = open(pathname, O_BINARY | O_RDONLY)) == -1)
+d346 1
+a346 1
+    if(read(f, (BYTE*)&num_symsets, 2) !=2)
+d349 1
+a349 1
+        close(f);
+d358 1
+a358 1
+    close(f);
+a365 1
+    if(trace_sw)
+d368 1
+a368 1
+            printf("    %c%c:  first= %u   num= %u   offset= %lu\n",
+d387 1
+d430 2
+a431 2
+    WORD           ssf;            /* symbol set file handle */
+    BYTE           pathname[MAXNAME];
+d439 1
+a439 1
+        DBG1("New symbol set %u\n", new_ss_num);
+d454 1
+a454 1
+        DBG1("    symbol set size %u\n", ss_size);
+d465 1
+a465 1
+        if ((ssf = open(pathname, O_BINARY | O_RDONLY)) == -1)
+d477 1
+a477 1
+            close(ssf);
+d481 1
+a481 1
+        close(ssf);
+d575 1
+a575 1
+    close(b->f);
+d595 1
+a595 1
+    BYTE        pathname[MAXNAME];
+d603 1
+d630 1
+a630 1
+    if((bucket->f = open(pathname, O_BINARY | O_RDONLY)) == -1)
+d653 16
+d678 15
+d709 15
+d741 15
+a755 1
+
+d776 1
+a776 1
+    DBG1("IXfind_bucket(%d)\n", i);
+d780 1
+a780 1
+    DBG5("    INDEX_ENTRY: %ld %s %lu %u %d\n", ix->tfnum,
+d835 1
+a835 1
+    DBG1("IXsetup_chr_def(cgnum = %d)\n", cgnum);
+d866 1
+a866 1
+            DBG1("    num_cc %d\n", num_cc);
+d897 1
+a897 1
+                    DBG4("    cgnum %d    h_esc %d v_esc %d    num_parts %d\n",
+d907 1
+a907 1
+                        DBG3("        cgnum%d   xoffset %d yoffset %d\n",
+d940 1
+d946 2
+a947 1
+    while(!dll_empty(hBUCKlru))
+d949 1
+a949 1
+
+d953 1
+d958 1
+d982 1
+a982 1
+    BYTE *p, *q;
+d984 2
+a985 19
+  /* See if source2 contains "\" */
+    q = source2;
+    while ((*q) && ((*q) != '\\'))
+       ++q;
+
+    p = dest;
+    if(! *q)              /* It doesn't, so assume source2 filename only */
+    {
+        if(*source1)        /* copy default directory path */
+        {
+            while(*source1)
+                *p++ = *source1++;
+
+            --p;              /* make sure a '\' seperates */
+            if(*p != '\\')
+                p++;
+            *p++ = '\\';
+       }
+     }
+d987 1
+a987 2
+    while(*p++ = *source2++)
+        ;
+a988 1
+
+@
+
+
+1.0
+log
+@from AGFA Bullet 1.10, 30-Mar-90
+@
+text
+@d3 20
+d32 1
+d35 1
+d37 3
+a42 1
+
+d47 3
+a54 1
+EXTERN BOOLEAN find_compound();
+d61 1
+a61 1
+#ifdef DEBUG
+d77 2
+d87 2
+d92 7
+a98 1
+GLOBAL MEM_HANDLE hBUCKlru;       /* Least recently used list for BUCKETs */
+d113 3
+d117 1
+a117 1
+MLOCAL UWORD         curssnum;            /* current symbol set number     */
+d123 43
+d167 3
+d182 1
+d190 4
+d196 5
+a200 1
+    if ((f = open(fname, O_BINARY | O_RDONLY)) == -1)
+d202 1
+a202 1
+        DBG1("Font index file %s not found\n", fname);
+d206 3
+d210 1
+d213 1
+a213 1
+    hbuf = FMalloc_rd(f, index_size+sizeof(FONTINDEX), (LONG)0, index_size);
+d267 1
+a267 1
+  /* Find plugins */
+d269 3
+d279 11
+a289 7
+             if(p->tfnum == 5719)  {hplugin[0] = hp;  plug_ct++;}
+        else if(p->tfnum == 5720)  {hplugin[1] = hp;  plug_ct++;}
+        else if(p->tfnum == 5721)  {hplugin[2] = hp;  plug_ct++;
+                                    small_plugins = FALSE;}
+        else if(p->tfnum == 5723)  {hplugin[3] = hp;  plug_ct++;}
+        else if(p->tfnum == 5724)  {hplugin[4] = hp;  plug_ct++;
+                                    small_plugins = FALSE;}
+d314 1
+d322 11
+a332 1
+    if ((f = open("if.ss", O_BINARY | O_RDONLY)) == -1)
+d348 1
+a348 1
+    hss_directory = FMalloc_rd(f, ssdir_size, (LONG)2, ssdir_size);
+a380 1
+    hchar_buf = (MEM_HANDLE)0L;             /*  No character buffer yet   */
+d383 1
+d385 3
+d422 1
+d449 9
+a457 1
+        if ((ssf = open("if.ss", O_BINARY | O_RDONLY)) == -1)
+d463 2
+a464 1
+        if(!FMseek_read(ssf, s->offset, ss_size, (BYTE*)&symbol_set[0]))
+d477 3
+d524 8
+d543 1
+a543 1
+            bucket_num = p->bucket_num;
+a556 1
+typedef MEM_HANDLE HBUCKET;
+a558 2
+
+
+d586 1
+d615 7
+a621 2
+    if((bucket->f = open(MEMptr(fi->hlibnames) + ix->name_off,
+                                                 O_BINARY | O_RDONLY)) == -1)
+a668 3
+    MEMfree(BUFFER_POOL, hchar_buf);  /* Always free the character buffer */
+    hchar_buf = (MEM_HANDLE)0L;
+
+d676 1
+d778 1
+d790 1
+d887 1
+a887 1
+#ifdef DEBUG
+d890 42
+@

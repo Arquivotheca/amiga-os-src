@@ -1,0 +1,396 @@
+
+* *****************************************************************************
+* 
+* Services Implementation Algorithms and Routines
+* =Robert J. Mical=
+* Copyright (C) 1988, Commodore-Amiga Inc.
+* 
+* CONFIDENTIAL and PROPRIETARY
+* 
+* NAME           DATE       DESCRIPTION
+* -------------  ---------  ---------------------------------------------------
+* =RJ Mical=     19-Feb-88  Created this file!
+* 
+* *****************************************************************************
+
+
+	INCLUDE "assembly.i"
+
+
+	NOLIST
+	INCLUDE "exec/types.i"
+; 	INCLUDE "exec/nodes.i"
+; 	INCLUDE "exec/lists.i"
+; 	INCLUDE "exec/ports.i"
+; 	INCLUDE "exec/memory.i"
+; 	INCLUDE "libraries/configvars.i"
+; 	INCLUDE "libraries/dos.i"
+; 
+; 	INCLUDE "hardware/intbits.i"
+; 
+	INCLUDE "janus.i"
+;	INCLUDE "janusreg.i"
+;	INCLUDE "janusvar.i"
+	INCLUDE "services.i"
+	INCLUDE "serviceinternal.i"
+;	INCLUDE "setupsig.i"
+	INCLUDE "asmsupp.i"
+	LIST
+
+
+
+* =============================================================================
+* === IMPLEMENTATION ALGORITHMS ===============================================
+* =============================================================================
+* 
+* This section is for Torsten and RJ.  These notes are *not* to be released 
+* to the real world, please.
+
+
+
+* === AddService() ============================================================
+* struct ServiceData *AddService(ApplicationID, LocalID, ParamType, ParamSize)
+* D0                             D2             D3:0-15  D4         D5
+* ULONG ApplicationID;
+* USHORT LocalID;
+* ULONG ParamSize;
+* ULONG ParamType;
+* This algorithm should work on both the Amiga and PC sides
+
+		MOVE.L	A2-A5/D2-D7,-(SP)
+
+		MOVE.L	_SysBase,A2
+
+* - if we're the Amiga
+* 	- lock the ServiceBase sempahore
+		LEA	sb_ServiceSemaphore(A6),A0
+		EXG.L	A6,A2
+		CALLSYS	LockSemaphore
+		EXG.L	A6,A2
+
+* - lock the ServiceParam lock
+		MOVEA.L	sb_ServiceParam(A6),A3
+		LOCK	A3
+
+* - check to see if the service already exists:  traverse the ServiceData list, 
+*   checking first that the ServiceData's SERVICE_DELETED flag isn't set and 
+*   if it isn't then checking for a match with ApplicationID and LocalID
+		MOVEQ.L	#0,D0
+		MOVE.W	sb_FirstData(A6),D0
+		ADD.L	sb_JanusBase(A6),D0
+		MOVE.L	D0,A3
+
+		CMP.L	D2,sd_ApplicationID(A3)
+		BNE	CHECK_NEXT
+		CMP.W	D3,sd_LocalID(A3)
+		BEQ	EXISTS
+CHECK_NEXT:
+		MOVEA.L	sd_NextService(A3),A3
+		BRA	CHECK_EXIST
+
+
+EXISTS:
+* 	- if match found, thye service already exists
+* 		- if UserCount == 0, this is a service that an Amiga 
+* 		  task is waiting for so proceed
+		TST.W	sd_UserCount(A3)
+		BEQ	NEW_SERVICE_USER
+* 		- else if UserCount != 0, this is an AddService() request 
+* 		  for a service that already exists, so goto error
+		BRA	ADDSERVICE_ERROR
+
+
+NOT_EXISTS:
+* 	- if match not found, this is a virgin service so start it from scratch
+* 		- ServiceData = MakeServiceData()
+* 		- if ServiceData == NULL goto error
+		JSR	MakeServiceData
+		MOVEA.L	A0,A3
+		TST.W	A3
+		BEQ	ADDSERVICE_ERROR
+
+
+NEW_SERVICE_USER:
+* - set ServiceData's UserCount to 1
+		MOVE.W	#1,sd_UserCount(A3)
+
+* - allocate janus memory of ParamType and ParamSize
+* 	- if allocation not successful, goto error
+		
+* - clear the parameter memory
+* - set ServiceData's ParamType and ParamSize
+* - calculate the JANUSPTR of the parameter memory and save this in the 
+*   Servicedata's RawParamPtr field
+* - if we're the Amiga
+* 	- save the ParamPtr in the ServiceData's AmigaParamPtr field
+* 	- set the AMIGA_PARAMPTR flag
+* - else if we're the PC
+* 	- save the ParamPtr in the ServiceData's PCParamPtr field
+* 	- set the PC_PARAMPTR flag
+* - if we're the Amiga, perform the ServiceCustomer stuff for this new service
+* 	- allocate a ServiceCustomer structure in non-janus memory
+* 		- if can't allocate, goto error
+* 	- InformNewCustomers()
+* 	- initialize and add the new ServiceCustomer to the ServiceData list
+* - signal the other processor with ADDED_SERVICE
+* - unlock the ServiceParam lock
+* - if we're the Amiga
+* 	- unlock the ServiceBase sempahore
+* - return the address of the ServiceData structure
+
+ADDSERVICE_ERROR:
+* - if we're the Amiga and ServiceCustomer allocated, free
+* - if parameter memory allocated, free
+* - unlock the ServiceParam lock
+* - if we're the Amiga
+* 	- unlock the ServiceBase sempahore
+* - return NULL
+
+
+
+* === GetService() ==========================================================
+* struct ServiceData *GetService(ApplicationID, LocalID, SignalNumber, Wait)
+
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC if you take out the ServiceCustomer stuff (or implement 
+* ServiceCustomer-type stuff on the PC side)
+
+* - lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - try to find the service:  traverse the ServiceData list, checking that the 
+*   ServiceData's SERVICE_DELETED flag isn't set and if it isn't then check 
+*   for a match with ApplicationID and LocalID
+* - if match found and UserCount > 0, the service is available
+* 	- allocate and initialize a ServiceCustomer structure in non-janus mem
+* 		- if not able to allocate, goto error
+* 	- increment ServiceData UserCount
+* 	- add ServiceCustomer to ServiceData list of customers 
+* - else if match found and UserCount == 0 and Wait is TRUE, or match not 
+*   found but Wait is TRUE, then the service isn't available yet but this user 
+*   is willing to wait for it
+* 	- allocate and initialize a ServiceCustomer structure in non-janus mem
+* 		- if not able to allocate, goto error
+* 	- if match not found, create a ServiceData structure at this time 
+* 		- ServiceData = MakeServiceData()
+* 		- if ServiceData == NULL goto error
+* 	- add ServiceCustomer to ServiceData list of customers 
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+* - if we have a ServiceData to return, return its address, else return NULL
+* 
+
+error:
+* - if we allocated a ServiceCustomer, free it
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+* - return NULL
+
+
+
+* === CallService() ===========================================================
+* VOID CallService(ChannelNumber)
+* 
+* This algorithm should work on both the Amiga and PC sides
+* 
+* - find a zero byte in the AmigaToPC[] (or PCToAmiga[] of course) array
+*   that's in SeviceParam
+* 	- if none found, wait politely until one is zero; if one never 
+* 	  becomes zero, the other side is hung, and now so are we 
+* - write the channel number to the location of the array
+* - trigger the appropriate service interrupt
+* 
+* Additionally, on the Amiga side:
+* - lock the ServiceBase semaphore
+* - maybe lock the ServiceParam lock
+* - find the ServiceData of the channel number
+* - traverse the CustomerList of the ServiceData, and for any Customer whose
+*   task isn't the current one, send a signal
+* - maybe unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+
+
+
+* === ReleaseService() ========================================================
+* VOID ReleaseService(ServiceData)
+* 
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC if you take out the ServiceCustomer stuff (or implement 
+* ServiceCustomer-type stuff on the PC side)
+* 
+* - lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - if we're the Amiga
+* 	- find the ServiceCustomer structure that matches this task
+* 	- unlink the ServiceCustomer structure
+* 	- free the memory of the ServiceCustomer structure
+* - if UserCount == 0
+* 	- The guy who called ReleaseService() is an Amiga task 
+* 	  that was waiting for a service that never came available.  
+* 	  The ServiceCustomer structure for this task is already removed 
+* 	  so check if there are any other ServiceCustomers 
+* 	  waiting for this task and if not then ExpungeService()
+* - else if UserCount > 0
+* 	- decrement UserCount
+* 	- if UserCount == 0, this service has no more users so 
+* 	  ExpungeService(ServiceData)
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+
+
+
+* === DeleteService() =========================================================
+* VOID DeleteService(ServiceData)
+* 
+* This algorithm should work on both the Amiga and PC sides
+* 
+* - if we're the Amiga
+* 	- lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - set the ServiceData's SERVICE_DELETED flag
+* - decrement UserCount
+* - if UserCount == 0
+* 	- ExpungeService(ServiceData)
+* - else if UserCount != 0
+* 	- Signal other processor with DELETE_SERVICE
+* 	- if we're the Amiga
+* 		- InformDeletedService(ServiceData)
+* - unlock the ServiceParam lock
+* - if we're the Amiga
+* 	- unlock the ServiceBase sempahore
+
+
+
+* === MakeServiceData() =======================================================
+* This routine returns a pointer to an allocated and initialized ServiceData 
+* structure, or NULL if anything went wrong.  The initializations include 
+* the allocation of the structure and of a channel number, setting of the 
+* ID fields, and linking the ServiceData structure into the ServiceParam list
+* 
+* This routine expects that the ServiceParam lock is already locked, and 
+* if this is the Amiga then that the ServiceBase semaphore is already locked
+* 
+* - allocate ServiceData structure in janus memory
+* 	- if allocation not successful goto error
+* - allocate a free channel bit
+* 	- if none found, goto error
+* - zero the ServiceData structure
+* - set channel bit in ServiceData structure
+* - set the ServiceData's ApplicationID and LocalID
+* - link the ServiceData structure into the ServiceParam list numerically 
+*   according to its channel number
+* - if we're the Amiga
+* 	- set ServiceData Flag SERVICE_AMIGASIDE
+* - return address of ServiceData structure
+
+error:
+* - if ServiceData allocated, free
+* - if channel bit allocated, free
+* - return NULL
+
+
+
+* === ExpungeService() ========================================================
+* VOID ExpungeService(ServiceData)
+* 
+* This algorithm should work on both the Amiga and PC sides
+* 
+* All users have abandoned a deleted service, so finally expunge it
+* 
+* This routine expects that the ServiceParam lock is already locked, and 
+* if this is the Amiga then that the ServiceBase semaphore is already locked
+* 
+* - unlink ServiceData from system
+* - if ServiceData channel number is non-zero, free the bit
+* - if ServiceData parameter memory is non-zero, free ServiceData parameter 
+*   memory 
+* - free memory of ServiceData structure 
+
+
+
+* === InformNewCustomers() ====================================================
+* VOID InformNewCustomers(ServiceData)
+* 
+* This algorithm is for Amiga only, unless you implement customers on the PC
+* 
+* A new service has been added, so inform any customers who have been waiting 
+* for it
+* 
+* This routine expects that the ServiceParam lock is already locked, and 
+* if this is the Amiga then that the ServiceBase semaphore is already locked
+* 
+* - if the ServiceData's FirstCustomer field is non-zero, traverse the 
+*   list and 
+* 	- signal the task
+* 	- increment UserCount
+
+
+
+* === InformDeletedService() ==================================================
+* VOID InformDeletedService(ServiceData)
+* 
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC
+* 
+* A service has been deleted, so signal all customers to take notice.  
+* 
+* This routine expects that the ServiceParam lock is already locked, and 
+* if this is the Amiga then that the ServiceBase semaphore is already locked
+* 
+* - if the ServiceData's FirstCustomer field is non-zero, traverse the 
+*   list and signal each task, which wakes them up at which time they 
+*   should have a look at the structure and notice that the SERVICE_DELETED
+*   flag is now set
+
+
+
+* === Service Interrupt with Channel Number of ADDED_SERVICE ==================
+* This is an interrupt handled by the Amiga Service Dispatcher Task
+* 
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC
+* 
+* - lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - Get the channel number of the added service
+* - Look up the ServiceData for that channel number
+* - InformNewCustomers(ServiceData)
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+
+
+
+* === Service Interrupt with Channel Number of DELETE_SERVICE =================
+* This is an interrupt handled by the Amiga Service Dispatcher Task
+* 
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC
+* 
+* This algorithm checks *all* services and sends a signal to all that are 
+* deleted, which redundancy is left in for its safety-margin value
+* 
+* - lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - traverse the ServiceData list, and if the SERVICE_DELETED flag is set
+* 	- InformDeletedService(ServiceData)
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+
+
+
+* === Service Interrupt with User Channel Number ==============================
+* This is an interrupt handled by the Amiga Service Dispatcher Task
+* 
+* This algorithm is for the Amiga side, but the idea should be much the same 
+* on the PC
+* 
+* - lock the ServiceBase sempahore
+* - lock the ServiceParam lock
+* - traverse the ServiceData list, looking to match channel number
+* 	- if match found
+* 		- traverse customer list, signalling each customer
+* - unlock the ServiceParam lock
+* - unlock the ServiceBase sempahore
+
+
+
+

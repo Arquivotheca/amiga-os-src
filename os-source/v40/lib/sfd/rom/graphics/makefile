@@ -1,0 +1,205 @@
+########################################
+MAKEMETA=	../../../../tools/makemeta
+
+
+OBJS0=\
+	BltBitMap.obj\
+	BltTemplate.obj\
+	ClearEOL.obj\
+	ClearScreen.obj\
+	TextLength.obj\
+	Text.obj\
+	SetFont.obj\
+	OpenFont.obj\
+	CloseFont.obj\
+	AskSoftStyle.obj\
+	SetSoftStyle.obj\
+	AddBob.obj\
+	AddVSprite.obj\
+	DoCollision.obj\
+	DrawGList.obj\
+	InitGels.obj\
+	InitMasks.obj\
+	RemIBob.obj\
+	RemVSprite.obj\
+	SetCollision.obj\
+	SortGList.obj\
+	AddAnimOb.obj\
+	Animate.obj\
+	GetGBuffers.obj\
+	InitGMasks.obj\
+	DrawEllipse.obj\
+	AreaEllipse.obj\
+	LoadRGB4.obj\
+	InitRastPort.obj\
+	InitVPort.obj\
+	MrgCop.obj\
+	MakeVPort.obj\
+	LoadView.obj\
+	WaitBlit.obj\
+	SetRast.obj\
+	Move.obj\
+	Draw.obj\
+	AreaMove.obj\
+	AreaDraw.obj\
+	AreaEnd.obj\
+	WaitTOF.obj\
+	QBlit.obj\
+	InitArea.obj\
+	SetRGB4.obj\
+	QBSBlit.obj\
+	BltClear.obj\
+	RectFill.obj\
+	BltPattern.obj\
+	ReadPixel.obj\
+	WritePixel.obj\
+	Flood.obj\
+	PolyDraw.obj\
+	SetAPen.obj\
+	SetBPen.obj\
+	SetDrMd.obj\
+	InitView.obj\
+	CBump.obj\
+	CMove.obj\
+	CWait.obj\
+	VBeamPos.obj\
+	InitBitMap.obj\
+	ScrollRaster.obj\
+	WaitBOVP.obj\
+	GetSprite.obj\
+	FreeSprite.obj\
+	ChangeSprite.obj\
+	MoveSprite.obj\
+	LockLayerRom.obj\
+	UnlockLayerRom.obj\
+	SyncSBitMap.obj\
+	CopySBitMap.obj\
+	OwnBlitter.obj\
+	DisownBlitter.obj\
+	InitTmpRas.obj\
+	AskFont.obj\
+	AddFont.obj\
+	RemFont.obj\
+	AllocRaster.obj\
+	FreeRaster.obj\
+	AndRectRegion.obj\
+	OrRectRegion.obj\
+	NewRegion.obj\
+	ClearRectRegion.obj\
+	ClearRegion.obj\
+	DisposeRegion.obj\
+	FreeVPortCopLists.obj\
+	FreeCopList.obj\
+	ClipBlit.obj\
+	XorRectRegion.obj\
+	FreeCprList.obj\
+	GetColorMap.obj\
+	FreeColorMap.obj\
+	GetRGB4.obj\
+	ScrollVPort.obj\
+	UCopperListInit.obj\
+	FreeGBuffers.obj\
+	BltBitMapRastPort.obj\
+	OrRegionRegion.obj\
+	XorRegionRegion.obj\
+	AndRegionRegion.obj
+
+OBJS1=\
+	SetRGB4CM.obj\
+	BltMaskBitMapRastPort.obj\
+	GfxInternal1.obj\
+	GfxInternal2.obj\
+	AttemptLockLayerRom.obj\
+	GfxNew.obj\
+	GfxFree.obj\
+	GfxAssociate.obj\
+	BitMapScale.obj\
+	ScalerDiv.obj\
+	TextExtent.obj\
+	TextFit.obj\
+	GfxLookUp.obj\
+	VideoControl.obj\
+	VideoControlTags.obj\
+	OpenMonitor.obj\
+	CloseMonitor.obj\
+	FindDisplayInfo.obj\
+	NextDisplayInfo.obj\
+	AddDisplayInfo.obj\
+	AddDisplayInfoData.obj\
+	SetDisplayInfoData.obj\
+	GetDisplayInfoData.obj\
+	FontExtent.obj\
+	ReadPixelLine8.obj\
+	WritePixelLine8.obj\
+	ReadPixelArray8.obj\
+	WritePixelArray8.obj\
+	GetVPModeID.obj\
+	ModeNotAvailable.obj\
+	WeighTAMatch.obj\
+	WeighTAMatchTags.obj\
+	EraseRect.obj\
+	ExtendFont.obj\
+	ExtendFontTags.obj\
+	StripFont.obj\
+	CalcIVG.obj\
+	AttachPalExtra.obj\
+	ObtainBestPenA.obj\
+	ObtainBestPen.obj\
+	GfxInternal3.obj\
+	SetRGB32.obj\
+	GetAPen.obj\
+	GetBPen.obj\
+	GetDrMd.obj\
+	GetOutlinePen.obj\
+	LoadRGB32.obj\
+	SetChipRev.obj\
+	SetABPenDrMd.obj\
+	GetRGB32.obj\
+	GfxSpare1.obj\
+	SetDefaultMonitor.obj\
+	AllocBitMap.obj\
+	FreeBitMap.obj\
+	GetExtSpriteA.obj\
+	GetExtSprite.obj\
+	CoerceMode.obj\
+	ChangeVPBitMap.obj\
+	ReleasePen.obj\
+	ObtainPen.obj\
+	GetBitMapAttr.obj\
+	AllocDBufInfo.obj\
+	FreeDBufInfo.obj\
+	SetOutlinePen.obj\
+	SetWriteMask.obj\
+	SetMaxPen.obj\
+	SetRGB32CM.obj\
+	ScrollRasterBF.obj\
+	FindColor.obj\
+	GfxSpare2.obj\
+	AllocSpriteDataA.obj\
+	AllocSpriteData.obj\
+	ChangeExtSpriteA.obj\
+	ChangeExtSprite.obj\
+	FreeSpriteData.obj\
+	SetRPAttrsA.obj\
+	SetRPAttrs.obj\
+	GetRPAttrsA.obj\
+	GetRPAttrs.obj\
+	BestModeIDA.obj\
+	BestModeID.obj\
+	WriteChunkyPixels.obj
+
+lib.timestamp:	asm.timestamp
+	make objs0 objs1 ${MFLAGS} ${MARGS}
+	cat *.obj >../graphics.lib
+	rm -f *.obj
+	touch lib.timestamp
+
+asm.timestamp:
+
+objs0:		${OBJS0}
+
+objs1:		${OBJS1}
+	rm -f *.asm
+	touch asm.timestamp
+
+.INCLUDE=${MAKEMETA}

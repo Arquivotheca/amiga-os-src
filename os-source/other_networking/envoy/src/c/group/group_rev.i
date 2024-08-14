@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'29.7.93'
+	ENDM
+VERS	MACRO
+		dc.b	'group 40.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'group 40.1 (29.7.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: group 40.1 (29.7.93)',0
+	ENDM

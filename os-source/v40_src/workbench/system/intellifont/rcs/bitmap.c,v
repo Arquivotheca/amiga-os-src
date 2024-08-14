@@ -1,0 +1,419 @@
+head     37.7;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+37.7
+date     92.02.07.11.50.58;  author davidj;  state Exp;
+branches ;
+next     37.6;
+
+37.6
+date     91.03.11.14.21.46;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.7
+log
+@bug fixes
+@
+text
+@/*
+**	$Id: bitmap.c,v 37.6 91/03/11 14:21:46 kodiak Exp Locker: davidj $
+**
+**	Fountain/bitmap.c -- handle bitmap creation
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+*/
+
+#include  "fountain.h"
+
+#define	DB(x)	;
+
+extern struct Library *SysBase;
+extern struct Library *DiskfontBase;
+extern struct Library *DOSBase;
+extern struct Library *GfxBase;
+
+extern struct Process *Process;
+
+extern union StaticPool S;
+
+BOOL CreateDiskFont (struct SizeEntry *se)
+{
+    struct TTextAttr tTextAttr;
+    struct TagItem tags[4];
+    struct TextFont *tf;
+    struct DiskFontHeader *srcDFH, *destDFH;
+    BPTR lock;
+    ULONG *src, *dest, *tDest, t, hunkSize, actual;
+    FILE *f;
+
+    tags[0].ti_Tag = OT_DeviceDPI;
+    tags[0].ti_Data = se->dpi;
+    tags[1].ti_Tag = OT_DotSize;
+    tags[1].ti_Data = se->dotSize;
+    tags[2].ti_Tag = OT_SymbolSet;
+    tags[2].ti_Data = se->symbolSet;
+    tags[3].ti_Tag = TAG_DONE;
+    tags[3].ti_Data = 0;
+    buildpath (S.t.TempBuffer2, se->ref.fe->fontPath, se->ref.fe->amigaName);
+    strcat (S.t.TempBuffer2, SUFFIX_FONT);
+    tTextAttr.tta_Name = S.t.TempBuffer2;
+    tTextAttr.tta_YSize = se->ySize;
+    tTextAttr.tta_Style = FSF_TAGGED;
+    tTextAttr.tta_Flags = 0;
+    tTextAttr.tta_Tags = tags;
+    DB (kprintf ("OpenDiskFont \"%s\" %ld $%lx $%lx ...\n", S.t.TempBuffer2, se->ySize, FSF_TAGGED, 0));
+    Process->pr_Result2 = 0;	/* clear IoErr() */
+    if ((!(tf = OpenDiskFont ((struct TextAttr *) & tTextAttr))) || (tf->tf_YSize != se->ySize))
+    {
+	DB (kprintf ("tf=0x%lx : ysize=%ld %ld\n", tf, (LONG) ((tf) ? tf->tf_YSize : 0), (LONG) se->ySize));
+	if (Process->pr_Result2 == ERROR_NO_FREE_STORE)
+	{
+	    DB (kprintf ("  failed: out of memory\n"));
+	    ErrRequester (ERROR_POpenFontMem, se->ref.fe->amigaName, se->ySize);
+	}
+	else
+	    ErrRequester (ERROR_POpenFont, se->ref.fe->amigaName, se->ySize);
+	if (tf)
+	{
+	    DB (kprintf ("  CloseFont($%lx)\n", tf));
+	    CloseFont (tf);
+	}
+	return (FALSE);
+    }
+
+    /* create memory copy of disk image of font */
+    srcDFH = (struct DiskFontHeader *)
+      (((ULONG) tf) - ((ULONG) OFFSET (DiskFontHeader, dfh_TF)));
+    src = ((ULONG *) srcDFH) - 1;
+    DB (kprintf ("  ... $%lx src $%lx srcDFH $%lx\n", tf, src, srcDFH));
+
+    if (src[-1])
+    {
+	ErrRequester (ERROR_POpenFontHunk, se->ref.fe->amigaName, se->ySize);
+	DB (kprintf ("  CloseFont($%lx)\n", tf));
+	CloseFont (tf);
+	return (FALSE);
+    }
+
+    hunkSize = src[-2] - 8;
+    dest = (ULONG *) malloc (hunkSize + 80);
+    DB (kprintf ("dest $%lx hunkSize %ld\n", dest, hunkSize));
+    if (!dest)
+    {
+	ErrRequester (ENDGAME_NoMemory, hunkSize + 80);
+	DB (kprintf ("  CloseFont($%lx)\n", tf));
+	CloseFont (tf);
+	return (FALSE);
+    }
+
+    /* set up header */
+    tDest = dest;
+    *tDest++ = 0x000003f3;	/* hunk.header */
+    *tDest++ = 0;		/* (no resident library) */
+    *tDest++ = 1;		/* one hunk */
+    *tDest++ = 0;		/* from 0 */
+    *tDest++ = 0;		/* to 0 */
+    *tDest++ = hunkSize / 4;
+    *tDest++ = 0x000003ea;	/* hunk.data */
+    *tDest++ = hunkSize / 4;
+    /* copy bulk of data */
+    memmove (tDest, src, hunkSize);
+    /* set up first part of trailer */
+    destDFH = (struct DiskFontHeader *) (tDest + 1);
+    tDest += hunkSize / 4;	/* skip over font data moved with memmove */
+    *tDest++ = 0x000003ec;	/* hunk.reloc32 */
+    *tDest++ = 0;		/* # of relocations (filled in later) */
+    *tDest++ = 0;		/* to hunk #0 */
+
+    /* massage data and complete trailer */
+    destDFH->dfh_DF.ln_Succ = destDFH->dfh_DF.ln_Pred = 0;
+    if (srcDFH->dfh_DF.ln_Name)
+    {
+	destDFH->dfh_DF.ln_Name = (char *) (((ULONG) srcDFH->dfh_DF.ln_Name) -
+					    ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_DF.ln_Name) + 4;
+    }
+
+    t = (ULONG) ((struct TextFontExtension *)
+		 (srcDFH->dfh_TF.tf_Extension))->tfe_Tags;
+    if (t)
+    {
+	destDFH->dfh_TF.tf_Style |= FSF_TAGGED;
+	destDFH->dfh_Segment = t - ((ULONG) src);
+	*tDest++ = OFFSET (DiskFontHeader, dfh_Segment) + 4;
+    }
+    else
+	destDFH->dfh_Segment = 0;
+    destDFH->dfh_TF.tf_Extension = 0;
+
+    destDFH->dfh_TF.tf_Message.mn_Node.ln_Succ =
+      destDFH->dfh_TF.tf_Message.mn_Node.ln_Pred = 0;
+    if (srcDFH->dfh_TF.tf_Message.mn_Node.ln_Name)
+    {
+	destDFH->dfh_TF.tf_Message.mn_Node.ln_Name = (char *)
+	  (((ULONG) srcDFH->dfh_TF.tf_Message.mn_Node.ln_Name) -
+	   ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_TF.tf_Message.mn_Node.ln_Name) + 4;
+    }
+    if (srcDFH->dfh_TF.tf_CharData)
+    {
+	destDFH->dfh_TF.tf_CharData = (APTR)
+	  (((ULONG) srcDFH->dfh_TF.tf_CharData) -
+	   ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_TF.tf_CharData) + 4;
+    }
+    if (srcDFH->dfh_TF.tf_CharLoc)
+    {
+	destDFH->dfh_TF.tf_CharLoc = (APTR)
+	  (((ULONG) srcDFH->dfh_TF.tf_CharLoc) -
+	   ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_TF.tf_CharLoc) + 4;
+    }
+    if (srcDFH->dfh_TF.tf_CharSpace)
+    {
+	destDFH->dfh_TF.tf_CharSpace = (APTR)
+	  (((ULONG) srcDFH->dfh_TF.tf_CharSpace) -
+	   ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_TF.tf_CharSpace) + 4;
+    }
+    if (srcDFH->dfh_TF.tf_CharKern)
+    {
+	destDFH->dfh_TF.tf_CharKern = (APTR)
+	  (((ULONG) srcDFH->dfh_TF.tf_CharKern) -
+	   ((ULONG) src));
+	*tDest++ = OFFSET (DiskFontHeader, dfh_TF.tf_CharKern) + 4;
+    }
+    *tDest++ = 0;		/* no more relocations */
+    *tDest++ = 0x000003f2;	/* hunk.end */
+
+    t = (((ULONG) tDest) - ((ULONG) dest) - hunkSize - 52) / 4;
+    DB (kprintf ("%ld relocations\n", t));
+    *((ULONG *) (dest + (hunkSize / 4) + (8 + 1))) = t;	/* # of reloc's */
+
+    DB (kprintf ("  CloseFont($%lx)\n", tf));
+    CloseFont (tf);
+
+    DB (kprintf ("dest $%lx destDFH $%lx hunkSize %ld\n", dest, destDFH, hunkSize));
+
+    /* write out disk image */
+    buildpath (S.t.TempBuffer2, se->ref.fe->fontPath, se->ref.fe->amigaName);
+    if (lock = CreateDir (S.t.TempBuffer2))
+    {
+	DB (kprintf ("created %s\n", S.t.TempBuffer2));
+	UnLock (lock);
+    }
+    else
+	DB (kprintf ("did not create %s\n", S.t.TempBuffer2));
+
+    buildpath (S.t.TempBuffer2, se->ref.fe->fontPath, se->fontFile);
+    if (!(f = fopen (S.t.TempBuffer2, "w")))
+    {
+	ErrRequester (ERROR_PCreateFail, se->ref.fe->amigaName, se->ySize,
+		      S.t.TempBuffer2);
+	free (dest);
+	return (FALSE);
+    }
+    t = hunkSize + 52 + (t * 4);
+    actual = fwrite ((char *) dest, 1, t, f);
+    free (dest);
+    fclose (f);
+    if (actual != t)
+    {
+	ErrRequester (ERROR_PFailWrite, se->ref.fe->amigaName, se->ySize,
+		      S.t.TempBuffer2, t, actual, ferror (f));
+	return (FALSE);
+    }
+    return (TRUE);
+}
+@
+
+
+37.6
+log
+@*** empty log message ***
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d12 2
+d23 1
+a23 2
+BOOL CreateDiskFont(se)
+struct SizeEntry *se;
+d41 2
+a42 2
+    buildpath(S.t.TempBuffer2, se->ref.fe->fontPath, se->ref.fe->amigaName);
+    strcat(S.t.TempBuffer2, SUFFIX_FONT);
+d48 9
+a56 8
+    DBG4("OpenDiskFont \"%s\" %ld $%lx $%lx ...\n", S.t.TempBuffer2, se->ySize,
+	    FSF_TAGGED, 0);
+    Process->pr_Result2 = 0;		/* clear IoErr() */
+    if ((!(tf = OpenDiskFont((struct TextAttr *) &tTextAttr))) ||
+	    (tf->tf_YSize != se->ySize)) {
+	if (Process->pr_Result2 == ERROR_NO_FREE_STORE) {
+	    DBG("  failed: out of memory\n");
+	    ErrRequester(ERROR_POpenFontMem, se->ref.fe->amigaName, se->ySize);
+d59 5
+a63 4
+	    ErrRequester(ERROR_POpenFont, se->ref.fe->amigaName, se->ySize);
+	if (tf) {
+	    DBG1("  CloseFont($%lx)\n", tf);
+	    CloseFont(tf);
+d65 1
+a65 1
+	return(FALSE);
+d70 3
+a72 3
+	    (((ULONG) tf) - ((ULONG) OFFSET(DiskFontHeader, dfh_TF)));
+    src = ((ULONG *) srcDFH)-1;
+    DBG3("  ... $%lx src $%lx srcDFH $%lx\n", tf, src, srcDFH);
+d74 17
+a90 15
+    if (src[-1]) {
+	ErrRequester(ERROR_POpenFontHunk, se->ref.fe->amigaName, se->ySize);
+	DBG1("  CloseFont($%lx)\n", tf);
+	CloseFont(tf);
+	return(FALSE);
+    }
+
+    hunkSize = src[-2]-8;
+    dest = (ULONG *) malloc(hunkSize+80);
+    DBG2("dest $%lx hunkSize %ld\n", dest, hunkSize);
+    if (!dest) {
+	ErrRequester(ENDGAME_NoMemory, hunkSize+80);
+	DBG1("  CloseFont($%lx)\n", tf);
+	CloseFont(tf);
+	return(FALSE);
+d95 8
+a102 8
+    *tDest++ = 0x000003f3;		/* hunk.header */
+    *tDest++ = 0;			/* (no resident library) */
+    *tDest++ = 1;			/* one hunk */
+    *tDest++ = 0;			/*   from 0 */
+    *tDest++ = 0;			/*   to 0 */
+    *tDest++ = hunkSize/4;
+    *tDest++ = 0x000003ea;		/* hunk.data */
+    *tDest++ = hunkSize/4;
+d104 1
+a104 1
+    memmove(tDest, src, hunkSize);
+d106 5
+a110 5
+    destDFH = (struct DiskFontHeader *) (tDest+1);
+    tDest += hunkSize/4;	/* skip over font data moved with memmove */
+    *tDest++ = 0x000003ec;		/* hunk.reloc32 */
+    *tDest++ = 0;			/* # of relocations (filled in later) */
+    *tDest++ = 0;			/* to hunk #0 */
+d114 2
+a115 1
+    if (srcDFH->dfh_DF.ln_Name) {
+d117 2
+a118 2
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_DF.ln_Name)+4;
+d122 3
+a124 2
+	    (srcDFH->dfh_TF.tf_Extension))->tfe_Tags;
+    if (t) {
+d127 1
+a127 1
+	*tDest++ = OFFSET(DiskFontHeader, dfh_Segment)+4;
+d134 3
+a136 2
+	    destDFH->dfh_TF.tf_Message.mn_Node.ln_Pred = 0;
+    if (srcDFH->dfh_TF.tf_Message.mn_Node.ln_Name) {
+d138 3
+a140 3
+		(((ULONG) srcDFH->dfh_TF.tf_Message.mn_Node.ln_Name) -
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_TF.tf_Message.mn_Node.ln_Name)+4;
+d142 2
+a143 1
+    if (srcDFH->dfh_TF.tf_CharData) {
+d145 3
+a147 3
+		(((ULONG) srcDFH->dfh_TF.tf_CharData) -
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_TF.tf_CharData)+4;
+d149 2
+a150 1
+    if (srcDFH->dfh_TF.tf_CharLoc) {
+d152 3
+a154 3
+		(((ULONG) srcDFH->dfh_TF.tf_CharLoc) -
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_TF.tf_CharLoc)+4;
+d156 2
+a157 1
+    if (srcDFH->dfh_TF.tf_CharSpace) {
+d159 3
+a161 3
+		(((ULONG) srcDFH->dfh_TF.tf_CharSpace) -
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_TF.tf_CharSpace)+4;
+d163 2
+a164 1
+    if (srcDFH->dfh_TF.tf_CharKern) {
+d166 3
+a168 3
+		(((ULONG) srcDFH->dfh_TF.tf_CharKern) -
+		((ULONG) src));
+	*tDest++ = OFFSET(DiskFontHeader, dfh_TF.tf_CharKern)+4;
+d170 9
+a178 9
+    *tDest++ = 0;			/* no more relocations */
+    *tDest++ = 0x000003f2;		/* hunk.end */
+
+    t = (((ULONG) tDest)-((ULONG) dest)-hunkSize-52)/4;
+    DBG1("%ld relocations\n", t);
+    *((ULONG *) (dest + (hunkSize/4) + (8+1))) = t;	/* # of reloc's */
+
+    DBG1("  CloseFont($%lx)\n", tf);
+    CloseFont(tf);
+d180 1
+a180 1
+    DBG3("dest $%lx destDFH $%lx hunkSize %ld\n", dest, destDFH, hunkSize);
+d183 5
+a187 4
+    buildpath(S.t.TempBuffer2, se->ref.fe->fontPath, se->ref.fe->amigaName);
+    if (lock = CreateDir(S.t.TempBuffer2)) {
+	DBG1("created %s\n", S.t.TempBuffer2);
+	UnLock(lock);
+d190 1
+a190 1
+	DBG1("did not create %s\n", S.t.TempBuffer2);
+d192 17
+a208 15
+    buildpath(S.t.TempBuffer2, se->ref.fe->fontPath, se->fontFile);
+    if (!(f = fopen(S.t.TempBuffer2, "w"))) {
+	ErrRequester(ERROR_PCreateFail, se->ref.fe->amigaName, se->ySize,
+		S.t.TempBuffer2);
+	free(dest);
+	return(FALSE);
+    }
+    t = hunkSize+52+(t*4);
+    actual = fwrite((char *) dest, 1, t, f);
+    free(dest);
+    fclose(f);
+    if (actual != t) {
+	ErrRequester(ERROR_PFailWrite, se->ref.fe->amigaName, se->ySize,
+		S.t.TempBuffer2, t, actual, ferror(f));
+	return(FALSE);
+d210 1
+a210 1
+    return(TRUE);
+@

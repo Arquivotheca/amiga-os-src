@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'24.6.93'
+	ENDM
+VERS	MACRO
+		dc.b	'look 1.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'look 1.1 (24.6.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: look 1.1 (24.6.93)',0
+	ENDM

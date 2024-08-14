@@ -1,0 +1,164 @@
+This file attempts to answer some of the more common questions about bru.
+
+Q:	Why does bru write it's archives in a "private format" rather than
+	using standard filesystem formats like "diskfit" on a Macintosh or
+	various public domain programs on an Amiga?  I like being able to
+	examine my backups and recover files from them using standard
+	operating system commands.
+
+A:	There are several reasons why bru writes its archives in a private
+	format:
+
+	(1)	Speed.  Since the format is "stream oriented" it can, in
+		theory, be written at the maximum rate at which the device
+		is capable of accepting data.  Going through the normal
+		system file mechanisms for writing the archive can greatly
+		reduce archive throughput.
+
+	(2)	Robustness.  If you write archives in the native system
+		format you at at the mercy of the system when it comes to
+		recovering data from archives which have been corrupted
+		or damaged in some way.  Since the bru format is reasonably
+		simple with some built in redundancy and sanity checks for
+		important information, it is much easier to reconstruct or
+		work around the loss of important information.
+
+	(3)	Portability.  The bru format is completely portable to any
+		system that has bru installed.  Archives written in the
+		host machine filesystem format are usually not portable to
+		any other systems without special software tools.
+
+	(4)	Media independence.  Because the format is stream oriented,
+		it is about as device independent as it possible to get.
+		For example, this is what allows bru to write it's archives
+		to Unix pipes, to streaming tapes, out serial lines, over
+		Ethernet stream connections, etc.  This provides great
+		flexibility, without sacrificing the ability to use
+		random access archive devices such as floppy disks or
+		optical disks (and to actually make use of the random access
+		features not just use them as streaming devices), when
+		random access archive devices are available.
+
+Q:	If efficiency is a consideration in using a private format for
+	writing archives, why doesn't bru read it's input data from
+	the "raw filesystem" like BSD's "dump" rather than going through
+	the less efficient mechanisms supplied for normal applications to
+	examine and read all files in the system?
+
+A:	Every design decision is a tradeoff.  Since bru has total control over
+	it's output format, and using a private format has significant 
+	advantages in several areas, ignoring the host filesystem format for
+	output is the reasonable thing to do.  However, bru most definitely
+	does not have any control over the input format (the host filesystem
+	format) and thus building-in explicit knowledge of the host
+	filesystem simply to read the input files slightly more efficiently
+	is quite obviously the wrong thing to do.  Not only must this code
+	be written, debugged, and maintained for each different host machine
+	(System V Unix, BSD Unix, AmigaDOS, MacOS, etc), but the slightest
+	change or upgrade to the host filesystem format can render the
+	program completely unusable.  The interface provided to the general
+	user community is far more stable and can be counted on to be
+	available even when the underlying filesystem format changes many
+	times.  This is not to say that reading the "raw filesystem" format
+	does not have some advantages, just that the disadvantages seem
+	to greatly outweigh the advantages.
+
+Q:	When bru is writing a multivolume archive and gets an unrecoverable 
+	write error part way through, why doesn't it remember where it was
+	when it started that volume, ask for a replacement media, and rewrite
+	that volume again?
+
+A:	There are really two issues involved here; (1) "correct" behavior in
+	the face of an unrecoverable write error, and (2) "checkpointing" of
+	state at the start of a volume.
+
+	First let's deal with the notion of correct behavior.  After some
+	reflection, it seems obvious that what might be seem to be the desired
+	default behavior in one situation might be totally inappropriate in
+	another.  The suggestion posed in the above question, to restart the
+	volume from the beginning, presupposes that the cost of doing this
+	is negligible, both in terms of money and time.  This is probably true
+	for archives written to floppy disks or other "small" erasable archive
+	media.  However, consider the case of a write error that occurs after
+	writing 500Mb of data to a tape capable of holding 1000Mb, six hours
+	after starting the write.  Or the case of writing to the 90% full point
+	on a write-once device like an optical disk, where the media might cost
+	$100 per disk or more.  In these cases, we probably want to simply
+	record the error, and subsequent data loss, and continue on.  If the
+	lost data is important, it can be captured in a second, subsequent 
+	archive.  Ideally we would like to have finer control over the
+	default behavior, possibly being prompted for the desired recovery
+	option, or having the default depend on some heuristics.
+
+	The second issue is one of checkpointing the internal state at the
+	start of a volume, so that the volume can be rewritten if necessary.
+	There are at least a couple of possibilities here, neither of which
+	bru currently implements.  The first is somewhat Unix specific, but
+	has been used to advantage at times by other programs, and that is
+	to make use of the "fork" system call to produce an identical copy
+	of the executing process at the start of each volume.  The child
+	process continues on, writing to the new volume, while the parent
+	waits around to see if it is successful.  If not, it forks another
+	child with the same state as the original, and the volume gets 
+	rewritten again.  If the child is successful, it forks its own child
+	at the end of that volume and does the same thing as it's parent.
+	The obvious disadvantage of this scheme is that a new process is
+	created for each and every volume, which may be a problem when lots
+	of small media are involved.  Another option, which is somewhat more
+	portable, is for the process to maintain an internal state table with
+	all the "appropriate information" necessary to perform a restart with
+	a given volume.  This is considerably more complex, but still workable.
+
+	Some form of ability to restart a volume, using either or both of the
+	above techniques, will probably be incorporated into a future version
+	of bru.
+
+Q:	Given the previous question, and assuming that the correct behavior
+	is NOT to restart the current volume, why doesn't bru simply "slip"
+	the data "past" the apparent bad spot and write it to the first place
+	that a write successfully completes?
+
+	The idea posed here is to introduce "skew" into the archive, so
+	that bad spots are skipped over.  Thus instead of having one of
+	the following cases (numbers are archive block numbers):
+
+		No error	Vol 1		 0  1  2  3  4  5  6  7  8  9
+				Vol 2		10 11 12 13 14 15 16 17 18 19
+				Vol 3		20 21 22
+
+		Error		Vol 1		 0  1  2  3  4  5  6  7  8  9
+				Vol 2		10 11 12 XX XX 15 16 17 18 19
+				Vol 3		20 21 22
+
+						(blocks 13 and 14 lost)
+
+	we get:
+
+		Error		Vol 1		 0  1  2  3  4  5  6  7  8  9
+				Vol 2		10 11 12 XX XX 13 14 15 16 17
+				Vol 3		18 19 20 21 22
+
+	This is primarily a current implemention restriction.  In principle
+	it is possible, but it does complicate intelligent use of random access
+	I/O on archive devices that will support it.  For example, if the device
+	to which the above archive is written supports seeks and has a known size,
+	and assuming file A starts at block 5 and file B starts at block 16, then
+	if all bru needs to do is get to the file header in the first block of
+	each file (blocks 5 and 16), it will attempt to compute the location of
+	blocks 5 and 16 and seek directly to them (with appropriate requests to
+	insert the given volumes).  In the case of skew, this would result in
+	bru getting block 14 when it was expecting 16.  Determining that getting
+	the wrong block is correct under these conditions is difficult in general,
+	but still a solvable problem.  Assume for the moment that bru did in
+	fact get block 14 when it was expecting 16.  It needs to be sure that this
+	is a result of a 2 block skew, and not just the hardware deciding to return
+	the wrong block (yes, this HAS happened to the author in the past, on a
+	flakey tape drive).  There are many other such considerations.
+
+	In short, yes it is probably possible to deal with skew in archives with
+	some assurance that the solution is sufficiently general to work in all
+	possible cases.  When the solution to this problem is fully worked out
+	and tested, it will be implemented.
+
+
+

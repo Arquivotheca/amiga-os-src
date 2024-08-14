@@ -1,0 +1,5 @@
+VERBOSE
+WITH MWLib:cgl/LIBRARY
+LIBRARY LIB:lcm.lib+LIB:lc.lib+LIB:amiga.lib
+ADDSYM
+NOICONS

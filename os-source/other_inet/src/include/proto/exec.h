@@ -1,0 +1,12 @@
+€Œ<exec/types.h>Œ<clib/exec_protos.h>°_USEOLDEXEC_Œ<pragmas/exec_old_pragmas.h>
+ƒExecBase*SysBase;Œ<pragmas/exec_pragmas.h>‡
+‹BeginIO(ƒIORequest*);
+ƒIORequest*CreateExtIO(ƒ©*,);
+ƒ©*CreatePort(„*,);
+ƒIOStdReq*CreateStdIO(ƒ©*);
+ƒTask*CreateTask(„*,„,”,);
+‹DeleteExtIO(ƒIORequest*);
+‹DeletePort(ƒ©*);
+‹DeleteStdIO(ƒIOStdReq*);
+‹DeleteTask(ƒTask*);
+‹NewList(ƒ®*);

@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	6
+DATE	MACRO
+		dc.b	'25.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'DataTypes 40.6'
+	ENDM
+VSTRING	MACRO
+		dc.b	'DataTypes 40.6 (25.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: DataTypes 40.6 (25.8.93)',0
+	ENDM

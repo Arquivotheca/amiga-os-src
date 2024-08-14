@@ -1,0 +1,55 @@
+LC = lc:lc
+ASM = lc:asm
+CFLAGS = -iINCLUDE: -b0 -v -cust -O
+ASMFLAGS = -iINC:
+LINK = lc:blink
+LIB = lib:lcnb.lib+lib:amiga.lib+lib:debug.lib
+OBJ = printertag.o+init.o+data.o+dospecial.o+render.o+renderT.o+transfer.o+density.o+memcopy.o+memclr.o
+TARGET = CanonBJ10
+
+.c.o:
+   @$(LC) $(CFLAGS) $#?
+
+$(TARGET): printertag.o init.o data.o dospecial.o render.o renderT.o density.o transfer.o memcopy.o memclr.o
+   @$(LINK) <WITH <
+   FROM $(OBJ)
+   TO $(TARGET)
+   LIBRARY $(LIB)
+   SC SD VERBOSE
+   <
+
+init.o: init.a
+   @$(ASM) $(ASMFLAGS) init.a
+
+printertag.o: printertag.a BJ10_rev.i
+   @$(ASM) $(ASMFLAGS) printertag.a
+
+transfer.o: transfer.a
+   @$(ASM) $(ASMFLAGS) transfer.a
+
+memcopy.o: memcopy.a
+   @$(ASM) $(ASMFLAGS) memcopy.a
+
+memclr.o: memclr.a
+   @$(ASM) $(ASMFLAGS) memclr.a
+
+#transfer.o: transfer.c
+#  @$(LC) $(CFLAGS) transfer.c
+
+dospecial.o: dospecial.c
+  @$(LC) $(CFLAGS) dospecial.c
+
+data.o: data.c
+  @$(LC) $(CFLAGS) data.c
+
+density.o: density.c
+  @$(LC) $(CFLAGS) density.c
+
+render.o: render.c memcopy.a memclr.a
+  @$(LC) $(CFLAGS) render.c
+
+renderT.o: render.c memcopy.a memclr.a
+  @$(LC) $(CFLAGS) -m3 -dTURBO -orenderT.o render.c
+
+install:
+   copy CanonBJ10 to devs:printers

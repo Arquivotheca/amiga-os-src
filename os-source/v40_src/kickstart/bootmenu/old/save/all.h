@@ -1,0 +1,20 @@
+#include <exec/types.h>
+#include <proto/clist.h>
+#include <proto/console.h>
+#include <proto/diskfont.h>
+#include <proto/dos.h>
+#include <clib/exec_protos.h>
+#include <proto/expansion.h>
+#include <proto/intuition.h>
+#include "graphics.h"
+#include <proto/icon.h>
+#include <proto/layers.h>
+#include <proto/mathffp.h>
+#include <proto/mathieeedoubbas.h>
+#include <proto/mathieeesingbas.h>
+#include <proto/mathtrans.h>
+#include <proto/potgo.h>
+#include <proto/timer.h>
+#include <proto/translator.h>
+
+#include "exec_pragmas.h"

@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'12.2.91'
+	ENDM
+VERS	MACRO
+		dc.b	'makereal 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'makereal 37.2 (12.2.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: makereal 37.2 (12.2.91)',0
+	ENDM

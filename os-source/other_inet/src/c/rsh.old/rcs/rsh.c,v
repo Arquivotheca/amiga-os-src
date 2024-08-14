@@ -1,0 +1,478 @@
+head     2.4;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+2.4
+date     91.10.03.11.53.31;  author martin;  state Exp;
+branches ;
+next     2.3;
+
+2.3
+date     91.10.03.11.46.57;  author martin;  state Exp;
+branches ;
+next     2.2;
+
+2.2
+date     91.10.01.13.01.49;  author martin;  state Exp;
+branches ;
+next     2.1;
+
+2.1
+date     91.04.29.10.58.40;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.07.13.24.58;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+2.4
+log
+@no longer includes config.h
+@
+text
+@/* ---------------------------------------------------------------------------------
+ * RSH.C
+ *
+ * $Locker: martin $
+ *
+ * $Id: rsh.c,v 2.3 91/10/03 11:46:57 martin Exp Locker: martin $
+ *
+ * $Revision: 2.3 $
+ *
+ * $Header: inet2:src/c/rsh/RCS/rsh.c,v 2.3 91/10/03 11:46:57 martin Exp Locker: martin $
+ *
+ *-----------------------------------------------------------------------------------
+ */
+
+/* totally rewritten rsh for 2.0.  This version does not do
+** stdin redirection.
+*/
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/tasks.h>
+#include <dos/dos.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <errno.h>
+
+#include <stddef.h>
+#include <string.h>
+
+
+/* shared library stuff */
+#include <ss/socket.h>
+
+#define RSH_PORT 514		/* XXXX - should getservent */
+
+#define DOSLIB	   "dos.library"
+#define DOSVER	   36L
+
+#include "rsh_rev.h"
+
+/* This is used with the templates to cause the version string to be */
+/* stored in the command.  It depends upon the command having a #include */
+/* of the appropriate version file to provide the value for this string */
+#define CMDREV  "\0$VER: " VSTRING
+
+#define bzero(a,n)	memset(a,'\0',n)
+
+#define TEMPLATE    "HOST/A,-L/K,CMD/F" CMDREV
+#define OPT_HOST    0
+#define OPT_L		1
+#define OPT_CMD     2
+#define OPT_COUNT   3
+
+
+int rsh (void)
+{
+	struct DosLibrary *DOSBase;
+	struct Library *SockBase ;
+	char *host;
+	char *remote_user, *local_user, one;
+	int s, cc, rdfd2, num, errno;
+	struct Task *mytask;
+
+	long opts[OPT_COUNT];
+	struct RDargs *rdargs;
+
+	fd_set readers, rd;
+	char buf[1024];
+
+	if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER))==NULL) {
+		return (10);
+	}
+	memset((char *)opts, 0, sizeof(opts));
+	rdargs = ReadArgs(TEMPLATE, opts, NULL);
+
+	if ((SockBase = OpenLibrary( "inet:libs/socket.library", 1L ))==NULL) {
+		PutStr("Opening of socket library failed.\n");
+		goto exit1;
+	}
+	setup_sockets( 5, &errno );
+
+	local_user=getlogin();
+
+	if(opts[OPT_L]) 
+		remote_user = (char *)opts[OPT_L];
+	else
+		remote_user = local_user;
+
+	if(opts[OPT_HOST])
+		host = (char *)opts[OPT_HOST];
+	else {
+		PutStr ("usage: rsh host [ -l username ] command\n"); 
+		goto exit3;
+	}
+
+	s = rcmd(&host, RSH_PORT, local_user, remote_user, (char *)opts[OPT_CMD] , &rdfd2);
+
+	if(s < 0){
+		PutStr(strerror(errno));
+		PutStr("\n");
+		goto exit3;
+	}
+
+	one = (char)1;
+	mytask = FindTask(0L);
+	s_ioctl(rdfd2, FIONBIO, &one);
+	s_ioctl(s, FIONBIO, &one);
+	FD_ZERO(&readers);
+	FD_SET(s, &readers);
+	FD_SET(rdfd2, &readers);
+
+	/*
+	 * Let remote know we're not sending any data.
+	 */
+	shutdown(s, 1);
+
+	do {
+		rd = readers;
+		num = select(MAX(rdfd2, s)+1, &rd, 0L, 0L, 0L);
+
+		if(num < 0 && errno == EINTR) {	 /* someone hit ^C */
+			PutStr(strerror(errno));
+			PutStr("\n");
+			break;
+		}
+
+		if(FD_ISSET(rdfd2, &rd)) {	 /* stderr reader */
+			do {
+				cc = recv(rdfd2, buf, sizeof(buf), 0);
+				if(cc > 0){
+                	WriteChars(buf, cc);
+				}
+			} while(cc > 0);
+			if(cc == 0){
+				break;
+			}
+		}
+
+		if(FD_ISSET(s, &rd)) {		 /* stdout reader */
+			do {
+				cc = recv(s, buf, sizeof(buf), 0);
+				if(cc > 0){
+					WriteChars(buf, cc);
+				}
+			} while(!(mytask->tc_SigRecvd & SIGBREAKF_CTRL_C) && cc > 0);
+			if(cc == 0){
+				break;
+			}
+		}
+
+	} while(1);
+
+    /* if we got a control C, reset signal and print a nice " ^C" */
+	if(mytask->tc_SigRecvd & SIGBREAKF_CTRL_C) {
+		SetSignal(0L,SIGBREAKF_CTRL_C);
+		PutStr(" ^C\n");
+	}
+
+exit3:
+	cleanup_sockets();
+exit2:
+	CloseLibrary(SockBase);
+exit1:
+	if(rdargs)
+		FreeArgs(rdargs);
+	CloseLibrary((struct Library *)DOSBase);
+
+}
+
+@
+
+
+2.3
+log
+@added usage line
+@
+text
+@d4 1
+a4 1
+ * $Locker:  $
+d6 1
+a6 1
+ * $Id: rsh.c,v 2.2 91/10/01 13:01:49 martin Exp $
+d8 1
+a8 1
+ * $Revision: 2.2 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/rsh/RCS/rsh.c,v 2.2 91/10/01 13:01:49 martin Exp $
+a28 1
+#include <config.h>
+a61 1
+	struct Library *SysBase = (*((struct Library **) 4));
+a161 3
+
+	s_close(rdfd2);
+	s_close(s);
+@
+
+
+2.2
+log
+@updated for new socket.library
+@
+text
+@d4 1
+a4 1
+ * $Locker: martin $
+d6 1
+a6 1
+ * $Id: rsh.c,v 2.1 91/04/29 10:58:40 martin Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 2.1 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/rsh/RCS/rsh.c,v 2.1 91/04/29 10:58:40 martin Exp Locker: martin $
+d90 1
+a90 1
+	if(opts[OPT_L])
+d95 6
+a100 1
+    host = (char *)opts[OPT_HOST];
+@
+
+
+2.1
+log
+@Totally rewritten
+Ported to SAS 5.10
+Uses shared socket.library
+Improved ^C and error handling
+@
+text
+@d6 1
+a6 1
+ * $Id: rsh.c,v 1.1 90/11/07 13:24:58 bj Exp Locker: martin $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: inet2:src/c/rsh/RCS/rsh.c,v 1.1 90/11/07 13:24:58 bj Exp Locker: martin $
+d23 2
+a24 1
+
+d64 2
+a65 3
+	struct SSLib *SSBase ;
+	struct ss_info *ssinfo;
+	char *host, **hostp;
+d82 1
+a82 1
+	if ((SSBase = OpenLibrary( "inet:libs/socket.library", 1L ))==NULL) {
+d86 1
+a86 4
+	if ((ssinfo = setup_sockets( &errno ))==NULL) {
+		PutStr("Error initializing socket library.\n");
+		goto exit2;
+	}
+d88 1
+a88 1
+	local_user=getusername();
+a95 1
+	hostp = &host;
+d97 1
+a97 1
+	s = rcmd(hostp, RSH_PORT, local_user, remote_user, (char *)opts[OPT_CMD] , &rdfd2);
+d107 2
+a108 2
+	ioctl(rdfd2, FIONBIO, &one);
+	ioctl(s, FIONBIO, &one);
+d116 1
+a116 1
+	s_shutdown(s, 1, ssinfo);
+d122 1
+a122 1
+		if(num < 0 && errno == EINTR) {	/* someone hit ^C */
+d128 1
+a128 1
+		if(FD_ISSET(rdfd2, &rd)) {	/* stderr reader */
+d140 1
+a140 1
+		if(FD_ISSET(s, &rd)) {		/* stdout reader */
+d160 2
+a161 2
+	s_close(rdfd2, ssinfo);
+	s_close(s, ssinfo);
+d164 1
+a164 1
+	cleanup_sockets(ssinfo);
+d166 1
+a166 1
+	CloseLibrary(SSBase);
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d15 8
+a22 5
+/*
+ * Quick hack at simple rsh() command for Amiga.  This version cannot
+ * do stdin -> remote as we (still) don't have a non blocking or async
+ * protocol for handlers.  Perhaps someday....
+ */
+d30 4
+a33 1
+#include <stdio.h>
+d35 3
+a38 1
+#define MAX(a, b) ((a) > (b) ? (a):(b))
+d40 2
+a41 1
+static char cmd[128], buf[1024];
+d44 13
+a56 2
+static char *compiler = "MANX36 MANX36" ;
+static char *vers = VERSTAG ;
+d58 2
+a59 1
+usage()
+d61 11
+a71 3
+	printf("usage: rsh host [-l username] cmd ...\n");
+	exit(1);
+}
+a72 6
+main(argc, argv)
+	int	argc;
+	char	**argv;
+{
+	int s, cc, cmdstart, rdfd2, one, num, nmode = 0;
+	char *remote_user=NULL, *local_user;
+d74 1
+a74 1
+	struct config *cf;
+d76 13
+a88 2
+	if(argc < 3 || argv[1][0] == '-'){
+		usage();
+d91 4
+a94 3
+	GETCONFIG(cf);
+	if(!cf)
+		local_user="guest";
+d96 1
+a96 3
+		local_user=cf->username;
+
+	remote_user = local_user;
+d98 2
+a99 12
+	for(cmdstart = 2; cmdstart < argc; cmdstart++){
+		if(strncasecmp(argv[cmdstart], "-l", 2) == 0){
+			remote_user = argv[++cmdstart];
+			continue;
+		} else if(strncasecmp(argv[cmdstart], "-n", 2) == 0){
+			nmode++;
+			continue;
+		} else {
+			/* everything else is a command */
+			break;
+		}
+	}
+d101 1
+a101 5
+	cmd[0] = '\0';
+	for(; cmdstart < argc; cmdstart++){
+		strcat(cmd, argv[cmdstart]);
+		strcat(cmd, " ");
+	}
+a102 1
+	s = rcmd(&argv[1], RSH_PORT, local_user, remote_user, cmd, &rdfd2);
+d104 3
+a106 2
+		fprintf(stderr, "rsh: connection failed\n");
+		exit(1);
+d109 2
+a110 1
+	one = 1;
+d120 1
+a120 1
+	shutdown(s, 1);
+d125 5
+a129 2
+		if(num < 0 && errno == EINTR){
+			FD_ZERO(&readers);
+d132 1
+a132 1
+		if(FD_ISSET(rdfd2, &rd)){	/* stderr reader */
+d136 1
+a136 1
+					write(1, buf, cc);
+d140 1
+a140 1
+				FD_CLR(rdfd2, &readers);
+d144 1
+a144 1
+		if(FD_ISSET(s, &rd)){		/* stdout reader */
+d148 1
+a148 1
+					write(1, buf, cc);
+d150 1
+a150 1
+			} while(cc > 0);
+d152 1
+a152 1
+				FD_CLR(s, &readers);
+d156 19
+a174 1
+	} while(FD_ISSET(rdfd2, &readers) || FD_ISSET(s, &readers));
+a175 2
+	close(rdfd2);
+	close(s);
+@

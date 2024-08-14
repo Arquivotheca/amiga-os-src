@@ -1,0 +1,202 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     90.07.31.13.57.10;  author valentin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@The fast mode interrupt server
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@; This is the BUSY loopback server. Very fast: >100K/sec on 25MHz 030 Amiga.
+
+
+	INCLUDE	"exec/types.i"
+	INCLUDE "exec/devices.i"
+	INCLUDE "resources/misc.i"
+	INCLUDE "libraries/dos.i"	
+	INCLUDE "devices/parallel.i"
+	INCLUDE "devices/timer.i"
+	INCLUDE "hardware/cia.i"
+	INCLUDE "asmsupp.i"
+	INCLUDE "pardev.i"
+
+_AbsExecBase	EQU	4
+
+JSRLIB	macro	*
+	XREF	_LVO\1
+	jsr	_LVO\1(a6)
+	endm
+
+	XREF	_ciaa
+	XREF	_ciab
+	XREF	_Cia
+	XREF	_NextRequest
+	XREF	Sleep
+
+	XDEF	_BoogieServer
+
+;	csect	text,0,,0,4
+
+	section	firstsection
+
+subSysName:
+	dc.b	"parallel",0
+	ds.w	0			; Force word alignement
+
+
+;==========================================================================
+;
+;	This interrupt server spit a character and then immediately tries
+;	to spit out the next one. If the printer cannot raise the BUSY line
+;	within 1.4 microseconds (for a 25MHz 030 Amiga), then characters
+;	will be lost. The EOF and EOL modes are not supported. On slow
+;	printers, this routine will use more CPU time. Use the SLOWPOKE flag
+;	with slow printers. (less than 5000 charcters/second)
+;
+;	The Exec is really nice to us, it saves d0, d1, a0, a1, a5 and a6.
+;	And furthermore, a1 will already hold ParDev, while a5 holds
+;	this server's entry point. (big deal)
+;
+;==========================================================================
+
+	CNOP	0,4
+
+_BoogieServer:
+
+	PUTMSG	5,<'%s/BoogieServer called'>
+
+	move.l	PAR_request(a1),a1		; Load pointer to IO request
+	move.l	a1,d0				; Test if zero
+	bne	again				; Branch if not aborted
+
+	PUTMSG	5,<'%s/BoogieServer is finished'>
+
+	rts
+again:
+	move.l	IO_DATA(a1),a0			; Get data base address
+	move.l	IO_ACTUAL(a1),d1		; Get index
+	adda.l	d1,a0				; Add index to base address
+
+	cmpi.w	#CMD_WRITE,IO_COMMAND(a1)	; Is this a CMD_READ? (same # of cycles as btst)
+	beq.s	Write				; Branch if so
+Read:
+	move.b	_ciaa+ciaprb,d0			; Read in data
+	move.b	d0,(a0)				; Store into data buffer
+	bra.s	here
+Write:
+	move.b	_ciab+ciapra,d0			; Load control register stat
+						; It's faster to cache reg
+	btst	#CIAB_PRTRSEL,d0		; Is the printer SELected?
+	beq	Repeat				; Branch if not
+	btst	#CIAB_PRTRBUSY,d0		; Is the printer BUSY?
+	bne	Repeat				; Branch if so
+Spit:
+	move.b	(a0),d0				; Get data from buffer
+	move.b	d0,_ciaa+ciaprb
+here:
+	addq.l	#1,d1				; Post-increment index
+	move.l	d1,IO_ACTUAL(a1)		; Store index
+
+	tst.b	d0				; Is the data byte a NULL?
+	beq	EOLtest
+there:
+	btst.b	#PARB_EOFMODE,IO_PARFLAGS(a1)	; Do we use the EOF mode?
+	bne	EOFmode				; Brach if so
+length:
+	cmp.l	IO_LENGTH(a1),d1		; Is the IO request finished?
+	beq	next				; Branch if so
+
+	PUTMSG	5,<'%s/Boogie: IO_LENGTH not finished'>
+
+	bra	again
+next:
+	PUTMSG	5,<'%s/Boogie: IO_LENGTH finished'>
+
+	move.l	IO_DEVICE(a1),-(sp)
+	bsr	_NextRequest
+	addq.l	#4,sp
+	rts
+
+;==========================================================================
+;
+;	Aha! The the byte transferred is a NULL. If the IO_LENGTH = -1 then
+;	that means that the IO request has just completed.
+;
+;==========================================================================
+
+EOLtest:
+	PUTMSG	5,<'%s/Boogie: EOLmode called'>
+
+	cmpi.l	#-1,IO_LENGTH(a1)		; Is EOL mode being used?
+	bne	there				; Branch if not
+	bra.s	next
+
+
+;==========================================================================
+;
+;	Oooh, the stupid EOF mode is being used. What a bummer! Well, let's
+;	see whether the current character matches one of the eight in the
+;	PTermArray.
+;
+;==========================================================================
+
+EOFmode:
+	PUTMSG	5,<'%s/EOFmode called'>
+
+	lea.l	IO_PTERMARRAY(a1),a0	; Get PTermArray base
+	moveq.l	#PTERMARRAY_SIZE-1,d1	; Load length of PTermArray minus 1
+0$
+	cmp.b	(a0)+,d0		; Do we have an EOF character?
+	dbcc	d1,0$			; Branch if not, or if result=-1
+	beq	next			; This request is finished
+
+	PUTMSG	5,<'%s/EOFmode not succeeded'>
+
+	bra	length			; See if enough characters were spit
+
+
+;==========================================================================
+;
+;	Since the printer is not ready to accept the next character, let's
+;	busy-loop 33 times. If after that the printer is still not ready,
+;	the parallel.device goes to sleep.
+;
+;==========================================================================
+
+Repeat:
+	PUTMSG	5,<'%s/Boogie: Repeating...'>
+
+	move.w	#32,d0				; Loop nine times
+0$
+ 	swap.w	d0				; Save counter in upper d0
+	move.b	_ciab+ciapra,d0			; Load control register stat
+	btst	#CIAB_PRTRSEL,d0		; Is the printer SELected?
+	beq	1$				; Branch if not
+	btst	#CIAB_PRTRBUSY,d0		; Is the printer BUSY?
+	bne	1$				; Branch if so
+	bra	Spit
+1$
+	swap.w	d0				; Restore counter in lower d0
+	dbra.s	d0,0$
+
+	move.l	IO_DEVICE(a1),a5		; Get pointer to device
+	bra	Sleep
+
+	END
+@

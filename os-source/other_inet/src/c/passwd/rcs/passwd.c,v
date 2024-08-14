@@ -1,0 +1,709 @@
+head     37.4;
+branch   ;
+access   ;
+symbols  Release1:1.1;
+locks    ; strict;
+comment  @ * @;
+
+
+37.4
+date     92.10.06.13.58.44;  author bj;  state Exp;
+branches ;
+next     37.3;
+
+37.3
+date     92.08.19.17.14.41;  author bj;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.09.24.13.29.44;  author bj;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.09.15.32.42;  author bj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.4
+log
+@Major rewrite.  
+1. removed mystrlen() routine
+2. what you type is now not echoed to the display (sheesh)
+3. #2 required addiing a mini editor to getpass()
+4. Better error reporting - more Unix like messages.
+5. Won't allow control-C break which could leave files
+   Locked.
+@
+text
+@/* -----------------------------------------------------------------------
+ * passwd.c
+ *
+ * $Locker:  $
+ *
+ * $Id: passwd.c,v 37.3 92/08/19 17:14:41 bj Exp $
+ *
+ * $Revision: 37.3 $
+ *
+ * $Header: AS225:src/c/passwd/RCS/passwd.c,v 37.3 92/08/19 17:14:41 bj Exp $
+ *
+ * $Log:$
+ *
+ *------------------------------------------------------------------------
+ */
+
+
+/*
+ * Make a password for the given user.
+ */
+ 
+#include <exec/types.h>
+#include <stdio.h>
+#include <pwd.h>
+#include <ss/socket.h>
+#include <libraries/dosextens.h>
+#include <config.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "passwd_rev.h"
+static BYTE *vers = VERSTAG ;
+
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <proto/utility.h>
+#include <proto/exec.h>
+
+#define TEMPLATE "USER/A"
+
+#define OPT_USER   0
+#define OPT_COUNT  1
+
+#define DOSLIB     "dos.library"
+#define DOSVER     36L
+#define SOCKLIB    "inet:libs/socket.library"
+#define SOCKVER     3L
+#define UTILLIB    "utility.library"
+#define UTILVER     0L
+
+#define CTRL_C_EXIT 1
+#define BUFFSIZE 256L
+#define OSIZE  12
+#define PWBUFF 128L
+
+#ifdef NULL
+#undef NULL
+#endif
+
+#define NULL ((BYTE *)0L)
+
+struct glob {
+	struct DosLibrary *g_DOSBase ;
+	struct Library *g_UtilityBase ;
+	struct Library *g_SockBase ;
+	BYTE g_obuffer[OSIZE] ;
+	BYTE g_pwbuff[PWBUFF] ;
+	} ;
+
+
+int    passwd(VOID) ;
+VOID   mysprintf( BYTE *, ... ) ;
+UBYTE  *crypt( REGISTER UBYTE *s, REGISTER UBYTE *uname, REGISTER struct glob *g ) ;
+ULONG  mod( ULONG dividend, ULONG divisor, struct Library *UtilityBase) ;
+UBYTE  *getpass( REGISTER UBYTE *prompt, REGISTER struct glob *g ) ;
+struct passwd *getpwuid() ;
+
+/* ==========================================================================
+ * main entry +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ * ==========================================================================
+ */
+
+int passwd(VOID)
+{
+	REGISTER struct DosLibrary *DOSBase ;
+	REGISTER struct Library    *UtilityBase ;
+	REGISTER struct Library    *SockBase ;
+	REGISTER struct passwd     *pwd;
+	REGISTER struct RDargs     *rdargs;
+	REGISTER BPTR fh ;
+	REGISTER LONG len, ok;
+	LONG opts[OPT_COUNT];
+	int error = 20 ;
+	int pwerr = 1 ;
+	int incorrect = 0 ;
+	struct glob glob ;
+	BYTE newname[64], newpbuf[32], *oldp, *checkp, *newp, oldname[64] ;
+	BYTE hbuf[BUFFSIZE] ;
+	char *pwstr = (char *)"passwd - '%s' " ;
+
+	memset((BYTE *)&glob,0,sizeof(struct glob)) ;
+	opts[0] = ok = 0L ;
+
+	if(UtilityBase = glob.g_UtilityBase = OpenLibrary(UTILLIB,UTILVER))
+	{
+		if (SockBase = glob.g_SockBase = OpenLibrary(SOCKLIB,SOCKVER))
+		{
+			if (DOSBase = glob.g_DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER))
+			{
+				if((rdargs = ReadArgs(TEMPLATE, opts, NULL)) != NULL)
+				{
+					mysprintf(oldname,"%s.old",PWFILE) ;
+					DeleteFile(oldname) ;
+					mysprintf(newname,"%s.new",PWFILE) ;
+					DeleteFile(newname) ;
+					if(fh = Open( newname, MODE_NEWFILE))
+					{
+						setpwent(1L) ;
+						while(pwd = getpwent())
+						{
+							pwerr = 0 ;
+							if(Stricmp((UBYTE *)pwd->pw_name, (UBYTE *)opts[OPT_USER]) == 0)
+							{
+								if((len = (LONG)(pwd->pw_passwd ? strlen(pwd->pw_passwd) : 0L )) != 0L)
+								{
+									oldp = getpass("Old password: ", &glob) ;
+									checkp = crypt(oldp, pwd->pw_name, &glob);
+									if(bcmp(checkp, pwd->pw_passwd, len) != 0)
+									{
+										PutStr("password incorrect.\n");
+										incorrect = 1 ;
+										DeleteFile(newname);
+										goto getout1 ;
+									}
+								}
+								if(newp = getpass("New password: ", &glob))
+								{
+									if( *newp == '\0' )
+									{
+										DeleteFile(newname);
+										goto getout1 ;
+									}
+								}
+								CopyMem(newp, newpbuf, 32L) ;
+								if(newp = getpass("Retype new password: ", &glob))
+								{
+									if( *newp == '\0')
+									{
+										DeleteFile(newname);
+										goto getout1 ;
+									}
+								}
+								if(Stricmp(newp, newpbuf) != 0)
+								{
+									PutStr("password mismatch.\n");
+									DeleteFile(newname);
+									goto getout1 ;
+								}
+								pwd->pw_passwd = crypt(newpbuf, pwd->pw_name, &glob);
+								ok++;
+							}
+							mysprintf(hbuf, "%s|%s|%ld|%ld|%s|%s|%s\n\x00", 
+									pwd->pw_name, 	pwd->pw_passwd,
+									(LONG)pwd->pw_uid, 	(LONG)pwd->pw_gid, 
+									pwd->pw_gecos, 	pwd->pw_dir, 
+									pwd->pw_shell);
+
+							FPuts(fh, hbuf) ;
+						}
+						if( pwerr )
+						{
+							PrintFault(IoErr(), "passwd - 'inet:db/passwd' ") ;
+						}
+getout1:
+						endpwent() ;
+						Close(fh) ;
+					}
+					else
+					{
+						mysprintf(hbuf, pwstr, newname) ;
+						PrintFault(IoErr(), hbuf) ;
+					}
+
+					FreeArgs(rdargs) ;
+
+					if(ok)
+					{
+						if((Rename(PWFILE, oldname)) != 0)  /* copy orig passwd to inet:db/passwd.old */
+						{
+							if((Rename(newname, PWFILE)) != 0)  /* copy new passwd entry to iinet:db/passwd */
+							{
+								error = 0 ;
+							}
+							else
+							{
+								mysprintf(hbuf, pwstr, PWFILE) ;
+								PrintFault(IoErr(), hbuf) ;
+							}
+						}
+						else
+						{
+							mysprintf(hbuf, pwstr, oldname) ;
+							PrintFault(IoErr(), hbuf) ;
+						}
+					}
+                    
+				}
+				else 
+				{
+					PrintFault(IoErr(), "passwd") ;
+				}
+				if( error && incorrect == 0 )
+				{
+					PutStr("Password unchanged.\n") ;
+				}
+				DeleteFile(newname) ;
+				CloseLibrary((struct Library *)DOSBase) ;
+			}
+			CloseLibrary(SockBase) ;
+		}
+		CloseLibrary(UtilityBase) ;
+	}                             
+	return(error) ;
+}
+
+ 
+
+/* ==================================================================
+ * crypt()  encrypts the new password.
+ * ==================================================================
+ */
+
+ 
+UBYTE *crypt( REGISTER UBYTE *s, REGISTER UBYTE *uname, REGISTER struct glob *g )
+{
+	REGISTER struct Library *UtilityBase = g->g_UtilityBase ;
+	REGISTER int i ;
+	REGISTER int k ;
+	unsigned int buf[OSIZE];
+
+	for(i = 0; i < OSIZE; i++)
+	{
+			buf[i] = 'A' + (*s? *s++:i) + (*uname? *uname++:i);
+	}
+
+	for(i = 0; i < OSIZE; i++)
+	{
+		for(k = 0; k < OSIZE; k++)
+		{                           
+			buf[i] += buf[OSIZE-k-1];
+			buf[i]  = (unsigned int)mod( (LONG)buf[i], 53L, UtilityBase) ; 
+		}
+		g->g_obuffer[i] = buf[i] + 'A' ;
+	}
+	g->g_obuffer[OSIZE-1] = 0;
+	return (g->g_obuffer) ;
+}
+
+
+/* ====================================================================
+ * getpass()
+ *
+ * gets password entry from the user.  Maximum length user can enter
+ * is PWBUFF.
+ * ====================================================================
+ */
+
+#define BACKSPACE "\x08 \x08"
+
+UBYTE *getpass( REGISTER UBYTE *prompt, REGISTER struct glob *g )
+{
+	REGISTER struct DosLibrary *DOSBase = g->g_DOSBase ;
+	REGISTER BPTR fhp ;
+	REGISTER int charcount = 0 ;
+	REGISTER BYTE *p ;
+	REGISTER LONG c ;
+
+	if(fhp = Open("CONSOLE:", MODE_NEWFILE))
+	{
+		*(p = g->g_pwbuff) = '\0' ;
+		SetMode(fhp, 1L) ;
+		FPuts(fhp,prompt) ;
+		Flush(fhp) ;
+
+		while((c = (LONG)FGetC(fhp)) != -1L)
+		{
+			if( c >= ' ' && c <= '~' && charcount < PWBUFF )
+			{
+				*p++ = (BYTE)c ;
+				charcount++ ;
+				FPutC(fhp, (LONG)'+' ) ;
+				Flush(fhp) ;
+			}
+			else
+			{
+				switch(c)
+				{
+					case 13:
+						FPutC(fhp,10L) ;
+						Flush(fhp) ;
+						goto ret ;
+						break ;
+					case 8:
+						if(charcount > 0)
+						{
+							FPuts(fhp, BACKSPACE) ;
+							Flush(fhp) ;
+							charcount-- ;
+							*(--p) = '\0' ;
+						}
+					default :
+						break ;
+				}
+			}
+		}
+ret:		
+		*p = '\0' ;
+		SetMode(fhp, 0L) ;
+		Close(fhp) ;
+		return(g->g_pwbuff) ;
+	}
+	return(NULL) ;
+}
+
+@
+
+
+37.3
+log
+@1. Better RdArgs
+2. Better error reporting
+3. RCS rev number now mathces binary version string.
+4. details and code cleanup.
+@
+text
+@d6 1
+a6 1
+ * $Id: passwd.c,v 1.2 91/09/24 13:29:44 bj Exp $
+d8 1
+a8 1
+ * $Revision: 1.2 $
+d10 1
+a10 1
+ * $Header: NW:src/c/passwd/RCS/passwd.c,v 1.2 91/09/24 13:29:44 bj Exp $
+d12 2
+d51 1
+d53 2
+a54 1
+#define OSIZE  12   
+d67 1
+a67 1
+	BYTE g_pwbuff[128] ;
+d70 1
+a75 1
+LONG   mystrlen( REGISTER UBYTE *str ) ;
+d95 1
+d100 1
+a100 1
+	
+d124 1
+a124 1
+								if((len = (LONG)(pwd->pw_passwd ? mystrlen(pwd->pw_passwd) : 0L )) != 0L)
+d126 1
+a126 1
+									oldp = getpass("Old password: ", &glob);
+d131 9
+d141 1
+a141 3
+										endpwent() ;
+										Close(fh) ;
+										goto getout ;
+a143 1
+								newp = getpass("New password: ", &glob); 
+d145 8
+a152 1
+								newp = getpass("Retype new password: ", &glob);
+d157 1
+a157 3
+									endpwent() ;
+									Close(fh) ;
+									goto getout ;
+d162 1
+a162 1
+							mysprintf(hbuf, "%s|%s|%ld|%ld|%s|%s|%s\n", 
+d167 3
+a169 3
+																
+							Write(fh, hbuf, (LONG)mystrlen(hbuf)) ;
+						}		
+d174 1
+d183 1
+a183 1
+getout:					
+d202 2
+a203 2
+						mysprintf(hbuf, pwstr, oldname) ;
+						PrintFault(IoErr(), hbuf) ;
+d206 1
+d208 1
+a208 1
+				else
+d212 5
+d223 1
+a223 1
+	return(error) ;	
+a225 7
+/* ====================================================================
+ * getpass()
+ *
+ * gets password entry from the user.  Maximum length user can enter
+ * is PWBUFF.
+ * ====================================================================
+ */
+a226 24
+#define PWBUFF 128L
+
+UBYTE *getpass( REGISTER UBYTE *prompt, REGISTER struct glob *g )
+{
+	REGISTER UBYTE *start ;
+	REGISTER struct DosLibrary *DOSBase = g->g_DOSBase ;
+	REGISTER BPTR fh = Open("CONSOLE:", MODE_NEWFILE) ;
+	
+	if(fh)
+	{
+		PutStr(prompt) ;
+		Flush(Output()) ;
+		FGets(fh,g->g_pwbuff, PWBUFF) ;
+		Close(fh) ;
+		start = g->g_pwbuff ;
+		while(*start && *start != '\n')
+		{
+			start++ ;
+		}
+		*start = '\0' ;
+		return(g->g_pwbuff) ;
+	}
+	return(NULL) ;
+}
+d259 7
+a265 3
+/* ==================================================================
+ * mystrlen()
+ * ==================================================================
+d268 1
+d270 1
+a270 2
+LONG
+mystrlen( REGISTER UBYTE *str )
+d272 7
+a278 3
+	REGISTER LONG x = 0L ;
+	
+	while(*str)
+d280 41
+a320 2
+		x++ ;
+		str++ ;
+d322 1
+a322 1
+	return x ;
+a324 3
+
+/*****  end 'o file *****/
+        
+@
+
+
+1.2
+log
+@Complete rewrite. Now uses (1) SAS C, (2) ReadArgs, 
+(3) shared socket library, (4) no startup code.
+MUCH smaller ( 16716 -> 1564 bytes)
+v 37.1
+@
+text
+@d4 1
+a4 1
+ * $Locker: bj $
+d6 1
+a6 1
+ * $Id: passwd.c,v 1.1 90/11/09 15:32:42 bj Exp Locker: bj $
+d8 1
+a8 1
+ * $Revision: 1.1 $
+d10 1
+a10 1
+ * $Header: NW:src/c/passwd/RCS/passwd.c,v 1.1 90/11/09 15:32:42 bj Exp Locker: bj $
+a37 1
+#define PWFAILED "passwd: failed\n"
+a83 1
+	REGISTER struct Library    *SysBase = (*((struct Library **) 4));
+d90 1
+d92 1
+a92 1
+	BYTE newname[64], newpbuf[32], *oldp, *checkp, *newp, oldname[64], *p1, *p2 ;
+d94 1
+d96 1
+a96 4
+	for( p1 = (BYTE *)&glob, p2 = p1 + sizeof(struct glob) ; p1 < p2 ; p1++ )
+	{
+		*p1 = '\0' ;
+	}	
+d108 1
+a108 1
+					DeleteFile(oldname) ; 
+d110 1
+a110 1
+					DeleteFile(newname) ; 
+d116 1
+d119 1
+a119 2
+								len = (LONG)(pwd->pw_passwd ? mystrlen(pwd->pw_passwd) : 0L ) ;
+								if( len != 0L )
+d132 1
+a132 1
+								newp = getpass("New password : ", &glob); 
+d134 1
+a134 1
+								newp = getpass("Enter new password again : ", &glob);
+d145 1
+a145 1
+                            }
+d154 4
+d163 2
+a164 1
+						PutStr("buffer error\n") ;
+d171 1
+a171 1
+						if((Rename(PWFILE, oldname)) != 0)
+d173 1
+a173 1
+							if((Rename(newname, PWFILE)) != 0)
+d179 2
+a180 1
+								PutStr(PWFAILED) ;
+d185 2
+a186 1
+							PutStr(PWFAILED) ;
+d190 4
+d199 1
+a199 1
+	}
+a207 1
+ *
+d237 1
+a237 4
+ * crypt()
+ *
+ * encrypts the new password.
+ *
+d242 1
+a242 1
+UBYTE *crypt( REGISTER UBYTE *s, REGISTER UBYTE *uname, REGISTER struct glob *g )   
+a243 1
+	REGISTER struct DosLibrary *DOSBase  = g->g_DOSBase ;
+a268 2
+ *
+ * strlen() for this
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+a4 1
+ * $Locker$
+d6 1
+a6 1
+ * $Id$
+d8 1
+a8 1
+ * $Revision$
+d10 1
+a10 1
+ * $Header$
+d19 2
+d23 5
+d30 44
+a73 2
+static char *compiler = "MANX MANX" ;
+static char *vers = VERSTAG ;
+d75 4
+d80 1
+a80 2
+main(argc, argv)
+	char	**argv;
+d82 123
+a204 6
+	char newname[64], newpbuf[32], *oldp, *checkp, *newp, oldname[64];
+	extern char *getpass(), *crypt();
+	extern int Enable_Abort;
+	struct passwd *pwd;
+	FILE *fopen(), *fp;
+	int len, ok;
+d206 19
+a224 4
+	Enable_Abort = 0;
+	if(argc != 2){
+		printf("usage: passwd user\n");
+		exit(1);
+d226 10
+d237 8
+a244 4
+	sprintf(oldname, "%s.old", PWFILE);
+	unlink(oldname);
+	sprintf(newname, "%s.new", PWFILE);
+	unlink(newname);
+d246 3
+a248 4
+	fp = fopen(newname, "w");
+	if(!fp){
+		perror("passwd: could not open tmpfile\n");
+		exit(1);
+d251 6
+a256 28
+	ok = 0;
+	setpwent();
+
+	while(pwd = getpwent()){
+		if(strcasecmp(pwd->pw_name, argv[1]) == 0){
+			len = pwd->pw_passwd ? strlen(pwd->pw_passwd):0;
+			if(len != 0){
+				oldp = getpass("Old password: ");
+				checkp = crypt(oldp, pwd->pw_name);
+				if(bcmp(checkp, pwd->pw_passwd, len) != 0){
+					printf("password incorrect.\n");
+					fclose(fp);
+					unlink(newname);
+					exit(1);
+				}
+			}
+			newp = getpass("New password: ");
+			strcpy(newpbuf, newp);
+			newp = getpass("Enter new passwd again: ");
+			if(strcmp(newp, newpbuf) != 0){
+				printf("password mismatch.\n");
+				fclose(fp);
+				unlink(newname);
+				endpwent();
+				exit(1);
+			}
+			pwd->pw_passwd = crypt(newpbuf, pwd->pw_name);
+			ok++;
+d258 1
+a258 5
+		fprintf(fp, "%s|%s|%d|%d|%s|%s|%s\n", 
+					pwd->pw_name, 	pwd->pw_passwd,
+					pwd->pw_uid, 	pwd->pw_gid, 	
+					pwd->pw_gecos, 	pwd->pw_dir, 	
+					pwd->pw_shell);
+d260 21
+a280 4
+	endpwent();
+	fclose(fp);
+	if(ok && !rename(PWFILE, oldname) && !rename(newname, PWFILE)){
+		printf("Password changed successfully.\n");
+d282 2
+d285 3
+a287 2
+	exit(0);
+}
+@

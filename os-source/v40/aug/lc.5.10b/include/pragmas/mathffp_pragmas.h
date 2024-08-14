@@ -1,0 +1,1 @@
+€…†MathBase SPFix 1E 001…†MathBase SPFlt 24 001…†MathBase SPCmp 2A 0102…†MathBase SPTst 30 101…†MathBase SPAbs 36 001…†MathBase SPNeg 3C 001…†MathBase SPAdd 42 0102…†MathBase SPSub 48 0102…†MathBase SPMul 4E 0102…†MathBase SPDiv 54 0102…†MathBase SPFloor 5A 001…†MathBase SPCeil 60 001

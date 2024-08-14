@@ -1,0 +1,16 @@
+VERSION		EQU	35
+REVISION	EQU	13
+DATE	MACRO
+		dc.b	'10.7.91'
+	ENDM
+VERS	MACRO
+		dc.b	'epsonXOld 35.13'
+	ENDM
+VSTRING	MACRO
+		dc.b	'epsonXOld 35.13 (10.7.91)',13,10,0
+		ds.w	0
+	ENDM
+VERTAG	MACRO
+		dc.b	0,'$VER: epsonXOld 35.13 (10.7.91)',0
+		ds.w	0
+	ENDM

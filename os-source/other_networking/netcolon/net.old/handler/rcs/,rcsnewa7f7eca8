@@ -1,0 +1,375 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  ;
+locks    Doug:1.11; strict;
+comment  @ * @;
+
+
+1.11
+date     90.12.13.03.21.04;  author Doug;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     90.11.29.01.44.37;  author Doug;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     90.11.28.04.29.51;  author Doug;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     90.11.27.22.12.37;  author Doug;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.25.15.50.33;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.20.22.23.41;  author Doug;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.20.01.07.34;  author Doug;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.18.00.03.06;  author Doug;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.10.18.00.18.33;  author J_Toebes;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.10.09.23.57.52;  author J_Toebes;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.10.02.23.41.06;  author J_Toebes;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@general handler device io routines
+@
+
+
+1.11
+log
+@Implement reestablishing of shared locks
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
+* |_o_o|\\ Copyright (c) 1988 The Software Distillery.  All Rights Reserved *
+* |. o.| ||          Written by Doug Walker                                 *
+* | .  | ||          The Software Distillery                                *
+* | o  | ||          235 Trillingham Lane                                   *
+* |  . |//           Cary, NC 27513                                         *
+* ======             BBS:(919)-471-6436                                     *
+\* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#include "handler.h"
+
+
+static int ReLock(GLOBAL global, struct NetNode *nnode);
+static int ReStartNode(GLOBAL global, HPACKET *hpkt);
+ACTFN(ReLockNext);
+
+static ACTFN(defact);
+
+static ACTFN(defact)
+{
+   BUG(("defact: Entry\n"))
+   hpkt->hp_Pkt->dp_Res1 = hpkt->hp_RP->Arg1;
+   hpkt->hp_Pkt->dp_Res2 = hpkt->hp_RP->Arg2;
+}
+
+int
+RemotePacket(GLOBAL global, HPACKET *hpkt)
+{
+  struct NetNode *nnode = hpkt->hp_NNode;
+  struct RPacket *RP = hpkt->hp_RP;
+  short npflags;
+  LONG Arg1, Arg2, Arg3, Arg4;
+  int badlock;
+  struct Library *DriverBase = hpkt->hp_Driver->libbase;
+
+   BUG(("RemotePacket: name=%s dev=%s\n", nnode->name, nnode->devname));
+
+   if(nnode->status != NODE_UP &&
+         !(nnode->status == NODE_RELOCK && hpkt->hp_State == HPS_RELOCK))
+   {
+      ReStartNode(global, hpkt);
+      return(1);
+   }
+
+/* Define macro to validate a remote lock/filehandle before sending it */
+#define DORP(field, flag) if(npflags & (flag))\
+                             if(CheckNPTR(RP->field)) badlock=1;\
+                             else field = (LONG)(((NETPTR)RP->field)->RPtr);\
+                          else field = RP->field;
+   if(npflags = hpkt->hp_NPFlags)
+   {
+      /* Save the resultant RPTRs in local vars in case any of them fail    */
+      badlock=0;
+      DORP(Arg1, NP1);
+      DORP(Arg2, NP2);
+      DORP(Arg3, NP3);
+      DORP(Arg4, NP4);
+
+      if(badlock)
+      {
+         hpkt->hp_State = HPS_ERR;
+
+         /* Best guess at a reasonable error message */
+         hpkt->hp_Pkt->dp_Res1 = DOS_FALSE;
+         hpkt->hp_Pkt->dp_Res2 = ERROR_INVALID_LOCK;
+         HPQ(global, hpkt);
+         return(1);
+      }
+
+      /* All of the args checked out OK, copy them in to the RP */
+      RP->Arg1 = Arg1;
+      RP->Arg2 = Arg2;
+      RP->Arg3 = Arg3;
+      RP->Arg4 = Arg4;
+   }
+
+   /* If there's no secondary function, the return codes from the */
+   /* other side must be copied over directly                     */
+   if(hpkt->hp_Func == NULL) hpkt->hp_Func = defact;
+
+   switch(SDNSend(hpkt->hp_Driver->drglobal, RP))
+   {
+      case SDN_OK:
+         /* Basically, we do nothing.  When the remote side replies */
+         /* to the packet, its driver will alert us.                */
+
+         /* NOTE: WE SHOULD PUT THIS ON SOME KIND OF "OUTSTANDING PACKET" QUEUE */
+         /*       SO IF THE CONNECTION IS BROKEN WE CAN CLEAN IT ALL UP         */
+
+         hpkt->hp_RP = NULL;  /* SDNSend freed this */
+         hpkt->hp_WNext = global->qpkts;
+         global->qpkts = hpkt;
+         return(0);
+
+      case SDN_PEND:
+         hpkt->hp_State = HPS_PEND;  /* Waiting on I/O to complete */
+         /* Leave the hp_RP - it's still not freed */
+         return(0);
+
+      case SDN_ERR:
+         if(hpkt->hp_State == HPS_RETRY)
+         {
+            /* Time to give up */
+            hpkt->hp_State = HPS_ERR;
+            HPQ(global, hpkt);
+         }
+         nnode->incarnation++;
+         ReStartNode(global, hpkt);
+
+         break;
+   }
+   return(1);
+}
+
+static int ReStartNode(GLOBAL global, HPACKET *hpkt)
+{
+   struct NetNode *nnode = hpkt->hp_NNode;
+   struct Library *DriverBase = hpkt->hp_Driver->libbase;
+
+   if(nnode->status != NODE_RELOCK &&
+          SDNInitNode(hpkt->hp_Driver->drglobal, nnode->name+1, &nnode->ioptr)
+                                     == SDN_ERR)
+   {
+      /* Error on write and we can't reestablish the connection */
+      /* We have to give up and flush the packet */
+      nnode->status = NODE_CRASHED;
+
+      hpkt->hp_State = HPS_ERR;
+
+      /* Best guess at a reasonable error message */
+      hpkt->hp_Pkt->dp_Res1 = DOS_FALSE;
+      hpkt->hp_Pkt->dp_Res2 = ERROR_NODE_DOWN;
+      HPQ(global, hpkt);
+   }
+   else
+   {
+      /* Allow this packet to ride in the hpc chain... eventually the */
+      /* last lock will be reestablished and the whole chain will be  */
+      /* processed.                                                   */
+      hpkt->hp_WNext = nnode->hpc;
+      nnode->hpc = hpkt;
+
+      /* OK, we have managed to reinitialize - now reestablish shared locks  */
+      ReLock(global, nnode);
+   }
+   return(0);
+}
+
+static int ReLock(GLOBAL global, struct NetNode *nnode)
+{
+   HPACKET *hpkt;
+   struct RPacket *RP;
+ 
+   BUG(("ReLock: entry\n"))
+
+   if(nnode->status == NODE_RELOCK) return(1);
+
+   nnode->status = NODE_RELOCK;  /* Prevent infinite loops */
+ 
+   hpkt = GetHPacket(global);
+
+   if(!(hpkt->hp_RP = RP = AllocRPacket(nnode, nnode->bufsize))) return(1);
+   RP->Type = ACTION_LOCATE_OBJECT;
+   RP->Arg1 = 0L;
+   RP->Arg3 = SHARED_LOCK;
+   RP->Arg4 = 0;
+   RP->DLen = 0;
+   RP->handle = hpkt;
+   hpkt->hp_NNode = nnode;
+   hpkt->hp_Driver = nnode->driver;
+   hpkt->hp_Func = ReLockNext;
+
+   hpkt->hp_NPFlags = 0;
+   hpkt->hp_State = HPS_RELOCK;
+
+   /* We could consider allocating bunches of HPACKETS and firing them all */
+   /* off at once, but for now let's do it one at a time */
+
+   HPQ(global, hpkt);
+
+   return(0);
+}
+
+ACTFN(ReLockNext)
+{
+   struct RPacket *RP;
+   struct NetNode *nnode = hpkt->hp_NNode;
+   NETPTR nptr;
+   struct FileLock *flock;
+   HPACKET *thp;
+   int cur, outcur, len, newstate;
+   char sep;
+   char *objname, *tmpchar, *outname;
+
+   BUG(("ReLockNext: Entry\n"))
+
+   RP = hpkt->hp_RP;
+
+   /* Process the results of the previous relock, if any */
+   if(hpkt->hp_State == HPS_ERR)
+      nnode->rlk = NULL;
+
+   if(nnode->rlk)
+   {
+      flock = nnode->rlk;
+      nptr = (NETPTR)flock->fl_Key;
+      if(RP->Arg1 != NULL)
+      {
+         /* Success! */
+         BUG(("ReLockNext: Lock reestablished, new rptr 0x%08lx\n", RP->Arg1))
+         nptr->RPtr = (RNPTR)RP->Arg1;
+      }
+      else
+      {
+         BUG(("ReLockNext: Attempt failed\n"))
+         nptr->incarnation--;
+      }
+      nnode->rlk = (struct FileLock *)flock->fl_Link;
+   }
+   else
+      nnode->rlk = nnode->lkc;
+
+   /* Send off the next relock, or clean up if none */
+   if(nnode->rlk)
+   {
+      flock = nnode->rlk;
+      nptr = (NETPTR)flock->fl_Key;
+
+      nptr->incarnation = nptr->NetNode->incarnation;
+
+      /* We now must construct the name of the item from the 'objname' buffer  */
+      /* the 'objname' buffer consists of the nodes of the name in REVERSE     */
+      /* ORDER, each one followed by a 1-byte length (the length includes 1    */
+      /* for the length itself).  Thus, FOO:BAR/BLETCH would show up as        */
+      /* "BLETCH\7BAR\4FOO\4".  This allows the server to create the string    */
+      /* easily, but still lets us parse it easily if/when we have to recreate */
+      /* the original name.                                                    */
+
+      outname = RP->DataP;
+      objname = nptr->objname;
+      cur = strlen(objname)-1;
+      sep = ':';
+      outcur=1;
+      while(cur>0)
+      {
+         len = objname[cur] - 1; 
+         tmpchar = objname + cur - len;
+         memcpy(outname+outcur, tmpchar, len);
+         outcur += len;
+         cur -= (len+1);
+         outname[outcur++] = sep;
+         sep = '/';
+      }
+      if(outname[outcur-1] == '/') outcur--;
+
+      outname[outcur] = 0;
+
+      outname[0] = RP->DLen = outcur-1;
+
+      BUGBSTR("ReLockNext: outname is ", outname);
+
+      RP->Type = ACTION_LOCATE_OBJECT;
+      RP->Arg1 = 0;
+      RP->Arg3 = SHARED_LOCK;
+      RP->Arg4 = 0;
+      RP->handle = hpkt;
+
+      hpkt->hp_Func = ReLockNext;
+
+      RemotePacket(global, hpkt);
+   }
+   else
+   {
+      /* Release all the queued-up HPACKETs */
+      if(nnode->hpc)
+      {
+         newstate = (hpkt->hp_State == HPS_ERR ? HPS_ERR : HPS_RETRY);
+         for(thp=nnode->hpc; thp->hp_WNext; thp=thp->hp_WNext)
+            thp->hp_State = newstate;
+
+         thp->hp_State = newstate;
+
+         thp->hp_WNext = global->donepkts;
+         global->donepkts = thp;
+         nnode->hpc = NULL;
+      }
+
+      nnode->status = (hpkt->hp_State == HPS_ERR ? NODE_CRASHED : NODE_UP);
+
+      hpkt->hp_Pkt = NULL;  /* Prevent retpkt from returning this */
+   }
+}
+
+
+HPACKET *GetHPacket(GLOBAL global)
+{
+   HPACKET *hp;
+
+   if(global->prmhpkt)
+   {
+      /* F

@@ -1,0 +1,19 @@
+/* "cdg.library" */
+#pragma libcall CDGBase CDGBegin 1e 801
+#pragma libcall CDGBase CDGEnd 24 0
+#pragma libcall CDGBase CDGFront 2a 0
+#pragma libcall CDGBase CDGBack 30 0
+#pragma libcall CDGBase CDGDraw 36 1
+#pragma libcall CDGBase CDGChannel 3c 1
+#pragma libcall CDGBase CDGPause 42 0
+#pragma libcall CDGBase CDGStop 48 0
+#pragma libcall CDGBase CDGPlay 4e 1
+#pragma libcall CDGBase CDGNextTrack 54 0
+#pragma libcall CDGBase CDGPrevTrack 5a 0
+#pragma libcall CDGBase CDGFastForward 60 0
+#pragma libcall CDGBase CDGRewind 66 0
+#pragma libcall CDGBase CDGClearScreen 6c 0
+#pragma libcall CDGBase CDGDiskRemoved 72 0
+#pragma libcall CDGBase CDGUserPack 78 801
+#pragma libcall CDGBase CDGAllocPrefs 7e 0
+#pragma libcall CDGBase CDGFreePrefs 84 901

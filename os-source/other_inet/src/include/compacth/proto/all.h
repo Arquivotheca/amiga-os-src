@@ -1,0 +1,1 @@
+€Œ<exec/types.h>Œ<proto/clist.h>Œ<proto/console.h>Œ<proto/diskfont.h>Œ<proto/dos.h>Œ<proto/exec.h>Œ<proto/expansion.h>Œ<proto/intuition.h>Œ<proto/graphics.h>Œ<proto/icon.h>Œ<proto/layers.h>Œ<proto/mathffp.h>Œ<proto/mathieeedoubbas.h>Œ<proto/mathieeesingbas.h>Œ<proto/mathtrans.h>Œ<proto/potgo.h>Œ<proto/timer.h>Œ<proto/translator.h>

@@ -1,0 +1,136 @@
+From bryce Sun Dec 22 01:56:19 1991
+Received: by cbmvax.cbm.commodore.com (5.57/UUCP-Project/Commodore 2/8/91)
+	id AA23692; Sun, 22 Dec 91 01:56:17 EST
+Date: Sun, 22 Dec 91 01:56:17 EST
+From: bryce (Bryce Nesbitt)
+Message-Id: <9112220656.AA23692@cbmvax.cbm.commodore.com>
+To: jerryh, jesup, havemose
+Subject: Filesystem brain dump
+Status: RO
+
+
+		CD-ROM FILESYSTEM
+
+(-) The CD-ROM filesystem provides a means of accessing the ISO-6990
+compatible data on a CD-ROM from within AmigaDOS, and vice versa.  Speed is
+the major issue.  Our drive seeks slower, we'll have to cover that with
+clever software.
+
+150K/sec or 300K/sec is quite fast.  The problem with CDs is not read speed,
+but seek time, and keeping up with the data rate.   Seek times can easily
+run into seconds.   Even short seeks (within laser voice coil range) are
+slow.  If you can't keep a read "streaming", you loose a lot of time -- not
+only do you take a substantial rotational latency, but the drive has to find
+the correct spiral track.   The drive seems to have no optimizations to keep
+close track of the spiral during "pause".
+
+(i) Several factors in the CDFS cause a propensity of small backward seeks
+(one or two sectors).  I've elimated some of the causes.  A special debug
+should be added to detect and eliminate these.  I suspect the directory cache
+code, maybe an interaction of logical and physical block sizes.
+
+  * OUR PREFETCH SCHEME MUST ENDEAVOR TO KEEP THE CD STREAMING FORWARD ALWAYS! *
+  * OUR PREFETCH SCHEME MUST ENDEAVOR TO KEEP THE CD STREAMING FORWARD ALWAYS! *
+
+The current CDFS has two buffers; 16K for data and 32K for directories. 
+Sectors are 2K, but other sizes are possible.  The cache size is adjustable
+by the application.
+
+	o The current data cache is filled 16K at a time (plus 8 bytes for the
+	DMA bug), then dolled out to the application.  Since it is impossible to
+	dole out 16K in zero time, the drive must enter pause mode every 16K,
+	then come out of pause to read the next 16K.  This is bad.
+
+	When a Read is requested >CacheSize, the current CDFS ignores anything
+	in the CacheBuffers then directly transfers the data.  This is bad
+	not because you read the data twice, but because you take very
+	expensive backwards seek. 
+
+	o The current directory cache is filled one sector at a time, as the
+	sectors come in.  Turn on my D(x) debugs to see this.  The search is
+	linear.  Replacement is strict age; no use count is kept:
+
+		for (i = 0; i < DirCacheSize; i++)
+		{
+			if (lbn == DirCacheIndex[i])
+				return (DIREC *)(&DirCache[i<<BlockShift]);
+		}
+		ReadCD(&DirCacheIndex[DirCacheBlock++],lbn,BlockSize);
+
+	In the case of a miss the new block is put in at index "DirCacheBlock",
+	which is then incremented and wrapped if needed.
+
+	(-) At startup the directory cache is empty -- a real waste.  I propose
+	that while the directory cache has empty slots, the CDFS should try
+	hard to fill them.  If blocks for a directory are searched, then *all*
+	blocks for that directory should be bursted in.  It takes just 1/75
+	of a second to get another sector, and orders of magnitudes more to
+	go back for a missed sector.   ISO 9660 files tend to follow just
+	after their directory.  Imagine:
+
+			15	DirBlk (Files A, B, C and D)
+			16	DirBlk (Files E  F  G and H)
+			17	Data A
+			18	Data B
+				...
+			50	Data H
+
+	A program that opens "FileA", reads it, then opens "File H" and reads
+	will seek from 15 to 17... to 16 to 50....  With some optimization the
+	first read would proceede 15, 16, 17..., 50....
+
+	I suggest either a usage count, or at least a "I've never been used"
+	flag to prevent kicking out good sectors because of the prefetch.
+	Your code can look at the Path table, and figure out which blocks
+	to read in (any that are right there...)
+
+
+	(d) CDXL Prefetch (68000 side).   The data buffer is divided into
+	sectors.  An infinite length CDXL read is posted with one node
+	on the CDXL list.  The callback for the node modifies the node
+	for the next block.
+
+	The XL callback adds to the valid buffer pointer, the 68000 adds
+	to the last read pointer.  If the 68000 is fast enough data will
+	stream from the CD with no interruption.
+
+	The read may be aborted by the 68000 when it a different area
+	is needed, or it may be aborted by the XL callback if the buffer
+	is full.
+
+
+	(-) 4510 side prefetch:  The 1186Q part has an 8K buffer chip,
+	expandible to 16K or 32K.  2352 bytes are needed for each sector.
+	One sector is under DMA, one is having ECC applied and a third
+	is streaming in from the auido player IC.  The rest are gravy.
+
+	With the larger buffer chip, extra sectors can be kept in the 1186Q.
+	Any time there is extra room, the 4510 will direct the system to extend
+	the current read and cache the resulting block.  All this without
+	bothering the 68000.
+
+	To make this scheme work requires quick response when the 68000
+	asks for a cached block - the 68000 will make more individual block
+	requests under this scheme.  The 4510/1186Q must quickly initiate DMA
+	when the 68000 requests a cached block. 
+
+	(-) For 4150 prefetch, smaller modifications are needed to the CDFS.
+	The quick IO modifications should be added.  A simple two buffer
+	scheme should be used to elimate the need to wait for DMA (the CPU
+	can execute a lot of cycles while DMA is running).
+
+
+(i) Warning:  _NoPrefs in the global data structure may be poked by
+the welcome disk.
+
+(b) Two bugs:  On startup, the CDFS reads the PVD twice.   One read is
+from strap calling ValidDisk(), the other from CDDS.  This is a 32K
+read, seek backwards, 32K read.   With a small bit of code, the CDFS
+can reuse the first PVD it read in -- after all it still has it.  Look
+at "BottPVDLSN".
+
+Also note that the 2K used by "ScratchBlock" can be reclaimed after the PVD
+is processed.  2K is a lot!!!!!
+
+
+

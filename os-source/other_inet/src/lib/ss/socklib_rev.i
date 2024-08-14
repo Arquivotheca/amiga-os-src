@@ -1,0 +1,14 @@
+VERSION		EQU	4
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'10.8.92'
+	ENDM
+VERS	MACRO
+		dc.b	'socklib 4.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'socklib 4.1 (10.8.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: socklib 4.1 (10.8.92)',0
+	ENDM

@@ -1,0 +1,683 @@
+head     37.2;
+branch   ;
+access   ;
+symbols  V37_10:37.2 V37_9:37.2 V37_7:37.1 V37_6:36.4 V37_5:36.3 V37_4:36.3 V37_3:36.3 V37_2:36.2 V37_1:36.2 V36_9:36.2 V36_7:33.1 V36_5:33.1 L33_4:33.1 L33_3:33.1 L33_2:33.1 L32_1:1.1;
+locks    ; strict;
+comment  @* @;
+
+
+37.2
+date     91.04.16.12.13.26;  author mks;  state Exp;
+branches ;
+next     37.1;
+
+37.1
+date     91.03.13.18.48.26;  author mks;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     91.03.01.12.33.14;  author mks;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     91.02.04.19.03.25;  author mks;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     90.08.29.17.53.43;  author mks;  state Exp;
+branches ;
+next     33.1;
+
+33.1
+date     86.02.12.22.49.29;  author sam;  state Exp;
+branches ;
+next     32.3;
+
+32.3
+date     86.02.12.22.45.23;  author sam;  state Exp;
+branches ;
+next     32.2;
+
+32.2
+date     86.02.06.15.11.49;  author sam;  state Exp;
+branches ;
+next     32.1;
+
+32.1
+date     86.01.14.21.23.06;  author sam;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     86.01.14.20.48.34;  author sam;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@placed under source control 
+@
+
+
+37.2
+log
+@Fixed major bug in the WaitCycle reply code.  It was passing
+the address of the first node and not the address of the list.
+@
+text
+@	TTL    '$Id: interrupt.asm,v 37.1 91/03/13 18:48:26 mks Exp Locker: mks $'
+**********************************************************************
+*								     *
+*   Copyright 1986, Commodore-Amiga Inc.   All rights reserved.	     *
+*   No part of this program may be reproduced, transmitted,	     *
+*   transcribed, stored in retrieval system, or translated into	     *
+*   any language or computer language, in any form or by any	     *
+*   means, electronic, mechanical, magnetic, optical, chemical,	     *
+*   manual or otherwise, without the prior written permission of     *
+*   Commodore-Amiga Incorporated, 983 University Ave. Building #D,   *
+*   Los Gatos, California, 95030				     *
+*								     *
+**********************************************************************
+*
+* $Id: interrupt.asm,v 37.1 91/03/13 18:48:26 mks Exp Locker: mks $
+*
+* $Locker: mks $
+*
+* $Log:	interrupt.asm,v $
+* Revision 37.1  91/03/13  18:48:26  mks
+* Changed hack for EV to not trash D0...  A few more cycles but better in
+* the long run.
+*
+* Revision 36.4  91/03/01  12:33:14  mks
+* Small code cleanup.  No real changes
+*
+* Revision 36.3  91/02/04  19:03:25  mks
+* Added kludges to make Earl Weaver baseball work!  What uglyness!
+*
+* Revision 36.2  90/08/29  17:53:43  mks
+* Changed revision to 36...  Change ownership to MKS...
+* Changed $Header to $Id
+*
+* Revision 33.1  86/02/12  22:49:29  sam
+* revision set to 33
+*
+* Revision 32.3  86/02/12  22:45:23  sam
+* fixed bug in testing for IO blocks to reply
+*
+* Revision 32.2  86/02/06  15:11:49  sam
+* commented software interrupt routine
+*
+* Revision 32.1  86/01/14  21:23:06  sam
+* revision set to 32
+*
+* Revision 1.1  86/01/14  20:48:34  sam
+* Initial revision
+*
+*
+**********************************************************************
+
+	section		audio
+
+*------ Included Files -----------------------------------------------
+
+	INCLUDE	'exec/types.i'
+	INCLUDE	'exec/ables.i'
+	INCLUDE	'exec/lists.i'
+	INCLUDE	'exec/nodes.i'
+	INCLUDE	'exec/ports.i'
+	INCLUDE	'exec/libraries.i'
+	INCLUDE	'exec/io.i'
+	INCLUDE	'exec/interrupts.i'
+	INCLUDE	'hardware/custom.i'
+	INCLUDE	'hardware/dmabits.i'
+	INCLUDE	'audio.i'
+	INCLUDE	'device.i'
+
+*------ Imported Globals ---------------------------------------------
+
+	xref	_custom
+	xref	_intena
+
+*------ Imported Functions -------------------------------------------
+
+	xref	_LVOCause
+	xref	_LVOReplyMsg
+
+*------ Exported Functions -------------------------------------------
+
+	xdef	_AudioInterrupt
+	xdef	_SoftInterrupt
+	xdef	_Restart
+	xdef	_NewPlay
+	xdef	_Cycles
+	xdef	_PerVol
+	xdef	_CLastCycle
+	xdef	_CStopWrite
+	xdef	_CQueueReplyList
+	xdef	_CReplyQueue
+
+;  bchg.b #1,$BFE001 ; ********************* Blink the LED *********************
+;******
+;
+;  The REPLY macro is really like AddTail onto the channel structure
+;  reply queue...
+;
+*	inputs	a1 - channel struct, a5 - iob
+*	affects	a6
+REPLY	macro
+	move.l	au_ReplyQueueTail(a1),a6
+	move.l	ln_Pred(a6),d0
+	move.l	a6,(a5)
+	move.l	a5,ln_Pred(a6)
+	move.l	d0,a6
+	move.l	a5,(a6)
+	endm
+
+*	------- load period and volume entry point
+*	inputs	a0 - custom chips, a1 - channel struct
+_PerVol:
+	move.l	au_Regs(a1),a5
+	move.l	au_PerVol(a1),ac_per(a5)
+	bra.s	ChangeCycle
+
+*	------- new play entry point
+*	inputs	a0 - custom chips, a1 - channel struct
+_NewPlay:
+	move.l	au_Next(a1),a5
+	btst	#ADIOB_PERVOL,io_Flags(a5)
+	beq.s	1$
+	move.l	au_Regs(a1),a6
+	move.l	ioa_Period(a5),ac_per(a6)
+1$:	move.l	au_Playing(a1),d0
+	beq.s	2$
+	move.l	d0,a5
+	REPLY
+	move.l	au_Next(a1),a5
+2$:	move.l	a5,au_Playing(a1)
+	btst	#ADIOB_WRITEMESSAGE,io_Flags(a5)
+	beq.s	ChangeCycle
+	lea	ioa_WriteMsg(a5),a5
+	REPLY
+
+*	-------	change entry to cycles
+*	inputs	a0 - custom chips, a1 - channel struct
+ChangeCycle:
+	move.l	#_Cycles,au_IntCode(a1)
+
+*	------- cycles entry point
+*	inputs	a0 - custom chips, a1 - channel struct
+_Cycles:
+	subq	#1,au_Cycles(a1)
+	bls.s	NoCycles
+
+*	------- clear interrupt request
+*	inputs	a0 - custom chips, a1 - channel struct
+ClearRequest:
+	move.w	au_IntFlag(a1),intreq(a0)
+
+*	------- check waitcycle list
+*	inputs	a1 - channel struct
+CheckWaitList:
+	btst	#ADUNITB_WAITLIST,au_Flags+1(a1)
+	bne	ReplyWaitList
+
+*	------- check reply list and exit
+*	inputs	a1 - channel struct
+CheckReplyQueue:
+	move.l	au_ReplyQueueTail(a1),a5
+	cmp.l	-lh_Tail(a5),a5
+	bne.s	CauseSoft
+	rts
+
+*	------- restart entry point
+_Restart:
+	move.l	au_IntNextCode(a1),au_IntCode(a1)
+	move.w	au_ChanFlag(a1),d0
+	or.w	#DMAF_SETCLR,d0
+	move.w	au_IntFlag(a1),intreq(a0)
+	move.w	d0,dmacon(a0)
+	bra.s	CheckWaitList
+
+*	------- last cycle or zero cycle
+*	inputs	a0 - custom chips, a1 - channel struct
+NoCycles:
+	bcc.s	LastCycle
+	clr.w	au_Cycles(a1)
+	move.w	au_IntFlag(a1),intena(a0)
+	bra	ClearRequest
+
+*	-------	change entry to stop
+*	inputs	a0 - custom chips, a1 - channel struct
+ChangeStop:
+	clr.l	au_Next(a1)
+	move.l	#StopWrite,au_IntCode(a1)
+	bra.s	ClearRequest
+
+*	------- stop write entry point
+*	inputs	a0 - custom chips, a1 - channel struct
+StopWrite:
+	move.w	au_ChanFlag(a1),dmacon(a0)
+	move.w	au_IntFlag(a1),intena(a0)	; Clear the interrupt enable...
+	move.l	au_Playing(a1),d0	; Check if we have someone playing...
+	beq.s	CheckWaitList
+	move.l	d0,a5
+	REPLY
+	clr.l	au_Playing(a1)
+	bra.s	CheckWaitList
+
+*	-------	cause software interrupt for reply list and exit
+*	inputs	a1 - channel struct
+CauseSoft:
+	move.l	au_SoftInterrupt(a1),a1
+	move.l	EXEC_BASE,a6
+	jmp	_LVOCause(a6)
+
+*	------- last cycle entry point
+*	inputs	a0 - custom chips, a1 - channel struct
+LastCycle:
+	move.l	au_WriteQueue(a1),a5
+	tst.l	(a5)
+	beq.s	ChangeStop
+	move.l	ioa_Length(a5),d0
+	lsr.l	#1,d0
+	move.l	au_Regs(a1),a6
+	move.w	d0,ac_len(a6)
+	move.l	ioa_Data(a5),ac_ptr(a6)
+	move.w	ioa_Cycles(a5),au_Cycles(a1)
+	move.l	a5,au_Next(a1)
+	move.l	(a5),a6
+	move.l	ln_Pred(a5),a5
+	move.l	a6,(a5)
+	move.l	a5,ln_Pred(a6)
+	move.l	#_NewPlay,au_IntCode(a1)
+	bra	ClearRequest
+
+*	-------	C entry point for stop write
+_CStopWrite:
+	movem.l	a5/a6,-(sp)
+	lea	_custom,a0
+	move.l	12(sp),a1
+	bsr	StopWrite
+	movem.l	(sp)+,a5/a6
+	rts
+
+*	-------	C entry point for last cycle
+_CLastCycle:
+	movem.l	a5/a6,-(sp)
+	lea	_custom,a0
+	move.l	12(sp),a1
+	bsr.s	LastCycle
+        movem.l (sp)+,a5/a6
+        rts
+
+*	-------	C entry point for queue up list to reply
+_CQueueReplyList:
+	movem.l	a5/a6,-(sp)
+	movem.l	12(sp),a5/a6
+	lea	ad_ReplyQueue+lh_Tail(a6),a0
+	bsr.s	QueueReplyList
+        movem.l (sp)+,a5/a6
+        rts
+
+*	-------	C entry point for reply list
+_CReplyQueue:
+	movem.l	a5/a6,-(sp)
+	move.l	12(sp),a1
+	move.l	EXEC_BASE,a6
+	bsr.s	_SoftInterrupt
+        movem.l (sp)+,a5/a6
+	rts
+
+*	-------	reply waitcycle list
+*	inputs	a1 - channel struct
+ReplyWaitList:
+	bclr	#ADUNITB_WAITLIST,au_Flags+1(a1)
+	lea	au_WaitList(a1),a5
+        move.l  au_ReplyQueueTail(a1),a0
+	bsr.s	QueueReplyList
+	bra	CauseSoft
+
+*       ------- queue up list to reply
+*	inputs	a0 - reply queue tail, a5 - list
+*	affects	a6
+QueueReplyList:
+        move.l	lh_TailPred(a5),a6
+        move.l  a0,(a6)
+        move.l  ln_Pred(a0),a6
+        move.l  lh_TailPred(a5),ln_Pred(a0)
+        move.l  (a5),(a6)
+        NEWLIST a5
+        rts
+
+*------ (audio.device)
+*
+*	SoftInterrupt - audio software interrupt routine.
+*
+*   SYNOPSIS
+*	SoftInterrupt(list)
+*	               a1
+*
+*   FUNCTION
+*
+*   INPUTS
+*	list - pointer to list to reply (singlely linked list with tail ptr)
+*
+*---------------------------------------------------------------------
+_SoftInterrupt:
+	move.l	a1,a5			make a5 reply list
+SoftI1:	DISABLE
+	move.l	(a5),a1			a1 points to first io block
+	move.l	(a1),d0			d0 is first io blocks successor
+	beq.s	SoftI3			if zero then there are no io blocks
+	move.l	d0,(a5)			remove first io block
+	cmp.l	lh_TailPred(a5),a1	check if first io block is also last
+	bne.s	SoftI2
+	move.l	a5,lh_TailPred(a5)	if it is, point list pred to head
+SoftI2	ENABLE
+	jsr	_LVOReplyMsg(a6)	reply first io block
+	bra.s	SoftI1
+SoftI3	ENABLE
+SoftI4	rts
+
+*------ (audio.device)
+*
+*   NAME
+*	AudioInterrupt - audio interrupt routine.
+*
+*   SYNOPSIS
+*	AudioInterrupt(unit)  (a0==CUSTOM)
+*			  a1
+*
+*   FUNCTION
+*
+*   INPUTS
+*	unit - audio unit structure address.
+*
+*---------------------------------------------------------------------
+_AudioInterrupt:
+*
+* This is a major hack.  Earl Weaver Baseball does not open
+* the audio.device but was relying on the fact that the
+* interrupt code and unit structures were still valid after using
+* the narrator.  Earl Weaver was just poking the interrupt
+* register and thus causing the interrupt to happen without
+* having any audio units set up.  Basically, it was working
+* due to luck of a side-effect of the narrator/audio interactions.
+*
+* The following tests are done to prevent the program from crashing
+* when it does this.  By checking if the values are NULL we can catch
+* the common cause of the crash.  (And even get the sound to work!)
+*
+* The original code was:
+*	move.l	au_IntCode(a1),a5
+*	jmp	(a5)
+*
+	move.l	au_IntCode(a1),a5
+	cmp.l	#0,a5			; Set the ZERO flag as needed...
+	bne.s	OkInt			; If not NULL, we are ok...
+	lea	_NewPlay(pc),a5		; Fake a NewPlay routine.
+OkInt	jmp	(a5)
+	end
+@
+
+
+37.1
+log
+@Changed hack for EV to not trash D0...  A few more cycles but better in
+the long run.
+@
+text
+@d1 1
+a1 1
+	TTL    '$Id: interrupt.asm,v 36.4 91/03/01 12:33:14 mks Exp Locker: mks $'
+d15 1
+a15 1
+* $Id: interrupt.asm,v 36.4 91/03/01 12:33:14 mks Exp Locker: mks $
+d20 4
+d268 1
+a268 1
+	move.l	au_WaitList(a1),a5
+@
+
+
+36.4
+log
+@Small code cleanup.  No real changes
+@
+text
+@d1 1
+a1 1
+	TTL    '$Id: interrupt.asm,v 36.3 91/02/04 19:03:25 mks Exp Locker: mks $'
+d15 1
+a15 1
+* $Id: interrupt.asm,v 36.3 91/02/04 19:03:25 mks Exp Locker: mks $
+d20 3
+d317 1
+a317 1
+*	AudioInterrupt(unit)
+d345 1
+a345 1
+	move.l	a5,d0			; Set the ZERO flag as needed...
+@
+
+
+36.3
+log
+@Added kludges to make Earl Weaver baseball work!  What uglyness!
+@
+text
+@d1 1
+a1 1
+	TTL    '$Id: interrupt.asm,v 36.2 90/08/29 17:53:43 mks Exp Locker: mks $'
+d15 1
+a15 1
+* $Id: interrupt.asm,v 36.2 90/08/29 17:53:43 mks Exp Locker: mks $
+d20 3
+d85 6
+d167 15
+d186 2
+a187 2
+	move.w	au_IntFlag(a1),intena(a0)
+	move.l	au_Playing(a1),d0
+a199 15
+
+*	-------	change entry to stop
+*	inputs	a0 - custom chips, a1 - channel struct
+ChangeStop:
+	clr.l	au_Next(a1)
+	move.l	#StopWrite,au_IntCode(a1)
+	bra.s	ClearRequest
+
+*	------- last cycle or zero cycle
+*	inputs	a0 - custom chips, a1 - channel struct
+NoCycles:
+	bcc.s	LastCycle
+	clr.w	au_Cycles(a1)
+	move.w	au_IntFlag(a1),intena(a0)
+	bra	ClearRequest
+@
+
+
+36.2
+log
+@Changed revision to 36...  Change ownership to MKS...
+Changed $Header to $Id
+@
+text
+@d1 1
+a1 1
+	TTL    '$Id$'
+d15 1
+a15 1
+* $Id$
+d20 4
+a81 19
+*------ (audio.device)
+*
+*   NAME
+*	AudioInterrupt - audio interrupt routine.
+*
+*   SYNOPSIS
+*	AudioInterrupt(unit)
+*			  a1
+*
+*   FUNCTION
+*
+*   INPUTS
+*	unit - audio unit structure address.
+*
+*---------------------------------------------------------------------
+_AudioInterrupt:
+	move.l	au_IntCode(a1),a5
+	jmp	(a5)
+
+d297 1
+a297 1
+	rts
+d299 38
+@
+
+
+33.1
+log
+@revision set to 33
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header: interrupt.asm,v 32.3 86/02/12 22:45:23 sam Exp $'
+d15 1
+a15 1
+* $Header: interrupt.asm,v 32.3 86/02/12 22:45:23 sam Exp $
+d17 1
+a17 1
+* $Locker: sam $
+d20 3
+d25 1
+a25 1
+* 
+d28 1
+a28 1
+* 
+d31 1
+a31 1
+* 
+a33 1
+* 
+d35 1
+d242 2
+a243 2
+        movem.l (sp)+,a5/a6 
+        rts 
+d245 1
+a245 1
+*	-------	C entry point for queue up list to reply 
+d251 2
+a252 2
+        movem.l (sp)+,a5/a6 
+        rts 
+d260 1
+a260 1
+        movem.l (sp)+,a5/a6 
+d262 1
+a262 1
+	
+d306 1
+a306 1
+	bne.s	SoftI2			
+@
+
+
+32.3
+log
+@fixed bug in testing for IO blocks to reply
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header: interrupt.asm,v 32.2 86/02/06 15:11:49 sam Exp $'
+d15 1
+a15 1
+* $Header: interrupt.asm,v 32.2 86/02/06 15:11:49 sam Exp $
+d17 1
+a17 1
+* $Locker:  $
+d20 3
+@
+
+
+32.2
+log
+@commented software interrupt routine
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header: interrupt.asm,v 32.1 86/01/14 21:23:06 sam Exp $'
+d15 1
+a15 1
+* $Header: interrupt.asm,v 32.1 86/01/14 21:23:06 sam Exp $
+d20 3
+d154 1
+a154 1
+	cmp.l	ln_Pred(a5),a5
+@
+
+
+32.1
+log
+@revision set to 32
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header: interrupt.asm,v 1.1 86/01/14 20:48:34 sam Exp $'
+d15 1
+a15 1
+* $Header: interrupt.asm,v 1.1 86/01/14 20:48:34 sam Exp $
+d17 1
+a17 1
+* $Locker: sam $
+d20 3
+d286 1
+a286 1
+*	list - pointer to list to reply (singley linked list with tail ptr)
+d290 1
+a290 1
+	move.l	a1,a5
+d292 7
+a298 7
+	move.l	(a5),a1
+	move.l	(a1),d0
+	beq.s	SoftI3
+	move.l	d0,(a5)
+	cmp.l	lh_TailPred(a5),a1
+	bne.s	SoftI2
+	move.l	a5,lh_TailPred(a5)
+d300 1
+a300 1
+	jsr	_LVOReplyMsg(a6)
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d1 1
+a1 1
+	TTL    '$Header$'
+d15 1
+a15 1
+* $Header$
+d17 1
+a17 1
+* $Locker$
+d19 4
+a22 1
+* $Log$
+@

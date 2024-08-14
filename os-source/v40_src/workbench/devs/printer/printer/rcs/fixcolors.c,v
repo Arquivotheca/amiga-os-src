@@ -1,0 +1,442 @@
+head     1.8;
+branch   ;
+access   ;
+symbols  V38_4:1.7 V37_603:1.7 V36_603:1.7 V36_599:1.7 V36_596:1.7 V36_587:1.7 V36_579:1.7 V36_575:1.7 V36_573:1.7 V36_572:1.7 V36_570:1.5 L34_564:1.5 L34_563:1.5 L34_562:1.5 L35_560:1.5 L35_559:1.5 L35_558:1.5 L35_556:1.5 L35_548:1.5 L35_547:1.5 L35_544:1.5 L35_543:1.5 L35_541:1.5 L35_539:1.4 L35_534:1.4 L35_528:1.3 L35_522:1.2 L35_517:1.2;
+locks    ; strict;
+comment  @*   @;
+
+
+1.8
+date     92.01.28.14.25.32;  author davidj;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.04.30.12.49.15;  author daveb;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.04.06.19.23.43;  author daveb;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     88.04.10.13.43.21;  author daveb;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     88.03.08.18.23.48;  author daveb;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     88.03.07.14.43.00;  author daveb;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     87.10.27.17.04.10;  author daveb;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     87.10.01.09.33.13;  author daveb;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     87.08.21.17.22.59;  author daveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@added to rcs / V1.3 beta 2 release
+@
+
+
+1.8
+log
+@compiled native
+@
+text
+@#include <exec/types.h>
+#include <graphics/rastport.h>
+#include <graphics/gfx.h>
+#include <intuition/intuition.h>
+
+#include "printer.h"
+#include "prtbase.h"
+#include "prtgfx.h"
+
+#include "printer_iprotos.h"
+
+#define FCYDEBUG	0
+#define FCRDEBUG	0
+
+extern struct PrinterExtendedData *PED;
+
+/*
+	COLOR CORRECTION ALGORITHM - HOW IT WORKS
+
+	Note :	Y - Yellow, M - Magenta, C - Cyan
+			R - Red, G - Green, B - Blue
+	The formula works as follows (for B):
+	B15 is a combination of M15/C15.  However, this leads to a purple
+	rather than a blue.  Therefore B15 is convoluted to be M8/C15 which
+	produces a relatively solid blue shade.(ie. M' = M - C / 2).
+	As we get away from M15/C15 (Blue) and approach	M15/C0 (Magenta)
+	or M0/C15 (Cyan) we want to approach subtracting nothing from M.
+	Since YMC is black we first get the minimum of YMC and subtract it
+	from YMC.  This reduces the color to only 2 components instead of the
+	original 3.  We now take the minimum of the two components we are
+	interested in (M and C in this case), divide it by 2 and subtract it
+	from the ORIGINAL component that we are interested in fixing
+	(M in this case).  This procedure only affects the shade we are
+	interested in fixing (Blue in this case, ie. combinations of
+	M and C) and leaves all other shades unchanged.
+*/
+
+/*
+	Fixes the colors in the printer color map.
+*/
+FixColorMap(PInfo)
+struct PrtInfo *PInfo;
+{
+	if (PED->ped_ColorClass & PCC_ADDITIVE) {
+		FixColorsRGB(PInfo, PInfo->pi_ColorMap,
+			1 << PInfo->pi_rp->BitMap->Depth);
+	}
+	else {
+		FixColorsYMC(PInfo, PInfo->pi_ColorMap,
+			1 << PInfo->pi_rp->BitMap->Depth);
+	}
+}
+
+/*
+	Fixes the colors of a row of pixels.
+*/
+FixColorsPixelArray(PInfo)
+struct PrtInfo *PInfo;
+{
+	if (PED->ped_ColorClass & PCC_ADDITIVE) {
+		FixColorsRGB(PInfo, PInfo->pi_ColorInt, PInfo->pi_width);
+	}
+	else {
+		FixColorsYMC(PInfo, PInfo->pi_ColorInt, PInfo->pi_width);
+	}
+}
+
+FixColorsYMC(PInfo, ce, n)
+struct PrtInfo *PInfo;
+union colorEntry *ce;
+int n;
+{
+	UWORD black, yellowblack, magentablack, cyanblack;
+	UWORD rflag, gflag, bflag;
+
+	rflag = (PInfo->pi_PrefsFlags & CORRECT_RED) ? 1 : 0;
+	gflag = (PInfo->pi_PrefsFlags & CORRECT_GREEN) ? 1 : 0;
+	bflag = (PInfo->pi_PrefsFlags & CORRECT_BLUE) ? 1 : 0;
+
+	do {
+#if FCYDEBUG
+		kprintf("(YMCK)before=%01lx%01lx%01lx%01lx, ",
+			ce->colorByte[PCMYELLOW], ce->colorByte[PCMMAGENTA],
+			ce->colorByte[PCMCYAN], ce->colorByte[PCMBLACK]);
+#endif FCYDEBUG
+		/* get original black */
+		black = ce->colorByte[PCMBLACK];
+		/* get original yellow - black */
+		yellowblack = (ce->colorByte[PCMYELLOW] - black) / 2;
+		/* get original magenta - black */
+		magentablack = (ce->colorByte[PCMMAGENTA] - black) / 2;
+		/* get original cyan - black */
+		cyanblack = (ce->colorByte[PCMCYAN] - black) / 2;
+		if (rflag) {	/* if want to fix red */
+			ce->colorByte[PCMYELLOW] -=
+				yellowblack < magentablack ?
+					yellowblack : magentablack;
+		}
+		if (gflag) {	/* if want to fix green */
+			ce->colorByte[PCMCYAN] -=
+				cyanblack < yellowblack ?
+					cyanblack : yellowblack;
+		}
+		if (bflag) {	/* if want to fix blue */
+			ce->colorByte[PCMMAGENTA] -=
+				magentablack < cyanblack ?
+					magentablack : cyanblack;
+		}
+#if FCYDEBUG
+		kprintf("(YMCK)after=%01lx%01lx%01lx%01lx\n",
+			ce->colorByte[PCMYELLOW], ce->colorByte[PCMMAGENTA],
+			ce->colorByte[PCMCYAN], ce->colorByte[PCMBLACK]);
+#endif FCYDEBUG
+		ce++;
+	} while (--n);
+}
+
+FixColorsRGB(PInfo, ce, n)
+struct PrtInfo *PInfo;
+union colorEntry *ce;
+int n;
+{
+	UWORD red, green, blue, rflag, gflag, bflag;
+
+	rflag = (PInfo->pi_PrefsFlags & CORRECT_RED) ? 1 : 0;
+	gflag = (PInfo->pi_PrefsFlags & CORRECT_GREEN) ? 1 : 0;
+	bflag = (PInfo->pi_PrefsFlags & CORRECT_BLUE) ? 1 : 0;
+
+	do {
+#if FCRDEBUG
+		kprintf("(RGBK)before=%01lx%01lx%01lx%01lx, ",
+			ce->colorByte[PCMRED], ce->colorByte[PCMGREEN],
+			ce->colorByte[PCMBLUE], ce->colorByte[PCMBLACK]);
+#endif FCRDEBUG
+		red = ce->colorByte[PCMRED];
+		green = ce->colorByte[PCMGREEN];
+		blue = ce->colorByte[PCMBLUE];
+		/* if want to fix red and there's some red in this color */
+		if (rflag && red>green && red>blue) {
+			red -= green > blue ? green : blue;
+			ce->colorByte[PCMBLUE] += red / 2;
+		}
+		/* if want to fix green and there's some green in this color */
+		if (gflag && green>red && green>blue) {
+			green -= red > blue ? red : blue;
+			ce->colorByte[PCMRED] += green / 2;
+		}
+		/* if want to fix blue and there's some blue in this color */
+		if (bflag && blue>red && blue>green) {
+			blue -= red > green ? red : green;
+			ce->colorByte[PCMGREEN] += blue / 2;
+		}
+#if FCRDEBUG
+		kprintf("(RGBK)after=%01lx%01lx%01lx%01lx\n",
+			ce->colorByte[PCMRED], ce->colorByte[PCMGREEN],
+			ce->colorByte[PCMBLUE], ce->colorByte[PCMBLACK]);
+#endif FCRDEBUG
+		ce++;
+	} while (--n);
+}
+@
+
+
+1.7
+log
+@changed '"../intuition.h"' to '<intuition/intuition.h>'
+@
+text
+@d9 2
+@
+
+
+1.6
+log
+@for rcs 4.x header change
+@
+text
+@d4 1
+a4 1
+#include "../intuition.h"
+@
+
+
+1.5
+log
+@removed #defines for PCM RED, GREEN, and BLUE
+V1.3 Gamma 10 release
+@
+text
+@@
+
+
+1.4
+log
+@created '#defines' for PCMRED, PCMGREEN, and PCMBLUE
+V1.3 Gamma 8 release
+@
+text
+@a12 4
+#define PCMRED		PCMCYAN
+#define PCMGREEN	PCMMAGENTA
+#define PCMBLUE		PCMYELLOW
+
+@
+
+
+1.3
+log
+@fixed color correction for RGB type printers
+V1.3 Gamma 8 release
+@
+text
+@d13 3
+a15 3
+#define PCMRED		2
+#define PCMGREEN	1
+#define PCMBLUE		0
+@
+
+
+1.2
+log
+@changed 'prtprefs.h' reference to new 'intuition.h' file
+V1.3 gamma 1 release
+@
+text
+@d4 1
+a4 1
+#include "../preferences.h"
+d7 1
+d10 2
+a11 2
+#define FCMDEBUG	0
+#define FCPADEBUG	0
+d13 6
+d46 29
+a74 1
+	union colorEntry *cm;
+a76 1
+	int i, numcolors;
+a77 1
+	cm = PInfo->pi_ColorMap;
+d81 7
+a87 11
+	numcolors = 1 << PInfo->pi_rp->BitMap->Depth;
+#if FCMDEBUG
+	kprintf("FCM: rflag=%ld, gflag=%ld, bflag=%ld, numcolors=%ld\n",
+		rflag, gflag, bflag, numcolors);
+#endif
+	for (i=0; i<numcolors; i++) {
+#if FCMDEBUG
+		kprintf("i=%ld, before=%01lx%01lx%01lx%01lx, ", i,
+			cm->colorByte[PCMYELLOW], cm->colorByte[PCMMAGENTA],
+			cm->colorByte[PCMCYAN], cm->colorByte[PCMBLACK]);
+#endif
+d89 1
+a89 1
+		black = cm->colorByte[PCMBLACK];
+d91 1
+a91 1
+		yellowblack = (cm->colorByte[PCMYELLOW] - black) / 2;
+d93 1
+a93 1
+		magentablack = (cm->colorByte[PCMMAGENTA] - black) / 2;
+d95 1
+a95 1
+		cyanblack = (cm->colorByte[PCMCYAN] - black) / 2;
+d97 3
+a99 2
+			cm->colorByte[PCMYELLOW] -=
+				yellowblack < magentablack ? yellowblack : magentablack;
+d102 3
+a104 2
+			cm->colorByte[PCMCYAN] -=
+				cyanblack < yellowblack ? cyanblack : yellowblack;
+d107 3
+a109 2
+			cm->colorByte[PCMMAGENTA] -=
+				magentablack < cyanblack ? magentablack : cyanblack;
+d111 7
+a117 10
+#if FCMDEBUG
+		kprintf("after=%01lx%01lx%01lx%01lx\n",
+			cm->colorByte[PCMYELLOW], cm->colorByte[PCMMAGENTA],
+			cm->colorByte[PCMCYAN], cm->colorByte[PCMBLACK]);
+#endif
+		cm++;
+	}
+#if FCMDEBUG
+	kprintf("FCM: exit\n");
+#endif
+d120 1
+a120 4
+/*
+	Fixes the colors of a row of pixels.
+*/
+FixColorsPixelArray(PInfo)
+d122 2
+d125 1
+a125 3
+	union colorEntry *ColorInt;
+	UWORD black, yellowblack, magentablack, cyanblack;
+	UWORD width, rflag, gflag, bflag;
+a126 2
+	width = PInfo->pi_width;
+	ColorInt = PInfo->pi_ColorInt;
+d130 1
+a130 3
+#if FCPADEBUG
+	kprintf("FCPA: rflag=%ld, gflag=%ld, bflag=%ld\n", flag, gflag, bflag);
+#endif
+d132 12
+a143 11
+		/* get original black */
+		black = ColorInt->colorByte[PCMBLACK];
+		/* get original yellow - black */
+		yellowblack = (ColorInt->colorByte[PCMYELLOW] - black) / 2;
+		/* get original magenta - black */
+		magentablack = (ColorInt->colorByte[PCMMAGENTA] - black) / 2;
+		/* get original cyan - black */
+		cyanblack = (ColorInt->colorByte[PCMCYAN] - black) / 2;
+		if (rflag) {	/* if want to fix red */
+			ColorInt->colorByte[PCMYELLOW] -=
+				yellowblack < magentablack ? yellowblack : magentablack;
+d145 4
+a148 3
+		if (gflag) {	/* if want to fix green */
+			ColorInt->colorByte[PCMCYAN] -=
+				cyanblack < yellowblack ? cyanblack : yellowblack;
+d150 4
+a153 3
+		if (bflag) {	/* if want to fix blue */
+			ColorInt->colorByte[PCMMAGENTA] -=
+				magentablack < cyanblack ? magentablack : cyanblack;
+d155 7
+a161 5
+		ColorInt++;
+	} while (--width);
+#if FCPADEBUG
+	kprintf("FCPA: exit\n");
+#endif
+@
+
+
+1.1
+log
+@V1.3 beta 4 check-in
+@
+text
+@d4 1
+a7 1
+#include "prtprefs.h"
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d6 1
+a6 1
+#include "prtprivate.h"
+d44 5
+a48 5
+	cm = PInfo->ColorMap;
+	rflag = (PInfo->PrefsFlags & CORRECT_RED) ? 1 : 0;
+	gflag = (PInfo->PrefsFlags & CORRECT_GREEN) ? 1 : 0;
+	bflag = (PInfo->PrefsFlags & CORRECT_BLUE) ? 1 : 0;
+	numcolors = 1 << PInfo->rp->BitMap->Depth;
+d101 5
+a105 5
+	width = PInfo->width;
+	ColorInt = PInfo->ColorInt;
+	rflag = (PInfo->PrefsFlags & CORRECT_RED) ? 1 : 0;
+	gflag = (PInfo->PrefsFlags & CORRECT_GREEN) ? 1 : 0;
+	bflag = (PInfo->PrefsFlags & CORRECT_BLUE) ? 1 : 0;
+@

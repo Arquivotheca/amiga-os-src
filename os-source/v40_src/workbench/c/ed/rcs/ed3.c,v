@@ -1,0 +1,520 @@
+head     1.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+1.6
+date     90.11.01.06.42.18;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.10.13.23.57.55;  author J_Toebes;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.10.13.20.06.38;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.09.06.19.37.53;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.22.22.20.05;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.04.06.19.47.11;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.54.38;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@ED text editor for 1.4
+@
+
+
+1.6
+log
+@Added out of memory message
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .  | || the authors:                             BBS: (919) 481-6436    */
+/* | o  | ||   John Toebes     John Mainwaring    Jim Cooper                 */
+/* |  . |//    Bruce Drake     Gordon Keener      Dave Baker                 */
+/* ======      Doug Walker                                                   */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**     (C) Copyright 1989 Commodore-Amiga, Inc.
+ **         All Rights Reserved
+**/
+
+/*----------------------------------------------------------------------*/
+/* Command: Ed3.c                                                       */
+/* Author:  John A. Toebes, VIII                                        */
+/* Change History:                                                      */
+/*  Date    Person        Action                                        */
+/* -------  ------------- -----------------                             */
+/* 23NOV89  John Toebes   Initial Creation                              */
+/* 27MAR90  John Toebes   Allowed fatal to be called in any situation   */
+/* 16APR90  John Toebes   Corrected copy_text_up routine                */
+/* 14OCT90  John Toebes   Moved fatal() to ed4.c                        */
+/* 30OCT90  John Toebes   Added ERROR_NO_MEMORY                         */
+/* Notes:                                                               */
+/*----------------------------------------------------------------------*/
+#include "ed.h"
+
+/************************************************************************/
+/*                                                                      */
+/* Screen editor support routines                                       */
+/*                                                                      */
+/************************************************************************/
+
+/***
+*
+* Copy text up store from p by n words. Write in assembler if possible
+*
+**/
+void copy_text_up(p,n)
+struct LINE *p;
+long n;
+{
+   long *source;
+   long *dest;
+
+   source = (long *)line_lastword;
+   dest   = (long *)(((char *)source) + n);
+   while(source >= (long *)p)
+      *dest-- = *source--;
+   /* For some reason this next test fails to catch the cases we are    */
+   /* interested in.  However after careful consideration, you always   */
+   /* want to update both the line_last and line_lastword pointers      */
+   /* whenever you insert something.  I leave the statement in commented*/
+   /* out for histerical purposes                                       */
+   /***if (line_last >= p)***/   /* must update this ptr        */
+      line_last = (struct LINE *)((char *)line_last+n);
+   line_lastword += n;
+}
+
+/***
+*
+* Copy text down in store onto p by n words.
+*   Again should be in assembler
+*
+**/
+void copy_text_down(p,n)
+struct LINE *p;
+long n;
+{
+   char *newlast = line_lastword-n;
+
+   if (p < line_last)
+      line_last = (struct LINE *)((char *)line_last-n);
+   memcpy((char *)p, (char *)p+n, newlast-(char *)p);
+   line_lastword = newlast;
+}
+
+/***
+*
+* Check to see if enough space for N words left in buffer.
+*    Worktop is set in initialisation code to allow a safety area
+*    so there is no need to check when inserting lines
+*
+***/
+BOOL room_for(n)
+long n;
+{
+   if ((line_lastword + n) >= worktop)
+      return(FALSE);
+   return(TRUE);
+}
+
+/***
+*
+* Move cursor to position x, y
+*
+**/
+void move_cursor(x,y)
+int x;
+int y;
+{
+   if ((x != phys_x) || (y != phys_y))
+      VDU_SETCURSOR(x, y);
+
+   phys_x = x;          phys_y = y;
+}
+
+/***
+*
+* Delete line n on vdu
+*
+**/
+void vud_delete_line(n)
+int n;
+{
+   if (n == 0)
+      VDU_SCROLLUP(1);
+   else
+   {
+      move_cursor( 0, n );
+      VDU_DELL();
+   }
+}
+
+/***
+*
+* Insert line n on vdu
+*
+**/
+void vud_insert_line(n)
+int n;
+{
+   if (n == 0)
+      VDU_SCROLLDOWN(1);
+   else
+   {
+      move_cursor( 0, n );
+      VDU_INSL();
+   }
+}
+
+/***
+*
+* Display routine. For every line which has been altered, re-display it
+*   While doing this check to see if any characters have been typed in;
+*   if so stop the update to the display and return the character
+*   Once complete return the next character typed if wait is true.
+*   Always leave the cursor at log_x, log_y
+*
+***/
+int display(wait)
+BOOL wait;
+{
+   int i;
+   int ch;
+
+   /* display lines, starting at current   */
+   for (i = log_y; i <= line_num; i++)
+   {
+      ch = display_line(i);
+      if (ch != C_NOTREADY) return(ch);
+   }
+
+   /* and now do the rest  */
+   for (i = log_y-1; i >= 0; i--)
+   {
+      ch = display_line(i);
+      if (ch != C_NOTREADY) return(ch);
+   }
+
+   /* Return character if one waiting   */
+   if (!wait) return(VDU_GETCHAR(FALSE));
+
+   /* Display message line      */
+   if (msg_num != 0) display_msg();
+
+   /* Display complete. Wait for character      */
+   move_cursor( log_x, log_y ); /* Show cursor where user thinks it is  */
+   ch = VDU_GETCHAR(TRUE);     /* Wait for character           */
+   if (msg_num != 0)
+   {
+      vdu_writes(0,line_max+1,"");      /* Clear message line           */
+      msg_num = 0;
+   }
+   return(ch);
+}
+
+/***
+*
+* Display line on screen, and return character typed if any
+*
+**/
+int display_line(i)
+int i;
+{
+   struct LINE *line;
+   int l;
+   int ch;
+
+   /* If the line does not need to be displayed, skip it                */
+   if (!line_mods[i]) return(C_NOTREADY);
+
+   ch = VDU_GETCHAR(FALSE);
+   if (ch != C_NOTREADY) return(ch);
+
+   line = line_ptr[i];
+   line_mods[i] = 0;                    /* mark as displayed now        */
+
+   l = line->data[0]-window_base;     /* length of text to be displayed */
+   if (l > (screen_width+1))            /* only display what we can fit */
+      l = screen_width+1;
+   move_cursor(0,i);                    /* move cursor to line          */
+   VDU_DEOL();       /* delete what was there before         */
+   vud_wrline(line->data+window_base+1,l);
+   if (l >= 0)
+      phys_x = l;                       /* cursor at end of line now    */
+   return(VDU_GETCHAR(FALSE));  /* and collect any char typed while that happened       */
+}
+
+
+/***
+*
+* Remember message, and abort processing if required
+*
+**/
+void msg(n)
+int n;
+{
+   msg_num = n;
+   cmdptr = 1;                  /* reset extended command pointer       */
+   if (err_level != 0) longjmp(*err_level, ERRLABEL);
+}
+
+/***
+*
+* Display message
+*
+**/
+void display_msg()
+{
+   VDU_HIGHLIGHTON();
+   vdu_writes(0, line_max+1, get_msg());
+   VDU_HIGHLIGHTOFF();
+}
+
+/***
+*
+* Get the string for the current pending error
+*
+***/
+char *get_msg()
+{
+   switch(msg_num)
+   {
+      case 0:                  return("");
+      case ERROR_DELLAST:      return("Last line deleted");
+      case ERROR_NOROOM:       return("No room in buffer");
+      case ERROR_NEWFILE:      return("Creating new file");
+      case ERROR_LINESTR:      return("Input lines truncated");
+      case ERROR_TOPFILE:      return("Top of file");
+      case ERROR_ENDFILE:      return("End of file");
+      case ERROR_TOOLONG:      return("Line too long");
+      case ERROR_UNKNOWN:      return("Unknown command");
+      case ERROR_BRACKET:      return("Unmatched ();");
+      case ERROR_ABANDON:      return("Commands abandoned");
+      case ERROR_SYNTAX:       return("Syntax error");
+      case ERROR_BADFILE:      return("Unable to open file");
+      case ERROR_NUMBER:       return("Number expected");
+      case ERROR_NOTSET:       return("No block marked");
+      case ERROR_INVALID:      return("Cursor inside block");
+      case ERROR_BLKERR:       return("Block incorrectly specified");
+      case ERROR_NOTFOUND:     return("Search failed");
+      case ERROR_TABSEXPANDED: return("Tabs in input file expanded");
+      case ERROR_NO_REXX:      return("Rexx not available");
+      case ERROR_NO_MEMORY:    return("Out of memory for operation");
+      case ERROR_STRING:       return(status_msg+1);
+   }
+   return("Unknown internal error");
+}
+@
+
+
+1.5
+log
+@Moved fatal() to ed4.c
+@
+text
+@d24 1
+d276 1
+@
+
+
+1.4
+log
+@Eliminate annoying warning message from compiler
+@
+text
+@d23 1
+a277 14
+}
+
+/***
+*
+* Fatal error - give message and stop
+*
+**/
+void fatal(s)
+char *s;
+{
+   if (console_stream != NULL)
+      VDU_CLEAR();
+   PutStr(s);
+   tidyup(RETURN_FAIL);
+@
+
+
+1.3
+log
+@Release 2.0 version
+@
+text
+@d46 1
+a46 1
+   dest   = ((char *)source) + n;
+@
+
+
+1.2
+log
+@new version from John
+@
+text
+@a228 5
+   if (Input() != sysin)        /* check not reading file               */
+   {
+      Close(Input());
+      SelectInput(sysin);
+   }
+@
+
+
+1.1
+log
+@*** empty log message ***
+@
+text
+@d22 1
+d42 2
+a43 2
+   char *source;
+   char *dest;
+d45 3
+a47 3
+   source = line_lastword;
+   dest   = source+n;
+   while(source >= (char *)p)
+d49 6
+a54 1
+   if (line_last >= p)  /* must update this ptr        */
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d4 4
+a7 4
+/* | .	| || the authors:			      BBS: (919) 481-6436    */
+/* | o	| ||   John Toebes     John Mainwaring	  Jim Cooper		     */
+/* |  . |//    Bruce Drake     Gordon Keener	  Dave Baker		     */
+/* ======      Doug Walker						     */
+d10 2
+a11 2
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+d14 10
+a23 9
+/*-----------------------------------------------------------------------*/
+/* Command: Ed3.c							 */
+/* Author:  John A. Toebes, VIII					 */
+/* Change History:							 */
+/*  Date    Person	  Action					 */
+/* -------  ------------- -----------------				 */
+/* 23NOV89  John Toebes   Initial Creation				 */
+/* Notes:								 */
+/*-----------------------------------------------------------------------*/
+d27 3
+a29 3
+/*									*/
+/* Screen editor support routines					*/
+/*									*/
+d98 1
+a98 1
+   phys_x = x;		phys_y = y;
+d164 1
+a164 1
+   /* Return character if one waiting	*/
+d167 2
+a168 2
+   /* Display message line	*/
+   if (msg_text != 0) display_msg();
+d170 1
+a170 1
+   /* Display complete. Wait for character	*/
+d173 1
+a173 1
+   if (msg_text != 0)
+d176 1
+a176 1
+      msg_text = 0;
+d193 1
+a193 1
+   /* If the line does not need to be displayed, skip it		*/
+d200 1
+a200 1
+   line_mods[i] = 0;			/* mark as displayed now	*/
+d209 1
+a209 1
+      phys_x = l;			/* cursor at end of line now	*/
+d222 1
+a222 1
+   msg_text = n;
+d228 1
+a228 1
+   cmdptr = 1;			/* reset extended command pointer	*/
+d239 4
+a242 1
+   char *msg;
+d244 8
+a251 1
+   switch(msg_text)
+d253 21
+a273 20
+
+      case ERROR_DELLAST:      msg = "Last line deleted";            break;
+      case ERROR_NOROOM:       msg = "No room in buffer";            break;
+      case ERROR_NEWFILE:      msg = "Creating new file";            break;
+      case ERROR_LINESTR:      msg = "Input lines truncated";        break;
+      case ERROR_TOPFILE:      msg = "Top of file";                  break;
+      case ERROR_ENDFILE:      msg = "End of file";                  break;
+      case ERROR_TOOLONG:      msg = "Line too long";                break;
+      case ERROR_UNKNOWN:      msg = "Unknown command";              break;
+      case ERROR_BRACKET:      msg = "Unmatched ();";                break;
+      case ERROR_ABANDON:      msg = "Commands abandoned";           break;
+      case ERROR_SYNTAX:       msg = "Syntax error";                 break;
+      case ERROR_BADFILE:      msg = "Unable to open file";          break;
+      case ERROR_NUMBER:       msg = "Number expected";              break;
+      case ERROR_NOTSET:       msg = "No block marked";              break;
+      case ERROR_INVALID:      msg = "Cursor inside block";          break;
+      case ERROR_BLKERR:       msg = "Block incorrectly specified";  break;
+      case ERROR_NOTFOUND:     msg = "Search failed";                break;
+      case ERROR_TABSEXPANDED: msg = "Tabs in input file expanded";  break;
+      default:		       msg = "Error";                        break;
+d275 1
+a275 4
+
+   VDU_HIGHLIGHTON();
+   vdu_writes(0, line_max+1, msg);
+   VDU_HIGHLIGHTOFF();
+d286 2
+a287 1
+   VDU_CLEAR();
+@

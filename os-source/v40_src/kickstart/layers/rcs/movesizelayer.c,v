@@ -1,0 +1,660 @@
+head     38.6;
+branch   ;
+access   ;
+symbols  V40_1:38.6 V39_62:38.6 V39_61:38.6 V39_60:38.5 V39_58:38.5 V39_56:38.5 V39_55:38.4 V39_54:38.4 V39_53:38.4 V39_52:38.4 V39_51:38.4 V39_50:38.4 V39_49:38.4 V39_48:38.4 V39_46:38.4 V39_45:38.4 V39_44:38.4 V39_42:38.4 V39_41:38.4 V39_40:38.4 V39_39:38.4 V39_38:38.4 V39_37:38.4 V39_36:38.4 V39_35:38.4 V39_34:38.4 V39_33:38.4 V39_32:38.3 V39_30:38.3 V39_28:38.3 V39_27:38.3 V39_26:38.3 V39_25:38.3 V39_24:38.3 V39_23:38.2 V39_22:38.2 V39_21:38.2 V39_20:38.2 V39_18:38.2 V39_16:38.2 V39_15:38.2 V39_14:38.2 V39_12:38.2 V39_10:38.2 V38_7:38.2 V38_6:38.2 First_Native_Build:38.2;
+locks    ; strict;
+comment  @ * @;
+
+
+38.6
+date     92.07.01.19.47.20;  author mks;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.04.14.16.39.21;  author mks;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.11.20.13.10.52;  author mks;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.11.08.13.21.45;  author mks;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.08.02.10.21.34;  author mks;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.07.25.09.55.55;  author bart;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+38.6
+log
+@autodoc spelling error fix
+@
+text
+@
+/******************************************************************************
+*
+*	$Id: movesizelayer.c,v 38.5 92/04/14 16:39:21 mks Exp Locker: mks $
+*
+******************************************************************************/
+
+#define	NEWCLIPRECTS_1_1
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <exec/lists.h>
+#include <exec/ports.h>
+#include <graphics/gfx.h>
+#include <graphics/clip.h>
+#include <graphics/rastport.h>
+#include <graphics/layers.h>
+
+#include "macros.h"
+
+#include "layersbase.h"
+
+void swizzlelayer(struct Layer *tl)
+{
+	struct Layer *l = tl->back;
+	struct ClipRect *t;
+
+	/* first swap front/back pointers */
+	if (tl->LayerInfo->top_layer == tl)	tl->LayerInfo->top_layer = l;
+	else		tl->front->back = l;
+	if (l->back)	l->back->front = tl;
+	tl->back = l->back;
+	l->front = tl->front;
+	tl->front = l;
+	l->back = tl;
+
+	/* now swap cliprect pointers */
+	t = tl->ClipRect;
+	tl->ClipRect = l->ClipRect;
+	l->ClipRect = t;
+
+	/* must fix lobs of all back layers */
+	{
+		struct Layer *p;
+		for ( p=tl; p ; p = p->back)
+		{
+			for ( t = p->ClipRect; t ; t = t->Next)
+				if (t->lobs == l)	t->lobs = tl;
+				else if (t->lobs == tl)	t->lobs = l;
+		}
+	}
+
+	/* swap bounds */
+	{
+		struct Rectangle t;
+		t = l->bounds;
+		l->bounds = tl->bounds;
+		tl->bounds = t;
+	}
+
+	/* swap width and height */
+	{
+		USHORT t;
+		t = l->Width;
+		l->Width = tl->Width;
+		tl->Width = t;
+		t = l->Height;
+		l->Height = tl->Height;
+		tl->Height = t;
+	}
+
+	/* do not touch Lock stuff, roms are using it too */
+
+	/* merge damagelists together */
+	OrRegionRegion(tl->DamageList,l->DamageList);
+	l->Flags |= tl->Flags & (LAYERREFRESH|LAYERIREFRESH|LAYERIREFRESH2);
+}
+
+/****** layers.library/MoveSizeLayer ***************************************
+*
+*    NAME                                                              (V36)
+*	MoveSizeLayer -- Position/Size layer
+*
+*    SYNOPSIS
+*	result = MoveSizeLayer( layer, dx, dy, dw, dh )
+*	d0                      a0     d0  d1  d2  d3
+*
+*	LONG MoveSizeLayer( struct Layer *, LONG, LONG, LONG, LONG);
+*
+*    FUNCTION
+*	Change upperleft and lower right position of Layer.
+*
+*    INPUTS
+*	dummy - unused
+*	l - pointer to a nonbackdrop layer
+*	dx,dy - change upper left corner by (dx,dy)
+*	dw,dy - change size by (dw,dh)
+*
+*    RETURNS
+*	result - TRUE if operation successful
+*	         FALSE if failed (due to out of memory)
+*	         FALSE if failed (due to illegal layer->bounds)
+*
+*    BUGS
+*
+*    SEE ALSO
+*	graphics/layers.h, graphics/clip.h
+*
+*******************************************************************************/
+
+long __stdargs __asm movesizelayer(register __a0 struct Layer *l,register __a1 struct Rectangle *r)
+{
+struct Layer_Info *wi=l->LayerInfo;
+struct Layer *tmplayer;
+ULONG flags;
+long status = FALSE;
+short move_change;
+short size_change;
+short dx;
+short dy;
+
+	dx = r->MaxX;
+	dy = r->MaxY;
+
+	move_change = r->MinX || r->MinY;
+	size_change = dx || dy;
+
+	if ( (move_change | size_change) == 0)	return TRUE;
+
+	/* convert delta to absolute */
+	r->MaxX += l->bounds.MaxX + r->MinX;
+	r->MaxY += l->bounds.MaxY + r->MinY;
+
+	r->MinX += l->bounds.MinX;
+	r->MinY += l->bounds.MinY;
+
+	/* dont turn inside out */
+	if(( r->MaxX < r->MinX ) || ( r->MaxY < r->MinY )) return(FALSE);
+
+	if (!fatten_lock(wi))	return(FALSE);
+	flags = LAYERBACKDROP | (l->Flags&(LAYERSMART|LAYERSIMPLE));
+
+	if (tmplayer = (struct Layer *)createbehindlayer(wi,l->rp->BitMap,*r,flags,NULL,(struct Hook *)1))
+	{
+	    if (!(l->Flags & LAYERBACKDROP)) tmplayer->Flags &= ~LAYERBACKDROP;
+
+	    /* put new layer infront of old layer */
+		if (movelayerinfrontof(tmplayer,l,TRUE))
+		{
+			regen_display(wi);
+
+			tmplayer->BackFill = l->BackFill;
+
+			/* bart's optimisations for the most common case */
+
+			if(l->Flags & LAYERSIMPLE)
+			{
+			    /* start damage with a clean slate */
+			    ClearRegion(tmplayer->DamageList);
+
+			    /* preserve as many bits as possible */
+			    if ((move_change) && (rectXrect(&(l->bounds),&(tmplayer->bounds))))
+			    {
+				WORD sx = l->bounds.MinX-l->Scroll_X-tmplayer->bounds.MinX;
+			        WORD sy = l->bounds.MinY-l->Scroll_Y-tmplayer->bounds.MinY;
+
+				WORD xmax =
+				 SHORTMIN(((sx > 0) ? sx : 0)+l->bounds.MaxX-l->bounds.MinX,
+				 		tmplayer->bounds.MaxX-tmplayer->bounds.MinX);
+
+				WORD ymax =
+				 SHORTMIN(((sy > 0) ? sy : 0)+l->bounds.MaxY-l->bounds.MinY,
+				 		tmplayer->bounds.MaxY-tmplayer->bounds.MinY);
+
+				struct Region *damage = tmplayer->DamageList;
+
+				tmplayer->DamageList = NULL;
+				ScrollRaster(tmplayer->rp,sx,sy,0,0,xmax,ymax);
+				tmplayer->DamageList = damage;
+			   }
+		        }
+
+			if (l->Flags & LAYERSUPER)
+			{
+				if (size_change)	SyncSBitMap(l);
+				else	copylayer(l,tmplayer);
+			}
+			else
+			{
+				tmplayer->Flags &= ~(LAYERREFRESH|LAYERIREFRESH|LAYERIREFRESH2);
+				copylayer(l,tmplayer);
+			}
+
+
+			/* make certain that newly revealed bits */
+			/* are filled with correct backfill pattern */
+
+			if( l->Flags & (LAYERSIMPLE|LAYERSMART) )
+				{
+				if (size_change)
+					{
+					struct Rectangle damage;
+
+					damage.MaxX = tmplayer->Width - 1;
+					damage.MaxY = tmplayer->Height - 1;
+
+					if (dx > 0)
+						{
+						damage.MinY = 0;
+						damage.MinX = damage.MaxX - dx + 1;
+						OrRectRegion(tmplayer->DamageList,&damage);
+						tmplayer->Flags |= (LAYERREFRESH|LAYERIREFRESH|LAYERIREFRESH2);
+						}
+
+					if (dy > 0)
+						{
+						damage.MinX = 0;
+						damage.MinY = damage.MaxY - dy + 1;
+						OrRectRegion(tmplayer->DamageList,&damage);
+						tmplayer->Flags |= (LAYERREFRESH|LAYERIREFRESH|LAYERIREFRESH2);
+						}
+
+					if ( (dx < 0) || (dy < 0) )
+						{
+						/* undo any damage that may go away now */
+						damage.MinX = 0;
+						damage.MinY = 0;
+						/* at most the damage should be */
+						/* constrained to the actual layer size */
+						AndRectRegion(tmplayer->DamageList,&damage);
+						}
+					}
+				}
+
+
+			/* backfill damage from scroll, size, and copy  */
+
+			tmplayer->Flags |= LAYERUPDATING;
+			if(internal_beginupdate(tmplayer))
+			{
+			    FullBackFill(tmplayer);
+			}
+			internal_endupdate(tmplayer);
+			tmplayer->Flags &= ~LAYERUPDATING;
+
+			swizzlelayer(tmplayer);
+			deletelayer2(tmplayer, 0);
+			if (l->Flags & LAYERSUPER)
+			{
+				if (size_change)
+				{
+					CopySBitMap(l);
+					gen_sbitmap_cr(l);
+				}
+			}
+			/* we want to be able to delete tmplayer */
+			status = TRUE;
+		}
+		else	deletelayer2(tmplayer, 0);
+	}
+    unlock_thin(wi);
+	return (status);
+}
+
+/****** layers.library/SizeLayer ***********************************************
+*
+*    NAME
+*	SizeLayer -- Change the size of this nonbackdrop layer.
+*
+*    SYNOPSIS
+*	result = SizeLayer( dummy, l, dx, dy )
+*	d0                  a0     a1 d0  d1
+*
+*	LONG SizeLayer( LONG, struct Layer *, LONG, LONG);
+*
+*    FUNCTION
+*	Change the size of this layer by (dx,dy). The lower right hand
+*	corner is extended to make room for the larger layer.
+*	If there is SuperBitMap for this layer then copy pixels into
+*	or out of the layer depending on whether the layer increases or
+*	decreases in size.  Collect damage list for those layers that may
+*	need to be refreshed if damage occurred.
+*
+*    INPUTS
+*	dummy - unused
+*	l - pointer to a nonbackdrop layer
+*	dx - delta to add to current x size
+*	dy - delta to add to current y size
+*
+*    RESULTS
+*	result - TRUE if operation successful
+*	         FALSE if failed (out of memory)
+*
+*    BUGS
+*
+*    SEE ALSO
+*	graphics/layers.h, graphics/clip.h
+*
+*******************************************************************************/
+
+/****** layers.library/MoveLayer ***********************************************
+*
+*    NAME
+*	MoveLayer -- Move layer to new position in BitMap.
+*
+*    SYNOPSIS
+*	result = MoveLayer( dummy, l, dx, dy )
+*	d0                  a0     a1 d0  d1
+*
+*	LONG MoveLayer( LONG, struct Layer *, LONG, LONG);
+*
+*    FUNCTION
+*	Move this layer to new position in shared BitMap.
+*	If any refresh layers become revealed, collect damage and
+*	set REFRESH bit in layer Flags.
+*
+*    INPUTS
+*	dummy - unused
+*	l - pointer to a nonbackdrop layer
+*	dx - delta to add to current x position
+*	dy - delta to add to current y position
+*
+*    RETURNS
+*	result - TRUE if operation successful
+*	         FALSE if failed (out of memory)
+*
+*    BUGS
+*	May not handle (dx,dy) which attempts to move the layer outside the
+*	layer's RastPort->BitMap bounds .
+*
+*    SEE ALSO
+*	graphics/layers.h, graphics/clip.h
+*
+*******************************************************************************/
+@
+
+
+38.5
+log
+@Added the setting of two more bits for damage work
+@
+text
+@d4 1
+a4 1
+*	$Id: movesizelayer.c,v 38.4 91/11/20 13:10:52 mks Exp Locker: mks $
+d328 1
+a328 1
+*	May not handle (dx,dy) which attempts to move the layer ouside the
+@
+
+
+38.4
+log
+@Fixed bug in scrolled layers.  (Used in SuperBitMap layers)
+@
+text
+@d4 1
+a4 1
+*	$Id: movesizelayer.c,v 38.3 91/11/08 13:21:45 mks Exp Locker: mks $
+d76 1
+a76 1
+	l->Flags |= tl->Flags & LAYERREFRESH;
+d190 1
+a190 1
+				tmplayer->Flags &= ~LAYERREFRESH;
+d212 1
+a212 1
+						tmplayer->Flags |= LAYERREFRESH;
+d220 1
+a220 1
+						tmplayer->Flags |= LAYERREFRESH;
+@
+
+
+38.3
+log
+@Removed unneeded blits into the tmplayer
+@
+text
+@d4 1
+a4 1
+*	$Id: movesizelayer.c,v 38.2 91/08/02 10:21:34 mks Exp Locker: mks $
+a145 2
+	    tmplayer->Scroll_X=l->Scroll_X;
+	    tmplayer->Scroll_Y=l->Scroll_Y;
+d164 2
+a165 2
+				WORD sx = (l->bounds.MinX-tmplayer->bounds.MinX);
+			        WORD sy = (l->bounds.MinY-tmplayer->bounds.MinY);
+@
+
+
+38.2
+log
+@Native build version checkin...
+@
+text
+@d4 1
+a4 1
+*	$Id: movesizelayer.c,v 38.1 91/07/25 09:55:55 bart Exp $
+d143 1
+a143 1
+	if (tmplayer = (struct Layer *)createbehindlayer(wi,l->rp->BitMap,*r,flags,NULL,(void *)(l->BackFill)))
+d146 2
+d160 3
+d164 1
+a164 2
+
+			    if(move_change)
+d166 2
+a167 5
+				WORD sx = ((l->bounds.MinX-l->Scroll_X)-
+				    (tmplayer->bounds.MinX-tmplayer->Scroll_X));
+
+			        WORD sy = ((l->bounds.MinY-l->Scroll_Y)-
+				    (tmplayer->bounds.MinY-tmplayer->Scroll_Y));
+d170 2
+a171 3
+				 SHORTMIN(((sx > 0) ? sx : 0)
+				 +l->bounds.MaxX-l->bounds.MinX,
+				 tmplayer->bounds.MaxX-tmplayer->bounds.MinX);
+d174 2
+a175 3
+				 SHORTMIN(((sy > 0) ? sy : 0)
+				 +l->bounds.MaxY-l->bounds.MinY,
+				 tmplayer->bounds.MaxY-tmplayer->bounds.MinY);
+a179 1
+
+a180 1
+
+a182 5
+
+			   /* start damage with a clean slate */
+
+			   ClearRegion(tmplayer->DamageList);
+
+a246 1
+
+@
+
+
+38.1
+log
+@begin_v38_development
+@
+text
+@d1 1
+d4 1
+a4 1
+*	$Id: movesizelayer.c,v 1.36 91/02/22 14:59:51 mks Exp $
+d8 2
+d18 1
+d21 52
+a72 5
+/*#define DEBUG*/
+/*
+#define DEBUGDEBUG1
+#define DEBUGDEBUG
+#define DEBUGMOVE*/
+d74 4
+a77 1
+#define TIMESTAMP(x)	/*if (*(short *)x);*/
+d111 1
+a111 4
+
+movesizelayer(l,r)
+struct Layer *l;
+struct Rectangle *r;	/* all deltas */
+d113 8
+a120 15
+	struct Layer_Info *wi=l->LayerInfo;
+	struct Layer *tmplayer;
+	ULONG	flags;
+	int status = FALSE;
+	short move_change;
+	short size_change;
+	short dx;
+	short dy;
+
+#ifdef DEBUG
+    printf("warp_layer(%lx,%lx,%ld,%ld,%ld,%ld)\n",wi,l,r->MinX,r->MinY,r->MaxX,r->MaxY);
+#ifdef DEBUGDEBUG1
+	Debug();
+#endif
+#endif
+a129 5
+#ifdef DEBUG
+	printf(" Width=%ld Height=%ld\n",
+		l->Width,l->Height);
+#endif
+
+a140 4
+#ifdef DEBUG
+	if ( (r->MinX < 0) || (r->MinY < 0) )
+		Debug();
+#endif
+d143 1
+a143 2
+	TIMESTAMP(0x666604);
+	if (tmplayer = (struct Layer *)createbehindlayer(wi,l->rp->BitMap,*r,flags,NULL,l->BackFill))
+a144 2
+	    TIMESTAMP(0x666614);
+
+a147 6
+#ifdef DEBUG
+		printf("movelayer:tomiddle\n");
+#ifdef DEBUGDEBUG
+		Debug();
+#endif
+#endif
+a149 2
+			TIMESTAMP(0x666624);
+
+a157 3
+			    struct ClipRect *cr;
+			    int i;
+
+a192 8
+#ifdef DEBUG
+			printf("movelayer:copylayer to %lx\n",tmplayer);
+#ifdef DEBUGDEBUG
+			Debug();
+#endif
+#endif
+
+			TIMESTAMP(0x666634);
+a201 4
+#ifdef DEBUG
+			printf("movelayer:damage stuff\n");
+#endif
+
+a256 1
+			TIMESTAMP(0x666644);
+a257 1
+			TIMESTAMP(0x666654);
+a258 1
+			TIMESTAMP(0x666664);
+a266 1
+			TIMESTAMP(0x666674);
+a272 4
+#ifdef DEBUGMOVE
+	printf("movelayerreturn=%lx\n",status);
+	Debug();
+#endif
+d276 35
+a310 6
+emovesizelayer(l,r)
+struct Layer *l;
+struct Rectangle r;
+{
+	return (movesizelayer(l,&r));
+}
+d312 34
+a345 57
+
+swizzlelayer(tl)
+struct Layer *tl;
+{
+	struct Layer *l = tl->back;
+	struct ClipRect *t;
+
+	/* first swap front/back pointers */
+	if (tl->LayerInfo->top_layer == tl)	tl->LayerInfo->top_layer = l;
+	else		tl->front->back = l;
+	if (l->back)	l->back->front = tl;
+	tl->back = l->back;
+	l->front = tl->front;
+	tl->front = l;
+	l->back = tl;
+
+	/* now swap cliprect pointers */
+	t = tl->ClipRect;
+	tl->ClipRect = l->ClipRect;
+	l->ClipRect = t;
+
+	/* must fix lobs of all back layers */
+	{
+		struct Layer *p;
+		for ( p=tl; p ; p = p->back)
+		{
+			for ( t = p->ClipRect; t ; t = t->Next)
+				if (t->lobs == l)	t->lobs = tl;
+				else if (t->lobs == tl)	t->lobs = l;
+		}
+	}
+
+	/* swap bounds */
+	{
+		struct Rectangle t;
+		t = l->bounds;
+		l->bounds = tl->bounds;
+		tl->bounds = t;
+	}
+
+	/* swap width and height */
+	{
+		USHORT t;
+		t = l->Width;
+		l->Width = tl->Width;
+		tl->Width = t;
+		t = l->Height;
+		l->Height = tl->Height;
+		tl->Height = t;
+	}
+
+	/* do not touch Lock stuff, roms are using it too */
+
+	/* merge damagelists together */
+	OrRegionRegion(tl->DamageList,l->DamageList);
+	l->Flags |= tl->Flags & LAYERREFRESH;
+}
+@

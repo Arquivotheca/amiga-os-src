@@ -1,0 +1,548 @@
+; :ts=8 
+*
+*       viewmgr.a - ViewManagere
+*
+*       William A. Ware                 B119
+*
+*************************************************************************
+*   This information is CONFIDENTIAL and PROPRIETARY                    *
+*   Copyright (C) 1990, Silent Software Incorporated.                   *
+*   All Rights Reserved.                                                *
+*************************************************************************
+
+                
+                include "exec/types.i"
+                include "exec/memory.i" 
+                include "exec/io.i"
+                include "exec/nodes.i"
+                include "exec/ports.i"
+                include "exec/ables.i"
+                include "exec/semaphores.i"
+
+                include "hardware/custom.i"
+                include "hardware/dmabits.i"
+                
+                include "graphics/view.i"
+;               include "V37:include/graphics/gfxbase.i"
+                include "graphics/gfxbase.i"
+                
+                include "cdtv/debox.i"
+                include "internal/deboxfunc.i"
+                
+                include "viewmgr.i"
+                include "/playerprefs_func.i"
+                
+
+exec            macro   function
+                move.l  a6,-(sp)
+                move.l  4,a6
+                jsr     LVO.\1(A6)
+                move.l  (sp)+,a6
+                endm
+
+
+                SECTION "viewmgr",code
+
+                INT_ABLES
+
+
+LSYSBASE        MACRO
+                        movea.l (4).w,a6
+                ENDM
+
+
+******* playerprefs.library/FindViewRGB ************************************
+*
+*   NAME
+*       FindViewRGB -- Find color values in hardware copper list.
+*
+*   SYNOPSIS
+*       FindViewRGB (view, clist, ncolors);
+*                     A0    A1      D0
+*
+*       struct View     *view;
+*       UWORD           **clist;
+*       WORD            ncolors;
+*
+*   FUNCTION
+*       This routine scans the hardware copper list attached to the View
+*       pointed to by 'view,' looking for the instructions that load the
+*       color registers.  The addresses of the arguments to these
+*       instructions (which are the color values themselves) are recorded in
+*       the array pointed to by 'clist.'  The maximum number of colors
+*       recorded is specified by 'ncolors.'
+*
+*       'clist' will be filled with pointers to the color value arguments in
+*       ascending order from zero to 'ncolors.'  The specified View should
+*       have only one ViewPort attached.
+*
+*       This routine should be used before calling LoadFoundRGB().
+*
+*   INPUTS
+*       view    - pointer to View
+*       clist   - pointer to array of UWORD pointers
+*       ncolors - number of entries in clist
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*       It is recommended that you use this routine only on Views you own
+*       and know all about.
+*
+*   BUGS
+*       This routine doesn't work on interlaced Views; only the v_LOFCprList
+*       is scanned.
+
+*       This routine was not checking for the end of the copperlist.  
+*       Instead it was looking through the entire allocated area for the
+*       copper list.  This could cause certain colors to not be loaded when
+*       calling LoadFoundRGB().
+*
+*
+*   SEE ALSO
+*       LoadFoundRGB()
+*
+*****************************************************************************
+*
+;-------------------------------------------------------------------
+; FindViewRGB( struct View *v, UWORD *ulist, int length )
+;               A0              A1              d0
+;
+; ulist - a pointer to an array of 'length' long words 
+;-------------------------------------------------------------------
+
+COLOR_0         equ     $180
+COLOR_31        equ     $1BE
+
+                xdef    _LIBFindViewRGB
+
+_LIBFindViewRGB:
+                ; a0 - v
+                ; a1 - ulist
+                ; d2 - COLOR_0
+                ; d3 - 32
+                movem.l d2-d4,-(sp)     ; WW - changed to fix End of CopList.
+                moveq   #-1,d4  ; $ffff   WW - added to fix End of CopList.
+                
+                moveq   #0,d3
+                move.w  d0,d3
+                add.w   d3,d3   ; word length
+        ; blank ulist 
+                move.w  d0,d2   ; number of works in list
+                moveq   #0,d0
+                move.l  a1,d1
+                bra.s   5$
+3$              move.l  d0,(a1)+
+5$              dbra    d2,3$
+                movea.l d1,a1
+                
+                movea.l v_LOFCprList(a0),a0
+                move.w  crl_MaxCount(a0),d1     ; Max # of instructions
+                movea.l crl_start(a0),a0        ; Hardware copper list
+
+        ; - Find all color moves 
+        ;       Setups
+                move.w  #COLOR_0,d2
+                bra.s   4$
+
+0$              move.w  (a0)+,d0
+
+        ; WW - Added to fix End of CopList.
+                ; check for end of copper
+                cmp.w   d4,d0
+                bne.s   6$              ; x = 127,y=255 wait. end of copper.
+                btst.b  #7,(a0)
+                bne.s   7$              ; blitter bit is 1.
+        ; WW - end of additions
+
+6$              sub.w   d2,d0
+                bmi.s   1$
+                cmp.w   d3,d0
+                bmi.s   2$              ; in range 
+1$              addq.w  #2,a0           ; move over op.
+4$              dbra    d1,0$
+                
+7$              movem.l (sp)+,d2-d4     ; WW - changed to fix End of CopList.
+                rts
+
+        ; found a color - log it 
+2$              add.w   d0,d0           ; make a long word
+                move.l  a0,0(a1,d0.w)
+                bra.s   1$
+                
+
+******* playerprefs.library/LoadFoundRGB ***********************************
+*
+*   NAME
+*       LoadFoundRGB -- Blast new set of colors into hardware copper list.
+*
+*   SYNOPSIS
+*       LoadFoundRGB (clist, cmap, ncolors);
+*                       A0    A1     D0
+*
+*       UWORD   **clist;
+*       UWORD   *cmap;
+*       WORD    ncolors;
+*
+*   FUNCTION
+*       YOU MUST CALL FindViewRGB() BEFORE CALLING THIS ROUTINE!
+*
+*       This routine takes the colors pointed to by 'cmap' and writes them
+*       to the addresses in the table pointed to by 'clist.'  'ncolors'
+*       is the number of entries in the color map.  If 'ncolors' is greater
+*       than 32, it will be truncated.
+*
+*       This is a very fast replacement for LoadRGB4(), with limitations.
+*       LoadRGB4() modifies and recalculates the intermediate and hardware
+*       copper lists, which can take a prohibitively long time to run.
+*       LoadFoundRGB() blasts the hardware copper list directly, which is
+*       much faster.  However, should the View ever be recalculated in any
+*       way (dragged, MakeScreen()ed, MrgCop()ed, LoadRGB4()ed, et al), you
+*       MUST call FindViewRGB() again before you can safely call this
+*       routine.
+*
+*       If you are creating your own View, and you know you won't be moving
+*       it, and you need fast color changes (such as color-cycling), then
+*       this routine is for you.
+*
+*       Note that if the View should ever be recalculated, the colors will
+*       be reset to what was last set with LoadRGB4().
+*
+*   INPUTS
+*       clist   - pointer to array of UWORD pointers
+*       cmap    - pointer to array of color values
+*       ncolors - number of colors in color map
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*       FindViewRGB()
+*
+*****************************************************************************
+*
+;------------------------------------------------------------------
+; LoadFoundRGB( UWORD *list, UWORD *colormap, int length )
+;                       a0      a1              d0
+
+        xdef    _LIBLoadFoundRGB
+
+_LIBLoadFoundRGB:
+                move.l  a2,-(sp)
+                cmpi.w  #32,d0                  ; Limit length to 32
+                bls.s   1$
+                moveq   #32,d0
+                bra.s   1$
+
+0$              move.l  (a0)+,d1
+                beq.s   3$                      ; NULL - skip
+                movea.l d1,a2
+                move.w  (a1)+,(a2)
+1$              dbra    d0,0$
+2$              movea.l (sp)+,a2
+                rts
+3$              addq.l  #2,a1
+                dbra    d0,0$
+                bra.s   2$
+
+******* playerprefs.library/LevelColor *************************************
+*
+*   NAME
+*       LevelColor -- Fast one-color fader.
+*
+*   SYNOPSIS
+*       newcolor = LevelColor (color, level);
+*          D0                   D0     D1
+*
+*       UWORD   newcolor;
+*       UWORD   color;
+*       UBYTE   level;
+*
+*   FUNCTION
+*       This routine computes an intermediate color value between black
+*       (0x000) and the color specified by 'color,' and returns the new
+*       color value.
+*
+*       If 'level' is 15, the resulting color is black (0x000).  If 'level'
+*       is zero, the resulting color is the original color.  Values of
+*       'level' outside this range are undefined and should not be used.
+*
+*   INPUTS
+*       color   - color value
+*       level   - fade level, range 0 - 15 (15 == black)
+*
+*   RESULT
+*       newcolor- faded color value
+*
+*   EXAMPLE
+*
+*   NOTES
+*       The fade algorithm is implemented as subtracting 'level' from each
+*       gun, clipping at 0.  Believe it or not, this looks quite good.
+*
+*   BUGS
+*
+*   SEE ALSO
+*       BetweenColor()
+*
+*****************************************************************************
+*
+;-----------------------------------------------------------------
+; Color Fade Routine 
+;       d0:16 - color
+;       d1:8 - lv1
+
+        xdef    _LIBLevelColor
+
+_LIBLevelColor: 
+                tst.b   d1
+                beq.s   3$              ; just return
+                movem.l d2-d4,-(sp)
+                ext.w   d1
+                move.w  d1,d2
+                asl.w   #4,d2
+                move.w  d2,d3
+                asl.w   #4,d3
+        ; if (lv3 < c)
+                moveq   #0,d4
+                cmp.w   d0,d3
+                bcc.s   0$
+                move.w  d0,d4
+                sub.w   d3,d4           ; ans = c-lv3
+                andi.w  #$0f00,d4       ; ans &= 0xf00
+        ; if (lv2 < c)
+0$              andi.w  #$00ff,d0
+                cmp.w   d0,d2
+                bcc.s   1$
+                add.w   d0,d4
+                sub.w   d2,d4           ; ans += c-lv2
+                andi.w  #$0ff0,d4       ; ans &= 0xff0
+        ; if (lv1 < c)
+1$              andi.w  #$000f,d0
+                cmp.w   d0,d1
+                bcc.s   2$
+                add.w   d0,d4
+                sub.w   d1,d4
+
+2$              moveq   #0,d0
+                move.w  d4,d0
+                movem.l (sp)+,d2-d4
+3$              rts
+
+
+
+******* playerprefs.library/BetweenColor ***********************************
+*
+*   NAME
+*       BetweenColor -- Calculate intermediate color value.
+*
+*   SYNOPSIS
+*       newcolor = BetweenColor (color0, color15, level);
+*
+*       UWORD   newcolor;
+*       UWORD   color0, color15;
+*       WORD    level;
+*
+*   FUNCTION
+*       Calculates an intermediate color value between the colors specified
+*       by 'color0' and 'color15,' and returns the new color value.
+*
+*       If 'level' is 0, the color returned is 'color0;' if 'level' is 15,
+*       the color returned is 'color15.'  Values of 'level' outside this
+*       range are clipped.
+*
+*   INPUTS
+*       color0  - color at fade level == 0
+*       color15 - color at fade level == 15
+*       level   - fade level, range 0 - 15
+*
+*   RESULT
+*       newcolor- intermediate color value
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*       LevelColor(), FadeCMap()
+*
+*****************************************************************************
+*
+;-----------------------------------------------------------------
+; _TraverseColor
+;
+; traversecolor is a slower more accurate fade routine. It is used 
+; to allow the color map to be changed from 1 palette to the other.
+;
+
+;       d0:16   color   x       (color at lv 0)
+;       d1:16   color2  y       (color at lv 15)
+;       d2      lv
+
+        xdef    _LIBBetweenColor
+
+
+_LIBBetweenColor:
+
+                tst.w   d2              ; use color x <= 0
+                ble.s   1$
+                cmp.w   #$f,d2          ; use color y >= 15
+                blt.s   2$
+                move.w  d1,d0
+1$              rts
+                
+2$              movem.l d1-d6,-(sp)
+                moveq   #$f,d3
+
+blue            move.w  d0,d4
+                and.w   d3,d4   ; Issolate both 
+                move.w  d1,d6   ; this time around y is reg d6
+                and.w   d3,d6
+                sub.w   d4,d6   ; y = y-x
+                mulu    d2,d6   ; y *= lv
+                asr.w   #4,d6   ; y >>= 4
+                add.w   d4,d6   ; y += x
+
+green           lsr.w   #4,d0
+                lsr.w   #4,d1
+                move.w  d0,d4
+                and.w   d3,d4
+                move.w  d1,d5   
+                and.w   d3,d5   ; y is now reg d5
+                sub.w   d4,d5   ; y = y-x
+                mulu    d2,d5   ; y *= lv
+                asr.w   #4,d5   ; y >>= 4
+                add.w   d4,d5   ; y += x
+                lsl.w   #4,d5   ; y << 4
+                or.w    d5,d6   ; newcolor |= y
+
+red             lsr.w   #4,d0
+                lsr.w   #4,d1
+                and.w   d3,d0   ; x is reg d0
+                and.w   d3,d1   ; y is reg d1
+                sub.w   d0,d1   ; y = y-x
+                mulu    d2,d1   ; y *= lv
+                asr.w   #4,d1   ; y >>= 4
+                add.w   d1,d0   ; x += y
+                lsl.w   #8,d0   ; x << 8
+                or.w    d6,d0   ; x |= newcolor
+                
+altfadeend      movem.l (sp)+,d1-d6
+                rts
+
+*****i* playerprefs.library/LoadFoundRGBFade *******************************
+*
+*   NAME
+*       LoadFoundRGBFade -- Weird color loader/fader.
+*
+*   SYNOPSIS
+*       LoadFoundRGBFade (clist, cmap, ncolors, level0, level1, mask);
+*                          A0     A1     D0       D1      D2     D3
+*
+*       UWORD   **clist;
+*       UWORD   *cmap;
+*       WORD    ncolors;
+*       WORD    level0, level1;
+*       ULONG   mask;
+*
+*   FUNCTION
+*       This is an unusual color loader/fader all-in-one routine.
+*
+*       'clist' points to an array of UWORD pointers as generated by
+*       FindViewRGB().  'cmap' points to a color table that has 'ncolors'
+*       entries.
+*
+*       Each color in the table is fetched, and has fading applied to it
+*       according to the rules in LevelColor().  The resulting color is then
+*       written to the hardware copper list similarly to LoadFoundRGB().
+*
+*       The bits in 'mask' determine which fade level is applied to a given
+*       color entry.  Bit 0 in 'mask' corresponds to color entry 0.  If a
+*       given bit in 'mask' is zero, the fading level 'level0' is applied
+*       to the corresponding color; if the bit is one, the fading level
+*       'level1' is applied.
+*
+*       If 'ncolors' is greater than 32, it is truncated.
+*
+*   INPUTS
+*       clist   - pointer to an array of UWORD pointers
+*       cmap    - pointer to color table to be loaded
+*       ncolors - number of color entries
+*       level0  - fading level applied if mask bit == 0
+*       level1  - fading level applied if mask bit == 1
+*       mask    - fading mask
+*
+*   RESULT
+*
+*   EXAMPLE
+*
+*   NOTES
+*
+*   BUGS
+*
+*   SEE ALSO
+*       LevelColor(), LoadFoundRGB()
+*
+*****************************************************************************
+*
+;------------------------------------------------------------------
+; LoadFoundRGBFade(list,cmap,length,level0,level1,altcmap,maskbyte)
+;                   a0   a1    d0     d1   d2       a2      d3
+
+
+        xdef    _LIBLoadFoundRGBFade
+
+_LIBLoadFoundRGBFade:
+                tst.w   d1
+                bne.s   nosimple
+                tst.w   d2
+                bne.s   nosimple
+                jmp     _LVOLoadFoundRGB(a6)    ; simple no fading
+
+nosimple        movem.l d2-d5/a2-a3,-(sp)
+
+                cmpi.w  #32,d0                  ; Limit length to 32
+                bls.s   2$
+                moveq   #32,d0
+2$              move.w  d0,d4           ; d4 = #color
+                move.w  d1,d5           ; d5 = level
+
+                bra.s   1$
+        
+        ;---------------------------------------------------------------
+                        ; loop
+0$              move.l  (a0)+,d1        ; list
+                beq.s   4$              ; skip if NULL
+                movea.l d1,a3
+                move.w  (a1)+,d0        ; color
+                lsr.l   #1,d3           ; get the bit for color
+                bcc.s   6$              ; just store if bit is 0
+
+                move.w  d2,d1           ; level1
+                jsr     _LVOLevelColor(a6)
+                move.w  d0,(a3)
+                dbra.w  d4,0$
+                bra.s   5$
+
+6$              move.w  d5,d1           ; reg level0 - bit is zero
+                jsr     _LVOLevelColor(a6)
+                move.w  d0,(a3)
+1$              dbra    d4,0$
+                        ; end loop
+5$              movem.l (sp)+,d2-d5/a2-a3
+                rts
+                        ; no color 
+4$              addq.l  #2,a1
+                dbra    d4,0$
+                bra.s   5$
+
+        END

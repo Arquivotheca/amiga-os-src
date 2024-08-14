@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	10
+DATE	MACRO
+		dc.b	'21.10.93'
+	ENDM
+VERS	MACRO
+		dc.b	'groupprefs 37.10'
+	ENDM
+VSTRING	MACRO
+		dc.b	'groupprefs 37.10 (21.10.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: groupprefs 37.10 (21.10.93)',0
+	ENDM

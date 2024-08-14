@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'18.9.92'
+	ENDM
+VERS	MACRO
+		dc.b	'hardware 39.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'hardware 39.1 (18.9.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: hardware 39.1 (18.9.92)',0
+	ENDM

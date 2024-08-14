@@ -1,0 +1,882 @@
+head     1.2;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+1.2
+date     94.01.24.12.00.17;  author darren;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     93.02.01.12.32.28;  author darren;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@New stuff for vectored fonts
+@
+
+
+1.2
+log
+@More documentation for this stuff - needs a book to cover it, but
+here is some stuff for the background information
+@
+text
+@**
+**      $Id: vectored.asm,v 1.1 93/02/01 12:32:28 darren Exp Locker: darren $
+**
+**      diskfont.library -- support code for vectored fonts
+**
+**      (C) Copyright 1992 Commodore-Amiga, Inc.
+**          All Rights Reserved
+**
+
+	SECTION	diskfont
+
+	INCLUDE	"exec/types.i"
+	INCLUDE	"exec/nodes.i"
+	INCLUDE	"exec/memory.i"
+	INCLUDE	"exec/macros.i"
+	INCLUDE	"exec/ables.i"
+	INCLUDE	"graphics/rastport.i"
+	INCLUDE	"graphics/scale.i"
+**	INCLUDE	"graphics/text.i"
+	INCLUDE "text.i"
+	INCLUDE	"graphics/view.i"
+
+	INCLUDE	"macros.i"
+	INCLUDE	"dfdata.i"
+	INCLUDE	"diskfont.i"
+	INCLUDE	"vecfont.i"
+	INCLUDE	"ddebug.i"
+
+	TASK_ABLES
+
+	IFND	TE0B_VECTORED
+		BITDEF	TE0,VECTORED,4	; vectored font
+	ENDC
+
+******* diskfont.library/V41 vectored fonts ***************************
+*
+* VECTORED FONTS (V41)
+*
+* As of the V41 release of diskfont.library, new functionality has been
+* added to support vectored fonts.  V41 is a special release originally
+* designed for use with Japanese, and other Asian fonts, however the
+* functionality is general enough that it will eventually be incorporated
+* into future versions of graphics.library
+*
+* Vectored fonts (not to be confused with outline fonts) are fonts which
+* render themselves.  To do this, a font provides redirection vectors
+* which replace some, or all of the default functions provided by
+* the graphics.library font subsystem.
+*
+* FONT FILES (V41)
+*
+* Vectored fonts have been implemented such that the existing font
+* definition files are unchanged.  A new file consisting of the font
+* name, and ".vec" extension in the font sub-directory provides the
+* additional information which identifies a vectored font, and a driver
+* (structured as an Exec library) which is required to use the vectored
+* font.  When present, and all information checks out, diskfont.library
+* opens the appropriate driver for a vectored font, and calls back the
+* driver to complete the installation of the font.
+*
+*
+* CODESET IDENTIFICATION (V41)
+*
+* There is now support for a new font tag which identifies a font's codeset.
+* This is just a re-use of an existing capability which allows a font to
+* identify its natural DPI in the font definition file.  A font can now
+* indicate either, or both in the font file(s).  This allows a font
+* requester to visually identify fonts intended for use with other languages.
+*
+* Note that font re-vectoring, and codeset identification are not
+* interdependent.  In other words, a font can be self-rendering,
+* or provide a unique codeset tag, or do both as required.  Some examples
+* would include:
+*
+*	o A Cyrillic font requires a codeset tag, but does not need to
+*	  be self rendering.
+*
+*	o An outline font can use the self-rendering mechanism, but
+*	  may not use the codeset tag (for an ECMA Latin1 codeset font).
+*
+*	o A Japanese font is self-rendering, and requires a codeset
+*	  tag to identify that the font is meant to be used with
+*	  a Japanese codeset like the Extended Unix Code (EUC).
+*
+*
+* IMPLEMENTATION ISSUES
+*
+* From the point of view of an application, a vectored font is
+* handled much like any other Amiga font.  It is opened with
+* OpenFont() or OpenDiskFont(), and closed with CloseFont().  You
+* continue to use SetFont(), and the various graphics.library
+* text rendering functions you use now to render the font.
+*
+* What has changed is that the font extension structure created
+* by ExtendFont() when a font is opened is now larger, and may
+* optionally contain a set of private vectors to functions which
+* know how to render the font.  There are two issues which the application
+* programmer needs to be aware of.
+*
+* 1.) The glyph data for a vectored font is not necessarily contained
+* within the TextFont structure itself, though at least one dummy
+* glyph must be present.
+*
+* struct TextFont {             
+*
+*----The following fields are unchanged for vectored fonts---
+*
+*     struct Message tf_Message;
+*     UWORD   tf_YSize;    
+*     UBYTE   tf_Style;    
+*     UBYTE   tf_Flags;    
+*     UWORD   tf_XSize;    
+*     UWORD   tf_Baseline; 
+*     UWORD   tf_BoldSmear;
+*     UWORD   tf_Accessors;
+*
+*---The following fields may no longer be entirely correct---
+*
+*     UBYTE   tf_LoChar;   
+*     UBYTE   tf_HiChar;   
+*     APTR    tf_CharData; 
+*
+*     UWORD   tf_Modulo;
+*     APTR    tf_CharLoc;
+*     APTR    tf_CharSpace;
+*     APTR    tf_CharKern;
+* };
+*
+* Many of the variables you might be using now such as tf_YSize are
+* still present, and useful.  Most applications do not look at
+* tf_LoChar and beyond, though some font accelerators, and of
+* course, font editors do.  Because languages like Japanese have
+* more characters than can be identified in the UBYTE size
+* tf_LoChar, and tf_HiChar variables, a vectored font is not required
+* to make its private glyph data public.
+*
+* 2.) The text subsystem has historically assumed that the glyph data
+* for a font resides entirely in RAM once opened.  Therefore it was
+* possible, and safe to call text rendering functions from an
+* Exec task.  Because that limitation is impractical for large glyph
+* sets (such as that required for Asian fonts), a vectored font driver
+* may optionally load glyph data from disk on the fly.  To do this,
+* the font driver must provide its own DOS processes, and disable
+* requesters for its disk process to avoid dead-locks with Intuition.
+* 
+* Another interesting side-effect of this is that a vectored font
+* may render more slowly than a standard Amiga font which has some
+* negative impact on multi-media software which have been able to
+* assume something about how long it takes to render a font.  This
+* issue will not be discussed in-depth here.
+*
+* The other interesting implication is that vectored fonts may
+* store glyph data in any convienent format, and apply caching
+* algorithms as appropriate for the font.  Infact this is desirable
+* for Asian fonts like Japanese which have subsets of glyphs which
+* are commonly used.
+*
+*
+* FONT MANAGEMENT & STORAGE
+*
+* For the sake of future growth, the responsibility for managing
+* lists of available fonts, and opening fonts remains in the domain
+* of diskfont.library and graphics.library.  This is important in
+* that allows for new font tags, and match criteria to be implemented.
+* For this reason, vectored fonts are added to the system using the same
+* disk based structures used now to install existing Amiga fonts.
+*
+* Vectored fonts are added to the system by installing them in the
+* FONTS: directory, and if necessary, using the FixFonts tool to
+* update the .font file when new sizes are added.  The actual font data
+* files must be present, though they may consist of little more than
+* a single dummy glyph, while the actual data for the font resides
+* elsewhere.  A convienent place to store private data is in the
+* font's sub-directory, or a sub-directory of that directory.  To
+* illustrate this, consider the directory structure for a Japanese
+* font --
+*
+* FONTS:
+*
+*	JIS_Gothic (dir)
+*		
+*		16			<- base font sizes
+*		24
+*
+*		JIS_Gothic.vec          <- .vec extension file
+*
+*		a1_JIS_Gothic (dir)	<- private data sub-directories
+*		.
+*		.
+*		.
+*		f4_JIS_Gothic (dir)
+*
+*	JIS_Gothic.font
+*
+*
+* In the above example the Japanese fonts use standard Amiga fonts
+* within the sub-directory of a standard Amiga font to store the
+* numerous glyphs required.  This is just one mechanism, though any
+* private mechanism is allowed.  The primary advantage of keeping
+* private data within a font's sub-directory is that it is then
+* possible to copy all files required for that font easily.
+*
+* When this font is opened by diskfont.library, a path to the
+* .vec file is created, and passed on to the font driver.  This
+* allows the font driver to find its private data using that same
+* file path.
+*
+* Note that diskfont.library will implicitly search for fonts in FONTS:,
+* but can also accept an explicit path when OpenDiskFont() is called.
+* Both mechanisms work with vectored fonts.
+*
+*
+* FUTURE ISSUES
+*
+* The addition of self-rendering fonts creates a few problems which
+* are being considered for the future.
+*
+* The first of these is that font drivers cannot inherit new styles.  In the
+* future this will most likely be solved by breaking the Text() function
+* up into its primitive components.  By doing this, font drivers can accept
+* the default style enhancements (e.g., underlining), or provide their
+* own methods for styles the driver understands.
+*
+* The second issue is related to new (future) graphics metric primitives.
+* Because a driver today cannot be aware of new functions in the future,
+* there is an implied understanding that drivers may need to be revised
+* in the future.  Currently there are no new primitives planned, but
+* the issue has been taken under consideration.
+*
+* In a proposed future RTG release of the Amiga OS, vectored fonts
+* allow a board to implement use of private, self-rendered fonts.  One
+* of the key problems with this is that historically an Amiga font can
+* be printed to any rastport, regardless of display mode.  This
+* implementation of vectored fonts solves that problem by allowing the
+* font to provide standard Amiga bitmap representations of an 8-bit
+* font, and call-back through the normal graphics.library text related
+* functions for rastports which the font driver cannot render in.
+*
+* This means that you can create vectored fonts which look, and behave
+* exactly like an existing Amiga bitmap font if the target rastport
+* is not one which the display driver can render in.  The bitmap font
+* data can even be bitmap scaled just as it is for a regular Amiga
+* font.  This is possible because diskfont.library knows how to create
+* a new TextFont structure, and call-back the driver to complete the
+* installation of a scaled vectored font.
+*
+*
+* THE FONT DRIVER (V41)
+*
+* A font driver is implemented as a standard Amiga shared library;
+* this allows for re-use of existing mechanisms of searching,
+* loading, and expunging of shared code.  As a shared library, a group
+* of fonts can share the same driver code.
+*
+* First, diskfont.library searches for a ".vec" file when opening
+* a disk font.
+*
+* Next, diskfont.library tries to LoadSeg() the ".vec" file.  The
+* vector extension file is a structure defined in vecfont.h.  It consists
+* of:
+*
+*  STRUCTURE	DiskFontVector,0
+*	UWORD	dfv_id
+*	APTR	dfv_backptr
+*	UWORD	dfv_sizeof
+*	APTR	dfv_fontname
+*	APTR	dfv_libname
+*	ULONG	dfv_libversion
+*	APTR	dfv_custom
+*	ULONG	dfv_codeset
+*	LABEL	DiskFontVector_SIZEOF
+*
+*
+* Diskfont.library makes some attempt to validate that the file it
+* LoadSeg()ed looks ok by checking dfv_id, dfv_backptr, and
+* dfv_sizeof.  In the future it may check dfv_fontname (this is not
+* currently implemented, but it is strongly suggested that the name
+* in the .vec file match the name of the font).
+*
+* Next diskfont.library tries to open the library indicated by
+* dfv_libname, and dfv_libversion.  If the driver library is opened
+* successfully, diskfont will call the library routine
+* InstallVectoredFont() documented below.  This is currently the only
+* function required for a font driver, though the driver must set aside
+* four (4) jump vectors for future use; these reserved functions must
+* return 0 in register D0.
+*
+*
+*   NAME
+*       InstallVectoredFont -- Install a vectored font
+*
+*   SYNOPSIS
+*       success=InstallVectoredFont( ttextattr, textfont, custom, vecpath )
+*       D0                           A0         A1        A2      A3
+*
+*       ULONG InstallVectoredFont(
+*				struct TTextAttr *, 
+*				struct TextFont *, 
+*				APTR custom,
+*				char *vecpath );
+*
+*   FUNCTION
+*       This is a standard function which must be provided by all
+*	vectored font libraries.  It is this function which is
+*	called by diskfont.library to actually install a vectored
+*	font.
+*
+*	
+*   INPUTS
+*       ttextattr - Pointer to a TTextAttr structure.  This is
+*	the same structure provided to diskfont library when
+*	OpenDiskFont() was called.
+*
+*	textfont - Pointer to the TextFont structure created
+*	by diskfont library (LoadSeg()ed from disk).  The
+*	TextFFont structure has already been extended.
+*
+*	custom - Pointer to a custom structure; contains any
+*	additional arguments required by this vectored font
+*	library.  This is actually a pointer to the custom data
+*	in the .vec file.  The driver must copy any fields it needs
+*	because the .vec file will be released when the driver
+*	returns from InstallVectoredFont().
+*
+*	vecpath - Pointer to the full path/file name used to
+*	LoadSeg() the .vec file for this font.  For bitmap scaled fonts,
+*	the path/font name will be the font used as the source data for
+*	this font. This is useful for loading disk data which is stored
+*	relative to the font .vec file.  The string pointed to by the
+*	function argument must be copied if required by the driver. Use
+*	dos.library/PathPart() to extract the path from the string if
+*	needed.
+*
+*   RESULTS
+*       success - Must be 1 indicating success, or 0 indicating
+*	failure.  In the future this function may return a pointer.
+*
+*
+*
+* It is this function which is called by diskfont.library when a vectored
+* font is opened.  The driver in turn completes the installation of
+* the font by calling back diskfont.library/SetFontVectors() to install
+* vectors for this font.  Once thats done, the font is considered
+* installed, and is available on the public font list.  See
+* SetFontVectors() for a complete description of this function.
+*
+* Now lets say that a driver has installed a vector for the Text()
+* function (something most vectored font drivers would do).  The driver
+* provided function is called with the same register arguments as
+* the graphics.library function (rastport pointer in A0, string pointer
+* in A1, and length in D0).
+*
+* The difference is that instead of passing graphics.library base in
+* register A6, a pointer to the drivers private data area is passed
+* in that register.  The driver may cache a pointer to graphics.library
+* in that private area along with any other information required to
+* render the glyph data.  The Text() vector must build a template,
+* and render it with BltTemplate() just like the real Text() function.
+* The driver function may also need to apply styles to the template.
+* Because of this, writing a font driver is not a trivial task.  The
+* writer should have a good understanding of how these functions
+* in graphics.library behave.
+*
+* There are times when a font driver may need to call back the
+* original function in graphics.library.  To make this possible,
+* all vectored functions are called back with a pointer to the
+* original text related function in register A5.  Also if a driver
+* does not provide a vector for a text related function, the original
+* text related function in graphics.library is called as it would be
+* for a standard Amiga bitmap font.
+* 
+* The ability to re-use components which already exist in graphics.library
+* can greatly simplify the task of writing a font driver for some kinds of
+* fonts.  A good example would be a set of ECMA Latin1 fonts which are
+* supported internally by a graphics board.  In this case it would make a
+* lot of sense to build a standard Amiga font for use by all other
+* rastports, and re-use the existing text metric functions.  About all
+* that is really needed is a Text() vector which knows how to render on
+* the board, or call back the original Text() function to render in other
+* rastports.
+*
+* On the other hand, something like the Japanese font driver must
+* provide vectors for virtually all text related functions because
+* single/double byte codes, and half/full width glyphs must be handled
+* differently from simpler 8-bit oriented codeset fonts.
+*
+*
+* OTHER DISKFONT CHANGES (V41)
+*
+* In addition to SetFontVectors(), there are some new features in
+* diskfont.library which are useful for font drivers.  The first
+* of these is ExpungeDiskFont() which is used to expunge a font opened
+* by diskfont.library.  This feature is particularly useful for a
+* font like the Japanese font driver which opens other Amiga fonts.
+* In particular, it allows the Japanese font driver to expunge sub-fonts
+* during low-memory conditions.
+*
+* There is now NewOpenDiskFont() which is similar to OpenDiskFont()
+* with an optional tag list.  Currently there is only one tag defined
+* which lets you open fonts as private.  A private font is opened
+* just like any other font, however it is marked as private and its
+* name does not appear in a list created by AvailFonts().  Once again
+* this is used by the Japanese font driver to open sub-fonts.  This
+* feature would also be useful for applications which need to open
+* private fonts relative to some path other than FONTS:.  Fonts opened
+* in this way can still be used by Intuition which requires applications
+* use TextAttr structures to specify fonts.
+*
+* Prior to V41, diskfont.library would expunge all un-opened fonts
+* in a low memory condition.  Now it tries to expunge fonts in
+* reverse order on the public font list, and tries to expunge them
+* one at a time until all fonts are expunged, or the memory allocation
+* succeeds.  This allows for the capability to bubble sort frequently
+* used fonts towards the head of the public font list, hence better
+* memory management behavior in low memory conditions as well as
+* overall better performance in OpenFont() (a function used frequently
+* by Intuition).
+*
+*
+* SPECIAL CONSIDERATIONS
+*
+* V41 diskfont.library cannot be expunged.  Expunging of the library
+* will be supported again in a future release once the vectored font
+* support is moved into graphics.library.  For now, diskfont.library
+* patches graphics.library, and in general is never expunged anyway.
+*
+* Tags to identify outline fonts, and special symbol set fonts are
+* being considered for the future.
+*
+************************************************************************
+
+******** diskfont.library/SetFontVectors *******************************
+*
+*   NAME
+*       SetFontVectorsA -- Set vectors for a custom font. (V41)
+*	SetFontVectors -- Varargs stub for SetFontVectorsA(). (V41)
+*
+*   SYNOPSIS
+*       success = SetFontVectorsA( textfont, taglist )
+*       D0                         A0        A1
+*
+*       BOOL SetFontVectors( struct TextFont *, struct TagList * );
+*
+*	success = SetFontVectors( textfont, Tag1, ...)
+*
+*	BOOL SetFontVectors( struct TextFont *, ULONG, ... );
+*
+*   FUNCTION
+*       Used by a vectored font library to set vectors for this
+*       font.   Vectored fonts render themselves by providing
+*	"vectors" for text related functions.  
+*
+*   INPUTS
+*       textfont - Pointer to the TextFont structure which is
+*       used as a handle for this font.
+*
+*       taglist - Pointer to a taglist specifying which vectors
+*       to set.
+*
+*   TAGS
+*	SFV_CodeSet - Code set (as defined by locale.library) required
+*		for this font.  Text streams must be sent using codeset
+*		sequences the font understands.
+*
+*	SFV_UserData - Pointer to user data.  This is the pointer which
+*		will be passed in register A6 when your font vector is
+*		called.
+*
+*	SFV_Library - Pointer to your driver's library base.  This tag
+*		is required, though not currently used for any purpose.
+*
+*	SFV_TextFunc - Pointer to your replacement graphics/Text()
+*		function.  Your function is called using the same
+*		register parameters as Text() with the exception of
+*		your userdata pointer in register A6.  In almost every
+*		case, this tag will be required.
+*
+*	SFV_CloseFunc - Pointer to your replacement graphics/CloseFont()
+*		function.  Your function is called using the same
+*		register parameters as CloseFont() with the exception
+*		of your userdata pointer in register A6.  This vector
+*		is useful for the purpose of managing your own open
+*		count, and expunging of fonts, though note that 
+*		historically CloseFont() does not break Forbid(), so
+*		your code MUST not break Forbid() either.
+*
+*	SFV_TextLengthFunc - Pointer to your replacement
+*		graphics/TextLength() function.  Your function is called
+*		using the same register parameters as TextLength()
+*		with the exception of your userdata pointer in register
+*		A6.  This vector is optional.  If not provided, the
+*		built-in graphics/TextLength() function is called.
+*
+*	SFV_FontExtentFunc - Like SFV_TextLengthFunc, but used to replace
+*		the graphics/FontExtent() function with your own function.
+*
+*	SFV_TextExtentFunc - Like SFV_TextLengthFunc, but used to replace
+*		the graphics/TextExtent() function with your own function.
+*
+*	SFV_TextFitFunc - Like SFV_TextLengthFunc, but used to replace
+*		the graphics/TextFit() function with your own function.
+*
+*   RESULTS
+*       success - Generally TRUE.  FALSE if low memory, or a
+*       bad tag is passed to this function.
+*
+*   NOTES
+*       This function may only be called by a vectored font's
+*       install code.  Calling it from any other context
+*       will return unpredictable results.
+*
+*       ASSUMES the font has been successfully extended with
+*       graphics/ExtendFont() before calling this function which
+*	will usually be true because diskfont.library will extend
+*	a font before calling InstallVectoredFont().  The only time
+*	this would not be true is if you are adding a vectored font
+*	which was not opened by diskfont.library.
+*
+*	Vectored fonts MUST provide tags for SFV_UserData, and
+*	SFV_Library or this function will return failure.  The
+*	default codeset of a font (if not specified) is
+*	CODESET_ECMALATIN1.  All relevant tags must be provided when
+*	this function is called.  Vectors may not be changed
+*	via this function once set.
+*
+*	***IMPORTANT***
+*
+*	Historically the various graphics/text functions could be
+*	safely called from an exec TASK.  Infact this is required
+*	because Intuition runs on the context of input.device TASK.
+*	Therefore your driver must provide its own PROCESS, and send
+*	messages to that PROCESS if disk access is required.  To
+*	avoid dead-locking with Intuition, your process must NOT
+*	bring up ANY DOS requesters.  DOS requesters can be turned OFF
+*	by setting the process window pointer to -1.
+*
+*   SEE ALSO
+*	vecfont.h, vecfont.i
+*
+***********************************************************************
+
+		XDEF	_DFSetFontVectors
+
+_DFSetFontVectors:
+
+	PRINTF	DBG_ENTRY,<'DF--SetFontVectors($%lx,$%lx)'>,A0,A1
+
+		movem.l	a2/a3/a4/a6,-(sp)
+
+		move.l	a6,a4			;cache diskfont base
+		move.l	a1,a3			;cache tags
+
+	;;; assume TextFont has been extended
+
+		move.l	tf_Extension(a0),d0
+		move.l	d0,a2
+		beq	sfv_uncompiled
+
+	PRINTF	DBG_ENTRY,<'DF--Vectored font is compiled'>
+
+	;;; check for existence of vector extension - if not
+	;;; exists, create a fresh one
+
+		move.l	tfe_VectoredFont(a2),d0
+		BNE_S	sfv_extended
+
+	PRINTF	DBG_ENTRY,<'DF--Vectored font is not extended yet'>
+
+		moveq	#TextVectors_SIZEOF,d0
+		move.l	#MEMF_PUBLIC!MEMF_CLEAR,d1
+		move.l	dfl_SysBase(a4),a6
+		JSRLIB	AllocVec
+
+		tst.l	d0
+		beq	sfv_uncompiled
+
+	PRINTF	DBG_ENTRY,<'DF--TextVectors @@ $%lx'>,D0
+
+		move.l	d0,tfe_VectoredFont(a2)
+
+		bset	#TE0B_VECTORED,tfe_Flags0(a2)
+
+sfv_extended:
+		move.l	d0,a2
+
+	;;; Now scan tag list for set tags, and set vector info
+
+		move.l	dfl_UtilityBase(a4),a6
+
+	;;; SFV_UserData tag MUST be provided
+
+		move.l	#SFV_UserData,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_UserData(a2)
+		beq	sfv_uncompiled
+
+	PRINTF	DBG_FLOW,<'DF--SFV_UserData==$%lx'>,D0
+
+	;;; SFV_Library tag MUST be provided
+
+		move.l	#SFV_Library,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_Library(a2)
+		beq	sfv_uncompiled
+
+	PRINTF	DBG_FLOW,<'DF--SFV_Library==$%lx'>,D0
+
+		move.l	#SFV_CodeSet,d0
+		move.l	#CODESET_ECMALATIN1,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_Codeset(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_CodeSet==$%lx'>,D0
+
+		move.l	#SFV_TextFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_TextFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_TextFunc==$%lx'>,D0
+
+		move.l	#SFV_CloseFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_CloseFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_CloseFunc==$%lx'>,D0
+
+		move.l	#SFV_TextLengthFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_TextLengthFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_TextLengthFunc==$%lx'>,D0
+
+		move.l	#SFV_FontExtentFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_FontExtentFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_FontExtentFunc==$%lx'>,D0
+
+		move.l	#SFV_TextExtentFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_TextExtentFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_TextExtentFunc==$%lx'>,D0
+
+		move.l	#SFV_TextFitFunc,d0
+		move.l	#0,d1
+		move.l	a3,a0
+		JSRLIB	GetTagData
+		move.l	d0,txv_TextFitFunc(a2)
+
+	PRINTF	DBG_FLOW,<'DF--SFV_TextFitFunc==$%lx'>,D0
+
+sfv_installed:
+
+		moveq	#01,d0			; success
+sfv_uncompiled:
+		movem.l	(sp)+,a2/a3/a4/a6
+
+		rts
+
+
+*****i* diskfont.library/OpenVectoredFont *****************************
+*
+*   NAME
+*       OpenVectoredFont -- Open a vectored font library
+*
+*   SYNOPSIS
+*       library = OpenVectoredFont( name )
+*       D0                           A0
+*
+*       struct Library *OpenVectoredFont( STRPTR name );
+*
+*   FUNCTION
+*       Open a vectored font library.  Vectored font libraries are
+*       structured like shared libraries, and currently stored
+*       in LIBS:, but may be stored in private directories
+*       in the future.
+*
+*	Vectored fonts are used to render fonts for which
+*	the existing bitmap graphics implementation is 
+*	inadequate.  Vectored fonts can be used to render
+*	glyphs directly from an outline engine, use of
+*	extended font sets (e.g., Japanese fonts), use of
+*	16 or 32 bit codesets, etc.
+*
+*	
+*   INPUTS
+*       name - Pointer to the name of font vector library extension
+*              file on disk.  
+*
+*   RESULTS
+*       library - 1 (TRUE) indicates no vector file.  0 (FALSE)
+*		  indicates failure to initialize vector library.
+*		  Ptr indicates library inited OK.
+*
+*   NOTES
+**********************************************************************
+
+		XDEF	_OpenVectoredFont
+
+_OpenVectoredFont:
+
+	PRINTF	DBG_ENTRY,<'DF--OpenVectoredFont($%lx)'>,A0
+
+
+		movem.l	d6-d7/a2-a6,-(sp)
+	
+		moveq	#01,d6		;assume no file
+		move.l	a0,a3		;pointer to path name
+
+		move.l	a6,a5
+
+		move.l	dfl_DOSBase(a5),a6
+		move.l	a3,d1
+		JSRLIB	LoadSeg
+
+		tst.l	d0
+		BEQ_S	ovf_failed
+
+		moveq	#00,d6		;assume init failure
+
+		move.l	d0,d7		;cache segment base
+
+	PRINTF	DBG_FLOW,<'DF--LoadSeg() successful'>
+
+** Scan segments for possible match tag
+
+ovf_scannextseg:
+		lsl.l	#2,d0		;BPTR -> APTR
+		BEQ_S	ovf_freeseg
+	
+		move.l	d0,a0
+		move.l	-4(a0),d1	;length of segment in bytes
+		move.l	(a0)+,d0	;next segment BPTR
+
+		sub.l	#6+DiskFontVector_SIZEOF,d1
+		bls.s	ovf_scannextseg
+
+ovf_tagsearch:
+
+		subq.l	#2,d1
+		bls.s	ovf_scannextseg
+
+		move.l	a0,a4
+
+		cmp.w	#DFV_ID,(a0)+
+		bne.s	ovf_tagsearch
+
+		cmp.l	(a0),a4		;back pointer match?
+		bne.s	ovf_tagsearch
+
+** validate sizeof structure
+
+		cmp.w	#DiskFontVector_SIZEOF,dfv_sizeof(a4)
+		bne.s	ovf_tagsearch
+
+** validate name of font
+
+	PRINTF	DBG_FLOW,<'DF--DFV tag found'>
+
+** Open library for this font
+
+	
+		move.l	dfl_SysBase(a5),a6
+		move.l	dfv_libname(a4),a1
+		move.l	dfv_libversion(a4),d0
+
+	PRINTF	DBG_OSCALL,<'DF--OpenLibrary(%s,%ld)'>,A1,D0
+
+		JSRLIB	OpenLibrary
+
+		tst.l	d0
+		beq.s	ovf_freeseg
+
+
+		move.l	d0,a6			;vector library base
+
+		move.l	dfl_VecTTextAttr(a5),a0	;TTextAttr
+		move.l	dfl_VecTextFont(a5),a1	;TextFont
+
+		move.l	dfv_custom(a4),a2	;custom
+	
+		jsr	_LVOInstallVectoredFont(a6)
+
+		tst.l	d0
+		beq.s	ovf_noinstall
+
+	PRINTF	DBG_FLOW,<'DF--Vectored Font Installed'>
+
+		move.l	a6,d6			;return vector library base
+		bra.s	ovf_freeseg
+
+** Close font vector library
+
+ovf_noinstall:
+
+		move.l	a6,a1
+		move.l	dfl_SysBase(a5),a6
+		JSRLIB	CloseLibrary
+
+** Free segment
+
+ovf_freeseg:
+
+		move.l	d7,d1
+		move.l	dfl_DOSBase(a5),a6
+		JSRLIB	UnLoadSeg
+
+ovf_failed:
+		move.l	d6,d0		;return SUCCESS or FAIL
+
+	PRINTF	DBG_EXIT,<'DF--$%lx=OpenVectoredFont()'>,D0
+
+		movem.l	(sp)+,d6-d7/a2-a6
+		rts
+
+
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d2 1
+a2 1
+**      $Id: vectored.asm,v 39.0 92/10/22 11:38:48 darren Exp $
+d35 1
+a35 1
+******* diskfont.library/SetFontVectors *******************************
+d37 397
+d435 2
+a436 2
+*       SetFontVectorsA -- Set vectors for a custom font. (V40)
+*	SetFontVectors -- Varargs stub for SetFontVectorsA(). (V40)
+@

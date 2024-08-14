@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	15
+DATE	MACRO
+		dc.b	'14.10.93'
+	ENDM
+VERS	MACRO
+		dc.b	'support 40.15'
+	ENDM
+VSTRING	MACRO
+		dc.b	'support 40.15 (14.10.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: support 40.15 (14.10.93)',0
+	ENDM

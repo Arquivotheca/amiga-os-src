@@ -1,0 +1,156 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  V36_3:1.1;
+locks    ; strict;
+comment  @@;
+
+
+1.1
+date     89.03.22.11.38.58;  author steveb;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Examine and ExNext
+@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*******************************************************************************
+**              (C) Copyright  Tripos Research Group 1980                     **
+**             University of Cambridge Computer Laboratory                    **
+********************************************************************************
+
+           ########  ##    ##            ########  ########  ########
+           ########  ##    ##            ########  ########  ########
+           ##        ##    ##               ##        ##        ##
+           ######    ########   #######     ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##               ##        ##        ##
+           ##        ##    ##            ########  ########  ########
+           ##        ##    ##            ########  ########  ########
+
+*******************************************************************************
+**     Author : Mike Richardson                                May 1980      **
+******************************************************************************/
+
+
+SECTION "EXINFO"
+GET     "LIBHDR"
+GET     "FH3HDR"
+GET     "MANHDR"
+GET     "IOHDR"
+
+
+LET setinfo ( pkt, key ) BE
+$(  errcode := error.nomoreentries
+    TEST key = 0 THEN
+       workfail ( pkt )
+    ELSE
+     $(
+        LET infovec = pkt ! pkt.arg2
+        LET buf     = readblock ( key, wait )
+        LET otype   = type ( buf )
+        LET bsize   = otype = st.file -> buf ! b.file.highseq, 0
+        LET bytesize= buf ! b.file.bytesize
+
+        IF otype=0 THEN   // Disk error
+        $( freeblock(buf,buf.invalid)
+           workfail ( pkt )
+        $)
+
+        IF bsize > b.size.hashtab THEN bsize := b.size.hashtab
+
+        infovec ! info.key   := key
+        infovec ! info.type  := otype
+        infovec ! info.dtype := otype
+
+	copyvec( buf+b.file.date, infovec+info.date, 2)
+	copyvec( buf+b.file.name, infovec+info.name, 7)
+	copyvec( buf+b.file.infobase,infovec+info.comment,comm.upb)
+        infovec ! info.protect := buf ! b.file.protect
+
+        IF otype = st.file THEN
+           UNTIL buf ! b.file.extension = 0 DO
+           $(
+              LET esize = ?
+              LET ext   = buf ! b.file.extension
+              freeblock ( buf, buf.invalid )
+              buf := readblock ( ext, wait )
+              esize := buf ! b.file.highseq
+              bsize := bsize + ( esize > b.size.hashtab -> b.size.hashtab, 
+                                                           esize  )
+           $)
+
+        infovec ! info.bytesize := bytesize
+        infovec ! info.blocksize:= bsize
+
+        freeblock ( buf, buf.valid )
+	errcode := 0
+        workdone  ( pkt, TRUE )
+     $)
+$)
+
+
+AND nextkey ( buf, hval ) = VALOF
+$( FOR slot = hval TO b.dir.hashmax DO
+   $( LET key = buf!slot
+      UNLESS key=0 RESULTIS key
+   $)
+   RESULTIS 0
+$)
+
+AND exobject ( pkt ) BE
+$(
+   // this routine to get information about the actual object
+   // specified and not to go off into directory entries
+
+   LET lock = pkt ! pkt.arg1
+   LET  key = checklock ( lock )
+
+   IF   key = 0 THEN workfail ( pkt )
+
+   setinfo ( pkt, key )
+$)
+
+AND exnext ( pkt ) BE
+$(
+   // this routine moves on to the next entry in a directory
+   // working from the supplied info vector
+   // see if we are at the start of a directory by comparing keys
+
+   LET lock = pkt ! pkt.arg1
+   LET dkey = checklock ( lock )
+   IF dkey=0 THEN workfail(pkt)
+   $( LET okey = pkt ! pkt.arg2 ! info.key
+      LET ikey = ?
+      LET hval = hash ( pkt ! pkt.arg2 + info.name )
+      LET  buf = readblock ( okey, wait )
+
+      TEST dkey = okey
+      THEN
+      $( // starting into the directory
+         ikey := nextkey ( buf, b.dir.hashtab )
+      $)
+      ELSE
+      $( // move on to the next entry
+         ikey := buf ! b.file.hashchain
+         IF ikey = 0
+         THEN
+         $( freeblock ( buf, buf.valid )  
+            buf  := readblock ( dkey, wait )
+            ikey := nextkey   ( buf, hval + 1 )
+         $)
+      $)
+      freeblock ( buf, buf.valid )
+      setinfo ( pkt, ikey )
+   $)
+$)
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'21.10.92'
+	ENDM
+VERS	MACRO
+		dc.b	'GetSerial 37.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'GetSerial 37.1 (21.10.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: GetSerial 37.1 (21.10.92)',0
+	ENDM

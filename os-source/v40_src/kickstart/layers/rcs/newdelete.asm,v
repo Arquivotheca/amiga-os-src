@@ -1,0 +1,633 @@
+head     38.4;
+branch   ;
+access   ;
+symbols  V40_1:38.4 V39_62:38.4 V39_61:38.4 V39_60:38.4 V39_58:38.4 V39_56:38.4 V39_55:38.4 V39_54:38.4 V39_53:38.4 V39_52:38.4 V39_51:38.4 V39_50:38.4 V39_49:38.4 V39_48:38.4 V39_46:38.4 V39_45:38.4 V39_44:38.4 V39_42:38.4 V39_41:38.4 V39_40:38.4 V39_39:38.4 V39_38:38.4 V39_37:38.4 V39_36:38.4 V39_35:38.4 V39_34:38.4 V39_33:38.4 V39_32:38.4 V39_30:38.4 V39_28:38.4 V39_27:38.4 V39_26:38.4 V39_25:38.4 V39_24:38.4 V39_23:38.4 V39_22:38.4 V39_21:38.4 V39_20:38.4 V39_18:38.4 V39_16:38.4 V39_15:38.4 V39_14:38.4 V39_12:38.3 V39_10:38.3;
+locks    ; strict;
+comment  @* @;
+
+
+38.4
+date     91.10.24.09.00.11;  author mks;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.09.30.14.09.34;  author mks;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.09.26.14.11.26;  author Unknown;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.09.26.14.08.55;  author Unknown;  state Exp;
+branches ;
+next     38.0;
+
+38.0
+date     91.09.20.17.18.27;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@
+@
+
+
+38.4
+log
+@Now uses Freecrlist() to free (and Waitblit) the found cliprects
+@
+text
+@*******************************************************************************
+*
+*	$Id: newdelete.asm,v 38.3 91/09/30 14:09:34 mks Exp Locker: mks $
+*
+*******************************************************************************
+*
+	include "exec/types.i"
+	include "graphics/clip.i"
+	include	"graphics/layers.i"
+	include	"graphics/rastport.i"
+*
+	include "layersbase.i"
+*
+	ifne	cr_Next
+	fail						; rely on cr_Next having offset of zero
+	endc
+*
+	xdef	_deletelayer2
+_deletelayer2:	; a0=layer d0=error
+*
+*	reserve two longwords on the stack using d0/d1 for temporary use
+*
+	movem.l d1-d7/a2-a6,-(sp)
+*
+	move.l	lb_GfxBase(a6),d6		; save graphics base
+*
+	move.l	a0,a2					; layer to delete
+	move.l	d0,d2					; error ?
+	bne.s	1$						; yes, dangerous to dispose
+	xref	_LVODisposeRegion
+	exg.l	a6,d6					; graphics base in a6
+	move.l	lr_DamageList(a2),a0	; pass damagelist to graphics
+	jsr		_LVODisposeRegion(a6)	; call graphics
+	exg.l	d6,a6					; layers base in a6
+*
+	xref	_Freecrlist
+1$	move.w	lr_Flags(a2),d0
+	and.w	#LAYERSUPER,d0
+	beq.s	2$						; if super free off super save cliprects
+	move.l	lr_SuperSaverClipRects(a2),a0
+	bsr		_Freecrlist
+	xref	_LVOSyncSBitMap
+	move.l	a2,a0					; pass layer pointer to graphics
+	exg.l	a6,d6					; graphics base in a6
+	jsr		_LVOSyncSBitMap(a6)		; call graphics
+	exg.l	d6,a6					; layers base in a6
+	move.l	lr_SuperClipRect(a2),a0	; now free rest of super cliprects
+	bsr		_Freecrlist
+	clr.l	lr_SuperBitMap(a2)
+	clr.l	lr_SuperClipRect(a2)
+*
+	xref	_LVOWaitBlit
+2$
+	exg.l	a6,d6					; graphics base in a6
+	jsr		_LVOWaitBlit(a6)		; call graphics
+	exg.l	d6,a6					; layers base in a6
+*
+*	delete all obscured cliprects from this layer
+*
+	lea.l	lr_ClipRect(a2),a3
+	bra.s	3$
+	xref	_Freecr
+*
+4$  move.l	d0,a1
+	move.l	cr_lobs(a1),d0
+	beq.s	5$
+	move.l	(a1),(a3)
+	tst.l	d2
+	bne.s	3$
+	move.l	a1,a0
+	bsr		_Freecr
+	bra.s	3$
+5$	move.l	(a3),a3
+3$	move.l	(a3),d0
+	bne.s	4$
+*
+*	now convert to layersimple
+*
+	xref	_LVOSetRast
+	move.w	#(LAYERSMART+LAYERSUPER),d1
+	not.w	d1
+	and.w	lr_Flags(a2),d1
+	or.w	#LAYERSIMPLE,d1
+	move.w	d1,lr_Flags(a2)
+*
+*	clear some portion of background rastport
+*
+	exg.l	a6,d6					; graphics base in a6
+	move.l	lr_rp(a2),a1			; relies on d0 already set to 0
+	jsr		_LVOSetRast(a6)			; call graphics
+	exg.l	d6,a6					; layers base in a6
+*
+*	new algorithm to delete in place does NOT call behindcode
+*	new code avoids the temporary allocation of lots of memory
+*
+	clr.l	(sp)					; clear list of previously found cr's
+*
+*	this algorithm keeps a temporary list pointed to by the stack
+*	if an obscured cliprect is behind us, and we are about to newly
+*	reveal it, copy its bits (if any) to the screen, add it to our list,
+*	and (possibly) add damage for it to the backing layer. for all cliprects
+*	that used to be obscured by our newly obscured cliprect, adjust cr_lobs
+*
+	lea.l	lr_ClipRect(a2),a3
+	bra		6$						; process remaining cliprects in place
+7$	move.l	lr_back(a4),d4			; for all layers behind this one
+	beq		8$
+*
+*	search for newly revealed cliprects
+*
+	xref	_rectXrect
+	move.l	d4,a4					; candidate layer in a4
+	lea.l	lr_MinX(a4),a1			; candidate layer bounds @@a1
+	move.l	d3,a0					; remaining cliprect in a0
+	lea.l	cr_MinX(a0),a0			; remaining cliprect bounds @@a0
+	bsr		_rectXrect
+	tst.l	d0
+	beq.s	7$
+*
+*	behind layer intersects this onscreen cliprect
+*	process its obscured cliprects to see which are to be newly revealed
+*
+	lea.l	lr_ClipRect(a4),a5
+	bra		9$
+*
+10$ move.l	d5,a1					; candidate cliprect pointer in a1
+	move.l	cr_lobs(a1),d0
+	cmp.l	a2,d0
+	bne		11$
+*
+*	this candidate cliprect obscured by target layer, see if newly revealed
+*
+	lea.l	cr_MinX(a1),a1			; candidate cliprect bounds @@a1
+	move.l	d3,a0					; remaining cliprect in a0
+	lea.l	cr_MinX(a0),a0			; remaining cliprect bounds @@a0
+	bsr		_rectXrect
+	tst.l	d0
+	beq		11$
+*
+	moveq.l	#0,d4					; haven't yet found a matching cr.bounds
+*
+*	check if the candidate is identical with a previously revealed cliprect
+*
+	exg.l	a6,d7					; save layers base in available register
+	lea.l	(sp),a6
+	move.l	d5,a1					; candidate cliprect pointer back in a1
+	bra.s	12$
+*
+*	check list of previously found cr's to find candidate cr.bounds there
+*
+13$	move.l	d0,a0					; pointer to listed cliprect in a0
+	movem.l	cr_MinX(a0),d0/d1
+	sub.l	cr_MinX(a1),d0
+	bne.s	14$
+	sub.l	cr_MaxX(a1),d1
+	bne.s	14$
+	move.l	cr_reserved(a0),d4		; found cr.bounds on list, fetch newobs
+	bra.s	15$						; and break out of the search...
+14$	move.l	(a6),a6
+12$ move.l	(a6),d0					; temporary use of d4 ok here (see 7$)
+	bne.s	13$
+*
+*	search is over, restore library pointer and check result of search
+*
+15$	exg.l	d7,a6					; layers base in a6
+*	move.l	d5,a1					; candidate cliprect pointer still in a1
+	tst.l	d4
+	beq.s	16$
+*
+*	this cliprect is already on the list, adjust its obscuring layer pointer
+*
+	move.l	d4,cr_lobs(a1)
+	bra		11$						; done processing this candidate
+*
+*	this cliprect is newly revealed...
+*
+16$ move.l	cr_BitMap(a1),d0
+	beq.s	17$
+*
+*	copy the obscured buffer of this cliprect to the screen to reveal it
+*
+	xref	_crtoscreen
+	move.l	lr_rp(a4),a0
+	bsr		_crtoscreen				; cliprect pointer already in a1
+	bra.s	18$
+*
+*	no obscured buffer: call backfill hook, add damageregion, set refresh bit
+*
+	xref	_CallBackFillHook
+	xref	_LVOOrRectRegion
+17$ move.l	cr_MinX(a1),-(sp)
+	move.l	cr_MaxX(a1),-(sp)		; <-- copy of bounds
+	move.l	cr_MinX(a1),-(sp)		; <-- rectangle here
+	move.l	a4,-(sp)
+	move.l	lr_rp(a4),-(sp)
+	move.l	lr_BackFill(a4),-(sp)
+	bsr		_CallBackFillHook
+	addq.l	#8,sp					; pop only first two arguments now
+	move.w	lr_Scroll_X(a4),d0
+	sub.w	lr_MinX(a4),d0
+	move.w	d0,d1					; adjust the previous bounds' X
+	add.w	4(sp),d0				; MinX (copy from stack)
+	add.w	8(sp),d1				; MaxX (copy from stack)
+	swap	d0
+	swap	d1
+	move.w	lr_Scroll_Y(a4),d0
+	sub.w	lr_MinY(a4),d0
+	move.w	d0,d1					; adjust the previous bounds' Y
+	add.w	6(sp),d0				; MinY (copy from stack)
+	add.w	10(sp),d1				; MaxY (copy from stack)
+	movem.l	d0/d1,4(sp)				; copy results back to stack
+	lea.l	4(sp),a1				; and pass address to orrectregion
+	move.l	lr_DamageList(a4),a0	; compounded with existing damagelist
+	exg.l	a6,d6					; graphics base in a6
+	jsr		_LVOOrRectRegion(a6)	; call graphics
+	exg.l	d6,a6					; layers base in a6
+	tst.l	d0
+	beq.s	19$						; if call failed, don't set refresh bit
+	move.w	#LAYERREFRESH,d0
+	or.w	d0,lr_Flags(a4)
+19$	lea.l	16(sp),sp				; remember to pop all arguments
+18$	move.l	d5,a1					; candidate cliprect pointer in a1
+	move.l	(a1),(a5)				; remove candidate cliprect from layer
+	move.l	a4,cr_reserved(a1)		; identify as newly obscuring layer
+	move.l	(sp),(a1)				; link temporary list to cr_Next
+	move.l	a1,(sp)					; and put this cliprect at head
+	bra.s	9$						; continue looping...
+11$	move.l	(a5),a5
+9$  move.l	(a5),d5
+	bne		10$						; search all cliprects in candidate layer
+	bra		7$						; search all candidate layers
+*
+*	only process the next cliprect if we have searched ALL layers behind
+*
+8$	move.l	(a3),a3
+6$ 	move.l	a2,a4					; search behind this layer...
+	move.l	(a3),d3					; if there is another cliprect to process
+	bne		7$
+*
+*******************************************************************************
+*
+* Now, free the cliprects that have been moved to the screen using the
+* Freecrlist() routine.  That routine does a WaitBlit() when needed...
+*
+	move.l	(sp),a0		; Get first cliprect...
+	bsr	_Freecrlist	; Free the cliprects
+*
+*******************************************************************************
+*
+	move.l	lb_ExecBase(a6),d7		; save exec base
+*
+*	free rest of cliprects
+*
+	tst.l	d2
+	bne.s 	22$
+	move.l	lr_ClipRect(a2),a0
+	bsr	_Freecrlist
+	xref	_LVOFreeMem
+	move.l	lr_rp(a2),a1
+	move.l	#rp_SIZEOF,d0
+	exg.l	a6,d7					; exec base in a6
+	jsr		_LVOFreeMem(a6)			; call exec
+	exg.l	d7,a6					; layers base in a6
+*
+*	unlink, remove lock and regenerate display
+*
+	xref	_unlinklayer
+22$ move.l	a2,a0
+	bsr		_unlinklayer
+*
+	xref	_LVORemove
+	lea.l	lr_Lock(a2),a1
+	exg.l	a6,d7						; exec base in a6
+	jsr		_LVORemove(a6)				; call exec
+	exg.l	d7,a6						; layers base in a6
+*
+	xref	_strip_onscreen_cliprects
+	move.l	lr_LayerInfo(a2),a0
+	jsr		_strip_onscreen_cliprects
+*
+	xref	_optimizeClipRects
+	move.l	lr_LayerInfo(a2),a0
+	jsr		_optimizeClipRects
+*
+	xref	_gen_onscreen_cliprects
+	move.l	lr_LayerInfo(a2),a0
+	jsr		_gen_onscreen_cliprects
+*
+*	finally, delete the layer structure itself and exit
+*
+	tst.l	d2
+	bne.s	23$
+	move.l	a2,a1
+	move.l	#lr_SIZEOF,d0
+	exg.l	a6,d7						; exec base in a6
+	jsr		_LVOFreeMem(a6)				; call exec
+*
+23$	movem.l (sp)+,d1-d7/a2-a6			; layers base back in a6 on exit
+	rts
+*
+	end
+@
+
+
+38.3
+log
+@Changed to use new prototypes that are fully register defined
+@
+text
+@d3 1
+a3 1
+*	$Id: newdelete.asm,v 38.2 91/09/26 14:11:26 Unknown Exp Locker: mks $
+d240 4
+a243 1
+*	assure that last crtoscreen has finished...
+d245 2
+a246 5
+	exg.l	a6,d6					; graphics base in a6
+	jsr		_LVOWaitBlit(a6)		; call graphics
+	exg.l	d6,a6					; layers base in a6
+
+	move.l	lb_ExecBase(a6),d7		; save exec base
+d248 1
+a248 1
+*	free newly onscreen cliprects...
+d250 1
+a250 7
+	lea.l	(sp),a3					; get address of temporary list
+	bra.s	20$
+21$ move.l	d3,a0
+	move.l	(a0),(a3)
+	bsr		_Freecr
+20$	move.l	(a3),d3
+	bne		21$
+d257 1
+a257 1
+	bsr		_Freecrlist
+@
+
+
+38.2
+log
+@oops, set up d6 earlier...
+@
+text
+@d3 1
+a3 1
+*	$Id: newdelete.asm,v 38.1 91/09/26 14:08:55 Unknown Exp Locker: Unknown $
+d9 2
+a10 2
+	include	"graphics/layers.i" 
+	include	"graphics/rastport.i" 
+a17 1
+	xdef	@@deletelayer2
+d19 1
+a19 2
+_deletelayer2:
+@@deletelayer2:
+d31 1
+a31 1
+	exg.l	a6,d6					; graphics base in a6	
+d36 1
+a36 1
+	xref	@@Freecrlist
+d41 1
+a41 1
+	bsr		@@Freecrlist
+d44 1
+a44 1
+	exg.l	a6,d6					; graphics base in a6	
+d46 1
+a46 1
+	exg.l	d6,a6					; layers base in a6	
+d48 1
+a48 1
+	bsr		@@Freecrlist
+d53 2
+a54 2
+2$	
+	exg.l	a6,d6					; graphics base in a6	
+d56 1
+a56 1
+	exg.l	d6,a6					; layers base in a6	
+d62 1
+a62 1
+	xref	@@Freecr
+d71 1
+a71 1
+	bsr		@@Freecr
+d88 1
+a88 1
+	exg.l	a6,d6					; graphics base in a6	
+d91 1
+a91 1
+	exg.l	d6,a6					; layers base in a6	
+d95 1
+a95 1
+* 
+d154 1
+a154 1
+	bne.s	14$	
+d156 1
+a156 1
+	bne.s	14$	
+d182 1
+a182 1
+	xref	@@crtoscreen
+d184 1
+a184 1
+	bsr		@@crtoscreen				; cliprect pointer already in a1
+d197 1
+a197 1
+	bsr		_CallBackFillHook		
+d199 1
+a199 1
+	move.w	lr_Scroll_X(a4),d0	
+d206 1
+a206 1
+	move.w	lr_Scroll_Y(a4),d0	
+d236 1
+a236 1
+6$ 	move.l	a2,a4					; search behind this layer... 
+d254 1
+a254 1
+	bsr		@@Freecr
+d263 1
+a263 1
+	bsr		@@Freecrlist
+d273 1
+a273 1
+	xref	@@unlinklayer
+d275 1
+a275 1
+	bsr		@@unlinklayer
+d283 1
+a283 1
+	xref	@@strip_onscreen_cliprects
+d285 1
+a285 1
+	jsr		@@strip_onscreen_cliprects
+d287 1
+a287 1
+	xref	@@optimizeClipRects
+d289 1
+a289 1
+	jsr		@@optimizeClipRects
+d291 1
+a291 1
+	xref	@@gen_onscreen_cliprects
+d293 1
+a293 1
+	jsr		@@gen_onscreen_cliprects
+@
+
+
+38.1
+log
+@saved 44 bytes
+@
+text
+@d3 1
+a3 1
+*	$Id: newdelete.asm,v 38.0 91/09/20 17:18:27 Unknown Exp Locker: Unknown $
+d26 3
+a29 1
+*
+a32 1
+	move.l	lb_GfxBase(a6),d6		; save graphics base
+@
+
+
+38.0
+log
+@downcoded deletelayer2
+@
+text
+@d3 1
+a3 1
+*	$Id: $
+d25 1
+a25 1
+	movem.l d0-d5/a2-a5,-(sp)
+d31 2
+a32 2
+	move.l	a6,(sp)
+	move.l	lb_GfxBase(a6),a6		; graphics base in a6
+d35 1
+a35 1
+	move.l	(sp),a6
+d45 1
+a45 2
+	move.l	a6,(sp)
+	move.l	lb_GfxBase(a6),a6
+d47 1
+a47 1
+	move.l	(sp),a6
+d54 2
+a55 2
+2$	move.l	a6,(sp)
+	move.l	lb_GfxBase(a6),a6
+d57 1
+a57 1
+	move.l	(sp),a6
+d89 1
+a89 2
+	move.l	a6,(sp)
+	move.l	lb_GfxBase(a6),a6
+d92 1
+a92 1
+	move.l	(sp),a6
+d97 1
+a97 1
+	clr.l	4(sp)					; clear list of previously found cr's
+d141 1
+a141 1
+	moveq.l	#0,d0					; haven't yet found a matching cr.bounds
+d145 3
+a147 2
+	move.l	a6,(sp)
+	lea.l	4(sp),a6
+d152 3
+a154 4
+13$	move.l	d4,a0					; pointer to listed cliprect in a0
+	move.l	d5,a1					; candidate cliprect pointer in a1
+	move.l	cr_MinX(a0),d1
+	sub.l	cr_MinX(a1),d1
+a155 1
+	move.l	cr_MaxX(a0),d1
+d158 1
+a158 1
+	move.l	cr_reserved(a0),d0		; found cr.bounds on list, fetch newobs
+d161 1
+a161 1
+12$ move.l	(a6),d4					; temporary use of d4 ok here (see 7$)
+d166 3
+a168 3
+15$	move.l	(sp),a6
+	move.l	d5,a1					; candidate cliprect pointer in a1
+	tst.l	d0
+d173 1
+a173 1
+	move.l	d0,cr_lobs(a1)
+d199 1
+a199 1
+	lea.l	8(sp),sp				; pop only first two arguments now
+d215 1
+a215 2
+	move.l	a6,(sp)				
+	move.l	lb_GfxBase(a6),a6
+d217 1
+a217 1
+	move.l	(sp),a6
+d226 2
+a227 2
+	move.l	4(sp),(a1)				; link temporary list to cr_Next
+	move.l	a1,4(sp)				; and put this cliprect at head
+d243 1
+a243 2
+	move.l	a6,(sp)
+	move.l	lb_GfxBase(a6),a6
+d245 3
+a247 1
+	move.l	(sp),a6
+d251 1
+a251 1
+	lea.l	4(sp),a3				; get address of temporary list
+d268 3
+a270 4
+	move.l	a6,(sp)
+	move.l	lb_ExecBase(a6),a6
+	jsr		_LVOFreeMem(a6)				; call exec
+	move.l	(sp),a6
+d280 1
+a280 2
+	move.l	a6,(sp)
+	move.l	lb_ExecBase(a6),a6
+d282 1
+a282 1
+	move.l	(sp),a6
+d302 1
+a302 2
+	move.l	a6,(sp)
+	move.l	lb_ExecBase(a6),a6
+a303 1
+	move.l	(sp),a6
+d305 1
+a305 1
+23$	movem.l (sp)+,d0-d5/a2-a5
+@

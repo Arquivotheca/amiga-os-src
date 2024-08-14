@@ -1,0 +1,1 @@
+make parts.mak

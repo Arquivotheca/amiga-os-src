@@ -1,0 +1,564 @@
+head     37.2;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+37.2
+date     91.02.15.14.14.30;  author eric;  state Exp;
+branches ;
+next     37.1;
+
+37.1
+date     91.01.23.16.56.14;  author eric;  state Exp;
+branches ;
+next     37.0;
+
+37.0
+date     91.01.23.16.56.09;  author eric;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+37.2
+log
+@New from Fred Fish 12 Feb 91
+@
+text
+@/************************************************************************
+ *									*
+ *	Copyright (c) 1988 Enhanced Software Technologies, Inc.		*
+ *			     All Rights Reserved			*
+ *									*
+ *	This software and/or documentation is protected by U.S.		*
+ *	Copyright Law (Title 17 United States Code).  Unauthorized	*
+ *	reproduction and/or sales may result in imprisonment of up	*
+ *	to 1 year and fines of up to $10,000 (17 USC 506).		*
+ *	Copyright infringers may also be subject to civil liability.	*
+ *									*
+ ************************************************************************
+ */
+
+
+/*
+ *  FILE
+ *
+ *	readinfo.c    routines to read and process archive info block
+ *
+ *  SCCS
+ *
+ *	@@(#)readinfo.c	12.8	11 Feb 1991
+ *
+ */
+
+ 
+/*
+ *	Many of these routines used to be in the file blocks.c but have
+ *	been moved to this file in an attempt to simplify blocks.c and
+ *	decouple some of the routines.  This was only partially successful
+ *	since they have gradually evolved into mutually referential files.
+ *
+ *	The entire "virtual archive" implementation has evolved from a
+ *	relatively simple straightforward set of routines to the complicated
+ *	convoluted code which now exists.  It is time to chuck the whole
+ *	thing and start over, using what has been learned about the
+ *	implementation requirements.  This is a prime example of why
+ *	you should plan to throw away the first implementation of anything,
+ *	because you WILL throw it away whether you plan to or not!!
+ *
+ */
+ 
+#include "globals.h"
+
+static BOOLEAN is_junk PROTO((union blk *blkp));
+static VOID dump_info PROTO((union blk *blkp));
+static VOID bad_magic PROTO((union blk *blkp));
+static VOID size_hack PROTO((UINT size));
+
+
+/*
+ *	The info_done flag prevents the recursive buffer size
+ *	adjustment from printing the info block more than once.
+ *
+ *	Note that we pass the fip of the archive file to ar_read
+ *	just to satisfy it's need for one.  At this point, there is
+ *	no "current file".  Also, we set the flba to 0 because it
+ *	gets automatically incremented as blocks are read, and we
+ *	can be called recursively, so it needs to be zero each time
+ *	we attempt to read the first block.
+ */
+ 
+VOID read_info ()
+{
+    static BOOLEAN info_done = FALSE;
+    union blk *blkp;
+    int magic;
+
+    DBUG_ENTER ("read_info");
+    blkp = ar_seek (0L, 0);
+    afile.flba = 0L;
+    ar_read (&afile);
+    if (!is_junk (blkp)) {
+	artime = (time_t) FROMHEX (blkp -> HD.h_time);
+	readsizes (blkp);
+	magic = (int) FROMHEX (blkp -> HD.h_magic);
+	DBUG_PRINT ("magic", ("archive header magic number %#x", magic));
+	if (magic != A_MAGIC) {
+	    bad_magic (blkp);
+	} else {
+	    if (!info_done) {
+		if ((mode == 'i' && flags.vflag > 2) || (mode == 'g')) {
+		    info_done = TRUE;
+		    dump_info (blkp);
+		}
+	    }
+	}
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+/*
+ *	Return non-zero if buffer can be forced to BLKSIZE for
+ *	efficiency during special cases (like for reading only
+ *	the file header blocks during -t mode).
+ */
+
+BOOLEAN forcebuffer ()
+{
+    int result;
+
+    DBUG_ENTER ("forcebuffer");
+    result = (mode == 't' && msize != 0 && !flags.bflag && !flags.pflag);
+    result &= seekable (afile.fname, BLKSIZE);
+    DBUG_PRINT ("force", ("returns logical value %d", result));
+    DBUG_RETURN (result);
+}
+
+
+/*
+ *  FUNCTION
+ *
+ *	sanity    check various options for sanity
+ *
+ *  SYNOPSIS
+ *
+ *	static VOID sanity ()
+ *
+ *  DESCRIPTION
+ *
+ *	After all command line options have been processed, this
+ *	function performs various "sanity" checks.  These could
+ *	be done in-line in options() but there are some advantages
+ *	to delaying the operation:
+ *
+ *		(1)	Syntax errors in the command line show
+ *			up before semantic errors.
+ *
+ *		(2)	The switch statement in options() is
+ *			usually quite long already.
+ *
+ *	Note that this is also a logical place to emit various
+ *	verbosity messages and do some "post-processing" of
+ *	options.
+ *
+ *  NOTE
+ *
+ *	The been_here flag is a hack to prevent the recursive
+ *	auto buffer size adjustment from printing the sizes more
+ *	than once.  Note that the first instance of ar_open prints
+ *	the new sizes, which the second instance of ar_open implemented.
+ *	This is all very dependent on that fact than sanity() is called
+ *	after read_info() in ar_open().
+ *
+ */
+
+VOID sanity ()
+{
+    static BOOLEAN been_here = FALSE;
+    
+    DBUG_ENTER ("sanity");
+    if (forcebuffer ()) {
+	DBUG_PRINT ("bufsize", ("buffer size forced to BLKSIZE"));
+	bufsize = BLKSIZE;
+    }
+    if (flags.vflag > 1 && !been_here) {
+	been_here = TRUE;
+	voutput ("buffer size = %uk bytes", bufsize/1024);
+	vflush ();
+	voutput ("media size = ");
+	if (msize != 0) {
+	    voutput ("%luk bytes", msize/1024);
+	} else {
+	    voutput ("<unknown>");
+	}
+	vflush ();
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+static BOOLEAN is_junk (blkp)
+union blk *blkp;
+{
+    BOOLEAN result;
+
+    DBUG_ENTER ("is_junk");
+    result = FALSE;
+    if (!chksum_ok (blkp)) {
+	if (!need_swap (blkp)) {
+	    bru_message (MSG_ISUM);
+	    result = TRUE;
+	    if (chksum (blkp) != 0L) {
+	        bru_message (MSG_FASTMODE);
+	    }
+	} else {
+	    do_swap ();
+	}
+    }
+    DBUG_RETURN (result);
+}
+
+
+static VOID dump_info (blkp)
+union blk *blkp;
+{
+    USHORT ar_uid;
+    USHORT ar_gid;
+    char *dtime;
+
+    DBUG_ENTER ("dump_info");
+    ar_uid = (USHORT) FROMHEX (blkp -> AH.a_uid);
+    ar_gid = (USHORT) FROMHEX (blkp -> AH.a_gid);
+    if (mode == 'g') {
+	voutput ("label:\t\t%s", blkp -> AH.a_label);
+	vflush ();
+	dtime = s_ctime((long *) &artime);
+	dtime[s_strlen (dtime) - 1] = EOS;
+	voutput ("created:\t%s", dtime);
+	vflush ();
+	voutput ("device:\t\t%s", blkp -> AH.a_name);
+	vflush ();
+	voutput ("user:\t\t%s", ur_gname (ar_uid));
+	vflush ();
+	voutput ("group:\t\t%s", gp_gname (ar_gid));
+	vflush ();
+	voutput ("system:\t\t%s %s %s %s %s",
+		   blkp -> AH.a_sysname, blkp -> AH.a_nodename,
+		   blkp -> AH.a_release, blkp -> AH.a_version,
+		   blkp -> AH.a_machine);
+	vflush ();
+	voutput ("bru:\t\t\"%s\"", blkp -> AH.a_id);
+	vflush ();
+	voutput ("release:\t%ld.%ld",
+		   FROMHEX (blkp -> HD.h_release),
+		   FROMHEX (blkp -> HD.h_level));
+	vflush ();
+	voutput ("variant:\t%ld",
+		   FROMHEX (blkp -> HD.h_variant));
+	vflush ();
+	voutput ("bufsize:\t%ld",
+		   FROMHEX (blkp -> HD.h_bufsize));
+	vflush ();
+	voutput ("msize:\t\t%lu",
+		   FROMHEX (blkp -> HD.h_msize));
+	vflush ();
+    } else {
+	vflush ();
+	voutput ("**** archive header info ****");
+	vflush ();
+	vflush ();
+	dtime = s_ctime ((long *) &artime);
+	dtime[s_strlen (dtime) - 1] = EOS;
+	voutput ("archive created: %s", dtime);
+	vflush ();
+	voutput ("release: %ld.%ld  ",
+		   FROMHEX (blkp -> HD.h_release),
+		   FROMHEX (blkp -> HD.h_level));
+	voutput ("variant: %ld", FROMHEX (blkp -> HD.h_variant));
+	vflush ();
+	voutput ("bru id: \"%s\"", blkp -> AH.a_id);
+	vflush ();
+	voutput ("archive label: \"%s\"", blkp -> AH.a_label);
+	vflush ();
+	voutput ("written on: \"%s\"", blkp -> AH.a_name);
+	vflush ();
+	voutput ("user id: %s  ", ur_gname (ar_uid));
+	voutput ("group id: %s", gp_gname (ar_gid));
+	vflush ();
+	voutput ("system identification: %s %s %s %s %s",
+		   blkp -> AH.a_sysname, blkp -> AH.a_nodename,
+		   blkp -> AH.a_release, blkp -> AH.a_version,
+		   blkp -> AH.a_machine);
+	vflush ();
+	vflush ();
+	voutput ("**** end info ****");
+	vflush ();
+	vflush ();
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+static VOID bad_magic (blkp)
+union blk *blkp;
+{
+    int vol;
+    char key;
+
+    DBUG_ENTER ("bad_magic");
+    vol = (int) FROMHEX (blkp -> HD.h_vol);
+    bru_message (MSG_IMAGIC, vol + 1);
+    key = response ("c => continue  q => quit  r => reload  s => fork shell",
+    	'q');
+    switch (key) {
+	case 'q':
+	case 'Q':
+	    done ();
+	    break;
+	case 'r':
+	case 'R':
+	    switch_media (0);
+	    phys_seek (0L);
+	    read_info ();
+	    break;
+	case 's':
+	case 'S':
+	    fork_shell ();
+	    bad_magic (blkp);
+	    break;
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+/*
+ *	Attempt to adjust to new buffer size.  Temporarily
+ *	suppress eject of media since we want the same
+ *	media as before.
+ */
+
+static VOID size_hack (size)
+UINT size;
+{
+    int ejectflag;
+
+    DBUG_ENTER ("size_hack");
+    if (ardp != NULL && ardp -> dv_flags & D_NOREWIND) {
+	size /= 1024;
+	bru_message (MSG_NOREWIND);
+	bru_message (MSG_RERUN, size);
+	done ();
+    } else {
+	DBUG_PRINT ("bufsize", ("adjust buffer size to %u", size));
+	flags.bflag = TRUE;
+	bufsize = size;
+	shmcheck ();
+	if (ardp != NULL && ardp -> dv_maxbsize != 0) {
+	    if (bufsize > ardp -> dv_maxbsize) {
+		bru_message (MSG_MAXBUFSZ, bufsize / 1024,
+			   ardp -> dv_maxbsize / 1024);
+		if (!flags.bflag) {
+		    bufsize = BLOCKS (ardp -> dv_maxbsize) * BLKSIZE;
+		    bru_message (MSG_BUFADJ, bufsize / 1024);		    
+		}
+	    }
+	}
+	if (ardp == NULL) {
+	    ar_close ();
+	} else {
+	    ejectflag = ardp -> dv_flags & D_EJECT;
+	    ardp -> dv_flags &= ~D_EJECT;
+	    ar_close ();
+	    ardp -> dv_flags |= ejectflag;
+	}
+	deallocate ();
+	ar_open ();
+    }
+    DBUG_VOID_RETURN;
+}
+
+
+/*
+ *	Note that in fast mode (-F flag), the information in the header
+ *	block may be unreliable.  We ignore the sizes if they look
+ *	unreasonable (like 0).  This can actually happen if there is
+ *	a hard read error on the first block and -F is used.
+ */
+
+VOID readsizes (blkp)
+union blk *blkp;
+{
+    UINT size;
+    ULONG ar_msize;
+
+    DBUG_ENTER ("readsizes");
+    if (!flags.sflag) {
+	ar_msize = (ULONG) FROMHEX (blkp -> HD.h_msize);
+	if (ar_msize != 0) {
+	    msize = ar_msize;
+	}
+    }
+    if (!flags.bflag) {
+	size = (UINT) FROMHEX (blkp -> HD.h_bufsize);
+	DBUG_PRINT ("bufsize", ("recorded buffer size = %u", size));
+	DBUG_PRINT ("bufsize", ("current buffer size = %u", bufsize));
+	if (size != 0 && size != bufsize && !ar_ispipe()) {
+	    size_hack (size);
+	}
+    }
+    DBUG_VOID_RETURN;
+}
+
+@
+
+
+37.1
+log
+@New version January 1991
+@
+text
+@d23 1
+a23 1
+ *	@@(#)readinfo.c	12.6	01 Jan 1991
+@
+
+
+37.0
+log
+@added to rcs
+@
+text
+@d23 1
+a23 1
+ *	@@(#)readinfo.c	11.20	10/10/89
+d44 1
+a44 1
+#include "autoconfig.h"
+d46 4
+a49 8
+#include <stdio.h>
+  
+#if (unix || xenix)
+#  include <sys/types.h>
+#  include <sys/stat.h>
+#else
+#  include "sys.h"
+#endif
+a50 12
+#include "typedefs.h"
+#include "dbug.h"
+#include "manifest.h"
+#include "config.h"
+#include "blocks.h"
+#include "macros.h"
+#include "usermsg.h"
+#include "devices.h"
+#include "flags.h"
+#include "bruinfo.h"
+#include "finfo.h"
+
+a51 40
+extern VOID bru_message ();		/* Report an error to user */
+extern VOID fork_shell ();		/* Fork a shell */
+extern int execute ();
+extern char *s_ctime ();
+extern BOOLEAN ar_ispipe ();
+extern union blk *ar_seek ();
+extern VOID switch_media ();
+extern VOID ar_close ();
+extern VOID ar_open ();
+extern VOID ar_read ();
+extern VOID deallocate ();		/* Deallocate the block buffer */
+extern VOID done ();
+extern BOOLEAN chksum_ok ();		/* Test for good block checksum */
+extern CHKSUM chksum ();		/* Compute checksum for block */
+extern BOOLEAN need_swap ();		/* Test for swap needed */
+extern VOID do_swap ();			/* Swap bytes/shorts */
+extern VOID phys_seek ();		/* Physical seek to given location */
+extern char *ur_gname ();		/* Translate uid to name */
+extern char *gp_gname ();		/* Translate gid to name */
+extern BOOLEAN seekable ();		/* Test for archive device seekable */
+extern VOID voutput ();			/* Verbosity output */
+extern VOID vflush ();			/* Flush verbosity output (with \n) */
+
+extern struct bru_info info;		/* Invocation information */
+extern struct finfo afile;		/* Archive file info */
+extern struct cmd_flags flags;		/* Flags from command line */
+extern struct device *ardp;		/* Pointer to archive device info */
+extern UINT bufsize;			/* Archive read/write buffer size */
+extern long msize;			/* Size of archive media */
+extern char mode;			/* Current mode */
+extern time_t artime;			/* Time read from existing archive */
+extern char response ();		/* Get single character response */
+extern VOID shmcheck ();		/* Check bufsize against shm size */
+
+static VOID dump_info ();
+static BOOLEAN is_junk ();
+static VOID bad_magic ();
+static VOID size_hack ();
+
+
+d67 2
+a68 3
+    register union blk *blkp;
+    register int magic;
+    VOID readsizes ();
+d102 1
+a102 1
+    register int result = FALSE;
+d105 1
+a105 1
+    result = (mode == 't' && msize != 0L && !flags.bflag && !flags.pflag);
+d160 1
+a160 1
+	voutput ("buffer size = %uk bytes", (UINT) bufsize/1024);
+d163 2
+a164 2
+	if (msize != 0L) {
+	    voutput ("%ldk bytes", (long) (msize/1024));
+d177 1
+a177 1
+    register BOOLEAN result;
+d199 2
+a200 2
+    register USHORT ar_uid;
+    register USHORT ar_gid;
+d220 3
+a222 3
+		   blkp -> AH.a_host.sysname, blkp -> AH.a_host.nodename,
+		   blkp -> AH.a_host.release, blkp -> AH.a_host.version,
+		   blkp -> AH.a_host.machine);
+d236 1
+a236 1
+	voutput ("msize:\t\t%ld",
+d263 3
+a265 3
+		   blkp -> AH.a_host.sysname, blkp -> AH.a_host.nodename,
+		   blkp -> AH.a_host.release, blkp -> AH.a_host.version,
+		   blkp -> AH.a_host.machine);
+d279 2
+a280 2
+    register int vol;
+    register char key;
+d317 1
+a317 1
+    register int ejectflag;
+d363 1
+a363 1
+register union blk *blkp;
+d365 2
+a366 2
+    register UINT size;
+    register long ar_msize;
+d370 2
+a371 2
+	ar_msize = FROMHEX (blkp -> HD.h_msize);
+	if (ar_msize > 0) {
+@

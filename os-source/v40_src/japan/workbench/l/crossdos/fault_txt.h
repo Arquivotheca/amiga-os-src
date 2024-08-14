@@ -1,0 +1,76 @@
+#ifndef DOS_DOS_H
+#include <dos/dos.h>
+#endif
+#ifndef DOS_DOSASL_H
+#include <dos/dosasl.h>
+#endif
+
+#define USE_COUNT (-160)
+#define NAME (-159)
+#define DISABLED (-158)
+#define INTERNAL (-157)
+#define SYSTEM (-156)
+#define FAULT (-155)
+#define FAIL_LIMIT (-154)
+#define BAD_RETURN_CODE (-153)
+#define CURRENT_DIR (-152)
+#define NO_RETURN_CODE (-151)
+#define LAST_CMD_FAILED (-150)
+#define PROCESS_ENDING (-149)
+#define REQUESTED_SIZE_TOO_SMALL (-148)
+#define REQUESTED_SIZE_TOO_LARGE (-147)
+#define CURRENT_STACK_SIZE (-146)
+#define NEWSHELL_FAILED (-145)
+#define MISSING_ELSE_OR_ENDIF (-144)
+#define MUST_BE_IN_CMD_FILE (-143)
+#define MORE_THAN_ONE_DIR (-142)
+#define CANT_SET (-141)
+#define BLOCK_CORRUPT_DIR (-140)
+#define BLOCK_CORRUPT_FILE (-139)
+#define BLOCK_BAD_HEADER (-138)
+#define BLOCK_OUT_OF_RANGE (-137)
+#define BLOCK_USED_TWICE (-136)
+#define VALIDATION_ERROR (-135)
+#define ON_DISK_BLOCK (-134)
+#define CHECKSUM_ERROR (-133)
+#define WRITE_ERROR (-132)
+#define READ_ERROR (-131)
+#define UNABLE_CREATE_PROC (-130)
+#define NEW_SHELL_PROCESS (-129)
+#define CANT_OPEN_FROM_FILE (-128)
+#define SUSPEND_REBOOT (-127)
+#define RETRY_CANCEL (-126)
+#define NO_ROOM_FOR_BITMAP (-125)
+#define CMD_TOO_LONG (-124)
+#define SHELL_ERROR (-123)
+#define CMDNAME_ERROR (-122)
+#define UNKNOWN_COMMAND (-121)
+#define LOAD_ERROR (-120)
+#define SYNTAX_ERROR (-119)
+#define REDIRECT_ERROR (-118)
+#define ERROR (-117)
+#define EMPTY_STRING (-116)
+#define DISK_CORRUPT (-115)
+#define PROGRAM_FAILED (-114)
+#define WAIT_FOR_ACTIVITY (-113)
+#define IN_DEVICE (-112)
+#define IN_UNIT (-111)
+#define YOU_MUST_REPLACE (-110)
+#define READ_WRITE_ERROR (-109)
+#define NO_DISK_PRESENT (-108)
+#define NOT_A_DOS_DISK (-107)
+#define ANY_DRIVE (-106)
+#define REPLACE_VOLUME (-105)
+#define INSERT_VOLUME (-104)
+#define IS_FULL (-103)
+#define IS_PROTECTED (-102)
+#define IS_NOT_VALIDATED (-101)
+#define VOLUME (-100)
+
+#define MAX_FAULT   (0x7FFFFFFF)
+
+struct Fault_strings
+{
+    LONG    f_code;     /* fault code */
+    STRPTR  f_string;   /* fault string */
+};

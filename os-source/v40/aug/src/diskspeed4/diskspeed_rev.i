@@ -1,0 +1,14 @@
+VERSION		EQU	4
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'29.11.91'
+	ENDM
+VERS	MACRO
+		dc.b	'DiskSpeed 4.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'DiskSpeed 4.1 (29.11.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: DiskSpeed 4.1 (29.11.91)',0
+	ENDM

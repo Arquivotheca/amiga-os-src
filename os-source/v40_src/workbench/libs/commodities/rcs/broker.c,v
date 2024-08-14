@@ -1,0 +1,436 @@
+head     38.6;
+branch   ;
+access   ;
+symbols  ;
+locks    vertex:38.6; strict;
+comment  @ * @;
+
+
+38.6
+date     92.10.16.18.03.21;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.02.27.17.06.52;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.10.24.10.21.51;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.10.21.11.05.45;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.10.08.12.14.52;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.10.07.15.28.25;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Commodity broker management
+@
+
+
+38.6
+log
+@Changes for SAS/C 6.0
+@
+text
+@
+#include <string.h>
+
+#include <clib/exec_protos.h>
+#include <pragmas/exec_pragmas.h>
+
+#include "commoditiesbase.h"
+#include "broker.h"
+#include "messages.h"
+
+
+/*****************************************************************************/
+
+
+/* Return values for BrokerCommand() (for use by Exchange program) */
+#define CMDE_OK        (0)
+#define CMDE_NOBROKER  (-1)
+#define CMDE_NOPORT    (-2)
+#define CMDE_NOMEM     (-3)
+
+
+/*****************************************************************************/
+
+
+static LONG DoBrokerCommand(struct CxObj *broker, WORD commandid)
+{
+struct CxMsg   *msg;
+struct MsgPort *port;
+struct Task    *task;
+
+    if (!broker)
+        return (CMDE_NOBROKER);
+
+    if (!(port = BROKER_DATA(broker)->cbd_Port))
+    {
+        /* alternate means for kill command   */
+        if ((commandid == CXCMD_KILL) && (task = BROKER_DATA(broker)->cbd_Task))
+        {
+            Signal(task,SIGBREAKF_CTRL_E);
+        }
+        return (CMDE_NOPORT);
+    }
+
+    if (msg = CreateCxMsg(CXM_COMMAND,NULL))
+    {
+        CXMSGID(msg) = commandid;
+        PutMsg(port,(struct Message *)msg);
+
+        return(CMDE_OK);
+    }
+
+    return (CMDE_NOMEM);
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM BrokerCommandLVO(REG(a0) STRPTR name,
+                          REG(d0) LONG longcommand)
+{
+LONG         result;
+struct List *list;
+
+    if (!name)
+        name = "Exchange";
+
+    LockCX();
+    list = (struct List *)CXOBJLIST;
+    result = DoBrokerCommand((struct CxObj *)FindName(list,name),(WORD)longcommand);
+    UnlockCX();
+
+    return(result);
+}
+
+
+/*****************************************************************************/
+
+
+struct CxObj * ASM CxBrokerLVO(REG(a0) struct NewBroker *nb, REG(d0) LONG *errorptr)
+{
+struct CxObj *broker;
+LONG          err = CBERR_OK;
+struct List  *list;
+
+    LockCX();
+
+    /* duplicate protection */
+    list = (struct List *)CXOBJLIST;
+    broker = (struct CxObj *)FindName(list,nb->nb_Name);
+
+    if (broker && (nb->nb_Unique & NBU_NOTIFY))
+        DoBrokerCommand(broker,CXCMD_UNIQUE);
+
+    if (broker && (nb->nb_Unique & NBU_UNIQUE))
+    {
+        err    = CBERR_DUP;
+        broker = NULL;
+    }
+    else
+    {
+        if (broker = CreateCxObj(CX_BROKER,(LONG)nb,0))
+        {
+            if (IsListEmpty(list))
+                AttachIHandler();
+            else
+                BrokerCommand(NULL,CXCMD_LIST_CHG);
+
+            /* note: don't use EnqueueCxObj, which takes CxObj param */
+            Enqueue(list,(struct Node *)broker);
+            CO_FLAGS(broker) |= COF_INLIST;
+        }
+        else
+        {
+            err = CBERR_SYSERR;
+        }
+    }
+
+    UnlockCX();
+
+    /* pass back error codes if caller wants them */
+    if (errorptr != NULL)
+        *errorptr = err;
+
+    return (broker);
+}
+
+
+/*****************************************************************************/
+
+
+static VOID CopyStr(STRPTR to, STRPTR from, WORD maxLen)
+{
+   to[--maxLen] = 0;
+
+   while (maxLen-- > 0)
+       to[maxLen] = from[maxLen];
+}
+
+
+/*****************************************************************************/
+
+
+VOID InitBroker(struct CxObj *broker, struct NewBroker *nb)
+{
+struct CxBrokerData *cbd = BROKER_DATA(broker);
+
+    CopyStr(cbd->cbd_Name,  nb->nb_Name,  CBD_NAMELEN);
+    CopyStr(cbd->cbd_Title, nb->nb_Title, CBD_TITLELEN);
+    CopyStr(cbd->cbd_Descr, nb->nb_Descr, CBD_DESCRLEN);
+    cbd->cbd_Task = FindTask(NULL);
+
+    broker->co_Flags &= ~COF_ENABLE;   /* start disabled   */
+    broker->co_Name   = &cbd->cbd_Name[0];
+    broker->co_Pri    = nb->nb_Pri;
+
+    if (nb->nb_Version >= 5)
+        cbd->cbd_Port = nb->nb_Port;
+    else
+        cbd->cbd_Port = NULL;
+}
+@
+
+
+38.5
+log
+@Creating the first broker now causes the input handler to be added
+Removed FindBroker() function
+@
+text
+@a9 1
+#include "cxpools.h"
+d25 1
+a25 1
+LONG DoBrokerCommand(struct CxObj *broker, WORD commandid)
+d44 1
+a44 1
+    if (msg = (struct CxMsg *) GetEMsg(CXMSG_CMD_SIZE))
+d46 1
+a46 3
+        CXMSGTYPE(msg) = CXM_COMMAND;
+        CXMSGDATA(msg) = NULL;
+        CXMSGID(msg)   = commandid;
+d48 2
+a49 1
+        return (CMDE_OK);
+d62 2
+a63 2
+LONG            result;
+struct MinList *list;
+d69 1
+a69 1
+    list = CXOBJLIST;
+d82 3
+a84 3
+struct CxObj   *broker;
+LONG            err = CBERR_OK;
+struct MinList *list;
+d89 1
+a89 1
+    list = CXOBJLIST;
+a92 1
+    {
+a93 1
+    }
+d104 1
+a104 1
+            if (IsListEmpty((struct List *)CXOBJLIST))
+d110 1
+a110 2
+            list = CXOBJLIST;
+            Enqueue((struct List *)list,(struct Node *)broker);
+d132 1
+a132 1
+VOID CopyStr(STRPTR to, STRPTR from, WORD maxLen)
+@
+
+
+38.4
+log
+@Clean up and speed up
+@
+text
+@d26 1
+a26 1
+LONG brokerCommand(struct CxObj *broker, WORD commandid)
+d64 3
+a69 12
+    return (brokerCommand(FindBroker(name),(WORD)longcommand));
+}
+
+
+/*****************************************************************************/
+
+
+struct CxObj * ASM FindBrokerLVO(REG(a0) STRPTR name)
+{
+struct CxObj    *broker;
+struct MingList *list;
+
+d72 1
+a72 1
+    broker = (struct CxObj *) FindName((struct List *)list,name);
+d75 1
+a75 1
+    return (broker);
+d91 3
+a93 1
+    broker = FindBroker(nb->nb_Name);
+d96 1
+a96 1
+        brokerCommand(broker,CXCMD_UNIQUE);
+d108 5
+d124 2
+a128 2
+
+    UnlockCX();
+@
+
+
+38.3
+log
+@*** empty log message ***
+@
+text
+@d16 10
+d45 8
+a52 2
+    if (!(msg = (struct CxMsg *) CreateEMsg(CxMsgLength(CXM_COMMAND))))
+        return (CMDE_NOMEM);
+d54 1
+a54 7
+    CXMSGTYPE(msg) = CXM_COMMAND;
+    CXMSGDATA(msg) = NULL;
+    CXMSGID(msg)   = commandid;
+
+    PutMsg(port,(struct Message *)msg);
+
+    return (CMDE_OK);
+d76 2
+a77 2
+struct CxObj *broker;
+struct List  *list;
+d81 1
+a81 1
+    broker = (struct CxObj *) FindName(list,name);
+d93 3
+a95 3
+struct CxObj *broker;
+LONG          err = CBERR_OK;
+struct List  *list;
+a107 1
+        /* don't create another */
+a109 1
+
+a112 1
+        /* create an inactive broker */
+d116 2
+a118 2
+            list = CXOBJLIST;
+            Enqueue(list,(struct Node *)broker);
+d139 1
+a139 1
+VOID CopyStr(STRPTR to, STRPTR from, UWORD maxlen)
+d141 4
+a144 2
+   strncpy(to, from, maxlen);
+   to[maxlen - 1] = '\0';
+@
+
+
+38.2
+log
+@..
+@
+text
+@a1 1
+
+a15 10
+void safncpy(char *to, char *from,int maxlen)
+{
+   strncpy(to, from, maxlen);
+   to[maxlen - 1] = '\0';   /* be sure it is terminated   */
+}
+
+
+/*****************************************************************************/
+
+
+a17 1
+LONG            length;
+d20 1
+a20 1
+LONG            task;
+d30 1
+a30 1
+            Signal((struct Task *)task,SIGBREAKF_CTRL_E);
+d35 1
+a35 3
+    length = CxMsgLength( (LONG) CXM_COMMAND);
+
+    if (!(msg = (struct CxMsg *) CreateEMsg(length)))
+d57 1
+a57 1
+    return ((LONG) brokerCommand(FindBroker(name),(WORD)longcommand));
+d98 1
+a98 1
+        /* don't create another   */
+d105 2
+a106 2
+        /* create an inactive broker   */
+        if (broker = CreateCxObj((LONG) CX_BROKER,(LONG)nb,0))
+d108 2
+a109 2
+            /* note: don't use EnqueueCxObj, which takes CxObj param   */
+            broker->co_Flags |= COF_INLIST;
+d119 1
+a119 1
+    /* pass back error codes if caller wants them   */
+d132 10
+d146 4
+a149 4
+    safncpy(cbd->cbd_Name,  nb->nb_Name, CBD_NAMELEN);
+    safncpy(cbd->cbd_Title, nb->nb_Title, CBD_TITLELEN);
+    safncpy(cbd->cbd_Descr, nb->nb_Descr, CBD_DESCRLEN);
+    cbd->cbd_Task = (LONG) FindTask(NULL);
+d156 3
+a158 4
+    {
+        cbd->cbd_Port    = nb->nb_Port;
+        cbd->cbd_Channel = nb->nb_ReservedChannel;
+    }
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d103 1
+a103 1
+    /* duplicate protection   */
+d120 1
+a120 1
+        if (broker = CreateCxObj((LONG) CX_BROKER, (LONG)nb,0))
+@

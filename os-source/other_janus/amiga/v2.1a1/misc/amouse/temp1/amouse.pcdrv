@@ -1,0 +1,297 @@
+	TITLE   AMouseWindowsDriver
+
+include cmacros.inc
+
+assumes CS,CODE
+assumes DS,DATA
+
+sBegin   CODE
+
+?WIN=0
+
+cProc   MouseRead, NEAR
+
+	include	MouseDef.inc
+	include	lock.inc
+
+cBegin	MouseRead
+
+	push	di
+	push	es
+
+	xor	ax,ax		; init. to no change to report
+
+	les	di,dword ptr cs:ParamArea
+				; allow for removing lock instruction
+	ifdef	mylock
+
+  lock	inc byte ptr es:WriteLock[di]
+
+	else
+
+	inc byte ptr es:WriteLock[di]
+
+	endif
+
+	js	MRGotLock
+	jmp	MRNoMove	; exit no change if locked
+
+MRGotLock:
+					; read out of D.P.RAM into local area
+	les	di,dword ptr cs:DualPortArea
+	xor	bx,bx
+
+;	move data up to but excluding button status (not used by Windows)
+;	into local copy area with lock on, release lock and then examine
+;	data.
+				
+	mov	cx,(AmigaPCStatus/2)	; convert to words
+MoveLoop:
+	xor	ax,ax			; zero
+	xchg	ax,es:0[di+bx]		; destructive read from D.P.RAM
+	mov	cs:DPCopyArea[bx],ax	; store in local area
+	inc	bx
+	inc	bx
+	loop	MoveLoop
+
+	les	di,dword ptr cs:ParamArea
+				; allow for removing lock instruction
+	ifdef	mylock
+
+  lock	mov byte ptr es:WriteLock[di],7fH	; unlock
+
+	else
+
+	mov byte ptr es:WriteLock[di],7fH	; unlock
+
+	endif
+
+	lea	di,cs:DPCopyArea
+	mov	ax,cs
+	mov	es,ax		; es:di = DPCopyArea
+	xor	ax,ax		; initialise to no change
+
+				; get X change
+	mov	bx,es:AmigaPCX[di]
+	or	bx,bx
+	jz	GetY		; no change in X co-ord.
+	sar	bx,1
+	or	ax,1		; cursor position change
+GetY:
+				; get Y change
+	mov	cx,es:AmigaPCY[di]
+	or	cx,cx
+	jz	GetButtons	; no change in Y co-ord.
+	sar	cx,1
+	or	ax,1		; cursor position change
+GetButtons:
+	test	word ptr es:AmigaPCLeftP[di],-1
+	jz	GetLRel
+	or	ax,2		; Left pressed
+GetLRel:
+	test	word ptr es:AmigaPCLeftR[di],-1
+	jz	GetRPrs
+	or	ax,4		; Left released
+GetRPrs:
+	test	word ptr es:AmigaPCRightP[di],-1
+	jz	GetRRel
+	or	ax,8		; Right pressed
+GetRRel:
+	test	word ptr es:AmigaPCRightR[di],-1
+	jz	GetStatus
+	or	ax,16		; Right released
+GetStatus:
+
+MRNoMove:
+	pop	es
+	pop	di
+
+cEnd	MouseRead
+
+
+InTimer		db	0
+
+cProc	MouseInt, NEAR
+
+cBegin	MouseInt
+
+	test	cs:InTimer,-1
+	jnz	NextTimer		; still running since last int.
+
+	inc	cs:InTimer
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	push	ds
+	push	es
+	push	cs
+	pop	ds
+
+	call	MouseRead		; read Mouse info from DPRam
+	or	ax,ax
+	jz	NoChange
+	mov	dx,cs:DataSegment
+	mov	ds,dx
+	mov	dx,ds:[2]
+	call	dword ptr cs:IntCallAddr
+NoChange:
+	
+	pop	es
+	pop	ds
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	dec	cs:InTimer
+NextTimer:
+
+cEnd	MouseInt
+
+cProc	Timer, FAR
+cBegin	Timer
+
+	pushf
+	call	cs:dword ptr TimerOffset
+	call	MouseInt
+	iret
+
+cEnd	Timer
+
+cProc	Init, NEAR
+cBegin	Init
+
+	mov	cx,3			; Janus problem - try 3 times
+					; before giving up on Amiga
+RetryJanus:
+	push	cx
+	mov	ax,(JFUNC_GETBASE*256)+JIntNum	; get base for service
+	int	0BH			; do it
+;	or	al,al
+;	jnz	NoService		; one check (at time of writing useless)
+	mov	ax,di			; Parameter Offset
+	pop	cx
+	loop	RetryJanus
+	or	ax,ax			; the real check
+	jns	GotService		; Offset should be positive
+	jmp	NoService
+
+DualPortArea	dw	0,0
+ParamArea	dw	0,0
+DPCopyArea	dw	DPSize dup(0)
+TimerOffset	dw	0
+TimerSegment	dw	0
+IntCallAddr	dw	0
+IntCallSeg	dw	0
+DataSegment	dw	0
+
+GotService:
+	mov	ax,es:0[di]		; Offset of Buffer area
+	mov	DualPortArea,ax
+	mov	DualPortArea+2,dx	; segment of Buffer area
+	mov	ParamArea,di
+	mov	ParamArea+2,es		; parameter area address
+
+	mov	ax,351cH
+	int	21H			; read current Timer interrupt handler
+	mov	TimerSegment,es		; save
+	mov	TimerOffset,bx
+	mov	dx,OFFSET Timer
+	push	cs
+	pop	ds
+	mov	ax,251cH		; set new Timer interrupt handler
+	int	21H
+NoService:
+
+cEnd	Init
+
+Print		PROC	NEAR
+	pushf
+	sti
+	push	ax
+	mov	ah,5
+	int	21H
+	pop	ax
+	popf
+	ret
+Print		ENDP
+
+?WIN=1
+
+cProc	Inquire	, <PUBLIC,FAR,di,si>
+	parmD	Area
+cBegin	Inquire
+
+	les	di,Area
+	mov	si,0
+	mov	ax,14
+	mov	cx,ax
+  repz	movsb
+	sub	ax,cx
+
+cEnd	Inquire
+
+
+
+cProc	Enable, <PUBLIC,FAR>
+	parmD	IntAddr
+cBegin	Enable
+
+
+	push	ds
+	push	cs
+	pop	ds
+	mov	DataSegment,ax
+	les	bx,IntAddr		; windows interrupt routine
+	mov	IntCallAddr,bx
+	mov	IntCallSeg,es
+	
+	call	Init
+
+	xor	ax,ax			; return value ?
+
+cEnd	Enable
+
+cProc	Disable, <PUBLIC, FAR>
+cBegin	Disable
+
+	mov	ax,cs:TimerSegment
+	mov	dx,cs:TimerOffset
+	mov	ds,ax
+	or	ax,dx
+	jz	NotEn
+	mov	ax,251cH		; set new Timer interrupt handler
+	int	21H
+	xor	ax,ax			; zero
+	mov	cs:TimerSegment,ax
+	mov	cs:TimerOffset,ax
+NotEn:
+
+cEnd	Disable
+
+cProc	GetVector, <PUBLIC, FAR>
+cBegin	GetVector
+
+	mov	ax,-1
+
+cEnd	GetVector
+
+sEnd
+
+sBegin	DATA
+
+
+	db	001h, 000h, 003h, 000h, 000h, 000h, 002h, 000h
+	db	002h, 000h, 000h, 000h, 000h, 000h, 000h, 000h   
+	db	000h, 000h, 000h, 000h, 000h, 000h, 000h, 000h
+	db	000h, 000h, 000h, 000h, 000h, 000h, 000h, 000h
+	db	000h, 000h, 000h, 0FFh, 0FFh, 0F8h, 002h, 00Bh
+	db	0F7h, 002h, 000h, 0F8h, 003h, 00Ch, 0EFh, 000h 
+	db	000h, 000h, 030h, 06fh, 0ffh	 
+
+sEnd
+	END

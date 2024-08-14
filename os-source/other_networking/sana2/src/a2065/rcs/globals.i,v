@@ -1,0 +1,406 @@
+head     1.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @* @;
+
+
+1.4
+date     93.12.14.13.42.56;  author kcd;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.01.21.15.40.30;  author gregm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.11.07.11.49.40;  author gregm;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.10.24.10.59.38;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@First verison of New A2065 driver
+@
+
+
+1.4
+log
+@Updated file headers and some definitions to match with the SANA-II
+spec.  Added new structures for dealing with multiple protocol stacks.
+@
+text
+@**
+** A2065 SANA-II Device Driver source
+** Copyright (c) 1992 by Commodore-Amiga, Inc.
+**
+** All rights Reserved.
+**
+
+
+        include "utility/tagitem.i"
+        include "utility/hooks.i"
+        include "devices/sana2.i"
+        include "devices/sana2specialstats.i"
+        include "a2065stats.i"
+        include "a2065.i"
+        include "lvos.i"
+
+        xref _LVONextTagItem
+        xref _LVOMakeFunctions
+	xref _LVOFindTagItem
+
+Ether2 equ      ((((S2WIRETYPE_ETHERNET)&$ffff)<<16)|$0000)
+
+_LVOCopyToBuff equ -12
+_LVOCopyFromBuff equ -18
+_LVOWantPacket equ -24
+
+* temporary
+
+TAG_COPYTOBUFF   equ (TAG_USER+$B0000+1)
+TAG_COPYFROMBUFF equ (TAG_USER+$B0000+2)
+TAG_PACKETFILTER equ (TAG_USER+$B0000+3)
+
+	IFND DEBUG_MODE
+;DEBUG_MODE	EQU	1
+	ENDC
+
+        TRASHREG        OFF
+
+DEVPRI          EQU     0
+MAX_BOARDS      EQU     5
+HASH_SIZE       EQU     256
+HASH_MASK       EQU     255
+DELREG          EQU     $E80000
+
+        IFD     MAIN_MODULE
+        XDEF    InitReg
+        ELSE
+        XREF    InitReg
+        ENDC
+
+;----------------------------------------------------------------------------
+;                               DEVICE_BASE
+;----------------------------------------------------------------------------
+
+        STRUCTURE MYLIB,LIB_SIZE
+        ULONG   DeviceSegmentList
+        ULONG   SysBase
+        ULONG   ExpansionBase
+        ULONG   UTBase
+        ULONG   UnitCount
+        STRUCT  MyInt,IS_SIZE
+        STRUCT  UnitArray,MAX_BOARDS*4
+        STRUCT  ActiveUnits,MLH_SIZE
+        UBYTE   DeviceFlags
+        UBYTE   DevicePadding
+        LABEL   MYLIB_SIZE
+
+        BITDEF  DF,INIT_OK,0    ; If set, means device is ``initialized''
+
+;----------------------------------------------------------------------------
+;                              UNIT STRUCTURE
+;----------------------------------------------------------------------------
+
+        STRUCTURE       MY_UNIT,MLN_SIZE
+        APTR            UnitBoard
+        APTR            UnitChip
+        APTR            UnitMemory
+        APTR            UnitRxDescriptor
+        APTR            UnitTxDescriptor
+        APTR            UnitTxBuffer
+        APTR            UnitRxBuffer
+        ULONG           UnitOpenCount
+        ULONG           UnitTrackingCount
+        ULONG           UnitNRD
+        ULONG           UnitNWFill
+        ULONG           UnitNWDone
+        ULONG           UnitMCastRejects
+        STRUCT          UnitCurrentAddress,6
+        STRUCT          UnitDefaultAddress,6
+        STRUCT          UnitLogicalAddress,8
+        UBYTE           UnitFlags
+        UBYTE           UnitINEACount
+        STRUCT		UnitBMList,MLH_SIZE
+        STRUCT          UnitProtocolHashTable,HASH_SIZE*MLH_SIZE
+        STRUCT          Unit802PN,PN_SIZE
+        STRUCT          UnitOrfPN,PN_SIZE
+        STRUCT          UnitMultiCastList,MLH_SIZE
+        STRUCT          UnitConfigList,MLH_SIZE
+        STRUCT          UnitTxList,MLH_SIZE
+        STRUCT          UnitTxRunningList,MLH_SIZE
+        APTR            UnitConfigDev
+        STRUCT          UnitEventList,MLH_SIZE
+
+        LONG            MemoryOffset
+        LONG            ChipOffset
+
+        STRUCT          UnitSoftInt,IS_SIZE
+
+        STRUCT          UnitStats,S2DS_SIZE
+        LABEL           UNIT_SIZE_
+
+        BITDEF          UF,PAV,7
+        BITDEF          UF,OFFLINE,6
+        BITDEF          UF,HALT_WRITES,5
+        BITDEF          UF,WRITE_NEEDS_KICKSTART,4
+
+        BITDEF          UF,PROM,1
+        BITDEF          UF,MINE,0
+
+;----------------------------------------------------------------------------
+;                      MultiCast Address List Entry
+;----------------------------------------------------------------------------
+
+        STRUCTURE       MCN,MLN_SIZE
+        STRUCT          MCN_Address,6
+        ULONG           MCN_RxCount
+        UBYTE           MCN_Flags
+        UBYTE           MCN_Bit
+        UWORD           MCN_OpenCount
+        LABEL           MCN_SIZE
+
+;----------------------------------------------------------------------------
+;                             Protocol Nexus
+;----------------------------------------------------------------------------
+
+        STRUCTURE       PN,MLN_SIZE
+        USHORT          PN_PACKETTYPE
+        UBYTE           PN_FLAGS
+        UBYTE           PN_PADDING
+        STRUCT          PN_TYPESTATS,S2PTS_SIZE
+        STRUCT          PN_RXQ,MLH_SIZE
+        LABEL           PN_SIZE
+
+        BITDEF          PN,TRACKING,0
+
+;----------------------------------------------------------------------------
+;                Bit definitions for the ON_EVENT classes
+;----------------------------------------------------------------------------
+
+s2eF_ERROR    equ S2EVENT_ERROR
+s2eF_TX       equ S2EVENT_TX
+s2eF_RX       equ S2EVENT_RX
+s2eF_ONLINE   equ S2EVENT_ONLINE
+s2eF_OFFLINE  equ S2EVENT_OFFLINE
+s2eF_NETBUF   equ S2EVENT_BUFF
+s2eF_HARDWARE equ S2EVENT_HARDWARE
+s2eF_SOFTWARE equ S2EVENT_SOFTWARE
+
+* a rig because we changed the include files again, and I'm tired
+* of changing all the source constantly:
+S2DS_RXPACKETS equ S2DS_PACKETSRECEIVED
+S2DS_TXPACKETS equ S2DS_PACKETSSENT
+S2DS_FRAMINGERRORS equ S2DS_BADDATA
+S2DS_FIFOOVERRUNS equ  S2DS_OVERRUNS
+S2DS_RXUNKNOWNTYPES equ S2DS_UNKNOWNTYPESRECEIVED
+S2DS_HARDMISSES equ S2DS_OVERRUNS
+
+S2ERR_UNKNOWN_ENTITY equ S2ERR_BAD_ARGUMENT
+
+
+
+
+
+;----------------------------------------------------------------------------
+;       Debugging Stuff
+;       Comment out DEBUG_MODE to disable all debugging print outs.
+;----------------------------------------------------------------------------
+;
+
+        IFD     DEBUG_MODE
+        XREF    _kputstr,_kprintf
+        ENDC
+
+KPUTSTR MACRO
+        IFD     DEBUG_MODE
+        movem.l a0-a1/d0-d1,-(sp)
+        move.l  #\1,-(sp)
+        jsr     _kputstr
+        addq.w  #4,sp
+        movem.l (sp)+,a0-a1/d0-d1
+        ENDC
+        ENDM
+
+KPRN1   MACRO
+        IFD     DEBUG_MODE
+        movem.l a0-a1/d0-d1,-(sp)
+        move.l  \2,-(SP)
+        pea     \1
+        jsr     _kprintf
+        add.w   #8,sp
+        movem.l (sp)+,a0-a1/d0-d1
+        ENDC
+        ENDM
+
+KPRN2   MACRO
+        IFD     DEBUG_MODE
+        movem.l a0-a1/d0-d1,-(sp)
+        move.l  \3,-(SP)
+        move.l  \2,-(SP)
+        pea     \1
+        jsr     _kprintf
+        add.w   #12,sp
+        movem.l (sp)+,a0-a1/d0-d1
+        ENDC
+        ENDM
+
+KPRN3   MACRO
+        IFD     DEBUG_MODE
+        movem.l a0-a1/d0-d1,-(sp)
+        move.l  \4,-(SP)
+        move.l  \3,-(SP)
+        move.l  \2,-(SP)
+        pea     \1
+        jsr     _kprintf
+        add.w   #16,sp
+        movem.l (sp)+,a0-a1/d0-d1
+        ENDC
+        ENDM
+
+
+;----------------------------------------------------------------------------
+;                           Miscellaneous Stuff
+;----------------------------------------------------------------------------
+
+NLIST   MACRO
+        LEA     \1,A0
+        NEWLIST A0
+        ENDM
+
+DELAY   MACRO
+        tst.w   DELREG
+        ENDM
+
+;----------------------------------------------------------------------------
+;                           New Stuff for SANA-II V2 Compliance
+;----------------------------------------------------------------------------
+
+    STRUCTURE	SQ,MLN_SIZE
+	STRUCT		SQ_LIST,MLH_SIZE
+	APTR		SQ_FUNCTABLE
+	IFD	DEBUG_MODE
+	APTR		SQ_TASKNAME
+	ENDC
+	LABEL		SQ_SIZE
+
+    STRUCTURE	BMSTRUCT,0
+	APTR		BMS_CopyToBuff
+	APTR		BMS_CopyFromBuff
+	APTR		BMS_PacketHook
+	LABEL		BMS_SIZE
+@
+
+
+1.3
+log
+@Added a reference to the ConfigDev structure in each Unit struct.
+@
+text
+@d1 7
+a7 7
+;
+;        G L O B A L S . I   -   GLOBAL Definitions For A2065 Driver
+;
+;         Created Under Contract To Commodore Business Machines By:
+;
+;                   Perry Kivolowitz - ASDG Incorporated
+;
+d10 5
+a15 4
+        include "inc:sana2.i"
+        include "inc:sana2specialstats.i"
+        include "a2065stats.i"
+        include "a2065.device.i"
+d19 1
+d25 1
+d29 1
+a29 1
+TAG_COPYTOBUFF equ (TAG_USER+$B0000+1)
+d31 1
+a31 1
+
+d33 3
+d93 1
+d104 3
+d166 1
+a166 1
+S2DS_HARDMISSES equ S2DS_SOFTMISSES
+d194 11
+d230 1
+d244 17
+@
+
+
+1.2
+log
+@Changes too numerous to mention!
+@
+text
+@d94 1
+a94 1
+
+a220 1
+
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d14 1
+a32 2
+VERSION         EQU     1
+REVISION        EQU     0
+d79 2
+d86 1
+a86 1
+        UBYTE           UnitPadding
+d93 1
+d95 1
+a95 8
+        STRUCT          UnitErrorErrList,MLH_SIZE               ; 0
+        STRUCT          UnitTransmitErrList,MLH_SIZE            ; 1
+        STRUCT          UnitReceiverErrList,MLH_SIZE            ; 2
+        STRUCT          UnitOnLineList,MLH_SIZE                 ; 3
+        STRUCT          UnitOffLineList,MLH_SIZE                ; 4
+        STRUCT          UnitNetBuffErrList,MLH_SIZE             ; 5
+        STRUCT          UnitHardwareErrList,MLH_SIZE            ; 6
+        STRUCT          UnitSoftwareErrList,MLH_SIZE            ; 7
+d140 20
+a159 8
+        BITDEF          s2e,ERROR,S2EVENT_ERROR
+        BITDEF          s2e,TX,S2EVENT_TX
+        BITDEF          s2e,RX,S2EVENT_RX
+        BITDEF          s2e,ONLINE,S2EVENT_ONLINE
+        BITDEF          s2e,OFFLINE,S2EVENT_OFFLINE
+        BITDEF          s2e,NETBUF,S2EVENT_BUFF
+        BITDEF          s2e,HARDWARE,S2EVENT_HARDWARE
+        BITDEF          s2e,SOFTWARE,S2EVENT_SOFTWARE
+d161 3
+d170 1
+a170 1
+*       IFD     DEBUG_MODE
+d172 1
+a172 1
+*       ENDC
+a221 7
+KPUTMSG MACRO
+        movem.l a0-a1/d0-d1,-(sp)
+        move.l  #\1,-(sp)
+        jsr     _kputstr
+        addq.w  #4,sp
+        movem.l (sp)+,a0-a1/d0-d1
+        ENDM
+@

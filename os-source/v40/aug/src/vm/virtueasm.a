@@ -1,0 +1,491 @@
+;======================================================================
+;
+;	Assembly module of virtual memory handler, Virtue, Copyright
+;	July 1989, Valentin Pepelea. All rights reserved. Please do not
+;	propagate, I will do that myself in due time.
+;
+;======================================================================
+
+CALLSYS	macro	*
+	jsr	LVO\1(a6)
+	endm
+
+JUMPSYS macro	*
+	jmp	LVO\1(a6)
+	endm
+
+GURU	macro	*
+	move.l	4,a6			; Load ExecBase address
+	move.l	#\1,d7			; Load Guru number
+	CALLSYS	Alert
+	endm
+
+LVOSupervisor	EQU	-30
+LVOAlert	EQU	-$6c
+
+;======================================================================
+;
+;	section text,code
+	csect	text,0,,0,4
+;		name,type,align,rtype,rsize
+;				0 = Absolute short or long address
+;				1 = PC-relative offset
+;				2 = Address-register-relative offset
+;
+;======================================================================
+
+	XREF	_PageFault
+	XDEF	_BusError
+	XDEF	_Forbiden
+	XDEF	_Disabled
+	XDEF	_SetCRP
+	XDEF	_SetTC
+	XDEF	_PFlush
+	XDEF	_PFlushA
+
+;======================================================================
+;
+;	Upon a Bus Error exception, we arrive here. The special status
+;	word (SSW) tells us what caused the fault, and we calculate the
+;	fault address accordingly. But first we have to save all
+;	registers onto the (user) stack.
+;
+;======================================================================
+
+_BusError:
+	move.l	a0,-(sp)		; Save this register
+	move.l	usp,a0			; Get user stack pointer
+	movem.l	d0-d7/a1-a6,-(a0)	; Save these registers
+	move.l	(sp)+,-(a0)		; Transfer this too...
+	move.l	a0,usp			; Update user stack pointer
+
+	move.b	$a(sp),d0		; Get special status word (SSW)
+	btst.l	#0,d0			; Data cycle fault?
+	bne	DataFault		; Branch if so
+	btst.l	#6,d0			; Stage B of instruction pipe?
+	bne	PipeStageB		; Branch if so
+	btst.l	#7,d0			; Stage C of instruction pipe?
+	bne	PipeStageC		; Branch if so
+
+;======================================================================
+;
+;	There are a variety of Gurus that may be generated when we fall
+;	into an unrecognized state. Only a few are really needed, the
+;	rest are for debugging puposes.
+;
+;	A0000000	Interrupts were disabled
+;	A0000001	Multitasking is forbidden
+;	A1000001	Bus Error (MMU not at fault, probably hardware)
+;	A1000002	Limit Violation
+;	A1000003	Supervisor Only
+;	A1000004	Access Level
+;	A1000005	Write Protected
+;	A2000001	Unrecognized exception frame for SaveFrame
+;	A2000002	Unrecognized exception frame for RestoreFrame
+;	A2000003	Unrecognized exception frame for DiscardFrame
+;	A2000004	Unrecognized exception frame for PipeStageB
+;	A2000005	Unrecognized exception frame for PipeStageC
+;	A300000x	Disk I/O error
+;	A4000000	None of FC, FB or DF bits in SSW were set
+;	A5000000	Debugging Halt (Assembler)
+;
+;======================================================================
+
+	GURU	$A4000000
+
+PipeStageB:
+	move.b	$6(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it 
+	cmpi.b	#%10100000,d0		; Short bus cycle stack frame?
+	bne	0$			; Branch if not
+	movea.l	$2(sp),a0		; Calculate fault address
+	addq.l	#4,a0
+	bra.s	TestAddress
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne	1$			; Branch if not
+	movea.l	$24(sp),a0		; Load fault address
+	bra.s	TestAddress
+1$
+	GURU	$A2000004		; Unrecognized exception stack frame
+
+PipeStageC:
+	move.b	$6(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it
+	cmpi.b	#%10100000,d0		; Short bus cycle stack frame?
+	bne	0$			; Branch if not
+	movea.l	$2(sp),a0		; Calculate fault address
+	addq.l	#4,a0
+	bra.s	TestAddress
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne	1$			; Branch if not
+	movea.l	$24(sp),a0		; Calculate fault address
+	subq.l	#2,a0
+	bra.s	TestAddress
+1$
+	GURU	$A2000005		; Unrecognized exception stack frame
+
+DataFault:
+	move.l	$10(sp),a0		; Get data cycle fault address
+
+TestAddress:
+	move.b	$d(sp),d0		; Get FC of fault address
+	ptestr	d0,(a0),#3		; Test out fault address
+	pmove	mmusr,temp		; Get MMU status register
+	bfffo	temp,{0:6},d1		; What type of exception occurred?
+	beq	not_pmmu		; Branch if not an MMU error
+	jmp	([4,pc,d1.w*4])		; Jump according to error type
+
+	dc.l	bus_error		; A bus error occurred on table search
+	dc.l	limit_violation		; A limit violation
+	dc.l	supervisor_only		; Page reserved to supervisor only 
+	dc.l	access_level		; Access level violation (68851 only)
+	dc.l	write_protected		; Write protect violation
+	dc.l	invalid_descriptor	; Aha, It's a page fault!
+	dc.l	not_pmmu		; Not an MMU error
+
+bus_error:
+	GURU	$A1000001
+
+limit_violation:
+	GURU	$A1000002
+
+supervisor_only:
+	GURU	$A1000003
+
+access_level:
+	GURU	$A1000004
+
+write_protected:
+	GURU	$A1000005
+
+;======================================================================
+;
+;	If the cause is an invalid descriptor, that means we have a page
+;	fault. So let's save the current exception frame onto the user
+;	stack, then go into user mode. So the supervisor stack will be
+;	just like it was before the page fault occured. Then we can 
+;	perform page swapping under safe multitasking condition.
+;
+;======================================================================
+
+
+invalid_descriptor:
+	move.l	a0,d3			; Get fault address
+	jsr	SaveFrame		; Save exception stack frame
+
+	; Let's go into user mode.
+
+	move.w	sr,d0			; Get status register
+	bclr.l	#$0d,d0			; Clear supervisor mode bit
+	move.w	d0,sr
+
+	move.l	d3,-(sp)		; Call a C function; put data on stack
+	jsr	_PageFault		; PageFault(faultaddress)
+	addq.l	#4,sp			; Adjust stack pointer
+
+	; Let's go back into supervisor mode.
+
+	move.l	4,a6			; Get address of ExecBase
+	lea	0$,a5			; Get the start of the supervisor code
+	JUMPSYS	Supervisor
+0$
+	jsr	DiscardFrame		; Get rid of bogus exception frame
+	jsr	RestoreFrame		; Restore page fault exception frame
+	move.l	usp,a0			; Get user stack pointer
+	move.l	(a0)+,-(sp)		; Transfer this value (register a0)
+	movem.l	(a0)+,d0-d7/a1-a6	; Restore these registers
+	move.l	a0,usp			; Update user stack pointer
+	move.l	(sp)+,a0		; Restore this register
+	rte
+
+;======================================================================
+;
+;	Since it was not an MMU error, let's fetch the pointer to the
+;	user's exception handler. (probably just the faithful Guru)
+;
+;======================================================================
+
+not_pmmu:
+	movea.l	_OldVector,a0		; Get old bus error autovector
+	jmp	(a0)			; Go to that error handler
+
+;======================================================================
+;
+;	This function saves the exception (page fault) frame from the
+;	supervisor stack onto the user stack. Callable only by 68010+
+;	processors. A non-bus error exception frame will cause a Guru.
+;
+;	Must be called from supervisor mode, with only the return 
+;	address on top of the exception stack frame.
+;
+;======================================================================
+
+SaveFrame:
+	move.l	sp,a0			; Get source address
+	addq.l	#4,a0			; Adjust for return address
+	move.l	usp,a1			; Get destination address
+	move.b	$a(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it
+
+	cmpi.b	#%10100000,d0		; Short bus cycle fault stack frame?
+	bne	0$			; Branch if not
+	move.l	#32,d0			; Load length of fault frame
+	sub.l	#32,a1			; Adjust destination address
+	move.l	a1,usp
+	jsr	CopyLongWords		; Save fault frame onto user stack
+	rtd	#32			; Adjust stack pointer and return
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne 1$
+	move.l	#92,d0
+	sub.l	#92,a1
+	move.l	a1,usp
+	jsr	CopyLongWords
+	rtd	#92
+1$
+	GURU	$A2000001		; Unrecognized exception frame
+
+;======================================================================
+;
+;	This function restores the fault frame from the user stack to
+;	the supervisor stack.
+;
+;======================================================================
+
+RestoreFrame:
+	move.l	(sp)+,d1		; Save return address
+	move.l	usp,a0			; Get source address
+	move.l	sp,a1			; Get destination address
+
+	move.b	$6(a0),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it
+
+	cmpi.b	#%10100000,d0		; Short bus cycle fault stack frame?
+	bne	0$			; Branch if not
+	move.l	#32,d0			; Load length of fault frame
+	sub.l	#32,a1			; Adjust destination address
+	move.l	a1,sp
+	jsr	CopyLongWords		; Restore frame onto supervisor stack
+	move.l	a0,usp			; Adjust user stack pointer
+	move.l	d1,-(sp)		; Restore return address
+	rts
+0$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault stack frame?
+	bne	1$			; Branch if not
+	move.l	#92,d0			; Load length of fault frame
+	sub.l	#92,a1			; Adjust destination address
+	move.l	a1,sp
+	jsr	CopyLongWords		; Restore frame onto supervisor stack
+	move.l	a0,usp			; Adjust user stack pointer
+	move.l	d1,-(sp)		; Restore return address
+	rts
+1$
+	GURU	$A2000002		; Unrecognized exception frame
+
+;======================================================================
+;
+;	This function simply 'erases' the exception stack frame located
+;	on top of the supervisor stack. Works only on 68010+ processors.
+;
+;	void DiscardFrame()
+;
+;======================================================================
+
+DiscardFrame:
+	move.b	$a(sp),d0		; Get stack frame type
+	andi.b	#%11110000,d0		; And isolate it
+	cmpi.b	#%00000000,d0		; Normal 4 word stack frame?
+	bne	0$
+	rtd	#8
+0$
+	cmpi.b	#%00010000,d0		; Throwaway 4 word stack frame?
+	bne	1$
+	rtd	#8
+1$
+	cmpi.b	#%00100000,d0		; Instruction exception? (6 words)
+	bne	2$
+	rtd	#12
+2$
+	cmpi.b	#%10000000,d0		; MC68010 Bus Fault (29 words)
+	bne	3$
+	rtd	#58
+3$
+	cmpi.b	#%10010000,d0		; Coprocessor Mid-Instruction? (10)
+	bne	4$
+	rtd	#20
+4$
+	cmpi.b	#%10100000,d0		; Short bus cycle fault? (16 words)
+	bne	5$
+	rtd	#32
+5$
+	cmpi.b	#%10110000,d0		; Long bus cycle fault? (46 words)
+	bne	6$
+	rtd	#92
+6$
+	GURU	$A2000003		; Unrecognized exception stack frame
+
+;======================================================================
+;
+;	The following two functions copy memory blocks, just like the
+;	CompyMem() system routine, but faster since there is no bound
+;	checking. Length of block, in bytes, must be below 2^16 words
+;	or longwords, as appropriate.
+;
+;	CopyWords(source,destination,length)(a0,a1,d0)
+;	CopyLongWords(source,destination,length)(a0,a1,d0)
+;
+;======================================================================
+
+CopyWords:
+	lsr.l	#1,d0			; How many words to copy?
+	beq	1$			; Return if none
+	subq.l	#1,d0			; Adjust for "dbra  d0,0$"
+0$
+	move.w	(a0)+,(a1)+		; Copy the words
+	dbra	d0,0$			; Branch if not finished
+1$
+	rts
+
+CopyLongWords:
+	lsr.l	#2,d0			; How many longwords to copy?
+	beq	1$			; Return if none
+	subq.l	#1,d0			; Adjust for "dbra  d0,0$"
+0$
+	move.l	(a0)+,(a1)+		; Copy the words
+	dbra	d0,0$			; Branch if not finished
+1$
+	rts
+
+;======================================================================
+;
+;	These functions determine wether multitasking is Forbid()en and
+;	wether interrupts are Disable()d. If so, it's Miller time.
+;
+;	void Disabled(), Forbiden() 
+;
+;======================================================================
+
+_Disabled:
+	move.l	a6,-(sp)		; Save this resgister
+	move.l	4,a6			; Get ExecBase
+	tst.b	$0126(a6)		; Are interrupts disabled?
+	blt	0$			; Branch if no
+	GURU	$A0000000		; Interrupts were disabled
+0$
+	move.l	(sp)+,a6		; Restore this register
+	rts
+
+_Forbiden:
+	move.l	a6,-(sp)		; Save this register
+	move.l	4,a6			; Get ExecBase
+	tst.b	$0127(a6)		; Is task switching enabled?
+	BLT	0$			; No? Eat a beacon, lettuce & tomato
+	GURU	$A0000001		; Multitasking was disabled
+0$
+	move.l	(sp)+,a6		; Restore this register
+	rts
+
+;======================================================================
+;
+;	This function sets the MMU CRP register.  It assumes a 68020 
+;	system with MMU, or a 68030 based system (eg, test for MMU before
+;	you call this, or you wind up in The Guru Zone).  Note that the
+;	CRP register is two longwords long. (author: Dave Haynie)
+;
+;	void SetCRP(ULONG *)
+;
+;======================================================================
+
+_SetCRP:
+	move.l	4(sp),a0		; Pointer to the CRP storage area
+	movem.l	a5/a6,-(sp)		; Save these registers
+	move.l	4,a6			; Get ExecBase
+	lea	0$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	movem.l	(sp)+,a5/a6		; Restore these registers
+	rts
+0$
+	pmove	(a0),CRP		; Set CRP register
+	rte
+
+;======================================================================
+;
+;	This function sets the MMU TC register.  It assumes a 68020 
+;	system with MMU, or a 68030 based system (eg, test for MMU before
+;	you call this, or you wind up in The Guru Zone). (by Dave Haynie) 
+;
+;	void SetTC(ULONG)
+;
+;======================================================================
+
+_SetTC:
+	lea	4(sp),a0		; Get address of our new TC value
+	movem.l	a5/a6,-(sp)		; Save these registers
+	move.l	4,a6			; Get ExecBase
+	lea	0$,a5			; Get the start of the supervisor code
+ 	CALLSYS	Supervisor
+	movem.l	(sp)+,a5/a6		; Restore these registers
+	rts
+0$
+	pmove	(a0),TC			; Set TC register
+	rte
+
+;======================================================================
+;
+;	This function flushes out the page descriptor located in the ATC
+;	which references the page whose address is placed on the stack.
+;
+;	void PFlush(ULONG)
+;
+;======================================================================
+
+_PFlush:
+	move.l	(sp),a0			; Get address of swapped-out page
+	movem.l	a5/a6,-(sp)		; Save these registers
+	move.l	4,a6			; Get ExecBase
+	lea	0$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	movem.l	(sp)+,a5/a6		; Restore these registers
+	rts
+0$
+;	pflush	#0,#0,(a0)		; Flush out the page's ATC entry
+	dc.w	%1111000000010000	; Bug in assembler forces me to do
+	dc.w	%0011100000010000	; to do this manually
+	rte
+
+;======================================================================
+;
+;	This function flushes out the entire ATC.
+;
+;	void PFlushA()
+;
+;======================================================================
+
+_PFlushA:
+	movem.l	a5/a6,-(sp)		; Save these registers
+	move.l	4,a6			; Get ExecBase
+	lea	0$,a5			; Get the start of the supervisor code
+	CALLSYS	Supervisor
+	movem.l	(sp)+,a5/a6		; Restore these registers
+	rts
+0$
+	pflusha				; Flush out the entire ATC
+	rte
+
+;======================================================================
+;
+;	Here is the uninitialized data section 
+;
+;======================================================================
+
+;	section hello,data
+	csect	data,1,,0,4
+
+	XREF	_OldVector
+
+temp:	ds.l	1			; Reserve one long word.
+
+	end
+

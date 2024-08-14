@@ -1,0 +1,2093 @@
+head     1.11;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.11
+date     93.10.19.16.17.16;  author jesup;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     93.09.06.22.21.26;  author jesup;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     93.09.06.19.13.57;  author jesup;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     93.09.03.19.28.24;  author jesup;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     93.09.03.19.18.58;  author jesup;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     93.08.31.20.40.07;  author jesup;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     93.07.21.15.26.40;  author jesup;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     93.07.21.13.58.38;  author jesup;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.10.12.10.59.31;  author gregm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.06.11.14.11.42;  author gregm;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.04.03.15.53.35;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@nipc/services filesystem glue
+@
+
+
+1.11
+log
+@Fixed cleanup after reconnect (mismatched free size - too small)
+@
+text
+@
+#include <stdio.h>
+#include <string.h>
+
+#include <exec/types.h>
+#include <intuition/intuition.h>
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/nipc_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/accounts_pragmas.h>
+#include <exec/memory.h>
+#include <clib/exec_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/utility_protos.h>
+#include <clib/nipc_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/accounts_protos.h>
+#include <envoy/services.h>
+#include <envoy/nipc.h>
+#include <envoy/accounts.h>
+#include <envoy/errors.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <dos/exall.h>
+#include <libraries/iffparse.h>
+#include "/fs.h"
+#include "fs_rev.h"
+#include "fsdbase.h"
+
+struct ExportVolume
+{
+    struct Node     ev_Link;            /* Link node */
+    struct List     ev_Users;           /* List of users that can access this volume */
+    UBYTE           ev_VolumeName[64];  /* Name of this volume for remote users */
+    ULONG           ev_Flags;           /* Flag bits for this export */
+};
+
+#define EVF_SnapshotOK          1
+#define EVF_LeftoutOK           2
+
+struct UserOrGroup
+{
+    struct Node     ug_Link;            /* Link node */
+    UWORD           ug_ID;
+    UBYTE           ug_Type;            /* see below */
+};
+
+#define UGTYPE_USER             0
+#define UGTYPE_GROUP            1
+
+ char *revision=VERSTAG;
+
+ extern STRPTR  FSDUser;
+ extern STRPTR  FSDPassword;
+ extern STRPTR  FSDEntityName;
+ extern ULONG   FSDSignalMask;
+ extern ULONG   FSDError;
+ extern struct Task *FSDSMProc;
+
+ extern __far FSDServer(void);
+
+void RemExall(BPTR lock, ULONG done);
+void ASM CleanupDeadMount(REG(a0) struct MountedFSInfo *m);
+BOOL CheckV37(BPTR lock);
+
+ULONG ASM StartService(REG(a0) struct TagItem *taglist)
+{
+    ULONG cptags[5];
+    UBYTE *entityName;
+    STRPTR userName;
+    STRPTR password;
+    struct Process *fsdproc;
+//    BOOL status = FALSE;
+    UBYTE  sigbit;
+    struct TagItem *tstate;
+    struct TagItem *tag;
+
+    tstate = taglist;
+    while (tag = NextTagItem(&tstate))
+    {
+        switch(tag->ti_Tag)
+        {
+            case SSVC_EntityName:
+                entityName = (UBYTE *) tag->ti_Data;
+                break;
+            case SSVC_UserName:
+                userName = (STRPTR) tag->ti_Data;
+                break;
+            case SSVC_Password:
+                password = (STRPTR) tag->ti_Data;
+                break;
+        }
+    }
+
+    strcpy(entityName,"Filesystem");
+
+    if(!FSDBase->FSD_Entity)
+    {
+        LoadConfig(&Mounts);
+        if(sigbit = AllocSignal(-1L))
+        {
+            FSDSMProc = (struct Task *) FindTask(0L);
+            FSDSignalMask = (1L<<sigbit);
+
+            cptags[0] = NP_Entry;
+            cptags[1] = (ULONG) FSDServer;
+            cptags[2] = NP_Name;
+            cptags[3] = (ULONG) "Filesystem";
+            cptags[4] = TAG_DONE;
+
+            FSDUser = userName;
+            FSDPassword = password;
+            FSDEntityName = entityName;
+
+            if(fsdproc = (struct Process *) CreateNewProc((struct TagItem *)cptags))
+            {
+                Wait(1L<<sigbit);
+//                status = TRUE;
+            }
+            FreeSignal(sigbit);
+        }
+    }
+    else
+    {
+        FSDError = 0;
+    }
+    return FSDError;
+}
+
+VOID ASM GetServiceAttrsA(REG(a0) struct TagItem *tagList)
+{
+    struct TagItem *ti;
+
+    if(ti=(struct TagItem *)FindTagItem( SVCAttrs_Name, tagList))
+    {
+        strcpy((STRPTR)ti->ti_Data,"Filesystem");
+    }
+}
+
+VOID ASM Server(REG(a0) STRPTR IUserName,
+                REG(a1) STRPTR IPassword,
+                REG(a2) STRPTR IEntityName)
+{
+    struct MountedFSInfo *mi;
+    struct MinList *mounts = &FSDBase->FSD_Current;
+    struct Entity *re;
+    ULONG sigbit;
+    ULONG cetags[7]={ENT_Name,0L,ENT_Public,0,ENT_AllocSignal,0L,TAG_DONE};
+    ULONG setags[4]={ENT_TimeoutLinks,1800,TAG_DONE,0};
+    register struct SignalSemaphore *ss = &FSDBase->FSD_CurrentLock;
+
+    NewList((struct List *) &ExAllList);
+    NewList((struct List *) mounts);
+    InitSemaphore(ss);
+
+    cetags[1]=(ULONG) IEntityName;
+    cetags[5]=(ULONG) &sigbit;
+
+    re = (struct Entity *) CreateEntityA((struct TagItem *)&cetags);
+    if (!re)
+        FSDError = 999;
+
+    SetEntityAttrsA(re,(struct TagItem *) &setags);
+
+    FSDBase->FSD_Entity = re;
+
+    Signal(FSDSMProc,FSDSignalMask);
+
+    if (re)
+    {
+        struct Transaction *t;
+
+        while (TRUE)
+        {
+            WaitEntity(re);
+
+            t = GetTransaction(re);
+            if (t)
+            {
+                switch (t->trans_Command)
+                {
+                    case (FSCMD_SHOWMOUNTS):
+                    {
+                        struct RequestMounts *rm;
+                        STRPTR out;
+                        struct ExportVolume *ev;
+                        struct UserInfo *ui;
+                        struct GroupInfo *gi;
+
+                        out = t->trans_ResponseData;
+                        rm = t->trans_RequestData;
+                        gi = AllocGroupInfo();
+                        if (gi)
+                        {
+                            ui = AllocUserInfo();
+                            if (ui)
+                            {
+                            /* ARgh!  This sucks -- by allowing some mounts to be "non-security", I have to conditionally give the user
+                             * less error feedback -- if given a bad username & pw, I don't know if they're talking to a non-secure
+                             * mount, or just typed in a pw wrong.  I'm settling for the point that if NO mounts are
+                             * found, then I check username/pw & return "bad u/pw" in that case.  Not a good solution, but
+                             * better than nothing.
+                             */
+                                int verd;
+                                /* If password is encrypted */
+                                if (rm->Password[0] == '$')
+                                    verd = VerifyUserCrypt(rm->User,&rm->Password[1],ui);
+                                else
+                                    verd = VerifyUser(rm->User,rm->Password,ui);
+
+                                ev = (struct ExportVolume *) Mounts.lh_Head;
+                                while (ev->ev_Link.ln_Succ)
+                                {
+                                    struct UserOrGroup *q;
+                                    /* check to see if this user/pw fits for this mount */
+                                    q = (struct UserOrGroup *) ev->ev_Users.lh_Head;
+                                    if (!(ev->ev_Flags & EVF_NoSecurity))  /* Everyone! */
+                                    {
+                                        while (q->ug_Link.ln_Succ)
+                                        {
+                                            if (q->ug_Type == UGTYPE_USER)
+                                            {
+                                                if (!verd)
+                                                    if (ui->ui_UserID == q->ug_ID)
+                                                    {
+                                                        break;
+                                                    }
+                                            }
+                                            else
+                                            {
+                                                if (!IDToGroup(q->ug_ID,gi))
+                                                {
+                                                    if (!verd)
+                                                        if (!MemberOf(gi,ui))
+                                                        {
+                                                            break;
+                                                        }
+                                                }
+                                            }
+                                            q = (struct UserOrGroup *) q->ug_Link.ln_Succ;
+                                        }
+                                    }
+                                    if (FSDBase->FSD_Mode == FSDMODE_NORMAL)
+                                    {
+                                        if ( (q->ug_Link.ln_Succ) || (ev->ev_Flags & EVF_NoSecurity) )
+                                        {
+					    // NOTE!  Greg uses modification of out as a flag!
+                                            if (ev->ev_VolumeName[0])
+                                                strcpy(out,ev->ev_VolumeName);      // Give the volume name rather than the device name
+                                            else
+                                                strcpy(out,ev->ev_Link.ln_Name);    // If no vol name exists, go dev name
+                                            out = &out[64];
+                                        }
+                                    }
+                                    if (((ULONG) out - (ULONG) t->trans_ResponseData) >= t->trans_RespDataLength)
+                                        break;
+                                    ev = (struct ExportVolume *) ev->ev_Link.ln_Succ;
+                                }
+                                if ((ULONG)out == (ULONG) t->trans_ResponseData)
+                                {
+                                    if (!VerifyUser(rm->User,rm->Password,ui))
+                                        t->trans_Error = FSERR_REJECTED_USER;
+                                }
+                                FreeUserInfo(ui);
+                            }
+                            FreeGroupInfo(gi);
+                        }
+                        t->trans_RespDataActual = ((ULONG)out - (ULONG) t->trans_ResponseData);
+
+                        ReplyTransaction(t);
+                        break;
+                    }
+                    case (FSCMD_DOSPACKET):
+                    {
+                        struct TPacket *tp;
+
+                        tp = (struct TPacket *) t->trans_RequestData;
+                        mi = (struct MountedFSInfo *) tp->tp_ServerMFSI;
+
+                        if (FSDBase->FSD_Mode == FSDMODE_NORMAL)
+                        {
+                            struct MountedFSInfo *mm;
+
+                            mm = (struct MountedFSInfo *) mounts->mlh_Head;
+                            while (mm->mfsi_Link.mln_Succ)
+                            {
+                                if (mm == mi)
+                                {
+                                    if (t->trans_SourceEntity == mi->mfsi_SourceEntity)
+                                        break;
+                                }
+                                mm = (struct MountedFSInfo *) mm->mfsi_Link.mln_Succ;
+                            }
+                            if (!mm->mfsi_Link.mln_Succ)
+                            {
+                                t->trans_Error = FSERR_REJECTED_USER;
+                                ReplyTransaction(t);
+                                break;
+                            }
+                            Remove((struct Node *)mm);
+                            AddHead((struct List *)mounts,(struct Node *)mm);   /* Keep recent mfsi's at the top of the list */
+                            ObtainSemaphore(ss);
+                            DoDosPacket(t,mi);
+                            ReleaseSemaphore(ss);
+                        }
+                        else
+                            t->trans_Error = FSERR_REJECTED_USER;
+                        ReplyTransaction(t);
+                        break;
+                    }
+                    case (FSCMD_MOUNT):
+                    {
+                        APTR oldwindow;
+                        struct Process *p;
+                        struct MountedFSInfo *z;
+                        ULONG denial= -1L;
+
+                        t->trans_RespDataActual = 4L;
+                        p = (struct Process *) FindTask(0L);
+                        oldwindow = (APTR) p->pr_WindowPtr;
+                        mi = (struct MountedFSInfo *) AllocMem(sizeof(struct MountedFSInfo),MEMF_PUBLIC|MEMF_CLEAR);
+                        if (mi)
+                        {
+                            UBYTE *lockname;
+                            UBYTE *ch;
+                            BOOL aup;
+                            struct ExportVolume *ev;
+                            struct UserInfo *ui;
+                            struct GroupInfo *gi;
+                            STRPTR Uname, Pword;
+
+                            Uname = &mi->mfsi_UserName[0];
+                            Pword = &mi->mfsi_Password[0];
+
+                            mi->mfsi_BaseLock = 0L;
+                            mi->mfsi_Flags = 0L;
+                            NewList((struct List *)&mi->mfsi_Locks);
+                            NewList((struct List *)&mi->mfsi_FileHandles);
+                            NewList((struct List *)&mi->mfsi_Etc);
+                            mi->mfsi_SourceEntity = t->trans_SourceEntity;
+                            p->pr_WindowPtr = (struct Window *) -1L;
+                            lockname = (UBYTE *) t->trans_RequestData;
+                            /* Match the volume name they've asked for up with a real name that's lockable */
+                            ev = (struct ExportVolume *) Mounts.lh_Head;
+                            while (ev->ev_Link.ln_Succ)
+                            {
+                                if (!Stricmp(t->trans_RequestData,ev->ev_VolumeName))
+                                {
+                                    lockname = (UBYTE *) ev->ev_Link.ln_Name;
+                                    break;
+                                }
+                                ev = (struct ExportVolume *) ev->ev_Link.ln_Succ;
+                            }
+
+                            mi->mfsi_BaseLock = (struct FileLock *) Lock(lockname,ACCESS_READ);
+                            GetHostName(t->trans_SourceEntity,(STRPTR)&mi->mfsi_HostName,80);
+                            /* Extract the client's name for the mount, username, and password from the mount request packet */
+                            ch = (UBYTE *) t->trans_RequestData;
+                            while (*ch)
+                                ch++;
+                            ch++;
+
+                            strcpy((char *)&mi->mfsi_ClientMount,(char *)ch);
+                            while (*ch)
+                                ch++;
+                            ch++;
+
+                            strcpy((char *)&mi->mfsi_UserName,(char *)ch);
+                            while (*ch)
+                                ch++;
+                            ch++;
+
+                            strcpy((char *)&mi->mfsi_Password,(char *)ch);
+                            //while (*ch)	not needed, we're done with ch
+                            //    ch++;
+                            //ch++;
+
+                            /* Attempt to Authenticate a user by the name and password
+                             * given.
+                             */
+                            /* Verify that the mount they're requesting is possible */
+                            aup = FALSE;
+                            gi = AllocGroupInfo();
+                            if (gi)
+                            {
+                                ui = AllocUserInfo();
+                                if (ui)
+                                {
+                                    /* This user/pw is real.  Try to find the mount they want. */
+                                    ev = (struct ExportVolume *) Mounts.lh_Head;
+                                    while (ev->ev_Link.ln_Succ)
+                                    {
+                                        /* If they ask for either the raw device name or the
+                                         * permitted volume name, match on it.
+                                         */
+                                        if ( (!Stricmp(ev->ev_Link.ln_Name,t->trans_RequestData)) ||
+                                             (!Stricmp(ev->ev_VolumeName,t->trans_RequestData)) )
+                                        {
+                                            /* Okay ... that mount exists ... are they permitted to use it? */
+                                            struct UserOrGroup *ug;
+
+                                            ug = (struct UserOrGroup *) ev->ev_Users.lh_Head;
+
+                                            if (ev->ev_Flags & EVF_NoSecurity)  /* Everyone! */
+                                            {
+                                                aup = TRUE;
+                                                mi->mfsi_UID = (UWORD) -1;
+                                                mi->mfsi_GID = (UWORD) -1;
+                                                mi->mfsi_UserFlags = 0;
+                                                break;
+                                            }
+                                            else
+                                            {
+                                                while (ug->ug_Link.ln_Succ)
+                                                {
+                                                    BOOL gooduser=FALSE;
+
+                                                    if (ug->ug_Type == UGTYPE_USER)
+                                                    {
+                                                        ULONG stat;
+                                                        if (Pword[0] == '$')
+                                                            stat = VerifyUserCrypt(Uname,&Pword[1],ui);
+                                                        else
+                                                            stat = VerifyUser(Uname,Pword,ui);
+
+                                                        if (!stat)
+                                                        {
+                                                            if (ui->ui_UserID == ug->ug_ID)
+                                                                if (FSDBase->FSD_Mode == FSDMODE_NORMAL)
+                                                                    gooduser = TRUE;
+                                                        }
+                                                        else
+                                                        {
+                                                            denial = FSERR_REJECTED_USER;
+                                                            break;
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        ULONG stat;
+                                                        if (Pword[0] == '$')
+                                                            stat = VerifyUserCrypt(Uname,&Pword[1],ui);
+                                                        else
+                                                            stat = VerifyUser(Uname,Pword,ui);
+
+                                                        if (!stat)
+                                                        {
+                                                            if (!IDToGroup(ug->ug_ID,gi))
+                                                            {
+                                                                if (!MemberOf(gi,ui))
+                                                                    if (FSDBase->FSD_Mode == FSDMODE_NORMAL)
+                                                                        gooduser = TRUE;
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            denial = FSERR_REJECTED_USER;
+                                                            break;
+                                                        }
+
+                                                    }
+                                                    if (gooduser)
+                                                    {
+                                                        aup = TRUE;
+                                                        mi->mfsi_UID = ui->ui_UserID;
+                                                        mi->mfsi_GID = ui->ui_PrimaryGroupID;
+                                                        mi->mfsi_UserFlags = ui->ui_Flags;
+                                                        break;
+                                                    }
+                                                    ug = (struct UserOrGroup *) ug->ug_Link.ln_Succ;
+                                                }
+                                                if (!ug->ug_Link.ln_Succ)
+                                                    denial = FSERR_REJECTED_USER;
+                                                else
+                                                    break;
+                                            }
+                                        }
+                                        ev = (struct ExportVolume *) ev->ev_Link.ln_Succ;
+                                    }
+                                    if (!ev->ev_Link.ln_Succ)
+                                        denial = FSERR_REJECTED_NOMOUNT;
+                                    FreeUserInfo(ui);
+                                }
+                                FreeGroupInfo(gi);
+
+                                if (!aup)
+                                {
+                                    FreeMem(mi,sizeof(struct MountedFSInfo));
+                                    mi=0L;
+                                }
+                                else
+                                {
+                                    if (TRUE) /* This user/group isn't priv'd. */
+                                    {
+                                        p->pr_WindowPtr = (struct Window *) oldwindow;
+                                        if (mi->mfsi_BaseLock)
+                                        {
+                                            STRPTR xp;
+                                            ULONG notag[2]={TAG_DONE,0};
+                                            t->trans_Error = 0L;
+                                            ((ULONG *)t->trans_ResponseData)[0] = (ULONG) mi;
+                                            xp = (STRPTR) (t->trans_ResponseData);
+                                            xp = &xp[4];
+                                            strcpy((UBYTE *)xp,(UBYTE *)&ev->ev_VolumeName);
+                                            mi->mfsi_Flags |= MFSIF_NOBACKDROP|MFSIF_NODISKINFO|MFSIF_SECURITYON;
+                                            if (ev->ev_Flags & EVF_SnapshotOK)
+                                                mi->mfsi_Flags &= ~MFSIF_NODISKINFO;
+                                            if (ev->ev_Flags & EVF_LeftoutOK)
+                                                mi->mfsi_Flags &= ~MFSIF_NOBACKDROP;
+                                            if (!(ev->ev_Flags & EVF_Full))
+                                                mi->mfsi_Flags &= ~MFSIF_SECURITYON;
+
+					    // we must know if this is a V37 filesystem
+					    if (CheckV37(mi->mfsi_BaseLock))
+						mi->mfsi_Flags |= MFSIF_V37_FS | MFSIF_COMMENT_BSTR;
+
+                                            mi->mfsi_VolumeName = &ev->ev_VolumeName[0];
+
+                                            mi->mfsi_FIB = (APTR) AllocDosObject(DOS_FIB, (struct TagItem *) &notag);
+
+                                            t->trans_RespDataActual = (strlen(xp))+1+4;
+                                            ReplyTransaction(t);
+                                        }
+                                        else
+                                        {
+                                            FreeMem(mi,sizeof(struct MountedFSInfo));
+                                            mi = 0L;
+                                        }
+                                        if (mi)
+                                        {
+                                            /* Search for duplicates */
+                                            /* Same source name, equiv. locks, same foreign lock name constitutes a match */
+                                            z = (struct MountedFSInfo *) mounts->mlh_Head;
+                                            while (z->mfsi_Link.mln_Succ)
+                                            {
+                                                if ( (!strcmp((char *)&z->mfsi_HostName,(char *)&mi->mfsi_HostName)) &&
+                                                     (!strcmp((char *)&z->mfsi_ClientMount,(char *)&mi->mfsi_ClientMount)) &&
+                                                     (SameLock((BPTR)z->mfsi_BaseLock,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME) )
+                                                {
+                                                    struct MountedFSInfo *q;
+                                                    q = z;
+                                                    z = (struct MountedFSInfo *)z->mfsi_Link.mln_Pred;
+                                                    ObtainSemaphore(ss);
+                                                    Remove((struct Node *)q);
+                                                    ReleaseSemaphore(ss);
+                                                    CleanupDeadMount(q);
+                                                }
+                                                z = (struct MountedFSInfo *) z->mfsi_Link.mln_Succ;
+                                            }
+                                            ObtainSemaphore(ss);
+                                            AddTail((struct List *)mounts,(struct Node *)mi);
+                                            ReleaseSemaphore(ss);
+                                        }
+                                    }
+                                    else /* User not accepted */
+                                    {
+                                        FreeMem(mi,sizeof(struct MountedFSInfo));
+                                        mi=0L;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                FreeMem(mi,sizeof(struct MountedFSInfo));
+                                mi = 0L;
+                            }
+                        }
+                        if (!mi)
+                        {
+                            t->trans_Error = denial;
+                            /* Institute use count */
+                            ((ULONG *)t->trans_ResponseData)[0]=0L;
+                            t->trans_RespDataActual = 4;
+                            ReplyTransaction(t);
+                            /* Close all open files, free locks */
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+}
+
+void KeepRecordLock(struct MountedFSInfo *m, BPTR fh, ULONG pos, ULONG len)
+{
+    struct LockedRecord *l;
+    l = (struct LockedRecord *) AllocMem(sizeof(struct LockedRecord),MEMF_CLEAR);
+    if (l)
+    {
+        l->rl_FileHandle = fh;
+        l->rl_Position = pos;
+        l->rl_Length = len;
+        KeepEtc(ETCTYPE_RecordLock,(APTR) l, m);
+    }
+}
+
+void NukeRecordLock(struct MountedFSInfo *m, BPTR fh, ULONG pos, ULONG len)
+{
+    struct LockedRecord *l;
+    struct ResourcesUsed *r;
+    r = (struct ResourcesUsed *) m->mfsi_Etc.mlh_Head;
+    while (r->ru_link.ln_Succ)
+    {
+        l = (struct LockedRecord *) r->ru_Resource;
+        if ((l->rl_FileHandle == fh) && (l->rl_Position == pos) && (l->rl_Length == len) &&
+            (r->ru_link.ln_Type == ETCTYPE_RecordLock))
+        {
+            Remove((struct Node *)r);
+            FreeMem(r,sizeof(struct ResourcesUsed));
+            return;
+        }
+        r = (struct ResourcesUsed *) r->ru_link.ln_Succ;
+    }
+}
+
+
+void KeepEtc(ULONG type, APTR data, struct MountedFSInfo *m)
+{
+    struct ResourcesUsed *ru;
+
+    ru = (struct ResourcesUsed *) AllocMem(sizeof(struct ResourcesUsed),MEMF_CLEAR|MEMF_PUBLIC);
+    if (!ru)
+        return;
+    ru->ru_link.ln_Type = type;
+    ru->ru_Resource = data;
+    AddTail((struct List *)&m->mfsi_Etc,(struct Node *)&ru->ru_link);
+}
+
+void NukeEtc(APTR data, struct MountedFSInfo *m)
+{
+    struct ResourcesUsed *r;
+    r = (struct ResourcesUsed *) m->mfsi_Etc.mlh_Head;
+    while (r->ru_link.ln_Succ)
+    {
+        if (r->ru_Resource == (APTR) data)
+        {
+            Remove((struct Node *)r);
+            FreeMem(r,sizeof(struct ResourcesUsed));
+            return;
+        }
+        r = (struct ResourcesUsed *) r->ru_link.ln_Succ;
+    }
+}
+
+void KeepLock(APTR thelock,struct MountedFSInfo *m)
+{
+
+    struct ResourcesUsed *ru;
+
+    ru = (struct ResourcesUsed *) AllocMem(sizeof(struct ResourcesUsed),MEMF_CLEAR|MEMF_PUBLIC);
+    if (!ru)
+        return;
+    ru->ru_Resource = thelock;
+    AddTail((struct List *)&m->mfsi_Locks,(struct Node *)&ru->ru_link);
+}
+
+
+void KeepFH(APTR thefh,struct MountedFSInfo *m)
+{
+
+    struct ResourcesUsed *ru;
+
+    ru = (struct ResourcesUsed *) AllocMem(sizeof(struct ResourcesUsed),MEMF_CLEAR|MEMF_PUBLIC);
+    if (!ru)
+        return;
+    ru->ru_Resource = thefh;
+    AddTail((struct List *)&m->mfsi_FileHandles,(struct Node *)&ru->ru_link);
+}
+
+void NukeLock(APTR thelock,struct MountedFSInfo *m)
+{
+    struct ResourcesUsed *r;
+    if (!thelock)
+        return;
+
+    // also must clean up any exalls underway
+    RemExall((BPTR) thelock,FALSE);
+
+    r = (struct ResourcesUsed *) m->mfsi_Locks.mlh_Head;
+    while (r->ru_link.ln_Succ)
+    {
+        if (r->ru_Resource == (APTR) thelock)
+        {
+            Remove((struct Node *)r);
+            FreeMem(r,sizeof(struct ResourcesUsed));
+            return;
+        }
+        r = (struct ResourcesUsed *) r->ru_link.ln_Succ;
+    }
+}
+
+void NukeFH(APTR thefh,struct MountedFSInfo *m)
+{
+
+    struct ResourcesUsed *r;
+    r = (struct ResourcesUsed *) m->mfsi_FileHandles.mlh_Head;
+    while (r->ru_link.ln_Succ)
+    {
+        if (r->ru_Resource == (APTR) thefh)
+        {
+            Remove((struct Node *)r);
+            FreeMem(r,sizeof(struct ResourcesUsed));
+            return;
+        }
+        r = (struct ResourcesUsed *) r->ru_link.ln_Succ;
+    }
+}
+
+void ASM CleanupDeadMount(REG(a0) struct MountedFSInfo *m)
+{
+
+    struct ResourcesUsed *r;
+
+    if (m->mfsi_FIB)
+        FreeDosObject(DOS_FIB,m->mfsi_FIB);
+
+    while (r = (struct ResourcesUsed *) RemHead((struct List *)&m->mfsi_Locks))
+    {
+        DoPkt(((struct FileLock *)BADDR(m->mfsi_BaseLock))->fl_Task,ACTION_FREE_LOCK,(ULONG)r->ru_Resource,0,0,0,0);
+        FreeMem(r,sizeof(struct ResourcesUsed));
+    }
+
+    while (r = (struct ResourcesUsed *) RemHead((struct List *)&m->mfsi_FileHandles))
+    {
+        struct FileHandle *f;
+        f = (struct FileHandle *) r->ru_Resource;
+        DoPkt(((struct FileLock *)BADDR(m->mfsi_BaseLock))->fl_Task,ACTION_END,f->fh_Arg1,0,0,0,0);
+        FreeMem(f,sizeof(struct SFH));
+        FreeMem(r,sizeof(struct ResourcesUsed));
+    }
+
+    while (r = (struct ResourcesUsed *) RemHead((struct List *)&m->mfsi_Etc))
+    {
+        switch (r->ru_link.ln_Type)
+        {
+            case ETCTYPE_RecordLock:
+            {
+                struct LockedRecord *l=r->ru_Resource;
+                UnLockRecord(l->rl_FileHandle,l->rl_Position,l->rl_Length);
+                FreeMem(l,sizeof(struct LockedRecord));
+                break;
+            }
+        }
+        FreeMem(r,sizeof(struct ResourcesUsed));
+    }
+
+    FreeMem(m,sizeof(struct MountedFSInfo));
+}
+
+
+BOOL BadStructure(UBYTE *structname)
+{
+    BOOL returnval = FALSE;
+    struct Library *ib;
+
+    ib = OpenLibrary("intuition.library",0L);
+    IntuitionBase = ib;
+    if (IntuitionBase)
+    {
+        struct EasyStruct ers={sizeof(struct EasyStruct),0L,"Envoy Network Problem",
+                               "FS Server reports a null\nstructure.  Name:\n'%s'","OK"};
+        returnval = (BOOL) EasyRequestArgs(0L,&ers,0L,&structname);
+
+        CloseLibrary(ib);
+    }
+
+    return(returnval);
+}
+
+// fs version code stolen from c:Version
+
+#include <exec/resident.h>
+
+struct Resident *FindRomTag(BPTR segList)
+{
+struct Resident *tag;
+UWORD           *seg;
+ULONG            i;
+ULONG           *ptr;
+
+    while (segList)
+    {
+        ptr     = (ULONG *)((ULONG)segList << 2);
+        seg     = (UWORD *)((ULONG)ptr);
+        segList = *ptr;
+
+        for (i=*(ptr-1)>>1; (i>0) ; i--)
+        {
+            if (*(seg++) == RTC_MATCHWORD)
+            {
+                tag = (struct Resident *)(--seg);
+                if (tag->rt_MatchTag == tag)
+                {
+                    return(tag);
+                }
+            }
+        }
+    }
+
+    return(NULL);
+}
+
+
+// return TRUE if this is a V37 ROM filesystem, which doesn't (really) support ED_OWNER safely
+
+BOOL CheckV37(BPTR lock)
+{
+	struct FileLock *l = BADDR(lock);
+	struct Resident *resident;
+	struct DosList *dl;
+	BOOL result = FALSE;
+
+	dl = LockDosList(LDF_READ|LDF_DEVICES);
+
+	// if the export has a volume and no device, we won't find it, so we assume >= 37
+	do {
+		dl = NextDosEntry(dl,LDF_READ|LDF_DEVICES);
+		if (dl && (dl->dol_Task == l->fl_Task))
+		{
+			// found the filesystem we're exporting!
+			if (dl->dol_misc.dol_handler.dol_Startup)
+			{
+				// try to make sure it's the ROM fs or l:FastFileSystem
+				if (resident = FindRomTag(dl->dol_misc.dol_handler.dol_SegList))
+				{
+					if (resident->rt_Version < 39 &&
+					    (strncmp(resident->rt_IdString,"fs 37.",
+						     strlen("fs 37.")) == 0 ||
+					     strncmp(resident->rt_Name,"ffs 37.",
+						     strlen("ffs IdString.")) == 0))
+					{
+						result = TRUE;
+					}
+				}
+			}
+			break;
+		}
+	} while (dl);
+	UnLockDosList(LDF_READ|LDF_DEVICES);
+
+	return result;
+}
+
+
+/*********************/
+
+struct ConfigStruct
+{
+    UBYTE   MountName[64];
+    UBYTE   VolumeName[64];
+    ULONG   Flags;
+};
+
+struct ConfigUser
+{
+    UWORD   ID;
+    UBYTE   Flags;
+    UBYTE   Filler;
+};
+
+
+#define ID_EFSC     MAKE_ID('E','F','S','C')
+#define ID_VOLM     MAKE_ID('V','O','L','M')
+
+#define IFFPrefChunkCnt     1
+
+static LONG far IffPrefChunks[]={ID_EFSC,ID_VOLM};
+
+BOOL LoadConfig(struct List *ExportList)
+{
+    struct ConfigStruct *cs;
+    struct ConfigUser *cu;
+    struct Library *i;
+
+    cs = (struct ConfigStruct *) AllocMem(sizeof(struct ConfigStruct),MEMF_PUBLIC);
+    if (cs)
+    {
+        cu = (struct ConfigUser *) AllocMem(sizeof(struct ConfigUser),MEMF_PUBLIC);
+        if (cu)
+        {
+            i = (struct Library *) OpenLibrary("iffparse.library",37L);
+            IFFParseBase = i;
+            if (IFFParseBase)
+            {
+                struct IFFHandle *iff;
+                iff = (struct IFFHandle *) AllocIFF();
+                if (iff)
+                {
+                    iff->iff_Stream = (ULONG) Open("env:envoy/efs.config",MODE_OLDFILE);
+                    if (!iff->iff_Stream)
+                        iff->iff_Stream = (ULONG) Open("envarc:envoy/efs.config",MODE_OLDFILE);
+                    if (iff->iff_Stream)
+                    {
+                        InitIFFasDOS(iff);
+                        if (!OpenIFF(iff,IFFF_READ))
+                        {
+                            if (!StopChunk(iff,ID_EFSC,ID_VOLM))
+                            {
+                                if (!ParseIFF(iff,IFFPARSE_SCAN))
+                                {
+                                    while (TRUE)
+                                    {
+                                        struct ContextNode *cn;
+                                        cn = (struct ContextNode *) CurrentChunk(iff);
+                                        if (cn)
+                                        {
+                                            ULONG size;
+                                            size = cn->cn_Size;
+                                            if (ReadChunkBytes(iff,cs,sizeof(struct ConfigStruct)) == sizeof(struct ConfigStruct))
+                                            {
+                                                struct ExportVolume *ev;
+                                                ev = (struct ExportVolume *) AllocMem(sizeof(struct ExportVolume),MEMF_PUBLIC);
+                                                if (ev)
+                                                {
+                                                    UBYTE *namex;
+                                                    namex = (UBYTE *) AllocMem(strlen(cs->MountName)+1,MEMF_PUBLIC);
+                                                    if (namex)
+                                                    {
+                                                        strcpy (namex,cs->MountName);
+                                                        strcpy (ev->ev_VolumeName,cs->VolumeName);
+                                                        ev->ev_Flags = cs->Flags;
+                                                        ev->ev_Link.ln_Name = namex;
+                                                        NewList(&ev->ev_Users);
+                                                        AddTail(ExportList,&ev->ev_Link);
+                                                    }
+                                                }
+                                                size -= sizeof(struct ConfigStruct);
+                                                while(size)
+                                                {
+                                                    if (ReadChunkBytes(iff,cu,sizeof(struct ConfigUser)) == sizeof(struct ConfigUser))
+                                                    {
+                                                        struct UserOrGroup *ugx;
+                                                        ugx = (struct UserOrGroup *) AllocMem(sizeof(struct UserOrGroup),MEMF_PUBLIC);
+                                                        if (ugx)
+                                                        {
+                                                            UBYTE *namex;
+                                                            ugx->ug_ID = cu->ID;
+                                                            ugx->ug_Type = cu->Flags;
+                                                            if (!ugx->ug_Type)
+                                                            {
+                                                                struct UserInfo *ui;
+                                                                ui = AllocUserInfo();
+                                                                if (ui)
+                                                                {
+                                                                    if (!IDToUser(cu->ID,ui))
+                                                                    {
+                                                                        namex = (UBYTE *) AllocMem(strlen(ui->ui_UserName)+1,MEMF_PUBLIC);
+                                                                        if (namex)
+                                                                        {
+                                                                            strcpy(namex,ui->ui_UserName);
+                                                                            ugx->ug_Link.ln_Name = namex;
+                                                                        }
+                                                                        else
+                                                                            break;
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        namex = (UBYTE *) AllocMem(8,MEMF_PUBLIC);
+                                                                        if (namex)
+                                                                        {
+                                                                            strcpy(namex,"Old UID");
+                                                                            ugx->ug_Link.ln_Name = namex;
+                                                                        }
+                                                                        else
+                                                                            break;
+                                                                    }
+                                                                    AddTail(&ev->ev_Users,(struct Node *)ugx);
+                                                                    FreeUserInfo(ui);
+                                                                }
+                                                            }
+                                                            else
+                                                            {
+                                                                struct GroupInfo *gi;
+                                                                gi = AllocGroupInfo();
+                                                                if (gi)
+                                                                {
+                                                                    if (!IDToGroup(cu->ID,gi))
+                                                                    {
+                                                                        namex = (UBYTE *) AllocMem(strlen(gi->gi_GroupName)+1,MEMF_PUBLIC);
+                                                                        if (namex)
+                                                                        {
+                                                                            strcpy(namex,gi->gi_GroupName);
+                                                                            ugx->ug_Link.ln_Name = namex;
+                                                                        }
+                                                                        else
+                                                                            break;
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        namex = (UBYTE *) AllocMem(8,MEMF_PUBLIC);
+                                                                        if (namex)
+                                                                        {
+                                                                            strcpy(namex,"Old GID");
+                                                                            ugx->ug_Link.ln_Name = namex;
+                                                                        }
+                                                                        else
+                                                                            break;
+                                                                    }
+                                                                    AddTail(&ev->ev_Users,(struct Node *)ugx);
+                                                                    FreeGroupInfo(gi);
+                                                                }
+
+                                                            }
+                                                        }
+                                                    }
+                                                    else
+                                                        break;
+                                                    size -= sizeof(struct ConfigUser);
+                                                }
+                                            }
+
+                                            if (ParseIFF(iff,IFFPARSE_SCAN))
+                                                break;
+                                        }
+                                    }
+                                }
+                            }
+                            CloseIFF(iff);
+                        }
+                        Close(iff->iff_Stream);
+                    }
+                    FreeIFF(iff);
+                }
+                CloseLibrary(i);
+            }
+            FreeMem(cu,sizeof(struct ConfigUser));
+        }
+        FreeMem(cs,sizeof(struct ConfigStruct));
+    }
+    return(TRUE);
+}
+
+
+
+
+BOOL SafeExamine(BPTR alock, struct FileInfoBlock *f)
+{
+
+    BPTR newlock;
+    BOOL status;
+
+    newlock = DupLock(alock);
+    if ((newlock) || ((!newlock) && (!IoErr())))
+    {
+        status = Examine(newlock,f);
+        UnLock(newlock);
+        return(status);
+    }
+    else
+    {
+        return(FALSE);
+    }
+
+}
+
+ULONG PermFromLock(struct FileLock *l)
+{
+    struct FileInfoBlock *myfib;
+    ULONG notag[2]={TAG_DONE,0};
+    ULONG permissions=-1L;
+
+    myfib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,(struct TagItem *) &notag);
+    if (myfib)
+    {
+        if (SafeExamine((BPTR)l, myfib))
+            permissions = myfib->fib_Protection;
+        FreeDosObject(DOS_FIB,myfib);
+    }
+    return(permissions);
+}
+
+
+UWORD UIDFromLock(struct FileLock *l)
+{
+    struct FileInfoBlock *myfib;
+    ULONG notag[2]={TAG_DONE,0};
+    UWORD userid;
+
+    myfib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,(struct TagItem *) &notag);
+    if (myfib)
+    {
+        if (SafeExamine((BPTR)l, myfib))
+        {
+            userid = myfib->fib_OwnerUID;
+        }
+        FreeDosObject(DOS_FIB,myfib);
+    }
+    return (userid);
+}
+
+UWORD GIDFromLock(struct FileLock *l)
+{
+    struct FileInfoBlock *myfib;
+    UWORD groupid;
+    ULONG notag[2]={TAG_DONE,0};
+
+    myfib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,(struct TagItem *) &notag);
+    if (myfib)
+    {
+        if (SafeExamine((BPTR)l, myfib))
+            groupid = myfib->fib_OwnerGID;
+        FreeDosObject(DOS_FIB,myfib);
+    }
+    return (groupid);
+}
+
+
+ULONG BestPermFromLock(struct FileLock *l, struct MountedFSInfo *m)
+{
+    return(BestPermFromLockX(l,m,0,0));
+}
+
+ULONG BestPermFromLockX(struct FileLock *l, struct MountedFSInfo *m, ULONG *flags, ULONG *map)
+{
+    struct FileInfoBlock *myfib;
+    UWORD groupid, ownerid;
+    ULONG notag[2]={TAG_DONE,0};
+    ULONG pbits;
+
+    myfib = (struct FileInfoBlock *) AllocDosObject(DOS_FIB,(struct TagItem *) &notag);
+    if (myfib)
+    {
+        BPTR oneback;
+        oneback = ParentDir((BPTR)l);
+        if (oneback)
+            UnLock(oneback);
+        if (SafeExamine((BPTR)l, myfib))
+        {
+            groupid = myfib->fib_OwnerGID;
+            ownerid = myfib->fib_OwnerUID;
+            pbits = myfib->fib_Protection;
+	    pbits &= ALLBITS;			// mask off bits other than protection bits
+            if (map)
+                *map = pbits;
+
+            if (!oneback)
+            {
+                FreeDosObject(DOS_FIB,myfib);
+                return(15);
+            }
+
+            /* If they're the administrator, they're the owner */
+	// If it has no group or ownerid, they're NOT the owner!
+            if ((m->mfsi_UserFlags & UFLAGF_AdminAll) /*|| (!ownerid) || (!groupid)*/)
+            {
+                ULONG pc;
+
+                pc = (~pbits & OWNERBITS);
+                FreeDosObject(DOS_FIB,myfib);
+                if (flags)
+                    *flags |= BPF_USER;
+                return(pc);
+            }
+
+            /* If they're the owner */
+            if (ownerid == m->mfsi_UID)
+            {
+                pbits = ((~pbits) & OWNERBITS);
+                if (flags)
+                    *flags |= BPF_USER;
+            }
+            else if (groupid == m->mfsi_GID)
+            {
+                pbits = ((pbits & GROUPBITS) >> FIBB_GRP_DELETE);
+                if (flags)
+                    *flags |= BPF_GROUP;
+            }
+            else
+            {
+                struct UserInfo *ui;
+                struct GroupInfo *gi;
+                BOOL good=FALSE;
+                ui = AllocUserInfo();
+                if (ui)
+                {
+                    gi = AllocGroupInfo();
+                    if (gi)
+                    {
+                        if (!IDToUser(m->mfsi_UID,ui))
+                        {
+                            if (!IDToGroup(groupid,gi))
+                            {
+                                if (!MemberOf(gi,ui))
+                                {
+                                    good=TRUE;
+                                    if (flags)
+                                        *flags |= BPF_GROUP;
+                                }
+                            }
+                        }
+                        FreeGroupInfo(gi);
+                    }
+                    FreeUserInfo(ui);
+                }
+                if (!good)
+                {
+                    pbits = ((pbits & OTHERBITS) >> FIBB_OTR_DELETE);
+                    if (flags)
+                        *flags |= BPF_OTHER;
+
+                }
+                else
+                {
+                    pbits = ((pbits & GROUPBITS) >> FIBB_GRP_DELETE);
+                }
+
+            }
+// huh?????!!!!! FIX????!!!!
+            if (myfib->fib_DirEntryType > 0)        /* If this lock references a DIRECTORY, set the high bit */
+                pbits |= (1 << 31);
+        }
+        FreeDosObject(DOS_FIB,myfib);
+    }
+
+    return (pbits);
+}
+
+ULONG BestPermShared(ULONG groupid, ULONG ownerid, ULONG pbits,ULONG type,
+		     struct MountedFSInfo *m, ULONG *flags);
+
+ULONG BestPerm(struct FileInfoBlock *myfib, struct MountedFSInfo *m)
+{
+    return(BestPermX(myfib,m,0));
+}
+
+ULONG BestPermX(struct FileInfoBlock *myfib, struct MountedFSInfo *m, ULONG *flags)
+{
+    return BestPermShared(myfib->fib_OwnerGID,myfib->fib_OwnerUID,
+			  myfib->fib_Protection,myfib->fib_DirEntryType,m,flags);
+}
+
+ULONG BestPermED(struct ExAllData *ed, ULONG type, struct MountedFSInfo *m, ULONG *flags)
+{
+    ULONG gid = 0, uid = 0;
+
+    if (type >= ED_OWNER)
+    {
+	gid = ed->ed_OwnerGID;
+	uid = ed->ed_OwnerUID;
+    }
+
+    return BestPermShared(gid,uid,ed->ed_Prot,ed->ed_Type,m,flags);
+}
+
+ULONG BestPermShared(ULONG groupid, ULONG ownerid, ULONG pbits,ULONG type,
+		     struct MountedFSInfo *m, ULONG *flags)
+{
+    /* If they're the administrator, they're the same as the owner */
+    /* Ditto if the FIB is NO OWNER or NO GROUP */
+    // If it has no group or ownerid, they're NOT the owner!
+    if ((m->mfsi_UserFlags & UFLAGF_AdminAll) /*|| (!ownerid) || (!groupid)*/)
+    {
+        ULONG pc;
+// FIX!!!
+        pc = (pbits & ~OWNERBITS) | ((~pbits) & OWNERBITS);
+        if (flags)
+            *flags |= BPF_USER;
+        return(pc);
+    }
+
+    /* If they're the owner */
+    if (ownerid == m->mfsi_UID)
+    {
+        pbits = ((~pbits) & OWNERBITS);
+        if (flags)
+            *flags |= BPF_USER;
+    }
+    else if (groupid == m->mfsi_GID)
+    {
+        pbits = (((pbits) & GROUPBITS) >> FIBB_GRP_DELETE);
+        if (flags)
+        {
+            *flags |= BPF_GROUP;
+        }
+    }
+    else
+    {
+        struct UserInfo *ui;
+        struct GroupInfo *gi;
+        BOOL good=FALSE;
+        ui = AllocUserInfo();
+        if (ui)
+        {
+            gi = AllocGroupInfo();
+            if (gi)
+            {
+                if (!IDToUser(m->mfsi_UID,ui))
+                {
+                    if (!IDToGroup(groupid,gi))
+                    {
+                        if (!MemberOf(gi,ui))
+                        {
+                            good=TRUE;
+                        }
+                    }
+                }
+                FreeGroupInfo(gi);
+            }
+            FreeUserInfo(ui);
+        }
+        if (!good)
+        {
+            pbits = (((pbits) & OTHERBITS) >> FIBB_OTR_DELETE);
+            if (flags)
+                *flags |= BPF_OTHER;
+        }
+        else
+        {
+            pbits = (((pbits) & GROUPBITS) >> FIBB_GRP_DELETE);
+            if (flags)
+                *flags |= BPF_GROUP;
+        }
+    }
+    if (type > 0)        /* If this lock references a DIRECTORY, set the high bit */
+        pbits |= (1 << 31);
+
+    return(pbits);
+}
+
+void __asm SetFSMode(register __d0 ULONG mode)
+{
+    struct MountedFSInfo *m;
+    struct List *l=(struct List *)&FSDBase->FSD_Current;
+    struct SignalSemaphore *ss=&FSDBase->FSD_CurrentLock;
+    ObtainSemaphore(ss);
+    FSDBase->FSD_Mode = mode;
+    while (m= (struct MountedFSInfo *) RemHead(l))
+        CleanupDeadMount(m);
+    ReleaseSemaphore(ss);
+
+}
+
+
+@
+
+
+1.10
+log
+@invert protection bits, don't give no protection to files with owner OR
+user 0
+@
+text
+@d735 1
+a735 1
+        FreeMem(f,sizeof(struct FileHandle));
+@
+
+
+1.9
+log
+@Compare against IDString, not rt_Name
+@
+text
+@d1139 1
+d1150 2
+a1151 1
+            if ((m->mfsi_UserFlags & UFLAGF_AdminAll) || (!ownerid) || (!groupid))
+d1154 2
+a1155 1
+                pc = (pbits & ~0xF) | (~pbits & 0xF);
+d1165 1
+a1165 1
+                pbits = ((~pbits) & (FIBF_READ|FIBF_WRITE|FIBF_EXECUTE|FIBF_DELETE));
+d1171 1
+a1171 1
+                pbits = (((~pbits) & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+d1204 1
+a1204 1
+                    pbits = (((~pbits) & (FIBF_OTR_READ|FIBF_OTR_WRITE|FIBF_OTR_EXECUTE|FIBF_OTR_DELETE)) >> FIBB_OTR_DELETE);
+d1211 1
+a1211 1
+                    pbits = (((~pbits) & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+d1215 1
+d1257 2
+a1258 1
+    if ((m->mfsi_UserFlags & UFLAGF_AdminAll) || (!ownerid) || (!groupid))
+d1261 2
+a1262 1
+        pc = (pbits & ~0xF) | ((~pbits) & 0xF);
+d1271 1
+a1271 1
+        pbits = ((~pbits) & (FIBF_READ|FIBF_WRITE|FIBF_EXECUTE|FIBF_DELETE));
+d1277 1
+a1277 1
+        pbits = (((~pbits) & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+d1310 1
+a1310 1
+            pbits = (((~pbits) & (FIBF_OTR_READ|FIBF_OTR_WRITE|FIBF_OTR_EXECUTE|FIBF_OTR_DELETE)) >> FIBB_OTR_DELETE);
+d1316 1
+a1316 1
+            pbits = (((~pbits) & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+@
+
+
+1.8
+log
+@Set the MFSIF_COMMENT_BSTR flag
+@
+text
+@d832 1
+d834 1
+a834 1
+					    (strncmp(resident->rt_Name,"fs 37.",
+d837 1
+a837 1
+						     strlen("ffs 37.")) == 0))
+d841 1
+@
+
+
+1.7
+log
+@tighten the test for V37 filesystems
+@
+text
+@d519 1
+a519 1
+						mi->mfsi_Flags |= MFSIF_V37_FS;
+@
+
+
+1.6
+log
+@Remove unneeded GetHostName()
+check if a filesystem is a <= V37 filesystem - if so, don't ask for
+OwnerUID/GID info
+@
+text
+@d830 1
+d832 6
+a837 1
+					if (resident->rt_Version <= 37)
+d839 1
+@
+
+
+1.5
+log
+@Initial cut at dircache mods.  Still needs throttling to avoid using too
+much client memory.  Perhaps should also abort on examine while pre-reading.
+@
+text
+@d68 1
+a69 1
+
+a285 1
+                            UBYTE hname[64];
+d287 1
+a297 1
+                            GetHostName(t->trans_SourceEntity,hname,63);
+d516 5
+d777 64
+@
+
+
+1.4
+log
+@Checkin of Greg's unreleased work
+@
+text
+@d28 1
+d66 1
+d77 1
+a77 1
+    BOOL status = FALSE;
+d122 1
+a122 1
+                status = TRUE;
+d148 1
+a148 3
+
+
+    struct MountedFSInfo *mi=0;
+d156 1
+d251 1
+d379 3
+a381 3
+                            while (*ch)
+                                ch++;
+                            ch++;
+d412 2
+a413 2
+                                                mi->mfsi_UID = -1;
+                                                mi->mfsi_GID = -1;
+a674 1
+
+d678 4
+d1144 2
+d1154 3
+d1158 12
+a1169 1
+    ULONG groupid, ownerid, pbits;
+d1171 3
+a1173 4
+    groupid = myfib->fib_OwnerGID;
+    ownerid = myfib->fib_OwnerUID;
+    pbits = myfib->fib_Protection;
+
+d1238 1
+a1238 1
+    if (myfib->fib_DirEntryType > 0)        /* If this lock references a DIRECTORY, set the high bit */
+@
+
+
+1.3
+log
+@Jeeze - this hasn't been checked in in quite some time!
+@
+text
+@a1 2
+#define VERIFYMFSI 1
+
+a53 2
+ void CleanupDeadMount();
+
+d65 3
+d153 1
+d166 2
+d201 15
+a215 1
+                                if (!VerifyUser(rm->User,rm->Password,ui))
+d217 4
+a220 2
+                                    ev = (struct ExportVolume *) Mounts.lh_Head;
+                                    while (ev->ev_Link.ln_Succ)
+a221 3
+                                        struct UserOrGroup *q;
+                                        /* check to see if this user/pw fits for this mount */
+                                        q = (struct UserOrGroup *) ev->ev_Users.lh_Head;
+d226 5
+a230 2
+                                                if (ui->ui_UserID == q->ug_ID)
+                                                    break;
+d236 5
+a240 2
+                                                    if (!MemberOf(gi,ui))
+                                                        break;
+d245 4
+a248 1
+                                        if (q->ug_Link.ln_Succ)
+d250 4
+a253 1
+                                            strcpy(out,ev->ev_Link.ln_Name);
+a255 3
+                                        if (((ULONG) out - (ULONG) t->trans_ResponseData) >= t->trans_RespDataLength)
+                                            break;
+                                        ev = (struct ExportVolume *) ev->ev_Link.ln_Succ;
+d257 8
+d282 1
+a282 2
+                        #ifdef VERIFYMFSI
+                        if (TRUE)
+d290 4
+a293 1
+                                    break;
+d298 10
+a307 3
+                                kprintf("Alert!  Attempt to use an invalid mfsi!\nFrom host %s, dp %lx\n",
+                                        hname, tp->tp_Type);
+
+a308 3
+                        #endif
+                        if (!mi)
+                            BadStructure("MountedFSInfo");
+d310 1
+a310 1
+                            DoDosPacket(t,mi);
+d327 1
+d333 4
+d345 14
+a358 1
+                            mi->mfsi_BaseLock = (struct FileLock *) Lock((UBYTE *)t->trans_RequestData,ACCESS_READ);
+d392 3
+a394 1
+                                    if (!VerifyUser(mi->mfsi_UserName,mi->mfsi_Password,ui))
+d396 20
+a415 5
+                                        /* This user/pw is real.  Try to find the mount they want. */
+                                        ev = (struct ExportVolume *) Mounts.lh_Head;
+                                        while (ev->ev_Link.ln_Succ)
+                                        {
+                                            if (!Stricmp(ev->ev_Link.ln_Name,t->trans_RequestData))
+a416 3
+                                                /* Okay ... that mount exists ... are they permitted to use it? */
+                                                struct UserOrGroup *ug;
+                                                ug = (struct UserOrGroup *) ev->ev_Users.lh_Head;
+d420 1
+d423 17
+a439 2
+                                                        if (ui->ui_UserID == ug->ug_ID)
+                                                            gooduser = TRUE;
+d443 16
+a458 1
+                                                        if (!IDToGroup(ug->ug_ID,gi))
+d460 2
+a461 2
+                                                            if (!MemberOf(gi,ui))
+                                                                gooduser = TRUE;
+d470 1
+a477 1
+                                                {
+a478 1
+                                                }
+a479 1
+                                            ev = (struct ExportVolume *) ev->ev_Link.ln_Succ;
+d481 1
+a481 2
+                                        if (!ev->ev_Link.ln_Succ)
+                                            denial = FSERR_REJECTED_NOMOUNT;
+d483 2
+a484 2
+                                    else
+                                        denial = FSERR_REJECTED_USER;
+d527 1
+a527 4
+                                        /* Search for duplicates */
+                                        /* Same source name, equiv. locks, same foreign lock name constitutes a match */
+                                        z = (struct MountedFSInfo *) mounts->mlh_Head;
+                                        while (z->mfsi_Link.mln_Succ)
+d529 18
+a546 11
+                                            if ( (!strcmp((char *)&z->mfsi_HostName,(char *)&mi->mfsi_HostName)) &&
+                                                 (!strcmp((char *)&z->mfsi_ClientMount,(char *)&mi->mfsi_ClientMount)) &&
+                                                 (SameLock((BPTR)z->mfsi_BaseLock,(BPTR)mi->mfsi_BaseLock) == LOCK_SAME) )
+                                            {
+                                                struct MountedFSInfo *q;
+                                                q = z;
+                                                z = (struct MountedFSInfo *)z->mfsi_Link.mln_Pred;
+                                                ObtainSemaphore(ss);
+                                                Remove((struct Node *)q);
+                                                ReleaseSemaphore(ss);
+                                                CleanupDeadMount(q);
+a547 4
+                                            z = (struct MountedFSInfo *) z->mfsi_Link.mln_Succ;
+                                        }
+                                        if (mi)
+                                        {
+d675 2
+d707 1
+a707 1
+void CleanupDeadMount(struct MountedFSInfo *m)
+d1032 1
+d1035 5
+d1057 2
+d1062 13
+a1074 2
+                pbits = 15L;
+                return(pbits);
+d1080 3
+a1082 1
+                pbits = ~(pbits & (FIBF_READ|FIBF_WRITE|FIBF_EXECUTE|FIBF_DELETE));
+d1086 3
+a1088 1
+                pbits = ((pbits & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+d1099 1
+a1099 1
+                    if (gi);
+d1103 1
+a1103 1
+                            if (!IDToGroup(m->mfsi_GID,gi))
+d1106 1
+d1108 3
+d1118 6
+a1123 1
+                    pbits = ((pbits & (FIBF_OTR_READ|FIBF_OTR_WRITE|FIBF_OTR_EXECUTE|FIBF_OTR_DELETE)) >> FIBB_OTR_DELETE);
+d1125 3
+a1127 1
+                    pbits = ((pbits & (FIBF_GRP_READ|FIBF_GRP_WRITE|FIBF_GRP_EXECUTE|FIBF_GRP_DELETE)) >> FIBB_GRP_DELETE);
+d1137 98
+@
+
+
+1.2
+log
+@Last "old service" revision.
+@
+text
+@d2 2
+d5 1
+d8 5
+d14 2
+a15 1
+#include <pragmas/authentication_pragmas.h>
+d17 3
+d21 3
+a23 1
+#include <clib/authentication_protos.h>
+d26 1
+a26 1
+#include <envoy/authentication.h>
+d30 1
+d33 1
+d35 17
+a51 3
+ struct Library *NIPCBase;
+ struct Library *ServicesBase;
+ struct Library *AuthenticationBase;
+d53 2
+a54 1
+ extern struct Library *DOSBase;
+d60 86
+a145 1
+main()
+d148 1
+d150 27
+a176 2
+    struct SignalSemaphore mountssema;
+    struct MinList mounts;
+d178 2
+a179 12
+    NewList(&mounts);
+    InitSemaphore(&mountssema);
+
+    AuthenticationBase = (struct Library *) OpenLibrary("authentication.library",0L);
+    if (AuthenticationBase)
+    {
+        ChooseAuthServer(NULL);
+        DOSBase = (struct Library *) OpenLibrary("dos.library",0L);
+        if (DOSBase)
+        {
+            NIPCBase = (struct Library *) OpenLibrary("nipc.library",0L);
+            if (NIPCBase)
+d181 1
+a181 2
+                ServicesBase = (struct Library *) OpenLibrary("services.library",0L);
+                if (ServicesBase)
+d183 1
+a183 4
+                    struct Entity *re;
+                    ULONG sigbit;
+                    re = (struct Entity *) StartService(ENT_AllocSignal,&sigbit,SSVC_MultiClient,0,TAG_DONE);
+                    if (re)
+d185 5
+a189 1
+                        struct Transaction *t;
+d191 4
+a194 1
+                        while (TRUE)
+d196 70
+d267 15
+a281 1
+                            WaitEntity(re);
+d283 49
+a331 2
+                            t = GetTransaction(re);
+                            if (t)
+d333 59
+a391 1
+                                if (t->trans_Command == FSCMD_DOSPACKET)
+d393 2
+a394 5
+                                    struct TPacket *tp;
+                                    tp = (struct TPacket *) t->trans_RequestData;
+                                    mi = (struct MountedFSInfo *) tp->tp_ServerMFSI;
+                                    DoDosPacket(t,mi);
+                                    ReplyTransaction(t);
+a396 1
+                                if (t->trans_Command == FSCMD_MOUNT)
+d398 1
+a398 9
+                                    APTR oldwindow;
+                                    struct Process *p;
+                                    struct MountedFSInfo *z;
+
+                                    t->trans_RespDataActual = 4L;
+                                    p = (struct Process *) FindTask(0L);
+                                    oldwindow = (APTR) p->pr_WindowPtr;
+                                    mi = (struct MountedFSInfo *) AllocMem(sizeof(struct MountedFSInfo),MEMF_PUBLIC|MEMF_CLEAR);
+                                    if (mi)
+d400 18
+a417 2
+                                        UBYTE *ch;
+                                        struct UserProfile *aup;
+d419 1
+a419 25
+                                        mi->mfsi_BaseLock = 0L;
+                                        NewList((struct List *)&mi->mfsi_Locks);
+                                        NewList((struct List *)&mi->mfsi_FileHandles);
+                                        mi->mfsi_SourceEntity = t->trans_SourceEntity;
+                                        p->pr_WindowPtr = (struct Window *) -1L;
+                                        mi->mfsi_BaseLock = (struct FileLock *) Lock((UBYTE *)t->trans_RequestData,ACCESS_READ);
+                                        GetHostName(t->trans_SourceEntity,(STRPTR)&mi->mfsi_HostName,80);
+                                        /* Extract the client's name for the mount, username, and password from the mount request packet */
+                                        ch = (UBYTE *) t->trans_RequestData;
+                                        while (*ch)
+                                            ch++;
+                                        ch++;
+                                        strcpy(&mi->mfsi_ClientMount,ch);
+                                        while (*ch)
+                                            ch++;
+                                        ch++;
+                                        strcpy(&mi->mfsi_UserName,ch);
+                                        while (*ch)
+                                            ch++;
+                                        ch++;
+                                        strcpy(&mi->mfsi_Password,ch);
+
+                                        /* Attempt to Authenticate a user by the name and password
+                                         * given.
+                                         */
+d421 4
+a424 2
+                                        aup = AuthenticateUser(&mi->mfsi_UserName[0],&mi->mfsi_Password[0]);
+                                        if (!aup)
+d427 1
+a427 1
+                                            mi=0L;
+d429 4
+a432 1
+                                        else
+d434 3
+a436 1
+                                            if (TRUE) /* This user/group isn't priv'd. */
+d438 7
+a444 35
+                                                p->pr_WindowPtr = (struct Window *) oldwindow;
+                                                if (mi->mfsi_BaseLock)
+                                                {
+                                                    t->trans_Error = 0L;
+                                                    ((ULONG *)t->trans_ResponseData)[0] = (ULONG) mi;
+                                                    ReplyTransaction(t);
+                                                }
+                                                else
+                                                {
+                                                    FreeMem(mi,sizeof(struct MountedFSInfo));
+                                                    mi = 0L;
+                                                    kprintf("Couldn't get a base lock!!!!!\n");
+                                                }
+                                                /* Search for duplicates */
+                                                /* Same source name, equiv. locks, same foreign lock name constitutes a match */
+                                                ObtainSemaphore(&mountssema);
+                                                z = (struct MountedFSInfo *) mounts.mlh_Head;
+                                                while (z->mfsi_Link.mln_Succ)
+                                                {
+                                                    if ( (!strcmp(&z->mfsi_HostName,&mi->mfsi_HostName)) &&
+                                                         (!strcmp(&z->mfsi_ClientMount,&mi->mfsi_ClientMount)) &&
+                                                         (SameLock(z->mfsi_BaseLock,mi->mfsi_BaseLock) == LOCK_SAME) )
+                                                    {
+                                                        struct MountedFSInfo *q;
+                                                        q = z;
+                                                        z = (struct MountedFSInfo *)z->mfsi_Link.mln_Pred;
+                                                        Remove(q);
+                                                        CleanupDeadMount(q);
+                                                    }
+                                                    z = (struct MountedFSInfo *) z->mfsi_Link.mln_Succ;
+                                                }
+                                                ReleaseSemaphore(&mountssema);
+                                                if (mi)
+                                                    AddTail((struct List *)&mounts,(struct Node *)mi);
+                                                FreeUserProfile(aup);   /* return the user profile to auth.library */
+d446 7
+a452 5
+                                            else /* User not accepted */
+                                            {
+                                                FreeMem(mi,sizeof(struct MountedFSInfo));
+                                                mi=0L;
+                                            }
+d455 1
+a455 1
+                                    if (!mi)
+d457 2
+a458 6
+                                        t->trans_Error = 2000; /* Any value will do for now ... */
+                                    /* Institute use count */
+                                        ((ULONG *)t->trans_ResponseData)[0]=0L;
+                                        ReplyTransaction(t);
+                                        break;
+                                    /* Close all open files, free locks */
+a459 1
+
+d461 5
+a465 1
+
+d467 9
+a475 1
+
+d477 1
+a477 1
+                        StopService(re);
+d479 2
+a480 1
+                    CloseLibrary(ServicesBase);
+a481 1
+                CloseLibrary(NIPCBase);
+d483 31
+a513 1
+            CloseLibrary(DOSBase);
+d515 1
+d520 28
+d557 1
+a557 1
+    AddTail((struct List *)&m->mfsi_Locks,&ru->ru_link);
+d570 1
+a570 1
+    AddTail((struct List *)&m->mfsi_FileHandles,&ru->ru_link);
+d578 1
+a578 1
+    while (r->ru_link.mln_Succ)
+d582 1
+a582 1
+            Remove(r);
+d586 1
+a586 1
+        r = (struct ResourcesUsed *) r->ru_link.mln_Succ;
+d595 1
+a595 1
+    while (r->ru_link.mln_Succ)
+d599 1
+a599 2
+//            kprintf("Nuked FH %lx\n",thefh);
+            Remove(r);
+d603 1
+a603 1
+        r = (struct ResourcesUsed *) r->ru_link.mln_Succ;
+d612 3
+d617 1
+a617 1
+        DoPkt(((struct FileLock *)BADDR(m->mfsi_BaseLock))->fl_Task,ACTION_FREE_LOCK,r->ru_Resource);
+d625 1
+a625 2
+        kprintf("Cleaning up - closing fh %lx\n",f);
+        DoPkt(((struct FileLock *)BADDR(m->mfsi_BaseLock))->fl_Task,ACTION_END,f->fh_Arg1);
+d630 15
+d646 355
+d1002 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d4 1
+d6 2
+d9 5
+a13 2
+#include <appn/services.h>
+#include <appn/nipc.h>
+d17 1
+d21 1
+d23 3
+a25 1
+ struct FileLock *BaseLock;
+d27 1
+a27 1
+ extern struct Library *DOSBase;
+d32 9
+a40 2
+    DOSBase = (struct Library *) OpenLibrary("dos.library",0L);
+    if (DOSBase)
+d42 3
+a44 2
+        NIPCBase = (struct Library *) OpenLibrary("nipc.library",0L);
+        if (NIPCBase)
+d46 2
+a47 2
+            ServicesBase = (struct Library *) OpenLibrary("services.library",0L);
+            if (ServicesBase)
+d49 2
+a50 4
+                struct Entity *re;
+                ULONG sigbit;
+                re = (struct Entity *) StartService(ENT_AllocSignal,&sigbit,TAG_DONE);
+                if (re)
+d52 9
+a60 1
+                    struct Transaction *t;
+d62 1
+a62 1
+                    BaseLock = (struct FileLock *) Lock("work:",ACCESS_READ);
+d64 115
+a178 2
+                    while (TRUE)
+                    {
+d180 1
+a180 1
+                        WaitEntity(re);
+a181 7
+                        t = GetTransaction(re);
+                        if (t)
+                        {
+                            if (t->trans_Command == FSCMD_DOSPACKET)
+                            {
+                                DoDosPacket(t);
+                                ReplyTransaction(t);
+d183 1
+a183 7
+                            if (t->trans_Command == FSCMD_UNMOUNT)
+                            {
+                                /* Institute use count */
+                                ReplyTransaction(t);
+                                /* Close all open files, free locks */
+                                break;
+                            }
+d185 1
+d187 1
+a187 1
+                    StopService(re);
+d189 1
+a189 1
+                CloseLibrary(ServicesBase);
+d191 43
+a233 1
+            CloseLibrary(NIPCBase);
+d235 1
+a235 1
+        CloseLibrary(DOSBase);
+d237 4
+d242 13
+d257 24
+@

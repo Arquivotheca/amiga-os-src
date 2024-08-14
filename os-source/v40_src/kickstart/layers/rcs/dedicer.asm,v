@@ -1,0 +1,1626 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  V40_1:39.7 V39_62:39.6 V39_61:39.6 V39_60:39.6 V39_58:39.6 V39_56:39.6 V39_55:39.6 V39_54:39.6 V39_53:39.6 V39_52:39.6 V39_51:39.6 V39_50:39.6 V39_49:39.6 V39_48:39.6 V39_46:39.6 V39_45:39.6 V39_44:39.6 V39_42:39.6 V39_41:39.5 V39_40:39.4 V39_39:39.3 V39_38:39.2 V39_37:39.1;
+locks    ; strict;
+comment  @* @;
+
+
+39.7
+date     92.10.19.14.12.40;  author mks;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     92.01.13.17.12.15;  author mks;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.01.12.10.48.09;  author mks;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.01.11.18.26.58;  author mks;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.01.10.18.44.11;  author mks;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.01.10.12.20.41;  author mks;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.01.10.09.46.48;  author mks;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.01.09.14.03.21;  author mks;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@The main dedice code is in this file and the dedice.c
+@
+
+
+39.7
+log
+@Added some minor comments.
+@
+text
+@*******************************************************************************
+*
+*	$Id: dedicer.asm,v 39.6 92/01/13 17:12:15 mks Exp Locker: mks $
+*
+*******************************************************************************
+*
+* This file seems to have become the general dedicer...
+*
+*******************************************************************************
+*
+	include	'exec/types.i'
+	include	'exec/nodes.i'
+	include	'exec/lists.i'
+	include	'graphics/gfx.i'
+	include	'graphics/clip.i'
+	include	'graphics/layers.i'
+*
+*******************************************************************************
+*
+		xref	_rectXrect
+		xref	_AllocCR
+		xref	_Freecrlist
+		xref	_get_concealed_rasters
+		xref	_copyrect
+*
+*******************************************************************************
+*
+* The following diagrams and text needs to be printed in fixed-width typeface.
+*
+*******************************************************************************
+*
+* The DEDICE code contained within this module is possible patent material.
+* The algorithms contained within are, to the best of my knowledge, fully
+* my own original work.  The text below will describe the concepts behind
+* the algorithms and the methods used to implement them.
+*
+*                            -- Michael Sinz
+*                               Senior Amiga Systems Engineer
+*                               Operating Systems Development Group
+*                               Commodore-Amiga, Inc.
+*
+*******************************************************************************
+* The number of cliprects on the display is related to the number of
+* layers on the display.  The *maximum* number of fully dediced cliprects
+* on the screen with n layers is n^3/3 + n^2/2 + n/6.  Note that this
+* number grows rather fast.  For this reason it is important that this code
+* be fast.  Also, note that this number does not normally grow as fast as
+* this due to the fact that this perfectly-bad alignment is unnatural.
+*******************************************************************************
+*
+*  (Text not written yet)
+*
+*		+-----------++-----------+
+*		|           ||           |
+*		|           ||           |
+*		|    cr1    ||    cr2    |
+*		|           ||           |
+*		|           ||           |
+*		+-----------++-----------+
+*
+*
+*
+*		+-----------++-----------+
+*		|           ||           |
+*		|           ||           |
+*		|    cr1    ||    cr2    |
+*		|           ||           |
+*		|           |+-----------+
+*		|           |
+*		+-----------+
+*
+*
+*
+*		+-----------++-----------+
+*		|           ||           |
+*		|           ||           |
+*		|    cr1    ||    cr2    |
+*		|           ||           |
+*		|           ||           |
+*		+-----------+|           |
+*		             |           |
+*		             +-----------+
+*
+*
+*
+*		+-----------+
+*		|           |
+*		|           |+-----------+
+*		|    cr1    ||    cr2    |
+*		|           ||           |
+*		|           ||           |
+*		+-----------++-----------+
+*
+*
+*
+*		             +-----------+
+*		             |           |
+*		+-----------+|           |
+*		|    cr2    ||    cr1    |
+*		|           ||           |
+*		|           ||           |
+*		+-----------++-----------+
+*
+*
+*
+*		+-----------+
+*		|           |
+*		|           |
+*		|    cr1    |
+*		|           |
+*		|           |
+*		+-----------+
+*		+-----------+
+*		|           |
+*		|           |
+*		|    cr2    |
+*		|           |
+*		|           |
+*		+-----------+
+*
+*
+*******************************************************************************
+*
+* **** NOTE ****
+* In order to improve performance, all of the routines have very closely
+* documented register usage.  This was done such that a minimum of
+* register save and restores would be needed...
+*
+*******************************************************************************
+*
+* This is a fast routine to sort the cliprect list stored in the layer.
+* The list is sorted with the MinX/Y value as the key.  Thus they will
+* be sorted from top left of the screen to bottom right.
+*
+* The sort takes the Y value as the most significant figure.  This is needed
+* such that the new dedice routine will be able to do a complete dedice.
+*
+* sort_layer_cr	- a0=layer	Does not trash a0!!!!
+*				Trashes d2!!!!
+*				Trashes a2!!!!
+*				Trashes a3!!!!
+*
+sort_layer_cr:	sub.l	a1,a1		; Clear new CR list...
+		move.l	a1,-(sp)	; And make storage for it...
+		move.l	lr_ClipRect(a0),d0	; Get first CR
+		beq.s	sort_cr_done	; If NULL, we have none...
+		move.l	sp,a2		; Get start of list...
+		move.l	d0,a1		; Get pointer...
+*
+* The first element always goes in with no proble...
+*
+* We insert the cr (a1) after the this cr (a2) and loop for more...
+*
+insert_cr:	move.l	(a1),d0		; Get old next pointer...
+		move.l	(a2),(a1)	; Set up new next pointer...
+		move.l	a1,(a2)		; Add him to the list...
+		tst.l	d0		; Check if we have more
+		beq.s	sort_cr_done	; If not, end the sort...
+*
+* The sort loop...
+*
+sort_cr_loop:	move.l	d0,a1		; Get pointer ready...
+		move.w	cr_MinX(a1),d2	; Get MinX...
+		move.w	cr_MinY(a1),d1	; Get MinY...
+*
+* Ok, a2 is pointing to the last place we inserted, so
+* check there first...
+*
+		move.l	(a2),a2		; Get ClipRect... (We know it is here)
+		cmp.w	cr_MinY(a2),d1	; Check MinY (low word...)
+		bgt.s	insert_cr_loop	; If we already know...
+		bne.s	1$		; If not same, X does not matter...
+		cmp.w	cr_MinX(a2),d2	; MinY is the same, check X
+		bgt.s	insert_cr_loop	; If not, we look from here...
+1$:		; Not larger...
+*
+* We were already past the normal spot so lets start looking from
+* the top...
+*
+		move.l	sp,a2		; Point at new list header...
+insert_cr_loop:	move.l	(a2),d0		; Get next pointer...
+		beq.s	insert_cr	; Check for end of list...
+		move.l	d0,a3		; Ok, we need to check this guy out...
+		cmp.w	cr_MinY(a3),d1	; Check MinY...
+		blt.s	insert_cr	; if lt, do the insert
+		bne.s	2$		; If not same, X does not matter...
+		cmp.w	cr_MinX(a3),d2	; Check MinX...
+		blt.s	insert_cr	; If less than next, insert it...
+2$:		move.l	a3,a2		; Set up the pointer...
+		bra.s	insert_cr_loop	; and go again...
+*
+* We are done so save the new list into the layer...
+*
+sort_cr_done:	move.l	(sp)+,lr_ClipRect(a0)	; Save the cliprect list
+		rts
+*
+*******************************************************************************
+*
+* This routine is for outside use to insert a single cliprect into
+* a layer in the same sorted order as the above sort routine gives me...
+*
+*	a0=layer
+*	a1=cliprect
+*
+sortlinkcr:	move.l	a2,-(sp)	; Save this one.  (we need it)
+		lea	lr_ClipRect(a0),a0	; Get pointer to list...
+		move.l	cr_MinX(a1),d1	; Get the cliprect X/Y pos...
+sortlink_loop:	move.l	(a0),d0		; Get next cliprect...
+		beq.s	sortlink_done	; If none, we are at end of list
+		move.l	d0,a2		; Well, we should check this one...
+		cmp.w	cr_MinY(a2),d1	; Check the Y pos first...
+		blt.s	sortlink_done	; If past, we are done...
+		beq.s	sortlink_full	; If same, go check the X...
+sortlink_next:	move.l	a2,a0		; Get ready to loop...
+		bra.s	sortlink_loop	; And check the next one...
+sortlink_full:	cmp.l	cr_MinX(a2),d1	; Check vs the next one...
+		bgt.s	sortlink_next	; If not time yet, go to next one...
+sortlink_done:	move.l	(a0),(a1)	; Get up next pointer...
+		move.l	a1,(a0)		; Link it in...
+		move.l	(sp)+,a2	; Restore a2
+		rts
+*
+*******************************************************************************
+*
+* preunslice_and_dice
+*
+* This routine does the allocation phase of the dedice.  It will attempt to
+* allocate the needed structures for the new cliprects.  If it fails, it will
+* release any partial allocation and return a failure value.
+*
+* This is the simple case cliprect reduction
+*
+* Input:	a2 - The layer
+*		a3 - Cliprect 1 (top/left)
+*		a4 - Cliprect 2 (bottom/right)
+*		a5 - Bounds pointer...
+*
+* Result:	d0 - NULL if failed...
+*		d1/a0/a1/d4 - trashed...
+*
+preunslice:	move.l	a3,lr_cr(a2)		; Store the pair
+		move.l	a4,lr_cr2(a2)		; of initial cliprects
+		sub.l	a0,a0			; Clear A0 for call...
+		bsr	_AllocCR		; Allocate a cliprect...
+		move.l	d0,lr_crnew(a2)		; Store the new cliprect
+		beq.s	pre_rts			; Return if error...
+		move.l	d0,a1			; Get cliprect pointer
+		moveq.l	#0,d1			; Need a NULL somewhere?
+		move.l	d1,cr_Next(a1)		; Clear the next field...
+		move.l	cr_lobs(a3),cr_lobs(a1)	; Set up lobs pointer
+		move.l	(a5),cr_MinX(a1)	; Get minX/Y of bounds
+		move.l	4(a5),cr_MaxX(a1)	; Get maxX/Y of bounds
+		tst.l	cr_BitMap(a3)		; Check if we have a bitmap
+		beq.s	pre_rts			; not, we are done...
+*
+* Allocate the bitmap as needed...  (and start the bits copying...)
+*
+		move.l	lr_LayerInfo(a2),d4	; Save layer info
+		move.l	d1,lr_LayerInfo(a2)	; NULL layer info
+		move.l	a2,a0			; Get layer pointer
+		bsr	_get_concealed_rasters	; Call the routine (a1 was CR)
+		move.l	d4,lr_LayerInfo(a2)	; Get LayerInfo back...
+		tst.l	d0			; Check for failure...
+		beq.s	pre_fail		; If failed, we exit...
+		move.l	lr_crnew(a2),a1		; Get new cliprect
+		move.l	a3,a0			; Get first old one
+		bsr	_copyrect		; Copy the data as needed...
+		move.l	lr_crnew(a2),a1		; Get new cliprect
+		move.l	a4,a0			; Get second old one
+		bsr	_copyrect		; Copy the data as needed...
+		moveq.l	#1,d0			; All worked...
+		rts
+pre_fail:	move.l	lr_crnew(a2),a0		; Get cliprect list
+pre_flush:	bsr	_Freecrlist		; Free it...
+		moveq.l	#0,d0			; Set error code
+pre_rts:	rts
+*
+*******************************************************************************
+*
+* This routine is much like preunslice but it is for the harder case...
+* In this case, we need a secondary cliprect in addition to the main one...
+*
+* Input:	a2 - The layer
+*		a3 - Cliprect 1 (top/left)
+*		a4 - Cliprect 2 (bottom/right)
+*		a5 - Bounds pointer...
+*
+* Result:	d0 - NULL if failed...
+*		d1/a0/a1/d4/d5 - trashed...
+*
+preunslice2:	bsr.s	preunslice		; Get the first one...
+		tst.l	d0			; Check for error...
+		beq.s	pre_rts			; If error, exit...
+		move.l	lr_crnew(a2),d5		; Save new cliprect...
+		addq.l	#8,a5			; Point at second bounds...
+		bsr.s	preunslice		; Get the second one...
+		subq.l	#8,a5			; Restore a5
+		move.l	d5,a0			; Get back the original cr...
+		tst.l	d0			; Did we get the second one
+		beq.s	pre_flush		; flush the old one if not...
+		move.l	lr_crnew(a2),(a0)	; Link the first one in
+		move.l	a0,lr_crnew(a2)		; front of the second...
+		rts				; Return with non-NULL...
+*
+*******************************************************************************
+*
+* Ok, we know all will work so we will just pull out the old and install
+* the new...
+*
+* The layer passed will have lr_cr and lr_cr2 as the old cliprects and
+* lr_crnew as a list of new cliprects to replace the old.  The first
+* cliprect in the list is the replacement for lr_cr.  Any other cliprects
+* are just to be added in sorted order...
+*
+* Input:	a2 - The layer
+*
+undice:		lea	lr_ClipRect(a2),a0	; Point at cliprect list
+		move.l	lr_cr(a2),d1		; Get first cliprect
+		bra.s	undice_loop		; start the loop...
+undice_next:	move.l	(a0),a0			; Get next cliprect...
+undice_loop:	cmp.l	(a0),d1			; Did we find the spot?
+		bne.s	undice_next		; If not, keep looking...
+*
+		move.l	lr_crnew(a2),a1		; Get first cliprect
+		move.l	(a1),lr_crnew(a2)	; Unlink it...
+		move.l	a1,(a0)			; Link the new cliprect
+		move.l	d1,a0			; Point at old cliprect
+		move.l	(a0),(a1)		; Link is complete...
+		clr.l	(a0)			; Clear the old link...
+*
+* Now find the second cliprect...
+*
+		move.l	lr_cr2(a2),a0		; Get it...
+		bra.s	undice_loop2		; Enter the loop...
+undice_next2:	move.l	(a1),a1			; Get next cliprect
+undice_loop2:	cmp.l	(a1),a0			; Did we find it?
+		bne.s	undice_next2		; Keep looking...
+		move.l	(a0),(a1)		; Unlink the cliprect...
+*
+* Now, link in the extra cliprect (if it exists)
+*
+		move.l	lr_crnew(a2),d0		; Get the possible extra
+		beq.s	undice_free		; Well, no more so free...
+		move.l	d0,a1			; Get cliprect
+		move.l	a2,a0			; Get layer
+		bsr	sortlinkcr		; Insert it sorted...
+*
+undice_free:	move.l	lr_cr2(a2),a0		; Get old cr...
+		move.l	lr_cr(a2),(a0)		; Link in other old one...
+		bra	_Freecrlist		; Free them...
+*
+*******************************************************************************
+*
+* This routine takes a stacked pair of cliprects and a bounds set that will
+* be used to replace the cliprects.  It then preunslices then as needed
+* and then, if all is well, will replace the old cliprects with the new
+*
+* Inputs:	a0 - Pointer to the rectangle(s)
+*		a1 - Pointer to the second cliprect
+*		a3 - Pointer to the first cliprect
+*
+* Result:	TRUE if it worked, FALSE if it failed...
+*		Trashes d3 & d4 & d5!!!!
+*
+* unslice2 is for the hard case.  It sets up the right function pointer
+*
+unslice2:	movem.l	a2-a5,-(sp)		; Save a bunch...
+		move.l	a0,a5			; Point at rectangles
+		lea	preunslice2(pc),a0	; Get right routine...
+		bra.s	unslice_common
+*
+* unslice is for the easy case.  It also sets up the right function pointers
+*
+unslice:	movem.l	a2-a5,-(sp)		; Save a bunch...
+		move.l	a0,a5			; Point at rectangles
+		lea	preunslice(pc),a0	; Get a pointer to the type...
+*
+* Now for the common code.  The preunslice routine function pointer is
+* in a0 (soon to be d3) and will be used to make this routine all in one...
+*
+unslice_common:	move.l	a0,d3			; Save in d3...
+		move.l	a1,a4			; Get other (2nd) cliprect
+*
+* First, walk down the cliprects trying to get the memory needed...
+*
+unslice_getmem:	move.l	cr__p2(a3),a2		; Get layer...
+		move.l	d3,a0			; Get function to call
+		jsr	(a0)			; Call it
+		tst.l	d0			; Did we work?
+		beq.s	unslice_bail		; If not, we bail...
+		move.l	cr__p1(a3),a3		; Walk down the list...
+		move.l	cr__p1(a4),a4		; ...on both cliprect stacks!
+		move.l	a3,d0			; Check if we have more
+		bne.s	unslice_getmem		; If more, get more...
+*
+* Now that we got the memory, we just need to do the undice...
+*
+		movem.l	(sp)+,a2-a5		; Restore all registers
+		movem.l	a2/a3,-(sp)		; Save these again...
+unslice_undice:	move.l	cr__p2(a3),a2		; Get layer...
+		move.l	cr__p1(a3),a3		; Get next cliprect...
+		bsr	undice			; undice this layer...
+		move.l	a3,d0			; Check if we are at the end
+		bne.s	unslice_undice		; If not, continue loop.
+		movem.l	(sp)+,a2/a3		; Restore...
+		moveq.l	#1,d0			; We worked!
+		rts				; And return...
+*
+* Oh no!  We could not get the memory... Back out what we have...
+*
+unslice_bail:	move.l	a3,a1			; Save current cliprect...
+		movem.l	(sp)+,a2-a5		; Restore the registers...
+		movem.l	a2/a3,-(sp)		; Save these...
+		move.l	a1,a2			; Put end position into a2
+		bra.s	bail_start		; Go to the start of the loop
+*
+bail_loop:	move.l	cr__p2(a3),a0		; Get layer...
+		move.l	lr_crnew(a0),a0		; Get new cliprects
+		bsr	_Freecrlist		; Free them...
+		move.l	cr__p1(a3),a3		; Get next one...
+bail_start:	cmp.l	a2,a3			; Are we at the end?
+		bne.s	bail_loop		; If not, continue...
+*
+		movem.l	(sp)+,a2/a3		; Restore...
+		moveq.l	#0,d0			; Set error
+		rts				; And we are done!
+*
+*******************************************************************************
+*
+* verify_dedice - This checks to see if the now matching cliprects can
+* be dediced based on the cliprect stacks...  This routine will link
+* all cliprects in the stacks together such that the real dedice will
+* not need to...  Only the cr1 list will contain the layer pointer...
+*
+* Also, if the routine is pased a mismatched latteral cliprect pair,
+* it will do the modifications needed to make the verify pass.
+*
+* We get cliprects in a0 and a1  (a0 is the first cliprect)
+* We get the layer pointer in a2
+* We get the obscuring layer pointer in d4
+* We return result in d1
+* We trash *ONLY* d1!!!
+*
+* This entry point is for when the bottom line matches and the
+* top line does not.  This is when CR2 is on the LEFT...
+* (Note: CR2 will never have a higher MinY than CR1)
+*
+verify_dedice4:	movem.l	d0/a2/a3/a4/a5,-(sp)
+		move.l	cr_MaxX(a0),-(sp)	; Set up MaxX/Y
+		move.l	cr_MinX(a1),-(sp)	; Set up MinX/Y
+		bra.s	verify_start		; Do the verify
+*
+* This entry point is for when the bottom line matches and the
+* top line does not.  This is when CR2 is on the RIGHT...
+* (Note: CR2 will never have a higher MinY than CR1)
+*
+verify_dedice3:	movem.l	d0/a2/a3/a4/a5,-(sp)
+		move.l	cr_MaxX(a1),-(sp)	; Set up MaxX/Y
+		move.w	cr_MinY(a1),-(sp)	; Set up MinY
+		move.w	cr_MinX(a0),-(sp)	; Set up MinX
+		bra.s	verify_start		; Start the verify
+*
+* This entry point is for when the top line matches and the
+* second cliprect is to the right...
+*
+verify_dedice2:	movem.l	d0/a2/a3/a4/a5,-(sp)
+*
+* For speed, get the whole MaxX and Y.  We only need to check Y which
+* is in the low word.  However, we will always need to save both onto
+* the stack so might as well have it in d0 ready to go...
+*
+		move.l	cr_MaxX(a1),d0		; Check the bottom edge
+		move.w	cr_MaxY(a0),d1		; Get the other MaxY
+		cmp.w	d1,d0			; If less than or same
+		ble.s	make_rect_new		; of a0, d0 is the bottom...
+		move.w	d1,d0			; Make a new bottom...
+make_rect_new:	move.l	d0,-(sp)		; Set Bottom/Right...
+		bra.s	make_rect_top		; Go do the top now...
+*
+* This entry point is for when we know that the case is the simple one:
+* That is, the first cliprect and the second line up perfectly and the
+* first comes before the second.
+*
+verify_dedice1:	movem.l	d0/a2/a3/a4/a5,-(sp)
+make_rect:	move.l	cr_MaxX(a1),-(sp)	; Set Bottom/Right position
+make_rect_top:	move.l	cr_MinX(a0),-(sp)	; Set Top/Left position
+verify_start:	move.l	a0,a4			; Save in a4
+		move.l	a1,a5			; Save in a5
+*
+* First check if any of the layers we already did intersect with this rect
+* since if any do, we don't need to even think about the dedice...
+*
+		move.l	a2,a3			; Get current layer...
+		move.l	sp,a1			; Point at rectangle on stack
+v_d_check:	move.l	lr_front(a3),a3		; Get previous layer
+		cmp.l	d4,a3			; Check if obscuring layer...
+		beq.s	v_d_ok			; If so, we are done...
+		lea	lr_MinX(a3),a0		; Point at layer rectangle
+		bsr	_rectXrect		; Check for overlap
+		tst.l	d0			; Check it...
+		beq.s	v_d_check		; If not, check next one...
+		bra.s	v_d_false		; No need to even bother...
+*
+* Clear the cr__p1 (link of cliprects) and set cr__p2 as layer pointer
+* Only the cr1 list will have the layer pointers...
+*
+v_d_ok:		move.l	a2,cr__p2(a4)		; Set up layer pointer
+		moveq.l	#0,d0			; Clear d0...
+		move.l	d0,cr__p1(a4)		; Clear next pointer
+		move.l	d0,cr__p1(a5)
+*
+* Now get the layer that is obscuring us; that is our starting point.
+*
+		move.l	d4,a3			; This is where we start...
+v_d_loop:	move.l	lr_back(a3),d0		; the second layer: set flags
+		move.l	d0,a3			; Does not set flags...
+		beq.s	v_d_done		; If NULL, we are done...
+		cmp.l	a2,a3			; Check if are at "this" layer
+		beq.s	v_d_loop		; If so, loop again...
+*
+* First check to see if we even come close to overlapping...
+* If not, we can skip the cliprect search!  (Yeah!)
+*
+		move.l	sp,a0			; Get our new bounds
+		lea	lr_MinX(a3),a1		; Get other layer's bounds
+		bsr	_rectXrect		; Check of overlap
+		tst.l	d0			; If NULL, no overlap
+		beq.s	v_d_loop		; If no overlap, next layer...
+*
+* Now, we need to check to see if both cliprects are in this layer...
+*
+* Since we know at least one of them is in the layer, if either one
+* is not, we know that we have to fail this dedice...
+*
+		lea	lr_ClipRect(a3),a0	; Get pointer to *cr
+		lea	cr_MinX(a4),a1		; Point at bounds for cr
+		bsr.s	search_next_cr		; Look for it
+		tst.l	d0			; If not found, we need
+		beq.s	v_d_false		; make sure the other isn't
+*
+* In this case, the first cliprect was found, so the other must be found
+* and it must be after it in the list.  (One of the reasons why we sorted it)
+* Also, we will link this cliprect into the cr1 list...
+*
+		move.l	d0,a0			; Get first result...
+		move.l	cr__p1(a4),cr__p1(a0)	; Set up link...
+		move.l	a0,cr__p1(a4)		; ...to matching cliprect
+		move.l	a3,cr__p2(a0)		; Set pointer to layer...
+*
+		lea	cr_MinX(a5),a1		; Bounds of cr2
+		bsr.s	search_next_cr		; Look for it
+		tst.l	d0			; Check if we got it...
+		beq.s	v_d_false		; If not, we exit false...
+*
+* Ok, we need to link this into the cr2 list...
+*
+		move.l	d0,a0			; Get cliprect into pointer...
+		move.l	cr__p1(a5),cr__p1(a0)	; Set up link...
+		move.l	a0,cr__p1(a5)		; ...to matching cliprect
+		bra.s	v_d_loop		; Next layer...
+*
+v_d_false:	moveq.l	#0,d1			; We did not work...
+v_d_exit:	move.l	a5,a1			; Get back cr2
+		move.l	a4,a0			; Get back cr
+		addq.l	#8,sp			; Adjust for our rectangle...
+		movem.l	(sp)+,d0/a2/a3/a4/a5
+		rts
+v_d_done:	moveq.l	#1,d1			; We worked...
+		bra.s	v_d_exit
+*
+*******************************************************************************
+*
+* New search for cliprect given a pointer to the last cliprect.
+* It does not search the cliprect given as a pointer.
+* It returns a pointer to a cliprect.
+* If nothing is found, it will return NULL
+*
+* To increase speed, it assumes that the list is sorted with the function
+* below and thus will abort the search if it notices it went too far.
+*
+* Note that we check for Y before X in the sort due to the fact that
+* the sort is not Y before X...
+*
+*	a0 = pointer to cliprect pointer
+*	a1 = bounds
+*
+*	returns d0 = pointer to matching cliprect.  (ClipRect *)
+*
+search_next_cr:	movem.l	(a1),d1/a1	* get xmin,ymin,xmax,ymax
+*		move.l	(a1),d1		* get xmin,ymin
+*		move.l	4(a1),a1	* get xmax,ymax
+*
+next_cr:	move.l	(a0),d0		; Get next cliprect...
+		beq.s	end_cr		; If NULL, we are done...
+		move.l	d0,a0		; Set up answer
+		cmp.w	cr_MinY(a0),d1	; Check the Y value first...
+		blt.s	no_cr		; If beyond, we exit...
+		bne.s	next_cr		; If not same, go to next...
+		cmp.l	cr_MinX(a0),d1	; Check if same Min values
+		blt.s	no_cr		; if we passed the cliprect...
+		bne.s	next_cr		; If not, check the next one...
+		cmp.l	cr_MaxX(a0),a1	; Check if same Max values
+		bne.s	next_cr		; If not, check the next one...
+end_cr:		rts			; Return with d0 result...
+no_cr:		moveq.l	#0,d0		; We have no CR...
+found_cr:	rts			; and return...
+*
+*******************************************************************************
+*
+* This search function, you pass in a cliprect and it returns either
+* a cliprect that "attaches" to it or NULL if one does not.
+* It only looks at the right/bottom sides of the cliprect for a match...
+* It also uses the fact that the cliprect list is sorted and thus
+* will early terminate any search that it may run into.
+* It also check to see that matching cliprects are obscured by the same layer.
+* Then, if the cliprect still looks like it can be dediced, it will be
+* verified (in verify_dedice).  All of these routines require that the
+* cliprect list is sorted by the sort routine...
+*
+*	a0 = pointer to cliprect
+*	a2 = pointer to layer  (for verify_dedice)
+*	returns d0 = pointer to result cliprect  (or NULL)
+*	Trashes d1 & a1 & d3 & d4 & d5 & d6 & d7!!!!!
+*
+search_side_cr:	move.l	cr_lobs(a0),d4	; For checking for correct LOBs
+*
+		; Get d3=MinX, d5=MinY, d6=MaxX, d7=MaxY
+		movem.w	cr_MinX(a0),d3/d5/d6/d7
+*
+		move.l	a2,a1		; We will check if already dediced...
+search_check:	move.l	lr_front(a1),a1	; Get layer above...
+		cmp.l	a1,d4		; Is it mine?
+		beq.s	do_search	; If so, we do the search...
+*
+		cmp.w	lr_MinX(a1),d6	; Check Max vs Min X collision
+		blt.s	search_check
+		cmp.w	lr_MinY(a1),d7	; Check Max vs Min Y collision
+		blt.s	search_check
+		cmp.w	lr_MaxX(a1),d3	; Check Max vs Min X collision
+		bgt.s	search_check
+		cmp.w	lr_MaxY(a1),d5	; Check Max vs Min Y collision
+		bgt.s	search_check
+*
+		bra.s	no_cr		; Collision, so this is not a good one
+*
+* The first match will alway happen to the right.  In fact, if there is
+* going to be a match, it will be the next cliprect.  (This is due to the
+* sorting...
+*
+do_search:	move.l	a0,a1		; a1 will search cliprect...
+		move.l	(a1),d0		; Get next cliprect...
+		beq.s	end_cr		; If NULL, we exit...
+		move.l	d0,a1		; Put cliprect pointer into a1...
+		move.w	cr_MaxX(a0),d1	; Get the right side of the CR
+		addq.w	#1,d1		; Bump it by one...
+		swap.w	d1		; Put it into the high word...
+		move.w	cr_MinY(a0),d1	; Get the minimum Y...
+		cmp.l	cr_MinX(a1),d1	; Is it a match?  If not, we
+		bne.s	look_side	; go and look at the side...
+		cmp.l	cr_lobs(a1),d4	; and if not the same, punt...
+		bne.s	look_side	; now go looking at the side...
+		bsr	verify_dedice2	; Check for dedice...
+		tst.l	d1		; Check result (** NOTE: d1 **)
+		bne.s	found_cr	; If ok, we found one...
+		bra.s	look_side_more	; Otherwise look for side ones...
+*
+* Now, start looking for the sideways hard cases!
+*
+look_side:	move.w	cr_MaxY(a0),d1	; Get the target MaxY...
+		bra.s	look_side_this	; Don't skip one...
+look_side_more:	move.w	cr_MaxY(a0),d1	; Get the target MaxY...
+look_side_next:	move.l	(a1),d0		; Get next one since this was is dead
+		beq.s	end_cr		; No more?  Exit...
+		move.l	d0,a1		; Put next one into a1...
+*
+look_side_this:	cmp.w	cr_MinY(a1),d1	; Are we past the point?
+		blt.s	look_bottom	; If we are past it, go to bottom
+		cmp.w	cr_MaxY(a1),d1	; Is it a match?
+		bne.s	look_side_next	; If not, keep looking...
+		cmp.l	cr_lobs(a1),d4	; They must match...
+		bne.s	look_side_next	; If not, get out...
+		move.w	cr_MinX(a0),d3	; Get the target left side
+		subq.w	#1,d3		; Make it right...
+		cmp.w	cr_MaxX(a1),d3	; Is it to the left?
+		beq.s	found_left	; Found on the left...
+		bgt.s	look_side_next	; If too far left, not right...
+		move.w	cr_MaxX(a0),d3	; Now check for the right side...
+		addq.w	#1,d3		; Make it right...
+		cmp.w	cr_MinX(a1),d3	; Check it...
+		bne.s	look_side_next	; If not it, try again...
+*
+* We found a really tough side cr2 on the right...
+*
+found_right:	bsr	verify_dedice3	; Do the very hard right side...
+found_check:	tst.l	d1		; Check result  (** NOTE: d1 **)
+		bne.s	v_found_cr	; We found one!
+		bra.s	look_side_more	; Look for more on the side...
+*
+* We found a really tough side cr2 on the left...
+*
+found_left:	bsr	verify_dedice4	; Do the hard left side...
+		bra.s	found_check
+*
+* Now, start looking for the bottom cliprect...  Build what we need...
+*
+look_bottom:	move.l	cr_MinX(a0),d1	; Get MinX into high reg...
+		move.w	cr_MaxY(a0),d1	; Get MaxY into low word...
+		addq.w	#1,d1		; On beyond MaxY...
+l_b_loop:	cmp.w	cr_MinY(a1),d1	; Check MinY first...
+		blt.s	v_no_cr		; If less than, we found none...
+		bne.s	l_b_next	; If not same, go to next one...
+		cmp.l	cr_MinX(a1),d1	; All must match...
+		beq.s	found_bottom	; We found a bottom one...
+l_b_next:	move.l	(a1),d0		; Get next cliprect...
+		beq.s	v_no_cr		; Exit if end of list
+		move.l	d0,a1		; Put it into a1...
+		bra.s	l_b_loop	; Look some more.
+found_bottom:	move.w	cr_MaxX(a0),d1	; Now check the MaxX
+		cmp.w	cr_MaxX(a1),d1	; as they must match...
+		bne.s	v_no_cr		; If not, exit...
+		cmp.l	cr_lobs(a1),d4	; and they much match
+		bne.s	v_no_cr		; If not, exit...
+		bsr	verify_dedice1	; Verify it will work (simple case)
+		tst.l	d1		; Check result (** NOTE: d1 **)
+		bne.s	v_found_cr	; If ok, exit with d0 set...
+v_no_cr:	moveq.l	#0,d0		; We have no CR...
+v_found_cr:	rts			; and return...
+*
+*******************************************************************************
+*
+* dedice - This routine tries to do simple layer dedice
+*
+* The layers *MUST* be locked when this routine is called.
+* The caller *MUST* have stripped the onscreen cliprects!!!
+*
+* called with	a0 = struct Layer_Info *
+*
+* returns	d0 = BOOLEAN - TRUE if something changed, FALSE if not...
+*
+* Ok, so the old optimize cliprects will now always call this routine...
+* Dedice may end up calling rebuild sometimes...
+*
+_optimizeClipRects:	xdef	_optimizeClipRects
+*
+dedice:		move.l	li_top_layer(a0),d0	; Get top layer
+		beq	end_dedice		; No layer, so exit!
+		movem.l	a2-a5/d2-d7,-(sp)	; Save these
+		move.l	sp,a5			; Make a copy of the stack reg
+*
+* Registers:	a4=top layer
+*		a3=cliprect loop
+*		a2=layer loop
+*		d2=changed flag - set to TRUE if something changes...
+*		a5=cache of stack pointer
+*		d3-d7=Trash reg
+*
+		move.l	d0,a4			; Get top_layer set up...
+*
+* Ok, sort the cliprects in all layers
+*
+pre_sort:	move.l	d0,a0			; Get ready for loop...
+			; sort_layer_cr trashes d2/a2/a3  (We don't care)
+		bsr	sort_layer_cr		; a0 does not get trashed
+		move.l	lr_back(a0),d0		; Get next layer...
+		bne.s	pre_sort		; Sort the next one...
+*
+* Ok, so we sorted the layers.  We now do the dedice.
+* Now set up d2 for the real work...
+*
+		moveq.l	#0,d2			; Nothing changed yet...
+*
+* Ok, now, go through each layer and look for dedicing...
+*
+		move.l	a4,a2
+dedice_loop:	move.l	lr_back(a2),d0		; Get next layer
+		beq	exit_dedice		; If NULL, we are done...
+		move.l	d0,a2			; Set up in pointer...
+dedice_cr:	lea	lr_ClipRect(a2),a3	; Get cliprects pointer
+dedice_cr_loop:	move.l	(a3),d0			; Get next cliprect...
+		beq.s	dedice_loop		; If done, next layer...
+		move.l	d0,a3			; Put it into a3...
+		move.l	a3,a0			; Also set up for call to:
+		bsr	search_side_cr		; and get the cliprect...
+		tst.l	d0			; Check if we got one...
+		beq.s	dedice_cr_loop		; Do next cliprect...
+		move.l	d0,a1			; Put it where I need it...
+*
+* For the below code:  cr1==a3    cr2==a1
+*
+* Produce the bounds that are a combination of the two cliprects.
+* There are basically 6 cases which break down into 2 classes:
+*
+*	SIMPLE	This is when perfect latteral or veritical
+*		alignment happens.  There is only one bound
+*		needed to describe this and it is based on
+*		the simple use of the Min(cr1) and Max(cr2)
+*
+*	HARD	This is when perfect latteral alignment is not
+*		available but partial latteral alignment has
+*		been verified.  There are four cases of this:
+*		First two cases have the top (MinY) aligned
+*		but may have the MaxY be either larger in cr1
+*		or in cr2.  The other two cases have the
+*		bottom (MaxY) aligned but cr2 may be to the left
+*		or right of cr1.  In this case, cr2 MinY will
+*		always be lower (larger) than cr1.
+*
+		; Get d4=MinX, d5=MinY, d6=MaxX, d7=MaxY
+		movem.w	cr_MinX(a1),d4/d5/d6/d7	; Cache cr2 bounds...
+		cmp.w	cr_MinX(a3),d4		; Matching X?
+		beq.s	dedice_simple		; If a match, a simple case...
+		cmp.w	cr_MaxY(a3),d7		; Check for MaxY match
+		beq.s	dedice_bmatch
+*
+* At this point we must assume that the top matches as we would not have
+* come to this point without such a match.  Since the bottom does not
+* match we just need to figure out which is larger...  In fact, the test
+* was already done just above here (the cmp.w) so we can just use those flags
+* and then generate the correct extra bounds...
+*
+		blt.s	tall_cr1		; If cr1 is taller than cr2
+*
+* cr2 is taller than cr1...
+*
+		move.w	d7,-(sp)		; Set second rectangle MaxY
+		move.w	d6,-(sp)		; Set second rectangle MaxX
+		move.w	cr_MaxY(a3),d0		; Get cr1 bottom...
+		addq.w	#1,d0			; Point just past it...
+		move.w	d0,-(sp)		; Set second rectangle MinY
+		move.w	d4,-(sp)		; Set second rectangle MinX
+		move.w	cr_MaxY(a3),-(sp)	; Set first rectangle MaxY
+		move.w	d6,-(sp)		; Set first rectangle MaxX
+		bra.s	hard_common		; Set the rest and do the work
+*
+* cr1 is taller than cr2...
+*
+tall_cr1:	move.l	cr_MaxX(a3),-(sp)	; Set second rectangle MaxX/Y
+		move.w	cr_MinX(a3),d0		; Get MinX...
+		swap.w	d0			; ...Into high word...
+		move.w	d7,d0			; Get cr2 bottom
+		addq.w	#1,d0			; Point just past it...
+		move.l	d0,-(sp)		; Set second rectangle MinX/Y
+		move.w	d7,-(sp)		; Set first rectangle MaxY
+		move.w	d6,-(sp)		; Set first rectangle MaxX
+		bra.s	hard_common		; Set the rest and do the work
+*
+* The bottom matched... Now check if the top matched too...
+*
+dedice_bmatch:	cmp.w	cr_MinY(a3),d5		; Check match on the top...
+		beq.s	dedice_simple		; If a match, simple case
+*
+* Ok, here we are with a match at the MaxY and not MinY.  This means
+* the hardest case:  Lower alignment.  There are two possible answers here:
+* 1)  cr2 is to the left of cr1
+* 2)  cr2 is to the right of cr1
+*
+* cr2 MinY is always lower than cr1 MinY!!!
+*
+		cmp.w	cr_MaxX(a3),d6		; Check it with cr1...
+		blt.s	right_cr1		; If cr1 is right of cr2
+*
+* cr1 is to the left of cr2...
+*
+		move.w	d7,-(sp)		; Set second rectangle MaxY
+		move.w	d6,-(sp)		; Set second rectangle MaxX
+		move.w	d5,-(sp)		; Set second rectangle MinY
+		move.w	cr_MinX(a3),-(sp)	; Set second rectangle MinX
+		bra.s	left_common		; Do the first rectangle...
+*
+* cr1 is to the right of cr2...
+*
+right_cr1:	move.l	cr_MaxX(a3),-(sp)	; Set second rectangle MaxX/Y
+		move.w	d5,-(sp)		; Set second rectangle MinY
+		move.w	d4,-(sp)		; Set second rectangle MinX
+*
+* This is common for both left and right cr1...
+*
+left_common:	move.w	cr_MaxX(a3),d0		; Get MaxX...
+		swap.w	d0			; ...Into high word...
+		move.w	d5,d0			; Get top of cr2
+		subq.w	#1,d0			; One above it...
+		move.l	d0,-(sp)		; Set first rectangle MaxX/Y
+*
+* This is common for all hard cases...
+*
+hard_common:	move.l	cr_MinX(a3),-(sp)	; Set first rectangle MinX/Y
+		move.l	sp,a0			; Point at my cliprects...
+			; unslice2 trashes d3!!!!  (We don't care)
+		bsr	unslice2		; Do the hard unslice...
+		bra.s	dedice_next		; ...and continue...
+*
+* Ok, so we have a simple case...  Lets build the bounds and call the simple
+* unslice routine...
+*
+dedice_simple:	move.w	d7,-(sp)		; Set rectangle MaxY
+		move.w	d6,-(sp)		; Set rectangle MaxX
+		move.l	cr_MinX(a3),-(sp)	; Set rectangle MinX/Y
+		move.l	sp,a0			; Point at new rectangle...
+			; unslice trashes d3!!!!  (We don't care)
+		bsr	unslice			; Call the unslice routine!
+*
+dedice_next:	move.l	a5,sp			; Restore the stack...
+		tst.l	d0			; Check if we changed any...
+		beq	dedice_cr_loop		; If not, we continue
+		moveq.l	#1,d2			; Set changed flag...
+		bra	dedice_cr		; Start layer over again...
+*
+* Now exit...  Set up the return result...
+*
+exit_dedice:	move.l	d2,d0			; Set return result...
+		movem.l	(sp)+,a2-a5/d2-d7	; Restore (no flags changed)
+end_dedice:	rts
+*
+*******************************************************************************
+*
+		end
+@
+
+
+39.6
+log
+@Saved a few bytes and started to put the more complete docs together
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.5 92/01/12 10:48:09 mks Exp Locker: mks $
+d42 7
+@
+
+
+39.5
+log
+@Minor bug fix and two quick optimizations...
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.4 92/01/11 18:26:58 mks Exp Locker: mks $
+d28 1
+d30 16
+d452 2
+a453 4
+		move.w	cr_MinX(a0),d0		; Get MinX/Y
+		swap.w	d0			; Put it into high word
+		move.w	cr_MinY(a1),d0		; Get MinY
+		move.l	d0,-(sp)		; Set up MinX/Y
+d466 2
+a467 1
+		cmp.w	cr_MaxY(a0),d0		; If less than or same
+d469 1
+a469 1
+		move.w	cr_MaxY(a0),d0		; Make a new bottom...
+@
+
+
+39.4
+log
+@Added the code needed to deal with the two cases of non-optimal
+cliprects.  These two cases were rather important since they
+(together) could cause a number of non-optimal conditions.
+
+Also, with great pains, I sped up the code again to make up for
+the extra testing needed for the two cases...  The code got a bit
+larger but I kept the growth to as little as possible.
+
+Next step will be full documentation of how this all works.
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.3 92/01/10 18:44:11 mks Exp Locker: mks $
+d215 1
+a215 1
+*		d1/a0/a1 - trashed...
+d224 2
+a225 2
+		moveq.l	#0,d0			; Need a NULL somewhere?
+		move.l	d0,cr_Next(a1)		; Clear the next field...
+d234 2
+a235 2
+		move.l	lr_LayerInfo(a2),-(sp)	; Save layer info
+		clr.l	lr_LayerInfo(a2)	; NULL layer info
+d238 1
+a238 1
+		move.l	(sp)+,lr_LayerInfo(a2)	; Get LayerInfo back...
+d265 1
+a265 1
+*		d1/a0/a1 - trashed...
+d270 1
+a270 1
+		move.l	lr_crnew(a2),-(sp)	; Save new cliprect...
+d274 1
+a274 1
+		move.l	(sp)+,a0		; Get back the original cr...
+d339 1
+a339 1
+*		Trashes d3!!!!
+@
+
+
+39.3
+log
+@Major reworking of the dedice code is now complete.  All that is
+left is to do some more testing and a ton of documentation!
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.2 92/01/10 12:20:41 mks Exp Locker: mks $
+d28 173
+d339 1
+d343 1
+a343 1
+unslice2:	movem.l	a2-a5/d7,-(sp)		; Save a bunch...
+d350 1
+a350 1
+unslice:	movem.l	a2-a5/d7,-(sp)		; Save a bunch...
+d355 1
+a355 1
+* in a0 (soon to be d7) and will be used to make this routine all in one...
+d357 1
+a357 1
+unslice_common:	move.l	a0,d7			; Save in d7...
+d363 1
+a363 1
+		move.l	d7,a0			; Get function to call
+d374 1
+a374 1
+		movem.l	(sp)+,a2-a5/d7		; Restore all registers
+d388 1
+a388 1
+		movem.l	(sp)+,a2-a5/d7		; Restore the registers...
+d416 1
+d418 1
+a418 3
+* We *MUST* *NOT* trash anything other than d1!
+*
+verify_dedice:	movem.l	d0/a2/a3/a4/a5,-(sp)
+d420 23
+a442 7
+* Now, build a rectangle structure that is the combination of
+* the two cliprects that are going to be used...
+*
+* We use the fact that the first cliprect is always the top/left one
+* and that the second cliprect is always the bottom/right one.
+* However, due to latteral cliprect pairs that are used in the
+* new optimal dedicer, we need to check for that case...
+d444 1
+a444 3
+		move.w	cr_MinY(a0),d0		; Get top edge...
+		cmp.w	cr_MinY(a1),d0		; Check for a match...
+		bne.s	make_rect		; If not match, do normal...
+d454 1
+a454 4
+*
+* Use d0 as the bottom of the rectangle...
+*
+make_rect_new:	move.l	d0,-(sp)		; Get Bottom/Right...
+d457 3
+a459 1
+* This entry point is for when we know that the case is the simple one...
+d462 3
+a464 5
+*
+make_rect:	move.l	cr_MaxX(a1),-(sp)	; Get Bottom/Right position
+make_rect_top:	move.l	cr_MinX(a0),-(sp)	; Get Top/Left position
+*
+		move.l	a0,a4			; Save in a4
+d472 3
+a474 5
+v_d_check:	move.l	lr_front(a3),d0		; Get previous layer
+		beq.s	v_d_ok			; Top layer?  Ok, so done...
+		move.l	d0,a3			; Get into a3 again...
+		cmp.l	cr_lobs(a4),d0		; Check if obscuring layer...
+		beq.s	v_d_check		; Skip it...
+d485 1
+a485 1
+		; d0 is NULL here... (only way to this point is d0==NULL)
+d491 1
+a491 1
+		move.l	cr_lobs(a4),a3		; This is where we start...
+d600 3
+d604 16
+a619 1
+search_side_cr:	move.l	a0,a1		; a1 will be our cliprect thing...
+d621 2
+d627 1
+d633 1
+a633 1
+		swap	d1		; Put it into the high word...
+d636 4
+a639 5
+		bne.s	look_bottom	; go and look at the bottom...
+		move.l	cr_lobs(a0),d1	; Check obscuring layer
+		cmp.l	cr_lobs(a1),d1	; and if not the same, punt...
+		bne.s	look_bottom	; now go looking at the bottom...
+		bsr	verify_dedice	; Check for dedice...
+d642 3
+d646 35
+d687 1
+a687 1
+		blt.s	no_cr		; If less than, we found none...
+d692 1
+a692 1
+		beq.s	end_cr		; Exit if end of list
+d697 3
+a699 4
+		bne.s	no_cr		; If not, exit...
+		move.l	cr_lobs(a0),d1	; Check the layer pointers
+		cmp.l	cr_lobs(a1),d1	; as they much match
+		bne.s	no_cr		; If not, exit...
+d702 3
+a704 2
+		beq.s	no_cr		; If not ok, exit with none...
+		rts			; Return with cliprect pointer...
+d724 1
+a724 1
+		movem.l	a0/a2-a5/d2-d4,-(sp)	; Save these
+d732 1
+a732 2
+*		d3=Temp used in rectangle generation
+*		d4=Temp used in rectangle generation
+d739 1
+d753 1
+a753 1
+		beq.s	exit_dedice		; If NULL, we are done...
+d765 4
+a768 1
+* Produce the bounds that are a combination of the two cliprects
+d770 90
+a859 30
+		move.l	cr_MaxX(a1),d4		; Get MaxX/Y from cr2
+		move.l	cr_MinX(a3),d3		; Get MinX/Y from cr1
+		cmp.w	cr_MinY(a1),d3		; Check if MinY is a match...
+		bne.s	dedice_normal		; If not, must be vertical...
+		cmp.w	cr_MaxY(a3),d4		; Check if MaxY is a match...
+		beq.s	dedice_normal		; If they do, it is normal...
+*
+* Ok, so we have a complex dedice to do...  Lets generate the rectanges
+*
+		blt.s	dedice_bigleft		; ** Flags from above!!!
+*
+* The right cliprect is the larger...
+*
+		move.w	cr_MaxY(a3),d4		; Get cr1 MaxY...
+		move.w	cr_MinX(a1),d3		; Get cr2 MinX...
+		swap	d3			; Into top...
+		move.w	d4,d3			; Get cr1 MaxY
+		addq.w	#1,d3			; One down from there...
+		move.l	cr_MaxX(a1),-(sp)	; MaxX/Y of second new cr
+		move.l	d3,-(sp)		; MinX/Y of second new cr
+		bra.s	dedice_new
+*
+* The left cliprect is the larger
+*
+dedice_bigleft:	move.w	cr_MinX(a3),d3		; Get cr1 MinX...
+		swap	d3			; Into top...
+		move.w	d4,d3			; Get cr2 MaxY
+		addq.w	#1,d3			; Bump to next pixel...
+		move.l	cr_MaxX(a3),-(sp)	; MaxX/Y of second new cr
+		move.l	d3,-(sp)		; MinX/Y of second new cr
+d861 3
+a863 2
+dedice_new:	move.l	d4,-(sp)		; MaxX/Y of first new cr
+		move.l	cr_MinX(a3),-(sp)	; MinX/Y of first new cr
+d865 2
+a866 1
+		bsr	unslice2		; Do the hard unslice
+d869 2
+a870 1
+* The simple/normal case is to make two into 1...
+d872 3
+a874 2
+dedice_normal:	move.l	d4,-(sp)		; Set bottom/right
+		move.l	d3,-(sp)		; Set top/left
+d876 1
+d881 1
+a881 1
+		beq.s	dedice_cr_loop		; If not, we continue
+d883 1
+a883 1
+		bra.s	dedice_cr		; Start layer over again...
+d888 1
+a888 1
+		movem.l	(sp)+,a0/a2-a5/d2-d4	; Restore (no flags changed)
+a889 93
+*
+*******************************************************************************
+*
+* This is a fast routine to sort the cliprect list stored in the layer.
+* The list is sorted with the MinX/Y value as the key.  Thus they will
+* be sorted from top left of the screen to bottom right.
+*
+* The sort takes the Y value as the most significant figure.  This is needed
+* such that the new dedice routine will be able to do a complete dedice.
+*
+* sort_layer_cr	- a0=layer	(does not trash a0!!!)
+*
+sort_layer_cr:	movem.l	d2/a2/a3,-(sp)	; We will need to save these
+		sub.l	a1,a1		; Clear new CR list...
+		move.l	a1,-(sp)	; And make storage for it...
+		move.l	lr_ClipRect(a0),d0	; Get first CR
+		beq.s	sort_cr_done	; If NULL, we have none...
+		move.l	sp,a2		; Get start of list...
+		move.l	d0,a1		; Get pointer...
+*
+* The first element always goes in with no proble...
+*
+* We insert the cr (a1) after the this cr (a2) and loop for more...
+*
+insert_cr:	move.l	(a1),d0		; Get old next pointer...
+		move.l	(a2),(a1)	; Set up new next pointer...
+		move.l	a1,(a2)		; Add him to the list...
+		tst.l	d0		; Check if we have more
+		beq.s	sort_cr_done	; If not, end the sort...
+*
+* The sort loop...
+*
+sort_cr_loop:	move.l	d0,a1		; Get pointer ready...
+		move.w	cr_MinX(a1),d2	; Get MinX...
+		move.w	cr_MinY(a1),d1	; Get MinY...
+*
+* Ok, a2 is pointing to the last place we inserted, so
+* check there first...
+*
+		move.l	(a2),a2		; Get ClipRect... (We know it is here)
+		cmp.w	cr_MinY(a2),d1	; Check MinY (low word...)
+		bgt.s	insert_cr_loop	; If we already know...
+		bne.s	1$		; If not same, X does not matter...
+		cmp.w	cr_MinX(a2),d2	; MinY is the same, check X
+		bgt.s	insert_cr_loop	; If not, we look from here...
+1$:		; Not larger...
+*
+* We were already past the normal spot so lets start looking from
+* the top...
+*
+		move.l	sp,a2		; Point at new list header...
+insert_cr_loop:	move.l	(a2),d0		; Get next pointer...
+		beq.s	insert_cr	; Check for end of list...
+		move.l	d0,a3		; Ok, we need to check this guy out...
+		cmp.w	cr_MinY(a3),d1	; Check MinY...
+		blt.s	insert_cr	; if lt, do the insert
+		bne.s	2$		; If not same, X does not matter...
+		cmp.w	cr_MinX(a3),d2	; Check MinX...
+		blt.s	insert_cr	; If less than next, insert it...
+2$:		move.l	a3,a2		; Set up the pointer...
+		bra.s	insert_cr_loop	; and go again...
+*
+* We are done so save the new list into the layer...
+*
+sort_cr_done:	move.l	(sp)+,lr_ClipRect(a0)	; Save the cliprect list
+		movem.l	(sp)+,d2/a2/a3	; Restore
+		rts
+*
+*******************************************************************************
+*
+* This routine is for outside use to insert a single cliprect into
+* a layer in the same sorted order as the above sort routine gives me...
+*
+*	a0=layer
+*	a1=cliprect
+*
+sortlinkcr:	move.l	a2,-(sp)	; Save this one.  (we need it)
+		lea	lr_ClipRect(a0),a0	; Get pointer to list...
+		move.l	cr_MinX(a1),d1	; Get the cliprect X/Y pos...
+sortlink_loop:	move.l	(a0),d0		; Get next cliprect...
+		beq.s	sortlink_done	; If none, we are at end of list
+		move.l	d0,a2		; Well, we should check this one...
+		cmp.w	cr_MinY(a2),d1	; Check the Y pos first...
+		blt.s	sortlink_done	; If past, we are done...
+		beq.s	sortlink_full	; If same, go check the X...
+sortlink_next:	move.l	a2,a0		; Get ready to loop...
+		bra.s	sortlink_loop	; And check the next one...
+sortlink_full:	cmp.l	cr_MinX(a2),d1	; Check vs the next one...
+		bgt.s	sortlink_next	; If not time yet, go to next one...
+sortlink_done:	move.l	(a0),(a1)	; Get up next pointer...
+		move.l	a1,(a0)		; Link it in...
+		move.l	(sp)+,a2	; Restore a2
+		rts
+@
+
+
+39.2
+log
+@Major speed increase by doing early verify dedice termination on lower
+layers.
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.1 92/01/10 09:46:48 mks Exp Locker: mks $
+d14 1
+d21 4
+a24 2
+		xref	_unslice
+		xref	_unslice2
+d28 204
+d283 2
+a284 2
+* First check if any of the layers we already did intersect with these
+* since if they do, we don't need to even think about the dedice here...
+d561 1
+a561 1
+		bsr	_unslice2		; Do the hard unslice
+d569 1
+a569 1
+		bsr	_unslice		; Call the unslice routine!
+a657 1
+_sortlinkcr:	xdef	_sortlinkcr
+@
+
+
+39.1
+log
+@New!  Optimal dedice all the time...
+@
+text
+@d3 1
+a3 1
+*	$Id: dedicer.asm,v 39.0 92/01/09 14:03:21 mks Exp Locker: mks $
+d76 16
+d95 2
+a96 2
+		move.l	a2,cr__p2(a4)		; Set up layer pointer
+		moveq.l	#0,d0			; Get a NULL
+@
+
+
+39.0
+log
+@First checkin.  Just before I start the brand new dedice code.
+@
+text
+@d3 1
+a3 1
+*	$Id$
+d11 4
+a14 4
+	include 'exec/types.i'
+	include 'exec/nodes.i'
+	include 'exec/lists.i'
+	include 'graphics/clip.i'
+a15 1
+	include	'layersbase.i'
+d21 1
+a21 1
+		xref	_rebuildcliprects
+a24 101
+* New search for cliprect given a pointer to the last cliprect.
+* It does not search the cliprect given as a pointer.
+* It returns a pointer to a cliprect.
+* If nothing is found, it will return NULL
+*
+* To increase speed, it assumes that the list is sorted with the function
+* below and thus will abort the search if it notices it went too far.
+*
+*	a0 = pointer to cliprect pointer
+*	a1 = bounds
+*
+*	returns d0 = pointer to matching cliprect.  (ClipRect *)
+*
+search_next_cr:	movem.l	(a1),d1/a1	* get xmin,ymin,xmax,ymax
+*		move.l	(a1),d1		* get xmin,ymin
+*		move.l	4(a1),a1	* get xmax,ymax
+*
+next_cr:	move.l	(a0),d0		; Get next cliprect...
+		beq.s	end_cr		; If NULL, we are done...
+		move.l	d0,a0		; Set up answer
+		cmp.l	cr_MinX(a0),d1	; Check if same Min values
+		blt.s	no_cr		; if we passed the cliprect...
+		bne.s	next_cr		; If not, check the next one...
+		cmp.l	cr_MaxX(a0),a1	; Check if same Max values
+		bne.s	next_cr		; If not, check the next one...
+end_cr:		rts			; Return with d0 result...
+no_cr:		moveq.l	#0,d0		; We have no CR...
+		rts			; and return...
+*
+*******************************************************************************
+*
+* This search function, you pass in a cliprect and it returns either
+* a cliprect that "attaches" to it or NULL if one does not.
+* It only looks at the right/bottom sides of the cliprect for a match...
+* It also uses the fact that the cliprect list is sorted and thus
+* will early terminate any search that it may run into.
+* It also check to see that matching cliprects are obscured by the same layer.
+* Then, if the cliprect still looks like it can be dediced, it will be
+* verified (in verify_dedice).  All of these routines require that the
+* cliprect list is sorted.
+*
+*	a0 = pointer to cliprect
+*	a2 = pointer to layer  (for verify_dedice)
+*	returns d0 = pointer to result cliprect  (or NULL)
+*
+search_side_cr:	move.l	a0,a1		; a1 will be our cliprect thing...
+*
+* First search for a bottom match...  So look for a top left that
+* matches this cliprect's bottom left.
+*
+		move.l	cr_MinX(a0),d1	; Get X/Y for top left
+		move.w	cr_MaxY(a0),d1	; Get Y from bottom...
+		addq.w	#1,d1		; Bump by 1...
+b_l_look:	move.l	(a1),d0		; Get next cliprect...
+		beq.s	end_cr		; If NULL, we did not find one...
+		move.l	d0,a1		; Set up for next load...
+		cmp.l	cr_MinX(a1),d1	; Check if this is good...
+		blt.s	look_side	; If passed it, look at side now...
+		bne.s	b_l_look	; If not match, look some more...
+*
+* Matches one corner, now check for the other...
+*
+		move.w	cr_MaxX(a0),d1	; Get MaxX from source cliprect
+		cmp.w	cr_MaxX(a1),d1	; Check for a match
+		bne.s	look_side	; If no match, we continue on the side
+		move.l	cr_lobs(a0),d1	; Now, check for same obscure layer
+		cmp.l	cr_lobs(a1),d1	; And do we have a winner?
+		bne.s	look_side	; If not the same, we do next one...
+		bsr.s	verify_dedice	; Verify that the dedice can work
+		tst.l	d1		; Check result
+		bne.s	end_cr		; It is good, so exit...
+*
+* Now, we need to ckeck for a side match....  So look for a top left that
+* matches this cliprect's top right...
+look_side:	move.w	cr_MaxX(a0),d1	; Get MaxX...
+		addq.w	#1,d1		; Move over 1...
+		swap	d1		; Put this into the high word
+		move.w	cr_MinY(a0),d1	; Get Y from top...
+		bra.s	side_skip	; Skip the next few bytes
+t_r_look:	move.l	(a1),d0		; Get next cliprect...
+		beq.s	end_cr		; Check if we found it...
+		move.l	d0,a1		; Set up for next load...
+side_skip:	cmp.l	cr_MinX(a1),d1	; Check for a top-left match
+		blt.s	no_cr		; If we passed it, return NULL
+		bne.s	t_r_look	; If no match, check next
+*
+* Matches one corner, now check for the other...
+*
+		move.w	cr_MaxY(a0),d1	; Get MaxY from source cliprect
+		cmp.w	cr_MaxY(a1),d1	; Check if it is ok...
+		bne.s	no_cr		; If no match, we are done...
+		move.l	cr_lobs(a0),d1	; Now, check for same obscure layer
+		cmp.l	cr_lobs(a1),d1	; And do we have a winner?
+		bne.s	no_cr		; If not same, we exit...
+		bsr.s	verify_dedice	; Verify that the dedice can work
+		tst.l	d1		; Check result
+		bne.s	end_cr		; It is good, so exit...
+		bra.s	no_cr		; No match, so return NULL...
+*
+*******************************************************************************
+*
+d30 3
+d45 24
+d70 2
+a71 2
+		move.l	cr_MaxX(a1),-(sp)	; Get Bottom/Right position
+		move.l	cr_MinX(a0),-(sp)	; Get Top/Left position
+d109 1
+a109 1
+		bsr	search_next_cr		; Look for it
+d123 1
+a123 1
+		bsr	search_next_cr		; Look for it
+d145 100
+d260 3
+a262 2
+		beq.s	end_dedice		; No layer, so exit!
+		movem.l	a0/a2-a4/d2/d5-d7,-(sp)	; Save these
+d268 3
+a271 3
+*		d6=The "theory" cliprect count max...
+*		d7=The cliprect count that will be made in the sort...
+*
+a272 4
+		moveq.l	#-1,d2			; Layer count var (temp)
+		moveq.l	#1,d5			; Square count...
+		moveq.l	#0,d6			; Zero the theory accum...
+		moveq.l	#0,d7			; Zero cliprect count...
+d277 1
+a277 25
+		bsr.s	sort_layer_cr		; a0 does not get trashed
+*
+* Ok, now we count the layer and add that to the theory of what
+* the best case max cliprect count is...
+*
+* Now, the best case maximum cliprect count is:
+*
+* This means:  2*Sum(i*i) - n*n
+*		where i=1 to n
+*		and n is the number of layers
+*
+* To do this with minimum effort and performance loss, we compute the i*i
+* by keeping a running square.  That is 1 (+3)=4 (+5)=9 (+7)=16 etc.
+* This means that these three add instructions do the sum of squares...
+*
+* Now, in addition, since our top-most layer does not have cliprects,
+* we will throw those away and thus start the square sums from 0 and
+* go to (n-1).  (Thus the -1 and 1 in the d2/d5 combination to start)
+*
+		add.l	d2,d5			; Make the next square...
+		addq.l	#2,d2			; Make the next square step...
+		add.l	d5,d6			; Add in the square...
+*
+* Now go back for more cliprects...
+*
+d281 1
+a281 18
+* Ok, so we now have sum(i*i)...  We now need to double it and
+* subtract n*n...
+* Now, n*n is in d5 so this is simple...
+*
+		add.l	d6,d6			; 2*sum(i*i)
+		sub.l	d5,d6			; 2*sum(i*i)-(n*n)
+*
+* The real question here is how much extra should we give the theory max?
+* Now, set d7 to the difference between the theory and the real...
+*
+		sub.l	d6,d7
+		subq.l	#2,d7			; And two more... (buffer)
+*
+* Ok, so we sorted the layers and at the same time found out what the
+* count is and what the max is.  We now do the dedice.  The unslice
+* function returns the number of cliprects removed.  We use that to
+* modify our total...
+*
+d304 41
+a344 2
+		move.l	cr_MaxX(a1),-(sp)	; Get Bottom/Right position
+		move.l	cr_MinX(a3),-(sp)	; Get Top/Left position
+d347 2
+a348 2
+		addq.l	#8,sp			; Free the rectangle...
+		sub.l	d0,d7			; Subtract from total...
+d357 1
+a357 7
+*
+* Ok, now check if we have too many cliprects...
+*
+		tst.l	d7			; Check d7
+		movem.l	(sp)+,a0/a2-a4/d2/d5-d7	; Restore (no flags changed)
+		bpl	_rebuildcliprects	; Do the rebuild if needed...
+		; The bmi above uses tail recursion to simplify the code...
+d366 2
+a367 3
+*  *** NOTE *** This routine also counts the cliprects.
+*               It does this in d7.  It does *NOT* clear d7
+*               It just adds 1 to d7 for each cliprect...
+a385 1
+		addq.l	#1,d7		; Count the cliprect...
+d392 2
+a393 2
+		move.w	cr_MinX(a1),d1	; Get MinX
+		move.w	cr_MinY(a1),d2	; Get MinY
+d399 4
+a402 4
+		cmp.w	cr_MinX(a2),d1	; Check MinX...
+		bgt.s	insert_cr_loop	; If X is greater....
+		bne.s	1$		; If not same, Y does not matter...
+		cmp.w	cr_MinY(a2),d2	; Check MinY...
+d413 1
+a413 1
+		cmp.w	cr_MinX(a3),d1	; Check MinX...
+d415 2
+a416 2
+		bne.s	2$		; If not same, Y does not matter...
+		cmp.w	cr_MinY(a3),d2	; Check MinY...
+d425 27
+@

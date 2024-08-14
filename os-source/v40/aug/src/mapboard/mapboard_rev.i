@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'19.11.92'
+	ENDM
+VERS	MACRO
+		dc.b	'MapBoard 37.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'MapBoard 37.2 (19.11.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: MapBoard 37.2 (19.11.92)',0
+	ENDM

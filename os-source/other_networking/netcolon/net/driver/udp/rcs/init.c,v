@@ -1,0 +1,923 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.5; strict;
+comment  @ * @;
+
+
+1.5
+date     91.08.02.09.12.35;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.07.25.19.19.47;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.07.08.10.05.30;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.06.21.11.52.56;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.06.05.12.48.38;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@**  Bolt NET-UDP.library:
+**  init.c -- Initialization and cleanup of the library.
+@
+
+
+1.5
+log
+@First Alpha?
+@
+text
+@/*
+**  Bolt NET-UDP.library:
+**  init.c -- Initialization and cleanup of the library.
+**
+**      $Log:	init.c,v $
+ * Revision 1.4  91/07/25  19:19:47  dlarson
+ * working!
+ *
+ * Revision 1.3  91/07/08  10:05:30  dlarson
+ * continuing development...
+ *
+ * Revision 1.2  91/06/21  11:52:56  dlarson
+ * work in progress...
+ *
+*/
+
+
+#include "bolt-udp.h"
+
+UDPGLOBAL UDPInit(char *data, ULONG *maskp, struct DrLibrary *DriverBase,
+		  char *name);
+
+/****** NET-UDP.library/SDNSerInit **********************************
+*
+*   NAME
+*	SDNSerInit -- Perform server specific initialization.
+*
+*   SYNOPSIS
+*	rc = SDNSerInit(drglobal, mask, data)
+*	D0		A0	  A1	A2
+*
+*	int SDNSerInit(APTR *, ULONG *, char *);
+*
+*   FUNCTION
+*	Perform server specific initialization.
+*
+*	The mask value is the communications mechanism for indicating which
+*	bits are to be used by the server.  On input it is a mask of bits
+*	available for use if the library is unable to allocate any bits.  On
+*	output it is a mask of the bits that the library will set whenever it
+*	needs to service a message.  Once the bit is set, the server should
+*	call SDNAccept() until SDN_NONE is returned.
+*
+*	The data string is a simple null terminated C style string that is
+*	for use by the library.  There is no format specified for the string,
+*	so drivers may use this for whatever they want.  The server
+*	code just reads the string from a configuration file and passes it
+*	on to the library.  This pointer may be NULL if no initialization
+*	string has been specified.  In the absence of any configuration
+*	information, it is the responsibility of the library code to pick
+*	an appropriate default or to safely fail the initialization.
+*
+*	The only difference between this routine and the SNDHanInit() is that
+*	the server portion needs to set up to receive asynchronous new
+*	connections.  It will only be doing calls to SDNAccept() and not any
+*	to SDNReceive().
+*
+*   INPUTS
+*	drglobal	- Server-specific global data pointer.
+*	mask		- On input, mask of signal bits already being used by
+*			  all other drivers;  On output, mask of signal bits
+*			  this driver will be using.
+*	data		- Pointer to driver-specific initialization string.
+*
+*   RESULT
+*	rc		- SDN_ERR, SDN_OK
+*
+*   NOTES
+*	Driver is free to reuse signal bits or allocate new ones.
+*
+***********************************************************************
+*
+*
+*
+*/
+int LIBENT UDPSDNSerInit (register __a0 UDPGLOBAL *tgp,
+		    register __a1 ULONG *maskp,
+		    register __a2 char *data,
+		    register __a6 struct DrLibrary *DriverBase)
+{
+UDPGLOBAL tg;			/*  A place to put the global we allocate  */
+struct sockaddr_in known;	/*  known address for server  */
+
+	BUGP(("Got to SerInit()..."));
+	*maskp = 0L;
+	*tgp = NULL;
+	if ((tg = UDPInit(data, maskp, DriverBase, "Bolt-UDP.Server.RMS")) == NULL)
+		return(SDN_ERR);
+	tg->DriverBase = DriverBase;
+/*
+**  Bind the socket we'll receive packets on to a well-known port number so
+**  that handlers (clients) will know how to find us.
+*/
+	setmem(&known, (int)sizeof(known), 0L);
+        known.sin_family = AF_INET;
+        known.sin_port = htons(tg->serverport);
+        known.sin_addr.s_addr = INADDR_ANY;
+	if(bind(tg->sock_recv, (struct sockaddr *)&known,(int)sizeof(known)) )
+	{
+		BUG(("SDNSerInit() error -- bind(to %ld): %s\n",
+		     tg->serverport, strerror(errno) ));
+		SDNSerTerm(tg);
+		return(SDN_ERR);
+        }
+/*  We succeded in init'ing  */
+	*tgp = tg;
+	BUG(("Successfully exiting SDNSerInit().\n"));
+	return(SDN_OK);
+}
+
+
+/****** NET-UDP.library/SDNSerTerm **********************************
+*
+*   NAME
+*	SDNSerTerm -- Terminate all resources associated with a server.
+*
+*   SYNOPSIS
+*	SDNSerTerm(drglobal)
+*		   A0
+*
+*	void SDNSerTerm(APTR);
+*
+*   FUNCTION
+*	Terminate all resouces associated with a server.
+*
+*	This routine should terminate all pending operations and free up all
+*	allocated objects in preparation for shutting down.  It must also free
+*	the global structure allocated at SDNSerInit() time.
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer or NULL if
+*			  initialization unsuccesful.
+*
+*   RESULT
+*	none.
+*
+*   NOTES
+*	Driver must not free ANY signal bits, even if it allocated them.
+*
+*   BUGS
+*	Closing the socket library frees the signal bits.  This is part of
+*	the shared socket library and cannot be changed.  Neither the handler
+*	nor the server currently free any signal bits, so we should consider
+*	changing the spec.
+*
+*	Doesn't tell rms task to shut up and shut down.
+*
+*   SEE ALSO
+*	SDNSerInit()
+****************************************/
+void LIBENT UDPSDNSerTerm (register __a0 UDPGLOBAL tg,
+			register __a6 struct DrLibrary *DriverBase)
+{
+struct UDPCon *i;
+
+	BUG(("SDNSerTerm() called.\n"));
+	if(tg == NULL)
+		return;
+	FD_ZERO(&tg->send_mask);
+	s_close(tg->sock_recv);
+	s_close(tg->sock_send);
+	cleanup_sockets();
+	CloseLibrary(SockBase);
+	if(tg->con)
+	{
+		do
+		{
+			i=tg->con->next;
+			FreeMem(tg->con, sizeof(*tg->con));
+		}while(i);
+	}
+/* Next line needs changing if we go back to seperate data and RPackets */
+	FreeMem(tg->ppack, DEFPACKETS*UDPRPALLOCN);
+	FreeMem(tg, sizeof(*tg));
+	BUG(("Exiting SDNSerTerm().\n"));
+}
+
+/****** NET-UDP.library/SDNHanInit **********************************
+*
+*   NAME
+*	SDNHanInit --  Perform handler specific initialization.
+*
+*   SYNOPSIS
+*	rc = SDNHanInit(drglobal, mask, data)
+*	D0		A0	  A1	A2
+*
+*	int SDNHanInit(APTR *, ULONG *, char *);
+*
+*   FUNCTION
+*	Perform handler specific initialization.
+*
+*	The mask value is the communications mechanism for indicating which
+*	bits are to be used by the handler.  On input it is a mask of bits
+*	available for use if the library is unable to allocate any bits.  On
+*	output it is a mask of the bits that the library will set whenever it
+*	needs to service a message.  Once the bit is set, the handler will
+*	call SDNReceive() until SDN_NONE is returned.
+*
+*	The data string is a simple null terminated C style string that is
+*	for use by the library.  There is no format specified in the string
+*	and may contain whatever the library wants it to have.  The handler
+*	code just reads the string from a configuration file and passes it
+*	on to the library.  This pointer may be NULL if no initialization
+*	string has been specified.  In the absence of any configuration
+*	information, it is the responsibility of the library code to pick an
+*	appropriate default or to safely fail the initialization.
+*
+*	The only difference between this routine and the SNDSerInit() is that
+*	the handler portion does not need to set up to receive asynchronous
+*	new connections.  It will only be doing calls to SDNReceive() and not
+*	any to SDNAccept().
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer.
+*	mask		- On input, mask of signal bits already being used by
+*			  all other drivers;  On output, mask of signal bits
+*			  this driver will be using.
+*	data		- Pointer to driver-specific initialization string.
+*
+*   RESULT
+*	rc		- SDN_ERR, SDN_OK
+*
+*   NOTES
+*	Driver is free to reuse signal bits or allocate new ones.
+*
+*   BUGS
+*	Why does this mess with signals?  What could the driver ever
+*	signal to the handler?  Which function would the handler need to
+*	call if it was signaled?
+*
+*   SEE ALSO
+*	SDNSerInit(), SDNHanTerm()
+*
+****************************************/
+int LIBENT UDPSDNHanInit (register __a0 UDPGLOBAL *tgp,
+			    register __a1 ULONG *maskp,
+			    register __a2 char *data,
+			    register __a6 struct DrLibrary *DriverBase)
+{
+struct sockaddr_in known;	/*  known address for handler  */
+UDPGLOBAL tg;
+
+	BUGP(("Got to HanInit"));
+	*maskp = 0L;
+	*tgp = NULL;
+	if ((tg = UDPInit(data, maskp, DriverBase, "Bolt-UDP.Handler.RMS")) == NULL)
+		return(SDN_ERR);
+	tg->DriverBase = DriverBase;
+/*
+**  No need to bind the socket we'll receive packets on because we'll only
+**  be receiving replies and the server should get our address from the packet
+**  it is replying to.
+**
+**  ACTUALLY, it turns out that there is no way to tell the server what
+**  address to reply to if it is not the same as it received from.  Hence,
+**  we must bind a well known port number even to the handler's recv socket.
+**  We'll just always make the number one greater than the server's recv
+**  socket...
+*/
+	setmem(&known, (int)sizeof(known), 0L);
+        known.sin_family = AF_INET;
+        known.sin_port = htons(tg->serverport+1);
+        known.sin_addr.s_addr = INADDR_ANY;
+	if(bind(tg->sock_recv, (struct sockaddr *)&known,(int)sizeof(known)) )
+	{
+		BUG(("SDNHanInit() error -- bind(to %ld): %s\n",
+		     tg->serverport+1, strerror(errno) ));
+		SDNHanTerm(tg);
+		return(SDN_ERR);
+        }
+/*  We succeded in init'ing so set the global  */
+	*tgp = tg;
+	BUG(("Succesfully Exiting SDNHanInit().\n"));
+	return(SDN_OK);
+}
+
+
+/****** NET-UDP.library/SDNHanTerm **********************************
+*
+*   NAME
+*	SDNHanTerm -- Terminate all resources associated with a handler.
+*
+*   SYNOPSIS
+*	SDNHanTerm(drglobal)
+*
+*	void SDNHanTerm(APTR);
+*
+*   FUNCTION
+*	Terminate all resources associated with a handler.
+*
+*	This routine should terminate all pendin operations and free up all
+*	allocated objects in prepartion for shutting down.  It must also free
+*	the global structure allocated at SDNHanInit() time.
+*
+*   INPUTS
+*	 drglobal	- Driver-specific global data pointer.
+*
+*   RESULT
+*	None.
+*
+*   NOTES
+*	Driver must not free ANY signal bits, even if it allocated them.
+*
+*   BUGS
+*	Closing the socket library frees the signal bits.  This is part of
+*	the shared socket library and cannot be changed.  Neither the handler
+*	nor the server currently free any signal bits, so we should consider
+*	changing the spec.
+*
+*	Doesn't tell rms task to shut up and shut down.
+*
+*   SEE ALSO
+*	SDNHanInit()
+*
+***************************************/
+int LIBENT UDPSDNHanTerm (register __a0 UDPGLOBAL tg,
+			    register __a6 struct DrLibrary *DriverBase)
+{
+	BUG(("SDNHanTerm() called.\n"));
+	UDPSDNSerTerm(tg, DriverBase);
+}
+
+
+/****i* NET-UDP.library/UDPInit **********************************
+*
+*   NAME
+*	UDPInit -- Perform UDP initializaion.
+*
+*   SYNOPSIS
+*	drglobal = UDPInit(data)
+*
+*	UDPGLOBAL UDPInit(ULONG *, char *);
+*
+*   FUNCTION
+*
+*   INPUTS
+*	data		- Pointer to driver-specific initialization string
+*			  (currently ignored).
+*   RESULT													 driver will be using.
+*	drglobal	- Driver-specific global data pointer or NULL if
+*			  initialization unsuccesful.
+*														 Initialization string.
+*   NOTES
+*	Driver is free to reuse signal bits or allocate new ones.
+*
+*   BUGS
+*	What is this #undef, #define SysBase stuff for???
+*
+*	FD_ZERO needs to be put back in.
+*
+*	IOCTL lines are very screwed up -- they don't deal with errors for
+*	diddly.
+*
+*   SEE ALSO
+*
+***************************************
+*
+*
+*/
+
+
+UDPGLOBAL UDPInit(char *data, ULONG *maskp, struct DrLibrary *DriverBase,
+		  char *name)
+{
+UDPGLOBAL tg;
+int i;
+long true = 1;			/*  for s_ioctl  */
+struct UDPRPacket *rp;
+int serverport;
+struct Process *pid;
+struct Library *DOSBase;
+/*
+**  stupid blink sez "Warning: Absolute reference to UNKNOWN!":
+*/
+struct TagItem tags[] =
+{
+	{NP_Entry, (LONG)rms},
+	{NP_Name, NULL},
+	{TAG_DONE}
+};
+
+/*
+**  Allocate a global structure.  Use MEMF_CLEAR so we don't have
+**  to initialize a bunch of fields to NULL.
+*/
+	if(!(tg = (void *)AllocMem(sizeof(*tg), MEMF_CLEAR)))
+	{
+		BUG(("UDPInit() can't AllocMem().\n"));
+		return(NULL);
+	}
+	tg->DriverBase = DriverBase;
+/*
+**  Process the data string (if any) as a port number for the Bolt server
+**  to listen to.
+*/
+	serverport = 0;
+	if (data)
+	{
+		while(*data == ' ') data++;
+		while(*data >= '0' && *data <= '9')
+		{
+			serverport = (((serverport << 2) + serverport)<<1) +
+			             *data++ - '0';
+		}
+	}
+	tg->serverport = serverport;
+	if (serverport == 0) tg->serverport = 7657;
+/*
+**  Allocate our pool of DEFPACKETS RPackets as one large block then go
+**  through and set the class to PACKET_FREE as well as properly initializing
+**  the UDPRPacket->next fields.
+*/
+	if((tg->ppack = (struct UDPRPacket *)
+	    AllocMem(DEFPACKETS*UDPRPALLOCN, 0L)) == NULL)
+	{
+		BUG(("UDPInit() can't AllocMem().\n"));
+		FreeMem((void *)tg, sizeof(*tg));
+		return(NULL);
+	}
+	for(rp=tg->ppack, i=0; i < DEFPACKETS-1; i++)
+	{
+		rp->next = (struct UDPRPacket *)((char *)rp+UDPRPALLOCN);
+		BUGP(("Init rp(%ld) i=%ld next=%ld\n",rp,i,rp->next));
+		rp->class = PACKET_FREE;
+		rp=rp->next;
+	}
+	rp->class = PACKET_FREE;
+	rp->next = NULL;
+	BUGP(("Init rp(%ld) i=%ld next=%ld\n",rp,i,rp->next));
+/*
+**  Open the socket library.
+**
+**  Remember that we've defined SockBase to tg->tg_SockBase and errno to
+**  tg->tg_errno so that it is as if the handler and the server had each
+**  opened the socket library.
+*/
+	if( (SockBase = OpenLibrary( "inet:libs/socket.library", 0L )) != NULL)
+	{
+		setup_sockets( MAXSOCKS, &errno );
+	}else
+	{
+		BUG(("UDPInit() can't OpenLibrary(socket.lib)\n"));
+		FreeMem((void *)tg->ppack, DEFPACKETS*UDPRPALLOCN);
+		FreeMem((void *)tg, sizeof(*tg));
+		return(NULL);
+	}
+/*
+**  Now open a socket for receiving data and one for sending data.
+**  Also, initialize a mask for the receiving socket to give select().
+*/
+	tg->sock_recv = socket(AF_INET, SOCK_DGRAM, 0);
+	tg->sock_send = socket(AF_INET, SOCK_DGRAM, 0);
+	if(tg->sock_recv == -1 || tg->sock_send == -1)
+	{
+		BUG(("UDPInit() can't get sockets.\n"));
+		goto CleanUp;
+	}
+	if(s_ioctl(tg->sock_recv, FIOASYNC, (char *)&true) < 0)
+	{
+		BUG(("UDPInit() error -- s_ioctl(recv): %s\n",strerror(errno)) );
+		goto CleanUp;
+	}
+	if(s_ioctl(tg->sock_send, FIOASYNC, (char *)&true) < 0)
+	{
+		BUG(("UDPInit() error -- s_ioctl(send): %s\n",strerror(errno)) );
+		goto CleanUp;
+	}
+	FD_ZERO(&tg->send_mask);
+	FD_SET(tg->sock_send, &tg->send_mask);
+/*
+**  Open DOS for the CreateProc.  This should be moved to LibInit/Custom!!!
+*/
+	DOSBase = OpenLibrary("dos.library", 37L);
+	if(!DOSBase)
+	{
+		BUG(("Can't open DOSBase"));
+		goto CleanUp;
+	}
+/*
+**  Get an Exec port to which the RMS process will send us rpackets it has
+**  accepted.  (We'll loose a little memory if this succeedes but start
+**  rms fails).
+*/
+	if( !(tg->rmsport = CreateMsgPort()) )
+	{
+		BUG(("UDPInit() can't CreateMsgPort()\n"));
+		CloseLibrary(DOSBase);
+		goto CleanUp;
+	}
+/*	tg->rmsport->mp_Node.ln_Name = (UBYTE *)name;
+*	tg->rmsport->mp_Node.ln_Pri  = 0L;
+*	AddPort(tg->rmsport);
+*/
+/*
+**  Start the RMS process.
+*/
+	tags[1].ti_Data = (LONG)name;
+	Forbid();
+	pid = CreateNewProcTagList(tags);
+	if(!pid)
+	{
+		Permit();
+		BUG(("UDPInit() can't CreateNewProcTags!\n"));
+		CloseLibrary(DOSBase);
+		goto CleanUp;
+	}
+	pid->pr_Task.tc_UserData=(APTR)tg;
+	*maskp = 1L << tg->rmsport->mp_SigBit;
+	Permit();
+	CloseLibrary(DOSBase);
+	BUGP(("UDPInit() returning succesfully. (maskp=%lx) ", maskp));
+	return(tg);
+
+/**********************/
+CleanUp:
+	cleanup_sockets();
+	CloseLibrary(SockBase);
+	FreeMem((void *)tg->ppack, DEFPACKETS*UDPRPALLOCN);
+	FreeMem((void *)tg, sizeof(*tg));
+	return(NULL);
+}
+@
+
+
+1.4
+log
+@working!
+@
+text
+@d6 3
+d373 1
+a373 3
+**  This belongs in UDPInit (because it isn't used anywhere else),
+**  but I leave it here to please the stupid blink
+**  (Absolute reference to UNKNOWN)
+d386 1
+a386 1
+	if(!(tg = (void *)AllocMem(sizeof(*tg), 0L)))
+d414 1
+a414 1
+	    AllocMem(DEFPACKETS*UDPRPALLOCN, MEMF_CLEAR)) == NULL)
+d490 4
+a493 3
+	tg->rmsport->mp_Node.ln_Name = (UBYTE *)name;
+	tg->rmsport->mp_Node.ln_Pri  = 0L;
+	AddPort(tg->rmsport);
+@
+
+
+1.3
+log
+@continuing development...
+@
+text
+@d6 3
+d17 2
+a18 1
+UDPGLOBAL UDPInit(char *data);
+d81 2
+a82 1
+	BUG(("Entered SDNSerInit()... "));
+d84 1
+a84 2
+
+	if ((tg = UDPInit(data)) == NULL)
+a101 15
+/*
+**  Get the signal to listen on and set socket to ASYNC so we will be signaled
+**  when packets arrive.
+*/
+	*maskp = 1L << s_getsignal(SIGIO);
+#if 0
+	BUG(("maskp set to %lx, setting FIOASYNC for socket %ld... ", *maskp,
+		tg->sock_recv));
+	if(s_ioctl(tg->sock_recv, FIOASYNC, (char *)&true) < 0)
+	{
+		BUG(("SDNSerInit() error -- s_ioctl(): %s\n",strerror(errno)) );
+		SDNSerTerm(tg);
+		return(SDN_ERR);
+	}
+#endif
+d143 2
+a155 1
+	FD_ZERO(&tg->recv_mask);
+d237 1
+d240 2
+a241 1
+	BUG(("Entered SDNHanInit()... "));
+d243 1
+a243 1
+	if ((tg = UDPInit(data)) == NULL)
+d250 6
+d257 12
+a268 1
+	/*  We succeded in init'ing so set the global  */
+d275 46
+d357 4
+a360 1
+UDPGLOBAL UDPInit(char *data)
+d367 13
+a379 2
+#undef SysBase
+struct Library *SysBase = ABSEXECBASE;
+d385 1
+a385 1
+	if(!(tg = (void *)AllocMem(sizeof(*tg), MEMF_CLEAR)))
+d390 1
+a390 1
+	tg->tg_SysBase = SysBase;
+a410 2
+**
+**  This must be changed if we go back to seperate data and RPackets.
+d412 2
+a413 2
+	if ((tg->ppack = (struct UDPRPacket *)
+			 AllocMem(DEFPACKETS*UDPRPALLOCN, MEMF_CLEAR)) == NULL)
+d419 1
+a419 1
+	for (rp = tg->ppack, i=0; i < DEFPACKETS; i++)
+d421 2
+a422 2
+		SETRPDATA(rp);
+		rp->next = rp+1;
+d424 1
+a424 1
+		rp++;
+d426 1
+a426 1
+	rp--;
+d428 1
+d455 1
+a455 5
+		cleanup_sockets();
+		CloseLibrary(SockBase);
+		FreeMem((void *)tg->ppack, DEFPACKETS*UDPRPALLOCN);
+		FreeMem((void *)tg, sizeof(*tg));
+		return(NULL);
+d459 2
+a460 2
+		BUG(("SDNSerInit() error -- s_ioctl(recv): %s\n",strerror(errno)) );
+		return(NULL);
+d464 2
+a465 2
+		BUG(("SDNSerInit() error -- s_ioctl(send): %s\n",strerror(errno)) );
+		return(NULL);
+a466 2
+
+	FD_ZERO(&tg->recv_mask);
+a467 1
+	FD_SET(tg->sock_recv, &tg->recv_mask);
+d469 41
+a509 2
+
+	BUG(("UDPInit() returning succesfully. "));
+a510 1
+}
+d512 7
+a518 44
+#define SysBase (tg->tg_SysBase)
+
+
+/****** NET-UDP.library/SDNHanTerm **********************************
+*
+*   NAME
+*	SDNHanTerm -- Terminate all resources associated with a handler.
+*
+*   SYNOPSIS
+*	SDNHanTerm(drglobal)
+*
+*	void SDNHanTerm(APTR);
+*
+*   FUNCTION
+*	Terminate all resources associated with a handler.
+*
+*	This routine should terminate all pendin operations and free up all
+*	allocated objects in prepartion for shutting down.  It must also free
+*	the global structure allocated at SDNHanInit() time.
+*
+*   INPUTS
+*	 drglobal	- Driver-specific global data pointer.
+*
+*   RESULT
+*	None.
+*
+*   NOTES
+*	Driver must not free ANY signal bits, even if it allocated them.
+*
+*   BUGS
+*	Closing the socket library frees the signal bits.  This is part of
+*	the shared socket library and cannot be changed.  Neither the handler
+*	nor the server currently free any signal bits, so we should consider
+*	changing the spec.
+*
+*   SEE ALSO
+*	SDNHanInit()
+*
+***************************************/
+int LIBENT UDPSDNHanTerm (register __a0 UDPGLOBAL tg,
+			    register __a6 struct DrLibrary *DriverBase)
+{
+	BUG(("SDNHanTerm() called.\n"));
+	UDPSDNSerTerm(tg, DriverBase);
+@
+
+
+1.2
+log
+@work in progress...
+@
+text
+@d6 3
+d12 1
+a12 1
+#include "net-udp.h"
+d14 2
+d80 1
+a80 1
+	if ((tg = UDPInit(maskp, data)) == NULL)
+d91 1
+a91 3
+        BUG(("About to bind: port=%ld\n", known.sin_port));
+	if( (bind(tg->sock_recv, (struct sockaddr *)&known,
+	    (int)sizeof(known))) == -1)
+d93 3
+a95 1
+		BUG(("SDNSerInit() error -- Bind() call failed\n"));
+d98 16
+a113 2
+
+	/*  We succeded in init'ing, so set the global  */
+d160 3
+a162 1
+	BUG(("SDNSerTerm() called... "));
+d171 11
+a181 2
+	FreeMem((void *)tg->ppack, DEFPACKETS*sizeof(struct UDPRPacket));
+	FreeMem((void *)tg, sizeof(*tg));
+d234 3
+d249 1
+a249 1
+	BUG(("Entered SDNHanInit()... \n"));
+d251 1
+a251 1
+	if ((tg = UDPInit(maskp, data)) == NULL)
+a258 1
+
+d272 1
+a272 1
+*	drglobal = UDPInit(mask, data)
+a278 3
+*	mask		- On input, mask of signal bits already being used by
+*			  all other drivers;  On output, mask of signal bits
+*			  this driver will be using.
+d293 3
+d302 1
+a302 1
+UDPGLOBAL UDPInit(ULONG *maskp, char *data)
+d306 1
+d337 1
+a337 1
+	if (serverport == 0) tg->serverport = 7656;
+d342 2
+d346 1
+a346 1
+			 AllocMem(DEFPACKETS*sizeof(struct UDPRPacket), MEMF_CLEAR)) == NULL)
+d354 1
+d362 1
+a362 3
+**  Open the socket library, then set maskp to a mask for the socket library
+**  SIG_IO signal.  Opening the socket library for each init'er means that
+**  they will each have their own signal.
+d364 3
+a366 2
+**  (remember that we've defined SockBase to tg->tg_SockBase and errno to
+**  tg->tg_SockBase)
+d374 1
+a374 1
+		FreeMem((void *)tg->ppack, DEFPACKETS*sizeof(struct UDPRPacket));
+a377 2
+	*maskp = 0;
+	*maskp = 1L << s_getsignal(SIGIO);
+a383 1
+
+d389 1
+a389 1
+		FreeMem((void *)tg->ppack, DEFPACKETS*sizeof(struct UDPRPacket));
+d393 11
+d455 1
+a455 1
+	BUG(("SDNHanTerm() called... \n"));
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d20 1
+a20 1
+*	inet SDNSerInit(APTR *, ULONG *, char *);
+d59 5
+a63 1
+****************************************/
+d72 1
+a76 1
+
+a77 1
+
+d82 1
+a82 1
+	setmem(&known, (int)sizeof(known), 0);
+d86 3
+a88 2
+	if(bind(tg->sock_recv, (struct sockaddr *)&known,
+		(int)sizeof(known)) < 0)
+d90 1
+a90 1
+		BUGR("Can't initialize Bolt UDP driver -\nBind() call failed");
+d96 1
+d141 1
+d144 2
+a145 1
+
+d149 2
+a150 1
+	CloseLibrary(SSBase);
+d152 1
+d216 1
+a217 1
+
+a219 1
+
+a220 1
+
+d229 1
+d262 2
+d266 4
+a269 1
+****************************************/
+d285 1
+a287 1
+
+a288 1
+
+a304 1
+
+d313 1
+d330 2
+a331 2
+**  (remember that we've defined SSBase to tg->tg_SSBase and errno to
+**  tg->tg_SSBase)
+d333 1
+a333 1
+	if(SSBase = OpenLibrary( "inet:libs/socket.library", 0L ))
+d335 1
+a335 1
+		ssinfo = setup_sockets( errno );
+d338 2
+d344 1
+a344 2
+	*maskp = 1L << SIG_IO;
+
+d351 2
+a352 1
+	if( !(tg->sock_recv && tg->sock_send) )
+d354 1
+d356 2
+a357 1
+		CloseLibrary(SSBase);
+d359 1
+d361 4
+a364 2
+	FD_ZERO(&tg->mask);
+	FD_SET(tg->sock_recv, &tg->mask);
+d366 1
+d412 1
+@

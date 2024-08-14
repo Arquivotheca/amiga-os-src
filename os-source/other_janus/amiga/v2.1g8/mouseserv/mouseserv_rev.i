@@ -1,0 +1,14 @@
+VERSION		EQU	36
+REVISION	EQU	11
+DATE	MACRO
+		dc.b	'20.8.91'
+	ENDM
+VERS	MACRO
+		dc.b	'mouseserv 36.11'
+	ENDM
+VSTRING	MACRO
+		dc.b	'mouseserv 36.11 (20.8.91)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: mouseserv 36.11 (20.8.91)',0
+	ENDM

@@ -1,0 +1,1017 @@
+head     7.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+7.1
+date     91.03.28.15.05.41;  author kodiak;  state Exp;
+branches ;
+next     7.0;
+
+7.0
+date     91.03.19.18.35.57;  author kodiak;  state Exp;
+branches ;
+next     6.0;
+
+6.0
+date     91.03.18.15.26.20;  author kodiak;  state Exp;
+branches ;
+next     5.1;
+
+5.1
+date     91.03.18.08.57.00;  author kodiak;  state Exp;
+branches ;
+next     5.0;
+
+5.0
+date     91.02.26.10.43.08;  author kodiak;  state Exp;
+branches ;
+next     3.0;
+
+3.0
+date     90.11.09.17.09.06;  author kodiak;  state Exp;
+branches ;
+next     2.0;
+
+2.0
+date     90.10.10.04.15.47;  author kodiak;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.10.10.03.10.19;  author kodiak;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+7.1
+log
+@change DEBUG statements
+@
+text
+@/*
+**	$Id: fm.c,v 7.0 91/03/19 18:35:57 kodiak Exp Locker: kodiak $
+**
+**	(C) Copyright 1990 Robert R. Burns
+**	    All Rights Reserved
+**
+**	$Log:	fm.c,v $
+ * Revision 7.0  91/03/19  18:35:57  kodiak
+ * after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+ * 
+ * Revision 6.0  91/03/18  15:26:20  kodiak
+ * folded in Bullet 1.30
+ * 
+ * Revision 5.1  91/03/18  08:57:00  kodiak
+ * eliminate old style symbol table lookup
+ * 
+ * Revision 5.0  91/02/26  10:43:08  kodiak
+ * Phase 2 Alpha 1
+ * 
+ * Revision 3.0  90/11/09  17:09:06  kodiak
+ * Kodiak's Alpha 1
+ * 
+*/
+/* fm.c */
+/* Copyright (C) Agfa Compugraphic, 1989, 1990. All rights reserved. */
+/*  12-Mar-90   jfd     Storing the pointers to the Typeface Header
+ *                      and Font Alias Segments in this routine now
+ *                      (keys 107 and 110)
+ *  05-May-90   awr     Character buffer is fixed size- allocated once
+ *  07-Jun-90   dah     Modified FMalloc_rd() and FMseek_read(); added
+ *                      parameters for font library compression.
+ *  08-Jun-90   dET     Close files at end of functions because Windows
+ *                      is brain dead.
+ *  29-Jul-90   awr     Fixed FMrd_char. Was clobbering cd->index with
+ *                      with index into update library. Later, old library
+ *                      becomes active- meaningless index.
+ *  12-Oct-90   dET     Close files at end of functions if running either
+ *                      WINDOWS or BOW
+ *  04-Dec-90  jfd      Moved "include" statement for  "cgconfig.h" to line
+ *                      following "port.h"
+ *                     
+ */
+
+#include <exec/types.h>
+#include <exec/nodes.h>
+#include <dos/dos.h>
+#include <clib/dos_protos.h>
+#include <pragmas/dos_pragmas.h>
+
+#include "debug.h"
+#include "port.h"
+#include "cgconfig.h"
+#include "cgif.h"
+#include "segments.h"
+#include "ix.h"
+#include "istypes.h"
+
+extern struct Library *DOSBase;
+
+/* mem.c */
+EXTERN VOID *MemAlloc();
+EXTERN VOID MemFree();
+
+/* if_init.c */
+EXTERN BOOLEAN    if_init_glob();
+EXTERN UWORD      if_init_char();
+/* maker.c */
+EXTERN LONG       if_init_face;        /* Last face processed by if_init */
+/* ix.c */
+EXTERN FONTINDEX *fi;                       /* Font Index handle */
+EXTERN UWORD      IXmak_font_index();
+EXTERN UWORD      IXget_fnt_index();
+EXTERN UWORD      IXfind_bucket();
+EXTERN UWORD      IXopen_file();
+EXTERN UWORD      IXclose_file();
+
+/* character buffer */
+
+EXTERN UBYTE *char_buf;
+
+
+
+
+/*------------------*/
+/*  FMseek_read     */
+/*------------------*/
+/*  In file "f", do an lseek to "offset" an then read "count" bytes
+ *  into "buffer". Return TRUE if success.
+ *  If file is compressed, use flag to decompress and read.
+ */
+GLOBAL BOOLEAN
+FMseek_read(f, offset, count, buffer, flag, input_filetype)
+    BPTR   f;          /* file handle              */
+    LONG   offset;     /* offset within file       */
+    UWORD  count;      /* number of BYTEs to read  */
+    BYTE  *buffer;     /* buffer to read data into */
+    UWORD  flag;
+    UWORD  input_filetype;  /* "D" or "C" for normal and compressed */
+{
+
+    DBG2("                FMseek_read()   offset: %ld   count: %ld\n",
+                                                          offset, count);
+#if COMPRESS
+    if(!(input_filetype & B_COMPRESS))
+    {
+#endif
+        if(Seek(f, offset, OFFSET_BEGINNING) == -1)
+        {
+            DBG2("    Seek(,%ld,) failed %ld\n", offset, IoErr());
+            return FALSE;
+        }
+
+#ifdef MSWINDOWS
+        if(_lread(f, buffer, count) != count)
+#else
+        if(Read(f, buffer, count) != count)
+#endif
+        {
+            DBG("                    read() failed\n");
+            return FALSE;
+        }
+#if COMPRESS
+    }
+    else
+    {
+      if(is_expand(f, offset, buffer, count, flag))
+      {
+        DBG("                      is_expand failed\n");
+        return FALSE;
+      }
+    }	      
+#endif	
+    return TRUE;
+}
+
+
+/*------------------*/
+/*  FMalloc_rd      */
+/*------------------*/
+/*  alloc "size" BYTEs and then do an lseek() to "offset" in file "f" and
+ *  read "count" BYTEs into the allocated buffer. Return the buffer pointer
+ *  or null on failure.
+ */
+GLOBAL UBYTE *
+FMalloc_rd(f, size, offset, count, flag, input_filetype)
+    LONG    f;
+    UWORD   size;                          /* Size of buffer to allocated */
+    LONG    offset;
+    UWORD   count;
+    UWORD   flag;
+    UWORD   input_filetype;
+{
+    UBYTE      *buf;
+
+  /*  Acquire size BYTES  */
+    buf = MemAlloc(size);
+    if (!buf)
+	return(0);
+
+  /*  Read data into new buffer.  If error, free buffer  */
+
+    if(!FMseek_read(f, offset, count, buf, flag, input_filetype))
+    {
+        MemFree(buf);
+        return(0);
+    }
+
+    return(buf);
+}
+
+
+
+
+/*-------------------*/
+/*  FMload_font      */
+/*-------------------*/
+/*  Load the global data from a font file into memory.
+ *  The source of this load are defined by the parameter "ix" which
+ *  points to an entry in the FONTINDEX table defining the typeface.
+ *
+ *  The destination of the load is defined by the parameter "b" which is
+ *  a pointer to a BUCKET structure.
+ */
+GLOBAL UWORD
+FMload_font(b, ix)
+    BUCKET      *b;
+    INDEX_ENTRY *ix;
+{
+    UWORD          status;
+    BYTE          *face_header_seg;      /* Face header seqment  */
+    CH_DIR_ENTRY  *chptr;
+    UWORD          ch_count;
+    LONG           globoff;
+    UWORD          globcount;
+    BYTE          *p;
+
+
+    UWORD          key;
+    ULONG          off;
+    UWORD          count;
+    BYTE          *fgseg;        /* face global segment */
+    BYTE          *seg;
+
+    DBG("    FMload_font()\n");
+
+    b->tfnum      = ix->tfnum;
+    b->bucket_num = ix->bucket_num;
+
+
+  /* Open library file */
+
+
+    if(status = IXopen_file(ix, b)) return status;
+
+  /* Read face header (= character directory) */
+
+    DBG("        face_header (=character directory)\n");
+
+    if(!(b->pface_header_seg = FMalloc_rd(b->f, ix->fhcount,
+            ix->fhoff, ix->fhcount, IS_EXP_FACEHDRSEG, ix->bucket_num)))
+    {
+        IXclose_file(b);
+        return ERR_mem_face_hdr;
+    }
+    face_header_seg = b->pface_header_seg;
+
+  /*  Set up character directory   (skip segment link)  and count characters
+   */
+
+    b->pchar_dir = (CH_DIR_ENTRY *) (b->pface_header_seg + 6);
+
+  /* Count number of characters in directory */
+
+    chptr = (CH_DIR_ENTRY*)(face_header_seg + 6);
+    ch_count = 0;
+    while(chptr->charnum != -1)
+    {
+        ch_count++;
+        chptr++;
+    }
+    b->ch_count = ch_count;
+
+  /* Type face global segment */
+
+    globoff = *(LONG*)(face_header_seg);        /* file offset    */
+    globcount = *(UWORD*)(face_header_seg + 4); /* segment length */
+
+
+    DBG2("\n        face_global()  offset: %ld   count: %ld\n",
+                           globoff, globcount);
+
+  /* get face global buffer */
+
+    if(!(b->pfgseg = FMalloc_rd(b->f, globcount, globoff, globcount,
+                                  IS_EXP_FACEGLOBSEG, ix->bucket_num)))
+    {
+        IXclose_file(b);
+        MemFree(b->pface_header_seg);
+        return ERR_face_abort;
+    }
+    fgseg = b->pfgseg;
+    b->sfgseg = globcount;
+
+  /*  Read segment directory and set segment memory handles */
+
+#ifdef  DEBUG
+    p = fgseg;
+
+    {
+	UWORD          type;
+	ULONG          size;
+	type = *((UWORD*)p);     p += 2;
+	size = *((ULONG*)p);     p += 4;
+	DBG2("            type = %ld    size = %ld\n",type, size);
+	DBG("\n            directory\n");
+    }
+#else
+    p = fgseg + 6;
+#endif
+
+    do
+    {
+        key =   *((UWORD*)p);     p += 2;
+        off =   *((ULONG*)p);     p += 4;
+        count = *((UWORD*)p);     p += 2;
+        DBG3("            key / offset / count  %ld   %ld   %ld\n",
+                                              key,off,count);
+
+        seg   = b->pfgseg + off + 6;
+        count -= 6;
+        switch (key)
+        {
+            case 100:  b->pgif = seg - 6;          /* Intellifont        */
+                       b->gifct = count + 6;
+                       break;
+            case 101:  b->ptrack_kern_seg = seg;   /* track kerning      */
+                       b->strack_kern_seg = count;
+                       break;
+            case 102:  b->ptext_kern_seg = seg;    /* text kerning       */
+                       b->stext_kern_seg = count;
+                       break;
+            case 103:  b->pdesign_kern_seg = seg;  /* designer kerning   */
+                       b->sdesign_kern_seg = count;
+                       break;
+            case 104:  b->pwidth_seg =             /* character widths   */
+			   (CHARWIDTH *) seg;
+                       b->swidth_seg = count;
+                       break;
+            case 105:  b->pattribute =             /* attribute hdr      */
+			   (FACE_ATT *) seg;
+                       b->sattribute = count;
+                       break;
+            case 106:  b->prast = seg;             /* raster parameter    */
+                       b->srast = count;
+                       break;
+            case 107:  b->ptf_header_seg = seg;    /* typeface header     */
+                       b->stf_header_seg = count;
+                       break;
+            case 108:  b->pcompound_seg = seg;     /* compound characters */
+                       b->scompound_seg = count;
+                       break;
+            case 109:  b->pdisplay =               /* display header      */
+			   (DISPLAY *) seg;
+                       b->sdisplay = count;
+                       break;
+            case 110:  b->pfont_alias_seg = seg;   /* font alias          */
+                       b->sfont_alias_seg = count;
+                       break;
+            case 111:  b->pcopy = seg - 6;         /* Copyright segment   */
+                       b->scopy = count + 6;
+                       break;
+            default:   break;
+        }
+    }
+    while (key != -1);
+
+#if (defined(MSWINDOWS) | defined(BOW))   /* 10-12-90 dET */
+    IXclose_file(b);   /* brain dead Windows does not allow open files */
+#endif
+
+    return SUCCESS;
+}
+
+
+
+
+/*-------------------*/
+/*  FMchar_index    */
+/*-------------------*/
+GLOBAL WORD
+FMchar_index(b, cgnum)
+    BUCKET  *b;
+    UWORD    cgnum;
+{
+    CH_DIR_ENTRY  *chptr;
+    WORD          i,lo,hi;
+    UWORD         charnum;
+
+  /* find entry in character directory */
+
+    DBG1("        FMchar_index(%ld)\n", cgnum);
+
+    chptr = b->pchar_dir;
+    lo = 0;
+    hi = (WORD)b->ch_count - 1;
+    while(lo <= hi)
+    {
+        i = (lo + hi)/2;
+        charnum = (chptr+i)->charnum;
+        if(charnum  == cgnum)
+        {
+            DBG1("            index = %ld\n", i);
+            return i;
+        }
+        else if(charnum < cgnum) lo = i+1;
+        else hi = i-1;
+    }
+    DBG("            character not found\n");
+    return -1;
+}
+
+
+
+/*-------------------*/
+/*    rd_char        */
+/*-------------------*/
+MLOCAL UWORD
+rd_char(bucknum, index)
+    UWORD  bucknum;
+    WORD   index;
+{
+    UWORD          status;
+    BUCKET        *b;
+    CH_DIR_ENTRY  *chptr;
+
+    DBG2("        rd_char(bucknum = %ld, index = index = %ld)\n",
+                                                    bucknum, index);
+
+
+    if(status = IXfind_bucket(bucknum, &b)) return status;
+    if(status = IXopen_file(fi->cur_index[bucknum], b))
+        return status;
+
+  /* Initialize typeface global data if need be */
+
+    if(if_init_face != b->tfnum)
+    {
+        if_init_face = 0;
+        if(!if_init_glob(b))
+        {
+#if (defined(MSWINDOWS) | defined(BOW))   /* 10-12-90 dET */
+          /* brain dead Windows does not allow open files */
+            IXclose_file(b);
+#endif
+
+            return ERR_if_init_glob;  
+        }
+        if_init_face = b->tfnum;
+    }
+
+  /*  character directory entry  */
+
+    chptr = b->pchar_dir + index;
+
+  /*  read character data */
+
+    if(chptr->charcount > CHARBUFSIZE)
+    {
+
+#if (defined(MSWINDOWS) | defined(BOW))   /* 10-12-90 dET */
+      /* brain dead Windows does not allow open files */
+        IXclose_file(b);
+#endif
+        return ERR_ov_char_buf;
+    }
+
+    if(!FMseek_read(b->f, chptr->charoff, chptr->charcount, char_buf,
+                                        IS_EXP_CHARSEG, b->bucket_num))
+    {
+
+#if (defined(MSWINDOWS) | defined(BOW))   /* 10-12-90 dET */
+      /* brain dead Windows does not allow open files */
+        IXclose_file(b);
+#endif
+        return ERR_rd_char_data;
+    }
+
+
+#if (defined(MSWINDOWS) | defined(BOW))   /* 10-12-90 dET */
+  /* brain dead Windows does not allow open files */
+    IXclose_file(b);
+#endif
+
+  /*  Initialize character data structures  */
+
+    return if_init_char(char_buf);
+}
+
+
+
+/*-------------------*/
+/*  FMrd_char        */
+/*-------------------*/
+/*  Find character with cgnum = n, allocate a character buffer, read the
+ *  character data into the buffer, and initialize character data structures.
+ *  The function rd_char() above does all of the work. This function
+ *  tries to substitute characters from an auxilary library if the character
+ *  being processed is in hq2 format.
+ */
+GLOBAL UWORD
+FMrd_char(cd)
+    CHR_DEF *cd;
+{
+    UWORD       status;
+    FONTINDEX  *fi_sav;
+    LONG        update_tfnum;
+    BUCKET     *b;
+    WORD        temp;
+
+    DBG1("        FMrd_char(cgnum = %ld)\n", cd->cgnum);
+
+    if(status = rd_char(cd->bucknum, cd->index))
+    {
+      /* If we failed because the character was not hq3 format, then try
+       * to find the character in the substitute hq3 libraries.
+       */
+
+        if(status != ERR_not_hq3) return status;  /* some other error */
+
+      /* Read in the font index for the substitute libraries */
+
+        fi_sav = fi;    /* save old font index */
+        if(status = IXmak_font_index("hq3.fnt")) return ERR_not_hq3;
+
+      /*  Set the three bucket index entries, the primary TF_SENSITIVE
+       *  bucket entry will contain our typeface. The update typeface
+       *  number is negative so that FMfont_change() won't get confused
+       *  when we go back to processing normal typefaces. This way he
+       *  won't think that a BUCKET already has normal typeface header
+       *  info loaded when in fact it has update typeface header info.
+       */
+
+        update_tfnum = - ((fi_sav->cur_index[cd->bucknum])->tfnum);
+        DBG1("    update_tfnum = %ld\n", update_tfnum);
+
+        if(!(status = IXget_fnt_index(update_tfnum)))
+        {
+
+            if(!(status = IXfind_bucket(0, &b)))
+            {
+                if((temp = FMchar_index(b, cd->cgnum)) >= 0)
+                    status = rd_char(0, temp);
+                else
+                    status = ERR_not_hq3;
+            }
+        }
+
+        MemFree(fi->fnt_index);   /* free temp. font index */
+        fi = fi_sav;                            /* restore font index    */
+        if(status) return ERR_not_hq3;
+    }
+
+    return SUCCESS;
+}
+
+@
+
+
+7.0
+log
+@after Amigaizing memory, lists, and adding UniCode.  Before cache work.
+@
+text
+@d2 1
+a2 1
+**	$Id: fm.c,v 6.0 91/03/18 15:26:20 kodiak Exp Locker: kodiak $
+d8 3
+a100 5
+#ifdef MSWINDOWS
+LONG far pascal _llseek( int, long, int );
+WORD far pascal _lread( int, char far *, int );
+#endif
+
+a106 3
+#ifdef MSWINDOWS
+        if(_llseek(f, offset, 0) != offset)
+#else
+a107 1
+#endif
+d109 1
+a109 1
+            DBG("                    lseek() failed\n");
+@
+
+
+6.0
+log
+@folded in Bullet 1.30
+@
+text
+@d2 1
+a2 1
+**	$Id: fm.c,v 5.1 91/03/18 08:57:00 kodiak Exp $
+d8 3
+d42 1
+d58 3
+a60 5
+EXTERN MEM_HANDLE MEMalloc();
+EXTERN VOID       MEMfree();
+EXTERN BYTE      *MEMptr();
+/* dll.c */
+EXTERN BOOLEAN dll_empty ();           /* Returns TRUE if p is empty list */
+d67 1
+a67 2
+EXTERN MEM_HANDLE hBUCKlru;
+EXTERN MEM_HANDLE hfi;                       /* Font Index handle */
+a72 1
+EXTERN VOID       BUCKfree();
+d76 1
+a76 1
+GLOBAL MEM_HANDLE  hchar_buf = 0;
+d146 1
+a146 1
+/*  MEMalloc "size" BYTEs and then do an lseek() to "offset" in file "f" and
+d150 1
+a150 1
+GLOBAL MEM_HANDLE
+d152 1
+d159 1
+a159 2
+    MEM_HANDLE hbuf;
+    BYTE      *buf;
+d162 3
+a165 7
+    while(!(hbuf=MEMalloc(BUFFER_POOL, size)))
+    {
+        if(dll_empty(hBUCKlru)) return NIL_MH;
+        BUCKfree( ((DLL*)MEMptr(hBUCKlru))->b );       /* free lru BUCKET */
+    }
+    buf = MEMptr(hbuf);
+
+d170 2
+a171 2
+        MEMfree(BUFFER_POOL, hbuf);
+        return NIL_MH;
+d174 1
+a174 1
+    return hbuf;
+a202 2
+    UWORD          type;
+    ULONG          size;
+d208 1
+a208 1
+    MEM_HANDLE     hseg;
+d225 1
+a225 1
+    if(!(b->hface_header_seg = FMalloc_rd(b->f, ix->fhcount,
+d231 1
+a231 1
+    face_header_seg = MEMptr(b->hface_header_seg);
+d236 1
+a236 1
+    b->hchar_dir = b->hface_header_seg + 6;
+d260 1
+a260 1
+    if(!(b->hfgseg = FMalloc_rd(b->f, globcount, globoff, globcount,
+d264 1
+a264 1
+        MEMfree(BUFFER_POOL, b->hface_header_seg);
+d267 1
+a267 1
+    fgseg = MEMptr(b->hfgseg);
+d275 8
+a282 4
+    type = *((UWORD*)p);     p += 2;
+    size = *((ULONG*)p);     p += 4;
+    DBG2("            type = %ld    size = %ld\n",type, size);
+    DBG("\n            directory\n");
+d295 1
+a295 1
+        hseg   = b->hfgseg + off + 6;
+d299 1
+a299 1
+            case 100:  b->hgif = hseg - 6;          /* Intellifont        */
+d302 1
+a302 1
+            case 101:  b->htrack_kern_seg = hseg;   /* track kerning      */
+d305 1
+a305 1
+            case 102:  b->htext_kern_seg = hseg;    /* text kerning       */
+d308 1
+a308 1
+            case 103:  b->hdesign_kern_seg = hseg;  /* designer kerning   */
+d311 2
+a312 1
+            case 104:  b->hwidth_seg = hseg;        /* character widths   */
+d315 2
+a316 1
+            case 105:  b->hattribute = hseg;        /* attribute hdr      */
+d319 1
+a319 1
+            case 106:  b->hrast = hseg;             /* raster parameter    */
+d322 1
+a322 1
+            case 107:  b->htf_header_seg = hseg;    /* typeface header     */
+d325 1
+a325 1
+            case 108:  b->hcompound_seg = hseg;     /* compound characters */
+d328 2
+a329 1
+            case 109:  b->hdisplay = hseg;          /* display header      */
+d332 1
+a332 1
+            case 110:  b->hfont_alias_seg = hseg;   /* font alias          */
+d335 1
+a335 1
+            case 111:  b->hcopy = hseg - 6;         /* Copyright segment   */
+d369 1
+a369 1
+    chptr = (CH_DIR_ENTRY*)MEMptr(b->hchar_dir);
+a399 1
+    FONTINDEX     *fi;
+a400 1
+    BYTE          *char_buf;
+d407 1
+a407 2
+    fi = (FONTINDEX*)MEMptr(hfi);
+    if(status = IXopen_file((INDEX_ENTRY*)MEMptr(fi->hcur_index[bucknum]), b))
+d429 1
+a429 1
+    chptr = (CH_DIR_ENTRY*)MEMptr(b->hchar_dir) + index;
+a442 1
+    char_buf = MEMptr(hchar_buf);
+a480 1
+    MEM_HANDLE  hfi_sav;
+a481 1
+    FONTINDEX  *fi;
+d498 1
+a498 1
+        hfi_sav = hfi;    /* save old font index */
+d509 1
+a509 4
+        fi_sav = (FONTINDEX*)MEMptr(hfi_sav);
+        update_tfnum = -
+              ((INDEX_ENTRY*)MEMptr(fi_sav->hcur_index[cd->bucknum]))
+                               ->tfnum;
+d524 2
+a525 3
+        fi = (FONTINDEX*)MEMptr(hfi);
+        MEMfree(BUFFER_POOL, fi->hfnt_index);   /* free temp. font index */
+        hfi = hfi_sav;                            /* restore font index    */
+@
+
+
+5.1
+log
+@eliminate old style symbol table lookup
+@
+text
+@d2 1
+a2 1
+**	$Id: fm.c,v 5.0 91/02/26 10:43:08 kodiak Exp Locker: kodiak $
+d8 3
+d31 5
+d45 1
+a49 1
+#include "cgconfig.h"
+d278 1
+d284 4
+a288 1
+    DBG("\n            directory\n");
+d342 1
+a342 1
+#ifdef MSWINDOWS
+d419 1
+a419 1
+#ifdef MSWINDOWS
+d438 1
+a438 1
+#ifdef MSWINDOWS
+d450 1
+a450 1
+#ifdef MSWINDOWS
+d458 1
+a458 1
+#ifdef MSWINDOWS
+@
+
+
+5.0
+log
+@Phase 2 Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id: fm.c,v 3.0 90/11/09 17:09:06 kodiak Exp Locker: kodiak $
+d8 3
+a57 1
+EXTERN SS_ENTRY   symbol_set[];
+@
+
+
+3.0
+log
+@Kodiak's Alpha 1
+@
+text
+@d2 1
+a2 1
+**	$Id$
+d7 4
+a10 1
+**	$Log$
+d30 1
+d40 2
+d66 1
+a66 1
+GLOBAL MEM_HANDLE  hchar_buf;
+a203 1
+    BYTE          *segptr;
+a282 1
+        segptr = (BYTE*)(fgseg + off);
+@
+
+
+2.0
+log
+@from AGFA Bullet 1.20Beta, 02-Oct-90
+@
+text
+@d1 8
+d24 3
+a26 4
+#include <stdio.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <io.h>
+d33 1
+a33 1
+#include "compress/istypes.h"
+d44 1
+a44 1
+EXTERN BOOLEAN    if_init_char();
+d74 1
+a74 1
+    WORD   f;          /* file handle              */
+d87 1
+a87 1
+    DBG2("                FMseek_read()   offset: %ld   count: %u\n",
+d94 1
+a94 1
+        if(_llseek(f, offset, SEEK_SET) != offset)
+d96 1
+a96 1
+        if(lseek(f, offset, SEEK_SET) != offset)
+d106 1
+a106 1
+        if(read(f, buffer, count) != count)
+d246 1
+a246 1
+    DBG2("\n        face_global()  offset: %ld   count: %d\n",
+d267 1
+a267 1
+    DBG2("            type = %d    size = %ld\n",type, size);
+d275 1
+a275 1
+        DBG3("            key / offset / count  %d   %ld   %d\n",
+d348 1
+a348 1
+    DBG1("        FMchar_index(%d)\n", cgnum);
+d359 1
+a359 1
+            DBG1("            index = %d\n", i);
+d385 1
+a385 1
+    DBG2("        rd_char(bucknum = %d, index = index = %d)\n",
+d473 1
+a473 1
+    DBG1("        FMrd_char(cgnum = %d)\n", cd->cgnum);
+@
+
+
+1.0
+log
+@from AGFA Bullet 1.10, 30-Mar-90
+@
+text
+@d3 12
+d26 2
+a53 2
+GLOBAL BYTE       *char_buf;
+GLOBAL UWORD       char_buf_size;
+d63 1
+d66 1
+a66 1
+FMseek_read(f, offset, count, buffer)
+d71 2
+d74 6
+d82 13
+d96 10
+a105 4
+    if(lseek(f, offset, SEEK_SET) != offset)
+    {
+        DBG("                    lseek() failed\n");
+        return FALSE;
+d107 1
+a107 2
+
+    if(read(f, buffer, count) != count)
+d109 3
+a111 1
+        DBG("                    read() failed\n");
+d113 4
+a116 1
+    }
+d125 1
+a125 8
+ *  or null on failure. If we do not have enough buffer memory, we can
+ *  close any BUCKET except "h_buck" or none if "h_buck" < 0.
+ *  The "h_buck" < 0 is a bit of a kludge- it's because this function
+ *  is also called during system initialization to load the font index
+ *  file and the symbol set directory (to save repeated code).
+ *  Since this function is usually called to load typeface global data
+ *  (either the character directory, aka face header, or the face
+ *  global segment) we always free the character data buffer.
+d128 1
+a128 1
+FMalloc_rd(f, size, offset, count)
+d132 2
+a139 3
+    MEMfree(BUFFER_POOL, hchar_buf);  /* Always free the character buffer */
+    hchar_buf = (MEM_HANDLE)0L;
+
+d149 1
+a149 1
+    if(!FMseek_read(f, offset, count, buf))
+d196 3
+a198 1
+    b->tfnum = ix->tfnum;
+d210 1
+a210 1
+                                                  ix->fhoff, ix->fhcount)))
+a217 1
+   *  (why didn't the loader count them?)
+d244 2
+a245 1
+    if(!(b->hfgseg = FMalloc_rd(b->f, globcount, globoff, globcount)))
+d252 1
+d272 2
+a273 1
+        hseg   = b->hfgseg + off;
+d276 2
+a277 12
+            case 100:  b->hgif = hseg;           /* Intellifont */
+                       b->gifct = count;
+                       break;
+            case 102:  b->htext_kern_seg = hseg + 6;
+                       break;
+            case 103:  b->hdesign_kern_seg = hseg + 6;
+                       break;
+            case 104:  b->hwidth_seg = hseg + 6;
+                       break;
+            case 105:  b->hattribute = hseg + 6; /* attribute hdr */
+                       break;
+            case 106:  b->hrast = hseg + 6;       /* raster parameter */
+d279 29
+a307 1
+            case 108:  b->hcompound_seg = hseg + 6;
+d309 2
+a310 1
+            case 109:  b->hdisplay = hseg + 6;          /* display header */
+d317 4
+d376 1
+d392 9
+a400 1
+        if(!if_init_glob(b)) return ERR_if_init_glob;  
+d404 2
+d408 4
+a411 1
+  /* allocate character buffer and read character data */
+d413 6
+a418 4
+    char_buf_size = 3*chptr->charcount;    /* kludge */
+    if(!(hchar_buf = FMalloc_rd(b->f, char_buf_size, chptr->charoff,
+                                                      chptr->charcount)))
+            return ERR_mem_char_buf;
+d421 11
+d433 5
+d440 1
+a440 2
+    return if_init_char();
+
+d464 1
+d500 2
+a501 2
+                if((cd->index = FMchar_index(b, cd->cgnum)) >= 0)
+                    status = rd_char(0, cd->index);
+@

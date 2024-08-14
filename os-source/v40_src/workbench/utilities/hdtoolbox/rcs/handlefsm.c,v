@@ -1,0 +1,1989 @@
+head     36.13;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.13
+date     93.03.11.14.18.02;  author kaori;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     93.01.19.16.41.11;  author kaori;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     93.01.08.16.51.48;  author kaori;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     92.12.07.15.39.58;  author kaori;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     92.12.02.10.54.04;  author kaori;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     92.07.31.15.37.54;  author kaori;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     92.07.16.12.11.56;  author kaori;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     92.07.07.13.32.44;  author kaori;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     92.06.23.18.57.31;  author kaori;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     92.06.16.09.24.01;  author kaori;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     91.03.05.15.24.55;  author jerryh;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     91.02.26.16.37.24;  author jerryh;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     90.04.20.07.07.58;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@file system maintenance code
+@
+
+
+36.13
+log
+@(DOS)->(OFS)
+@
+text
+@/* handlefsm.c - code to handle the file system maintenance */
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <graphics/gfx.h>
+#include <graphics/gfxmacros.h>
+#include <intuition/intuition.h>
+#include <libraries/dos.h>
+#include <libraries/filehandler.h>
+
+#include <dos.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <stdio.h>
+
+/* for lattice */
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/alib_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/gadtools_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+
+#include "refresh.h"
+#include "protos.h"
+
+#include "global.h"
+
+#include "gadgetids.h"
+#include "gadgets.h"
+#include "windows.h"
+
+#include "fstype.h"
+
+WORD FileSysUpdate = 0;
+
+#define DosTypeAddr	(&GetDosTypeSIBuff[0])
+
+//
+USHORT FSMDeleteFlags = 0;
+USHORT FSMUpdateFlags = 0;
+UWORD FSMListPosition = 0;	/* highlight position */
+
+extern UBYTE AddrLunText[44];
+
+extern struct Remember	*RKey;	/* pointer for list allocation */
+
+struct List	lh4;		/* list for file system list */
+
+#define	FSMLIST_LENGTH 80	/* file system list string length */
+//
+
+int
+HandleFSM (w,msg)
+	struct Window *w;
+	struct IntuiMessage *msg;
+{
+	register struct Gadget *gad;
+	register int done = FALSE;
+	UWORD id;
+
+	switch (msg->Class) {
+	case GADGETUP:
+	case GADGETDOWN:
+		gad = (struct Gadget *) (msg->IAddress);
+
+		id  = gad->GadgetID & ~REFRESH_MASK;
+
+		switch (id) {
+		case FSMUPDATE:
+			HandleFSMUpdate(w);
+			break;
+
+		case FSMDELETE:
+			HandleFSMDelete(w);
+			break;
+
+		case FSMADD:
+			HandleFSMAdd(w);
+			break;
+
+		case FSMCANCEL:
+			FreeFileSysList(FirstFileSys);
+			FirstFileSys = CurrFileSys = NULL;
+			done = HANDLE_CANCEL;
+			break;
+
+		case FSMOK:
+			FreeFileSysList(
+				SelectedDrive->rdb->rdb_FileSysHeaderList);
+			SelectedDrive->rdb->rdb_FileSysHeaderList =
+								   FirstFileSys;
+			if (FileSysUpdate)
+				SelectedDrive->Flags |= UPDATE;
+
+			done = HANDLE_DONE;
+			break;
+
+		case FSMLIST:
+			HandleFSMClick(w,msg);
+			break;
+
+		}
+
+		break;
+//
+//	case MENUPICK:			// No menu.
+//		HandleMenus(w,msg);
+//		break;
+
+	}
+
+	return done;
+}
+
+static UWORD gotit;
+
+void
+HandleFSMUpdate (w)
+	struct Window *w;
+{
+	register struct FileSysHeaderBlock *newfs,*fs;
+
+	if (CurrFileSys)	/* if one is selected */
+	{
+		/* replace old file sys on disk */
+		GetDosType.Flags |= GADGDISABLED;
+		sprintf(DosTypeAddr,"0x%lx",CurrFileSys->fhb_DosType);
+
+		if (newfs = GetFileSys(w))
+		{
+			newfs->fhb_Next = CurrFileSys->fhb_Next;
+			if (CurrFileSys == FirstFileSys)
+				FirstFileSys = newfs;
+			else {
+				/* this MUST succeed, no error checks */
+				for (fs = FirstFileSys;
+				     fs->fhb_Next;
+				     fs = fs->fhb_Next)
+				{
+					if (fs->fhb_Next == CurrFileSys)
+					{
+						fs->fhb_Next = newfs;
+						break;
+					}
+				}
+			}
+
+			if (DisplayFS == CurrFileSys)
+				DisplayFS = newfs;
+
+			FreeFileSys(CurrFileSys);
+			CurrFileSys = newfs;
+
+			redraw_fsmlist(w->RPort);
+			GT_SetGadgetAttrs(FSMList,w,NULL,
+					GTLV_Labels,&lh4,TAG_DONE);	//
+//
+			if (!gotit)
+			{
+				MyOffGadget(w,FSMUpdate);
+				MyOffGadget(w,FSMDelete);
+			}
+//
+			FileSysUpdate = TRUE;
+		}
+		GetDosType.Flags &= ~GADGDISABLED;
+	} else
+		DisplayBeep(w->WScreen);
+}
+
+void
+HandleFSMDelete (w)
+	struct Window *w;
+{
+	register struct FileSysHeaderBlock *fs,*lastfs;
+
+	if (CurrFileSys)
+	{
+		for (lastfs = NULL, fs = FirstFileSys;
+			fs && fs != CurrFileSys;
+			lastfs = fs, fs = fs->fhb_Next)
+			; /* NULL */
+
+		if (lastfs == NULL)		/* first one */
+			FirstFileSys = fs->fhb_Next;
+		else
+			// I think this is original bug.
+//			lastfs = fs->fhb_Next;
+			lastfs->fhb_Next = fs->fhb_Next;
+
+		FreeFileSys(CurrFileSys);
+		CurrFileSys = FirstFileSys;
+
+		DisplayFS = CurrFileSys;
+
+		DisplayFSNum = 0;
+		NumFS--;
+
+		redraw_fsmlist(w->RPort);
+		GT_SetGadgetAttrs(FSMList,w,NULL,
+					GTLV_Labels,&lh4,TAG_DONE);	//
+//
+		if (!gotit)
+		{
+			MyOffGadget(w,FSMUpdate);
+			MyOffGadget(w,FSMDelete);
+		}
+//
+		FileSysUpdate = TRUE;
+	} else
+		DisplayBeep(w->WScreen);
+}
+
+void
+HandleFSMAdd (w)
+	struct Window *w;
+{
+	register struct FileSysHeaderBlock *newfs,*fs;
+
+	GetDosType.Flags &= ~GADGDISABLED;
+
+	/* 39.13 - Now default identifier is international fast file system */
+	sprintf(DosTypeAddr,"0x%lx",ID_INTER_FFS_DISK);
+
+	if (newfs = GetFileSys(w))
+	{
+		for (fs = FirstFileSys;
+		     fs;
+		     fs = fs->fhb_Next)
+		{
+			if (newfs->fhb_DosType == fs->fhb_DosType)
+			{
+				Notify(w,
+				    "File System of Type 0x%lx already exists!",
+				    fs->fhb_DosType);
+				FreeFileSys(newfs);
+				return;
+			}
+		}
+		newfs->fhb_Next = FirstFileSys;
+		CurrFileSys = FirstFileSys = newfs;
+
+		DisplayFS = CurrFileSys;
+		DisplayFSNum = 0;
+		NumFS++;
+
+		redraw_fsmlist(w->RPort);
+//
+		GT_SetGadgetAttrs(FSMList,w,NULL,GTLV_Labels,&lh4,TAG_DONE);
+		GT_SetGadgetAttrs(FSMList,w,NULL,GTLV_Selected,0,TAG_DONE);
+		FSMListPosition = 0;
+//
+//
+		if (gotit)
+		{
+			MyOnGadget(w,FSMUpdate);
+			MyOnGadget(w,FSMDelete);
+		}
+//
+		FileSysUpdate = TRUE;
+	}
+}
+
+int
+GetFileHandler (w,req,msg)
+	struct Window *w;
+	struct Requester *req;
+	struct IntuiMessage *msg;
+{
+	int done = 0;
+
+	if (msg->Class == GADGETUP)
+	{
+		if (msg->IAddress == (APTR) &FsGetNameOk)
+			done = HANDLE_DONE;
+		else if (msg->IAddress == (APTR) &FsGetNameCancel)
+			done = HANDLE_CANCEL;
+		else
+			;
+	} else if (msg->Class == REQSET) {
+		/* activate the filename string gadget */
+		ActivateGadget(&GetFileName,w,req);
+	}
+
+	return done;
+}
+
+int
+GetTypeHandler (w,req,msg)
+	struct Window *w;
+	struct Requester *req;
+	struct IntuiMessage *msg;
+{
+	int done = 0;
+
+	if (msg->Class == GADGETUP)
+	{
+		if (msg->IAddress == (APTR) &FsGetTypeOk)
+			done = HANDLE_DONE;
+		else if (msg->IAddress == (APTR) &FsGetTypeCancel)
+			done = HANDLE_CANCEL;
+		else
+			;
+	} else if (msg->Class == REQSET) {
+		// sould not activate when gadget is disabled.
+		if (!(GetDosType.Flags & GADGDISABLED))
+			/* activate the filename string gadget */
+			ActivateGadget(&GetDosType,w,req);
+	}
+
+	return done;
+}
+
+/* 39.9 */
+struct FileSysHeaderBlock *
+GetFileSys (w)
+	struct Window *w;
+{
+	struct FileSysHeaderBlock *fs = NULL;
+	char *ptr;
+	LONG  dostype;
+
+	/* I think this sentense will bother peple who wants to put different FS. */
+	// sprintf(GetFileNameSIBuff,"l:FastFileSystem");
+again:
+	MakePrettyRequestBorder(FileSysNameRequester.Width,
+					FileSysNameRequester.Height);
+
+	if (HandleRequest(w,&FileSysNameRequester,GetFileHandler) == HANDLE_DONE)
+	{
+		GetVersionSInfo.LongInt = 0;
+		GetRevisionSInfo.LongInt = 0;
+		strcpy(GetVersionSIBuff,"0");
+		strcpy(GetRevisionSIBuff,"0");
+
+		// 39.9
+		GetFSVersion(GetFileNameSIBuff,
+				    &GetVersionSInfo.LongInt,
+				    &GetRevisionSInfo.LongInt);
+
+		sprintf(GetVersionSIBuff,"%ld",GetVersionSInfo.LongInt);
+		sprintf(GetRevisionSIBuff,"%ld",GetRevisionSInfo.LongInt);
+
+//		kprintf("name = %s\n",GetFileNameSIBuff);
+//		kprintf("DosTypeAddr = %s\n",DosTypeAddr);
+//		kprintf("Version = %s,",GetVersionSIBuff);
+//		kprintf("Revision = %s\n",GetRevisionSIBuff);
+
+		MakePrettyRequestBorder(FileSysTypeRequester.Width,
+					FileSysTypeRequester.Height);
+
+		if (HandleRequest(w,&FileSysTypeRequester,GetTypeHandler) == HANDLE_DONE)
+		{
+			/* first, check that the dostype is reasonable */
+			ptr = DosTypeAddr;
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&dostype) == strlen(ptr))
+			{
+				/* we have the dostype */
+			} else {
+				Notify(w,"Invalid hex DosType %s!",
+					(LONG) DosTypeAddr);
+				Notify(w,
+				   "Please enter the DosType in hex with a 0x leading.",
+				    NULL);
+				/* 39.13 - now deafult is international ffs */
+				sprintf(DosTypeAddr,"0x%lx",ID_INTER_FFS_DISK);
+				goto again;
+			}
+
+			fs = MakeFileSys(w,SelectedDrive->rdb,GetFileNameSIBuff,
+				 dostype,
+				 GetVersionSInfo.LongInt,GetRevisionSInfo.LongInt);
+		}
+	}
+	return fs;
+}
+
+#if 0
+struct FileSysHeaderBlock *
+GetFileSys (w)
+	struct Window *w;
+{
+	struct FileSysHeaderBlock *fs = NULL;
+	char *ptr;
+	LONG  dostype;
+
+again:
+	MakePrettyRequestBorder(FileSysNRequester.Width,
+					FileSysNRequester.Height);	//
+
+	if (HandleRequest(w,&FileSysNRequester,GetFileHandler) == HANDLE_DONE)
+	{
+		/* first, check that the dostype is reasonable */
+		ptr = DosTypeAddr;
+		if (*ptr++ == '0' && *ptr++ == 'x' &&
+		    stch_l(ptr,&dostype) == strlen(ptr))
+		{
+			/* we have the dostype */
+		} else {
+			Notify(w,"Invalid hex DosType %s!",
+			       (LONG) DosTypeAddr);
+			Notify(w,
+			   "Please enter the DosType in hex with a 0x leading.",
+			    NULL);
+			/* 39.13 - now deafult is international ffs */
+			sprintf(DosTypeAddr,"0x%lx",ID_INTER_FFS_DISK);
+			goto again;
+		}
+
+		fs = MakeFileSys(w,SelectedDrive->rdb,GetFileNameSIBuff,
+				 dostype,
+				 GetVersionSInfo.LongInt,GetRevisionSInfo.LongInt);
+	}
+	return fs;
+}
+#endif
+
+struct FileSysHeaderBlock *
+MakeFileSys (w,rdb,name,dostype,version,revision)
+	struct Window *w;
+	struct RigidDiskBlock *rdb;
+	char *name;
+	LONG dostype,version,revision;
+{
+	struct FileSysHeaderBlock *fs = NULL;
+	register struct LoadSegBlock *ls,*lastls;
+	BPTR fh;
+	register LONG len,newlen;
+	ULONG temp = 0, done;
+	LONG size;
+
+	if (fh = Open(name,MODE_OLDFILE))
+	{
+		size = Read(fh,(char *) &temp,4);
+		if (size != 4)
+			goto read_error;
+		if (temp == 0x3F3)			/* hunk_header */
+		{
+			if (Seek(fh,0,OFFSET_BEGINNING) == -1)
+				goto read_error;
+			if (fs = AllocNew(FileSysHeaderBlock))
+			{
+			    *fs = defaultfs;	/* structure copy */
+			    fs->fhb_DosType = dostype;
+//			    fs->fhb_Version = version;
+			    fs->fhb_Version = (version << 16)|(revision & 0x0000ffff);
+
+			    lastls = NULL;
+			    done = FALSE;
+			    while (!done) {
+				ls = (struct LoadSegBlock *)
+				    AllocMem(rdb->rdb_BlockBytes,MEMF_CLEAR);
+
+				ls->lsb_ID = IDNAME_LOADSEG;
+				ls->lsb_SummedLongs =
+					rdb->rdb_BlockBytes >> 2;
+				ls->lsb_HostID = HOST_ID;
+
+				if (lastls)
+					lastls->lsb_Next = ls;
+				else
+					fs->fhb_SegListBlocks = ls;
+
+				newlen = (ls->lsb_SummedLongs - 5) * 4;
+				len = Read(fh,(char *)&ls->lsb_LoadData[0],
+					   newlen);
+				if (len < 0)
+				{
+read_error:				if (w)
+					  Notify(w,
+					   "Error %d while reading filesystem!",
+					   IoErr());
+
+					if (fs)
+						FreeFileSys(fs);
+					fs = NULL;
+					done = TRUE;
+
+				} else if (len == 0) {
+
+					/* true EOF - drop last block */
+					lastls->lsb_Next = NULL;
+					FreeMem((char *)ls,
+						ls->lsb_SummedLongs*4);
+					done = TRUE;
+
+				} else if (len != newlen) {
+
+					/* EOF is assumed here */
+					ls->lsb_SummedLongs = (len >> 2) + 5;
+					done = TRUE;
+
+				} /* else not done yet */
+				lastls = ls;
+
+			    } /* while */
+			}
+		} else {
+			if (w)
+				Notify(w,"File %s is not a filesystem!",
+				       (LONG) name);
+		}
+		Close(fh);
+	} else {
+		if (w)
+			Notify(w,"Can't open filesystem %s!",
+			       (LONG) name);
+	}
+
+	return fs;
+}
+
+#if 0
+void
+redraw_fsmlist (rp)
+	struct RastPort *rp;
+{
+	register UWORD x,y,i;
+	register struct FileSysHeaderBlock *d;
+	char buffer[80],name[80];
+
+	gotit = 0;
+
+	x = FSMList.LeftEdge;
+	y = FSMList.TopEdge;
+
+	if (DisplayFS == NULL)
+		DisplayFS = FirstFileSys;
+
+	/* clear to erase old text */
+	SetAPen(rp,0L);
+	SetDrMd(rp,JAM1);
+	RectFill(rp,x,y,x + FSMList.Width - 1,y + FSMList.Height - 1);
+
+	SetAPen(rp,1L);
+
+	for (d = DisplayFS, i = 0;
+	     d && i < MaxDisplayFS;
+	     d = d->fhb_Next, i++)
+	{
+		switch (d->fhb_DosType) {
+		case 'DOS\x00':
+			strcpy(name,"Old File System");
+			break;
+		case 'DOS\x01':
+			strcpy(name,"Fast File System");
+			break;
+		default:
+			if (d->fhb_DosType & 0xffffff00 == 'UNI\x00')
+				sprintf(name,"UNIX File System %d",
+					d->fhb_DosType & 0x000000ff);
+			else
+				strcpy(name,"Custom File System");
+			break;
+		}
+		sprintf(buffer,"0x%lx   %6ld    %6ld   %s",
+			d->fhb_DosType,d->fhb_Version,
+			LoadSegSize(d->fhb_SegListBlocks),name);
+
+		Move(rp,x,y + rp->TxBaseline + 1);
+		Text(rp,buffer,strlen(buffer));
+
+		if (d == CurrFileSys)
+		{
+			SetAPen(rp,255L);
+			SetDrMd(rp,COMPLEMENT);
+
+			RectFill(rp,x,y,
+				    x + FSMList.Width - 1,
+				    y + rp->TxHeight);
+			SetAPen(rp,1L);
+			SetDrMd(rp,JAM1);
+
+			gotit = 1;
+		}
+		y += rp->TxHeight + 1;
+	}
+}
+#endif
+
+void
+redraw_fsmlist (rp)
+	struct RastPort *rp;
+{
+	register UWORD i;
+	register struct FileSysHeaderBlock *d;
+	char buffer[FSMLIST_LENGTH],name[FSMLIST_LENGTH];
+	char verstr[16];	// 39.9
+
+	struct Node *node,*nodenew;
+
+//	kprintf("redraw\n");
+	gotit = 0;
+
+	if (DisplayFS == NULL)
+		DisplayFS = FirstFileSys;
+
+	// Set first node in FSM list.
+	node = ((struct List *)(&lh4))->lh_Head;
+
+	for (d = DisplayFS, i = 0;
+	     d;
+	     d = d->fhb_Next, i++)
+	{
+//		sprintf(tmp,"%lx",d);
+//		kprintf("%s:",tmp);
+
+// 39.11
+		switch (d->fhb_DosType) {
+		case ID_DOS_DISK:				// DOS\0
+			strcpy(name,"Old File System");
+			break;
+		case ID_FFS_DISK:				// DOS\1
+			strcpy(name,"Fast File System");
+			break;
+		case ID_INTER_DOS_DISK:				// DOS\2
+			strcpy(name,"International (OFS)");
+			break;
+		case ID_INTER_FFS_DISK:				// DOS\3
+			strcpy(name,"International (FFS)");
+			break;
+		case ID_DC_DOS_DISK:				// DOS\4
+			strcpy(name,"Dir Cache (OFS)");
+			break;
+		case ID_DC_FFS_DISK:				// DOS\5
+			strcpy(name,"Dir Cache (FFS)");
+			break;
+		default:					// other
+			if (d->fhb_DosType & 0xffffff00 == 'UNI\x00')
+				sprintf(name,"UNIX File System %d",
+					d->fhb_DosType & 0x000000ff);
+			else
+				strcpy(name,"Custom File System");
+			break;
+		}
+//
+		sprintf(verstr,"%d.%d",
+			(d->fhb_Version & 0xffff0000) >> 16,
+			(d->fhb_Version & 0x0000ffff));		// 39.9
+		sprintf(buffer,"0x%08lx  %9s  %6ld   %s",
+			d->fhb_DosType,verstr,
+			LoadSegSize(d->fhb_SegListBlocks),name);	// 39.9
+
+		// Update FSM list.
+		if (node->ln_Succ)	// Update
+		{
+			if (strcmp(node->ln_Name,buffer) != 0)
+				strcpy(node->ln_Name,buffer);
+
+//			sprintf(tmp,"%x",node);
+//			kprintf("node %s - ",tmp);
+//			kprintf("update %s\n",node->ln_Name);
+
+			/* We don't need worry about add case,
+			   because list is added only once at a time. */
+			node = node->ln_Succ;
+		} else {		// Add Tail list
+			if (nodenew = (struct Node *)
+				AllocRemember(&RKey,
+					sizeof(struct Node),MEMF_CLEAR))
+			{
+				if(nodenew->ln_Name = AllocRemember(&RKey,
+						FSMLIST_LENGTH + 1,MEMF_CLEAR))
+				{
+					strcpy(nodenew->ln_Name,buffer);
+					AddTail(&lh4,nodenew);
+//					sprintf(tmp,"%x",nodenew);
+//					kprintf("node %s - ",tmp);
+//					kprintf("add %s\n",nodenew->ln_Name);
+				}
+			}
+		}
+
+		if (d == CurrFileSys)
+		{
+			gotit = 1;
+		}
+	}
+	if (node->ln_Succ)
+	{
+		// Don't be upset to delete tail of list.
+		// Because I already update the content of list above.
+		// The deleted content of list does not mean anything.
+		node = RemTail(&lh4);	// Delete Tail List
+//		sprintf(tmp,"%x",node);
+//		kprintf("node %s - deleted\n",tmp);
+	}
+}
+
+
+/* Allocate FSM list for CreateGadget(). */
+
+void
+AllocFSMList (void)		// allocate rtn for LISTVIEW_KIND Gadgets
+{
+	register UWORD i;
+	register struct FileSysHeaderBlock *d;
+	char buffer[FSMLIST_LENGTH],name[FSMLIST_LENGTH];
+	char verstr[16];	// 39.9
+
+	struct Node *node;
+
+	if (DisplayFS == NULL)
+		DisplayFS = FirstFileSys;
+
+	NewList(&lh4);
+
+	for (d = DisplayFS, i = 0;
+	     d;
+	     d = d->fhb_Next, i++)
+	{
+// 39.11
+		switch (d->fhb_DosType) {
+		case ID_DOS_DISK:				// DOS\0
+			strcpy(name,"Old File System");
+			break;
+		case ID_FFS_DISK:				// DOS\1
+			strcpy(name,"Fast File System");
+			break;
+		case ID_INTER_DOS_DISK:				// DOS\2
+			strcpy(name,"International (OFS)");
+			break;
+		case ID_INTER_FFS_DISK:				// DOS\3
+			strcpy(name,"International (FFS)");
+			break;
+		case ID_DC_DOS_DISK:				// DOS\4
+			strcpy(name,"Dir Cache (OFS)");
+			break;
+		case ID_DC_FFS_DISK:				// DOS\5
+			strcpy(name,"Dir Cache (FFS)");
+			break;
+		default:					// other
+			if (d->fhb_DosType & 0xffffff00 == 'UNI\x00')
+				sprintf(name,"UNIX File System %d",
+					d->fhb_DosType & 0x000000ff);
+			else
+				strcpy(name,"Custom File System");
+			break;
+		}
+//
+/*
+		switch (d->fhb_DosType) {
+		case ID_DOS_DISK:
+			strcpy(name,"Old File System");
+			break;
+		case ID_FFS_DISK:
+			strcpy(name,"Fast File System");
+			break;
+		default:
+			if (d->fhb_DosType & 0xffffff00 == 'UNI\x00')
+				sprintf(name,"UNIX File System %d",
+					d->fhb_DosType & 0x000000ff);
+			else
+				strcpy(name,"Custom File System");
+			break;
+		}
+*/
+		sprintf(verstr,"%d.%d",
+			(d->fhb_Version & 0xffff0000) >> 16,
+			(d->fhb_Version & 0x0000ffff));		// 39.9
+		sprintf(buffer,"0x%08lx  %9s  %6ld   %s",
+			d->fhb_DosType,verstr,
+			LoadSegSize(d->fhb_SegListBlocks),name);	// 39.9
+/*
+		sprintf(buffer,"0x%08lx   %6ld    %6ld   %s",
+			d->fhb_DosType,d->fhb_Version,
+			LoadSegSize(d->fhb_SegListBlocks),name);
+*/
+		if (node = (struct Node *)
+			AllocRemember(&RKey,sizeof(struct Node),MEMF_CLEAR))
+		{
+			if(node->ln_Name =
+				AllocRemember(&RKey,FSMLIST_LENGTH + 1,MEMF_CLEAR))
+			{
+			    strcpy(node->ln_Name,buffer);
+			    AddTail(&lh4,node);
+			}
+		}
+	}
+
+}
+
+
+
+/* return the size of a loadseglist */
+
+LONG
+LoadSegSize (ls)
+	register struct LoadSegBlock *ls;
+{
+	register LONG size = 0;
+
+	while (ls) {
+		size += (ls->lsb_SummedLongs - 5) * 4;
+		ls = ls->lsb_Next;
+	}
+	return size;
+}
+
+void
+HandleFSMClick (w,msg)
+	register struct Window *w;
+	struct IntuiMessage *msg;
+{
+	register UWORD y;
+	register struct FileSysHeaderBlock *d;
+
+	y = msg->Code;
+	FSMListPosition = y;	// Remember the highlight position for CreateGadget().
+
+	for (d = DisplayFS; d && y; d = d->fhb_Next, y--)
+		; /* NULL */
+
+	if (d) {
+		if (CurrFileSys == d)
+			return;
+		CurrFileSys = d;
+	} else
+		DisplayBeep(w->WScreen);
+}
+
+#if 0
+void
+HandleFSMClick (w,msg)
+	struct Window *w;
+	struct IntuiMessage *msg;
+{
+	register UWORD y;
+	register struct FileSysHeaderBlock *d;
+
+	y = (msg->MouseY - FSMList->TopEdge) / (w->RPort->TxHeight + 1);
+
+	for (d = DisplayFS; d && y; d = d->fhb_Next, y--)
+		; /* NULL */
+
+	if (d) {
+		if (CurrFileSys == d)
+			return;
+		CurrFileSys = d;
+
+		redraw_fsmlist(w->RPort);
+		if (gotit)
+		{
+			MyOnGadget(w,FSMUpdate);
+			MyOnGadget(w,FSMDelete);
+		}
+	} else
+		DisplayBeep(w->WScreen);
+}
+#endif
+
+int
+FSMInit (w)
+	struct Window *w;
+{
+	register struct FileSysHeaderBlock *fsb;
+	register int i;
+
+	/* get number of File systems */
+	for (i = 0, fsb = SelectedDrive->rdb->rdb_FileSysHeaderList;
+	     fsb;
+	     i++, fsb = fsb->fhb_Next)
+		; /* NULL */
+
+	NumFS        = i;
+	FirstFileSys = CopyFileSysList(
+				     SelectedDrive->rdb->rdb_FileSysHeaderList);
+	CurrFileSys  = FirstFileSys;
+	DisplayFS    = FirstFileSys;
+	FileSysUpdate = 0;
+	DisplayFSNum = 0;
+
+	if (SelectedDrive->Flags & SCSI)
+		memcpy(&AddrLunText[16]," SCSI ",6);
+	else {
+		memset(&AddrLunText[16],' ',6);
+		memcpy(&AddrLunText[16],xt_name,strlen(xt_name));
+	}
+
+	AddrLunText[31] = SelectedDrive->Addr + '0';
+	AddrLunText[38] = SelectedDrive->Lun  + '0';
+
+	if (CurrFileSys == NULL)
+	{
+		FSMUpdateFlags |= GADGDISABLED;
+		FSMDeleteFlags |= GADGDISABLED;
+	} else {
+		FSMUpdateFlags &= ~GADGDISABLED;
+		FSMDeleteFlags &= ~GADGDISABLED;
+	}
+
+//	MaxDisplayFS = FSMList.Height / (w->RPort->TxHeight + 1);
+
+	GetVersionSInfo.LongInt = 0;
+	GetRevisionSInfo.LongInt = 0;	// 39.9
+	strcpy(GetVersionSIBuff,"0");
+	strcpy(GetRevisionSIBuff,"0");	// 39.9
+
+	/* 39.13 - bug fix */
+	FSMListPosition = 0;
+
+	return TRUE;
+}
+
+/* 39.9 - these routines supports version number for file system */
+
+#include "exec/resident.h"
+
+void
+CopyVersionStr (UBYTE *data,STRPTR result,UWORD size)
+{
+	UWORD i,j;
+
+	i = 0;
+	while (data[i] == ' ')
+		i++;
+
+	j = 0;
+	while ((data[i] != '\0') &&
+	       (data[i] != '\r') &&
+	       (data[i] != '\n') &&
+	       (j < size))
+		result[j++] = data[i++];
+
+	if (j == size)
+		j--;
+
+	result[j] = '\0';
+}
+
+struct Resident *
+FindRomTag (BPTR segList)
+{
+	struct Resident *tag;
+	UWORD *seg;
+	ULONG i;
+	ULONG *ptr;
+
+	while (segList)
+	{
+		ptr     = (ULONG *)((ULONG)segList << 2);
+        	seg     = (UWORD *)((ULONG)ptr);
+		segList = *ptr;
+
+		for (i = *(ptr-1)>>1;(i > 0);i--)
+		{
+			if (*(seg++) == RTC_MATCHWORD)
+		        {
+				tag = (struct Resident *)(--seg);
+				if (tag->rt_MatchTag == tag)
+				{
+					return(tag);
+				}
+        		}
+		}
+	}
+
+	return(NULL);
+}
+
+#define BUFSIZE		2052
+#define VERSTR_LENGTH	256
+
+BOOL
+FindVerString (char *name,char *verstr)
+{
+	UBYTE *buffer;
+	BOOL found = FALSE;
+	BPTR file;
+	LONG i,len;
+
+	/* check for normal $VER: version string */
+
+	if (buffer = AllocVec(BUFSIZE,MEMF_PUBLIC|MEMF_CLEAR))
+	{
+		if (file = Open(name,MODE_OLDFILE))
+		{
+			while (!found)
+			{
+				len = Read(file,buffer,BUFSIZE - 5);
+				if (len <= 0)
+					break;
+
+				buffer[BUFSIZE - 4] = 0;
+
+				for (i = 0;i < len - 15;i++)
+				{
+					if (buffer[i] == '$')
+					{
+						if (!strncmp(&buffer[i],"$VER:",5))
+						{
+							CopyVersionStr(
+								&buffer[i + 5],
+								verstr,
+								VERSTR_LENGTH);
+							found = TRUE;
+							break;
+						}
+					}
+				}
+				if (len == BUFSIZE - 5)
+					Seek(file,-25,OFFSET_CURRENT);
+			}
+			Close(file);
+		}
+		FreeVec(buffer);
+	}
+	return(found);
+}
+
+BOOL
+GetFSVersion (char *FileSystemName,LONG *version,LONG *revision)
+{
+	// look for romtag in file
+	BPTR seg;
+	struct Resident *res;
+	char *str;
+	BOOL found = TRUE;
+	char verstr[VERSTR_LENGTH];
+	LONG i,len;
+
+	verstr[0] = '\0';
+
+	seg = LoadSeg(FileSystemName);
+	if (seg)
+	{
+		res = FindRomTag(seg);
+		if (res)
+		{
+			*version = res->rt_Version;
+
+			// we must search for the '.' and get the rev number
+			for (str = (char *) res->rt_IdString; *str; str++)
+			if (*str == '.')
+			{
+				*revision = atol(str+1);
+				break;
+			}
+		} else {
+			// If we can't find out RomTag, we must search $VER string
+			if (found = FindVerString(FileSystemName,verstr))
+			{
+				i = 0;
+				while ((verstr[i] != ' ') && (verstr[i] != '\0'))
+					i++;
+
+				if (i > 0)
+				{
+					len = StrToLong(&verstr[i],version);
+					if (len > 0)
+					{
+						i += len;
+						if (verstr[i] == '.')
+						{
+							i++;
+							len = StrToLong(&verstr[i],
+									revision);
+							if (len > 0)
+								i += len;
+						}
+					}
+				}
+			}
+		}
+		UnLoadSeg(seg);
+	} else
+		found = FALSE;
+
+	return(found);
+}
+/* 39.9 END */
+
+@
+
+
+36.12
+log
+@Remove "PatchFlags" future.
+@
+text
+@d559 1
+a559 1
+				sprintf(name,"Unix File System %d",
+d626 1
+a626 1
+			strcpy(name,"International (DOS)");
+d632 1
+a632 1
+			strcpy(name,"Dir Cache (DOS)");
+d639 1
+a639 1
+				sprintf(name,"Unix File System %d",
+d730 1
+a730 1
+			strcpy(name,"International (DOS)");
+d736 1
+a736 1
+			strcpy(name,"Dir Cache (DOS)");
+d743 1
+a743 1
+				sprintf(name,"Unix File System %d",
+d760 1
+a760 1
+				sprintf(name,"Unix File System %d",
+@
+
+
+36.11
+log
+@Use DE_SECSPERBLK instead of DE_SIZEBLOCKS for PatchFlafs.
+@
+text
+@a136 11
+		/* 39.13 - Check patch flag for allowing change file system. */
+		/* 39.15 - Only PatchFlags is not set, enable to change to file system block size. */
+		/* 39.16 - Change from DE_SIZEBLOCK to DE_SECSPERBLK */
+		if (!(CurrFileSys->fhb_PatchFlags & (1<<DE_SECSPERBLK)))
+		{
+			FsChangeBlockSize.Flags |= SELECTED;
+		}
+		else
+			FsChangeBlockSize.Flags &= ~SELECTED;
+// printf("fhb_PatchFlags = %x\n",CurrFileSys->fhb_PatchFlags);
+
+a232 3
+	/* 39.13 - Initialize flag for allow change block size */
+	FsChangeBlockSize.Flags &= ~SELECTED;
+
+a381 9
+
+			/* 39.13 - Now you can change file system block size in
+			"File system Characteristics". */
+			/* 39.15 - Only PatchFlags is not set, enable to change to file system block size. */
+			/* 39.16 - Change from DE_SIZEBLOCK to DE_SECSPERBLK */
+			if (FsChangeBlockSize.Flags & SELECTED)
+				fs->fhb_PatchFlags &= ~(1<<DE_SECSPERBLK);
+			else
+				fs->fhb_PatchFlags |= (1<<DE_SECSPERBLK);
+@
+
+
+36.10
+log
+@fhb_PatchFlags opposite.(1<<DE_SIZEBLOCK is not set enable to change fs block size.)
+@
+text
+@d139 2
+a140 1
+		if (!(CurrFileSys->fhb_PatchFlags & (1<<DE_SIZEBLOCK)))
+d400 1
+d402 1
+a402 1
+				fs->fhb_PatchFlags &= ~(1<<DE_SIZEBLOCK);
+d404 1
+a404 1
+				fs->fhb_PatchFlags |= (1<<DE_SIZEBLOCK);
+@
+
+
+36.9
+log
+@Add CHECK_KIND gadget for changing file system block size.
+@
+text
+@d138 2
+a139 1
+		if (CurrFileSys->fhb_PatchFlags & (1<<DE_SIZEBLOCK))
+d145 1
+a145 1
+//printf("fhb_PatchFlags = %x\n",CurrFileSys->fhb_PatchFlags);
+d398 1
+d400 2
+@
+
+
+36.8
+log
+@Add GetTypeHandler(), GetFileSys() and change MakeFileSys().
+@
+text
+@d40 1
+a40 1
+#define AllocNew(t)	((struct t *) AllocMem(sizeof(struct t),MEMF_CLEAR))
+d49 2
+d53 5
+a57 4
+extern struct Remember	*RKey;
+struct List	lh4;		/* List for DriveList */
+UWORD FSMListPosition = 0;	/* highlight position */
+#define	FSMLIST_LENGTH 80	/* DriveList string length */
+d98 1
+a98 1
+			SelectedDrive->rdb->rdb_FileSysHeaderList = 
+d114 1
+a114 1
+//	case MENUPICK:			// I don't want to use menu now.
+d137 9
+d197 2
+a198 2
+		       fs && fs != CurrFileSys;
+		       lastfs = fs, fs = fs->fhb_Next)
+d202 1
+a202 1
+		       FirstFileSys = fs->fhb_Next;
+d204 3
+a206 3
+// I think this is original bug.
+//		       lastfs = fs->fhb_Next;
+		       lastfs->fhb_Next = fs->fhb_Next;
+a218 1
+//KK		RebuildFSMProp(w);
+d238 3
+a240 1
+	sprintf(DosTypeAddr,"0x%lx",'DOS\x01');
+d242 3
+d268 5
+a272 7
+		GT_SetGadgetAttrs(FSMList,w,NULL,
+					GTLV_Labels,&lh4,TAG_DONE);	//
+		GT_SetGadgetAttrs(FSMList,w,NULL,
+					GTLV_Selected,0,TAG_DONE);	//
+		FSMListPosition = 0;					//
+
+//KK		RebuildFSMProp(w);
+d334 1
+a334 1
+// 39.9
+d343 2
+a344 2
+	// I think this sentense will bother peple who wants to put different FS.
+//	sprintf(GetFileNameSIBuff,"l:FastFileSystem");
+d347 1
+a347 1
+					FileSysNameRequester.Height);	//
+d370 1
+a370 1
+					FileSysTypeRequester.Height);	//
+d386 2
+a387 2
+				sprintf(DosTypeAddr,"0x%lx",
+					'DOS\x01');
+d394 5
+d431 2
+a432 2
+			sprintf(DosTypeAddr,"0x%lx",
+				'DOS\x01');
+d481 1
+a481 1
+				ls->lsb_SummedLongs = 
+d483 1
+a483 1
+				ls->lsb_HostID = 7;
+d539 67
+a610 1
+//	register UWORD x,y;
+a620 3
+//	x = FSMList.LeftEdge;
+//	y = FSMList.TopEdge;
+
+a623 7
+	/* clear to erase old text */
+//	SetAPen(rp,0L);
+//	SetDrMd(rp,JAM1);
+//	RectFill(rp,x,y,x + FSMList.Width - 1,y + FSMList.Height - 1);
+
+//	SetAPen(rp,1L);
+
+d628 1
+a628 1
+	     d /*&& i < MaxDisplayFS*/;
+d634 1
+d636 1
+a636 1
+		case 'DOS\x00':
+d639 1
+a639 1
+		case 'DOS\x01':
+d642 13
+a654 1
+		default:
+d662 1
+a668 7
+/*
+		sprintf(buffer,"0x%08lx   %6ld    %6ld   %s",
+			d->fhb_DosType,d->fhb_Version,
+			LoadSegSize(d->fhb_SegListBlocks),name);
+*/
+//		Move(rp,x,y + rp->TxBaseline + 1);
+//		Text(rp,buffer,strlen(buffer));
+a701 9
+//			SetAPen(rp,255L);
+//			SetDrMd(rp,COMPLEMENT);
+
+//			RectFill(rp,x,y,
+//				    x + FSMList.Width - 1,
+//				    y + rp->TxHeight);
+//			SetAPen(rp,1L);
+//			SetDrMd(rp,JAM1);
+
+a703 1
+//		y += rp->TxHeight + 1;
+a704 1
+//
+d707 1
+a707 1
+		// Don't be upset to delete tail of list. 
+a713 1
+//
+d719 2
+a720 1
+void AllocFSMList(void)		// allocate rtn for LISTVIEW_KIND Gadgets
+d735 1
+a735 1
+	     d /*&& i < MaxDisplayFS*/;
+d738 30
+d769 1
+a769 1
+		case 'DOS\x00':
+d772 1
+a772 1
+		case 'DOS\x01':
+d783 1
+d798 1
+a798 1
+			if(node->ln_Name = 
+d878 1
+a878 22
+#if 0
+void
+RebuildFSMProp (w)
+	struct Window *w;
+{
+	LONG range = (LONG) NumFS - (LONG) MaxDisplayFS;
+
+	if (range <= 0)
+		NewModifyProp(&FSMDrag,w,NULL,FSMDragSInfo.Flags,
+		      MAXPOT,0,
+		      FSMDragSInfo.HorizBody,0xFFFF,1L);
+	else
+		NewModifyProp(&FSMDrag,w,NULL,FSMDragSInfo.Flags,
+			      MAXPOT,
+			      (0xFFFF * min(DisplayFSNum,range)) / range,
+			      FSMDragSInfo.HorizBody,
+			      range ? (0xFFFF * MaxDisplayFS)/NumFS : 0xFFFF,
+			      1L);
+}
+#endif
+
+int		
+d910 1
+a910 1
+	{	
+a919 10
+	/* set up the prop gadget!! */
+	/* equivalent to the NewModifyProp in RebuildFSMProp */
+//	FSMDragSInfo.HorizPot  = MAXPOT;
+//	FSMDragSInfo.VertPot   = NumFS > MaxDisplayFS ?
+//				(0xFFFF * DisplayFSNum) / (NumFS-MaxDisplayFS) :
+//				0;
+//	FSMDragSInfo.VertBody  = NumFS ? 
+//				 (0xFFFF * min(MaxDisplayFS,NumFS))/NumFS :
+//				 0xFFFF;
+
+d925 3
+d931 2
+a932 1
+// 39.9
+d935 2
+a936 1
+void CopyVersionStr(UBYTE *data, STRPTR result, UWORD size)
+d938 45
+a982 1
+    UWORD i,j;
+d984 1
+a984 43
+    i = 0;
+    while (data[i] == ' ')
+        i++;
+
+    j = 0;
+    while ((data[i] != '\0') &&
+	   (data[i] != '\r') &&
+	   (data[i] != '\n') &&
+	   (j < size))
+        result[j++] = data[i++];
+
+    if (j == size)
+        j--;
+
+    result[j] = '\0';
+}
+
+struct Resident *FindRomTag(BPTR segList)
+{
+    struct Resident *tag;
+    UWORD *seg;
+    ULONG i;
+    ULONG *ptr;
+
+    while (segList)
+    {
+        ptr     = (ULONG *)((ULONG)segList << 2);
+        seg     = (UWORD *)((ULONG)ptr);
+        segList = *ptr;
+
+        for (i=*(ptr-1)>>1; (i>0) ; i--)
+        {
+            if (*(seg++) == RTC_MATCHWORD)
+            {
+                tag = (struct Resident *)(--seg);
+                if (tag->rt_MatchTag == tag)
+                {
+                    return(tag);
+                }
+            }
+        }
+    }
+    return(NULL);
+d990 2
+a991 1
+BOOL FindVerString(char *name,char *verstr)
+d993 101
+a1093 97
+    UBYTE *buffer;
+    BOOL found = FALSE;
+    BPTR file;
+    LONG i,len;
+
+    /* check for normal $VER: version string */
+
+    if (buffer = AllocVec(BUFSIZE, MEMF_PUBLIC|MEMF_CLEAR))
+    {
+	if (file = Open(name, MODE_OLDFILE))
+	{
+            while (!found)
+	    {
+		len = Read(file, buffer, BUFSIZE - 5);
+		if (len <= 0)
+		    break;
+
+		buffer[BUFSIZE - 4] = 0;
+
+		for (i = 0;i < len - 15;i++)
+		{
+		    if (buffer[i] == '$')
+		    {
+			if (!strncmp(&buffer[i], "$VER:", 5))
+			{
+			    CopyVersionStr(&buffer[i + 5],
+					verstr, VERSTR_LENGTH);
+			    found = TRUE;
+			    break;
+                        }
+                    }
+                }
+		if (len == BUFSIZE - 5)
+		    Seek(file, -25, OFFSET_CURRENT);
+	    }
+            Close(file);
+	}
+	FreeVec(buffer);
+    }
+    return(found);
+}
+
+BOOL GetFSVersion(char *FileSystemName, LONG *version, LONG *revision)
+{
+    // look for romtag in file
+    BPTR seg;
+    struct Resident *res;
+    char *str;
+    BOOL found = TRUE;
+    char verstr[VERSTR_LENGTH];
+    LONG i,len;
+
+    verstr[0] = '\0';
+
+    seg = LoadSeg(FileSystemName);
+    if (seg)
+    {
+	res = FindRomTag(seg);
+	if (res)
+	{
+	    *version = res->rt_Version;
+
+	    // we must search for the '.' and get the rev number
+	    for (str = (char *) res->rt_IdString; *str; str++)
+		if (*str == '.')
+		{
+		    *revision = atol(str+1);
+		    break;
+		}	     
+	} else {
+	    // If we can't find out RomTag, we must search $VER string
+	    if (found = FindVerString(FileSystemName,verstr))
+	    {
+		i = 0;
+		while ((verstr[i] != ' ') && (verstr[i] != '\0'))
+		    i++;
+
+		if (i > 0)
+		{
+		    len = StrToLong(&verstr[i],version);
+		    if (len > 0)
+		    {
+			i += len;
+			if (verstr[i] == '.')
+			{
+			    i++;
+			    len = StrToLong(&verstr[i],revision);
+			    if (len > 0)
+				i += len;
+			}
+		    }
+		}
+	    }
+	}
+	UnLoadSeg(seg);
+    } else
+	found = FALSE;
+d1095 1
+a1095 1
+    return(found);
+d1097 1
+a1097 1
+// 39.9 END
+@
+
+
+36.7
+log
+@Clean up comment
+Clean up comment
+@
+text
+@d133 1
+d228 1
+d294 92
+d416 1
+d418 2
+a419 1
+				 dostype,GetVersionSInfo.LongInt);
+d423 1
+d426 1
+a426 1
+MakeFileSys (w,rdb,name,dostype,version)
+d430 1
+a430 1
+	LONG dostype,version;
+d452 2
+a453 1
+			    fs->fhb_Version = version;
+d529 1
+d574 7
+d584 1
+a584 1
+
+d654 1
+d682 7
+d692 1
+a692 1
+
+d850 1
+d852 1
+d856 160
+@
+
+
+36.6
+log
+@*** empty log message ***
+@
+text
+@d104 1
+a104 1
+			HandleFSMClickNew(w,msg);
+d164 2
+a165 2
+				MyOffGadgetNew(w,FSMUpdate);
+				MyOffGadgetNew(w,FSMDelete);
+d210 2
+a211 2
+			MyOffGadgetNew(w,FSMUpdate);
+			MyOffGadgetNew(w,FSMDelete);
+d260 2
+a261 2
+			MyOnGadgetNew(w,FSMUpdate);
+			MyOnGadgetNew(w,FSMDelete);
+d611 1
+a611 1
+HandleFSMClickNew (w,msg)	// New HandleClick()
+d654 2
+a655 2
+			MyOnGadgetNew(w,FSMUpdate);
+			MyOnGadgetNew(w,FSMDelete);
+@
+
+
+36.5
+log
+@Support list position
+@
+text
+@d110 1
+a110 1
+// Kaori
+@
+
+
+36.4
+log
+@update gadtools gadgets
+@
+text
+@d46 1
+a46 1
+// Kaori
+d49 1
+d160 2
+a161 2
+					GTLV_Labels,&lh4,TAG_DONE);	// Kaori
+// Kaori
+d191 1
+a191 1
+// Kaori --- This is original bug.
+d205 1
+a205 1
+					GTLV_Labels,&lh4,TAG_DONE);	//Kaori
+d207 1
+a207 1
+// Kaori
+d251 5
+a255 1
+					GTLV_Labels,&lh4,TAG_DONE);	// Kaori
+d257 1
+a257 1
+// Kaori
+d302 1
+a302 1
+					FileSysNRequester.Height);	// Kaori
+d475 1
+a475 1
+		sprintf(buffer,"0x%-8.8lx   %6ld    %6ld   %s",
+d527 1
+a527 1
+// Kaori
+d543 1
+a543 1
+void AllocFSMList(void)		// Kaori
+d575 1
+a575 1
+		sprintf(buffer,"0x%-8.8lx   %6ld    %6ld   %s",
+d611 1
+a611 1
+HandleFSMClickNew (w,msg)	// Kaori
+d705 1
+a705 1
+		memcpy(&AddrLunIText.IText[16]," SCSI ",6);
+d707 2
+a708 2
+		memset(&AddrLunIText.IText[16],' ',6);
+		memcpy(&AddrLunIText.IText[16],xt_name,strlen(xt_name));
+d711 2
+a712 2
+	AddrLunIText.IText[31] = SelectedDrive->Addr + '0';
+	AddrLunIText.IText[38] = SelectedDrive->Lun  + '0';
+@
+
+
+36.3
+log
+@Compile warning messages removed
+
+@
+text
+@d21 1
+d23 1
+d28 1
+d46 10
+a101 6
+		case FSMDOWN:
+		case FSMUP:
+		case FSMDRAG:
+			HandleFSMList(w,id);
+			break;
+
+d103 1
+a103 1
+			HandleFSMClick(w,msg);
+d109 4
+a113 4
+	case MENUPICK:
+		HandleMenus(w,msg);
+		break;
+
+d119 2
+d158 9
+a166 1
+
+d190 3
+a192 1
+		       lastfs = fs->fhb_Next;
+d198 1
+d203 10
+a212 2
+		RebuildFSMProp(w);
+
+d249 10
+a258 2
+		RebuildFSMProp(w);
+
+d296 3
+a416 1
+static UWORD gotit;
+d422 2
+a423 1
+	register UWORD x,y,i;
+d425 3
+a427 1
+	char buffer[80],name[80];
+d429 1
+d432 2
+a433 2
+	x = FSMList.LeftEdge;
+	y = FSMList.TopEdge;
+d439 5
+a443 3
+	SetAPen(rp,0L);
+	SetDrMd(rp,JAM1);
+	RectFill(rp,x,y,x + FSMList.Width - 1,y + FSMList.Height - 1);
+d445 2
+a446 1
+	SetAPen(rp,1L);
+d449 1
+a449 1
+	     d && i < MaxDisplayFS;
+d452 3
+d470 1
+a470 1
+		sprintf(buffer,"0x%lx   %6ld    %6ld   %s",
+d474 32
+a505 2
+		Move(rp,x,y + rp->TxBaseline + 1);
+		Text(rp,buffer,strlen(buffer));
+d509 2
+a510 2
+			SetAPen(rp,255L);
+			SetDrMd(rp,COMPLEMENT);
+d512 5
+a516 5
+			RectFill(rp,x,y,
+				    x + FSMList.Width - 1,
+				    y + rp->TxHeight);
+			SetAPen(rp,1L);
+			SetDrMd(rp,JAM1);
+d520 64
+a583 1
+		y += rp->TxHeight + 1;
+d585 1
+d588 2
+d606 2
+a607 2
+HandleFSMClick (w,msg)
+	struct Window *w;
+d613 2
+a614 1
+	y = (msg->MouseY - FSMList.TopEdge) / (w->RPort->TxHeight + 1);
+a622 7
+
+		redraw_fsmlist(w->RPort);
+		if (gotit)
+		{
+			MyOnGadget(w,&FSMUpdate);
+			MyOnGadget(w,&FSMDelete);
+		}
+d627 1
+d629 1
+a629 1
+HandleFSMList (w,id)
+d631 1
+a631 1
+	UWORD id;
+d633 1
+a634 2
+	register struct FileSysHeaderBlock *old = DisplayFS;
+	register ULONG i,j;
+d636 1
+a636 11
+	if (NumFS <= MaxDisplayFS || !old)
+		return;
+
+	switch (id) {
+	case FSMUP:
+		if (FirstFileSys != DisplayFS)
+		{
+			for (d = FirstFileSys;
+			     d && d->fhb_Next != old;
+			     d = d->fhb_Next)
+				; /* NULL */
+d638 2
+a639 4
+			DisplayFS = d;
+			DisplayFSNum--;
+		}
+		break;
+d641 4
+a644 11
+	case FSMDOWN:
+		if (old->fhb_Next && DisplayFSNum < NumFS-MaxDisplayFS) {
+			DisplayFS = old->fhb_Next;
+			DisplayFSNum++;
+		}
+		break;
+
+	case FSMDRAG:
+		i = (FSMDragSInfo.VertPot + 1L) *
+		    max(((LONG) NumFS - MaxDisplayFS),0);
+		i >>= 16;
+a645 12
+		for (d = FirstFileSys, j = 0;
+		     d->fhb_Next && j < i;
+		     d = d->fhb_Next, j++)
+			; /* NULL */
+
+		DisplayFS = d;
+		DisplayFSNum = j;
+		break;
+	}
+
+	if (old != DisplayFS)
+	{
+d647 1
+a647 4
+		if (id != FSMDRAG)
+			RebuildFSMProp(w);
+
+		if (!gotit)	/* never displayed selected, so de-select */
+d649 2
+a650 3
+			CurrFileSys = NULL;
+			MyOffGadget(w,&FSMUpdate);
+			MyOffGadget(w,&FSMDelete);
+d652 2
+a653 1
+	}
+d655 1
+d657 1
+d676 1
+d710 3
+a712 3
+	{
+		FSMUpdate.Flags |= GADGDISABLED;
+		FSMDelete.Flags |= GADGDISABLED;
+d714 2
+a715 2
+		FSMUpdate.Flags &= ~GADGDISABLED;
+		FSMDelete.Flags &= ~GADGDISABLED;
+d718 1
+a718 1
+	MaxDisplayFS = FSMList.Height / (w->RPort->TxHeight + 1);
+d722 7
+a728 7
+	FSMDragSInfo.HorizPot  = MAXPOT;
+	FSMDragSInfo.VertPot   = NumFS > MaxDisplayFS ?
+				(0xFFFF * DisplayFSNum) / (NumFS-MaxDisplayFS) :
+				0;
+	FSMDragSInfo.VertBody  = NumFS ? 
+				 (0xFFFF * min(MaxDisplayFS,NumFS))/NumFS :
+				 0xFFFF;
+@
+
+
+36.2
+log
+@Updated to compile under lc 5.10a
+@
+text
+@a98 1
+		default:
+a106 1
+	default:
+@
+
+
+36.1
+log
+@initial check in
+@
+text
+@d18 9
+a26 4
+#include <proto/exec.h>
+#include <proto/graphics.h>
+#include <proto/intuition.h>
+#include <proto/dos.h>
+@

@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	13
+DATE	MACRO
+		dc.b	'3.2.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cdfs 40.13'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdfs 40.13 (3.2.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdfs 40.13 (3.2.94)',0
+	ENDM

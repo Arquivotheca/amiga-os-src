@@ -1,0 +1,14 @@
+VERSION		EQU	37
+REVISION	EQU	69
+DATE	MACRO
+		dc.b	'21.4.93'
+	ENDM
+VERS	MACRO
+		dc.b	'mungwall 37.69'
+	ENDM
+VSTRING	MACRO
+		dc.b	'mungwall 37.69 (21.4.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: mungwall 37.69 (21.4.93)',0
+	ENDM

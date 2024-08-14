@@ -1,0 +1,855 @@
+head     38.6;
+branch   ;
+access   ;
+symbols  ;
+locks    vertex:38.6; strict;
+comment  @ * @;
+
+
+38.6
+date     92.10.16.18.00.36;  author vertex;  state Exp;
+branches ;
+next     38.5;
+
+38.5
+date     92.02.27.17.02.50;  author vertex;  state Exp;
+branches ;
+next     38.4;
+
+38.4
+date     91.10.24.10.19.30;  author vertex;  state Exp;
+branches ;
+next     38.3;
+
+38.3
+date     91.10.21.11.02.22;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     91.10.08.12.13.01;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.10.07.15.27.57;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Commodity object management
+@
+
+
+38.6
+log
+@Changes for SAS/C 6.0
+@
+text
+@
+#include <utility/tagitem.h>
+
+#include <clib/exec_protos.h>
+#include <clib/utility_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/utility_pragmas.h>
+
+#include "commoditiesbase.h"
+#include "objects.h"
+#include "broker.h"
+
+
+/*****************************************************************************/
+
+
+#define GetCxObj(size) AllocPoolMem(size)
+#define FreeCxObj(obj) FreePoolMem(obj)
+
+
+/*****************************************************************************/
+
+
+/* size of extra object data */
+static const LONG DataSizeTable[] =
+{
+    0,                 /* CX_INVALID    */
+    sizeof(FILTERD),   /* CX_FILTER     */
+    0,                 /* CX_TYPEFILTER */
+    sizeof(SENDD),     /* CX_SEND       */
+    sizeof(SIGNALD),   /* CX_SIGNAL     */
+    0,                 /* CX_TRANSLATE  */
+    sizeof(BROKERD),   /* CX_BROKER     */
+    0,                 /* CX_DEBUG      */
+    sizeof(CUSTOMD),   /* CX_CUSTOM     */
+    0,                 /* CX_ZERO       */
+};
+
+
+/*****************************************************************************/
+
+
+struct CxObj * ASM CreateCxObjLVO(REG(d0) ULONG type,
+                                  REG(a0) LONG  arg1,
+                                  REG(a1) LONG  arg2)
+{
+struct CxObj *co;
+LONG          extra_data;
+
+    extra_data = DataSizeTable[type];
+
+    if (co = GetCxObj(sizeof(struct CxObj) + extra_data))
+    {
+        CO_DATA(co)  = (union CxObjData *) (extra_data?  &co[1]: 0L);
+        CO_TYPE(co)  = type;
+        CO_FLAGS(co) = COF_ENABLE;
+        CO_ERROR(co) = 0;
+
+        if (type == CX_BROKER)
+            CO_FLAGS(co) |= ((struct NewBroker *)arg1)->nb_Flags;
+
+        NewList((struct List *)CO_LIST(co));
+
+        switch (type)
+        {
+            case CX_FILTER    : SetFilter(co,(STRPTR)arg1);
+                                break;
+
+            case CX_TYPEFILTER: CO_DATA(co) = (union CxObjData *)arg1;
+                                break;
+
+            case CX_SEND      : SENDER_PORT(co) = (struct MsgPort *)arg1;
+                                SENDER_ID(co)   = arg2;
+                                break;
+
+            case CX_SIGNAL    : SIGNAL_TASK(co)   = (struct Task *)arg1;
+                                SIGNAL_SIGNAL(co) = arg2;
+                                break;
+
+            case CX_TRANSLATE : ASSIGN_XLATE_IE(co,(struct InputEvent *)arg1);
+                                break;
+
+            case CX_BROKER    : InitBroker(co,(struct NewBroker *)arg1);
+                                break;
+
+            case CX_DEBUG     : CO_DATA(co) = (union CxObjData *)arg1;
+                                break;
+
+            case CX_CUSTOM    : CUSTOM_ACTION(co) = (LONG (*)()) arg1;
+                                CUSTOM_ID(co)     = arg2;
+                                break;
+
+            case CX_ZERO      : break;
+        }
+    }
+
+    return(co);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM DeleteCxObjLVO(REG(a0) struct CxObj *co)
+{
+    if (co)
+    {
+        RemoveCxObj(co);
+        FreeCxObj(co);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+static VOID CxWalk(struct List *list)
+{
+struct CxObj *co;
+
+    /* WARNING! We're using RemHead() for speed, this should be
+     * RemoveCxObj()
+     */
+    while (co = (struct CxObj *)RemHead(list))
+    {
+         CxWalk((struct List *)CO_LIST(co));
+         FreeCxObj(co);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM DeleteCxObjAllLVO(REG(a0) struct CxObj *co)
+{
+    if (co)
+    {
+        RemoveCxObj(co);
+        CxWalk((struct List *)CO_LIST(co));
+        FreeCxObj(co);
+    }
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM ActivateCxObjLVO(REG(a0) struct CxObj *co,
+                          REG(d0) LONG true)
+{
+LONG prev = 0;
+
+    if (co)
+    {
+        prev = CO_FLAGS(co) & COF_ENABLE;
+
+        if (true)
+            CO_FLAGS(co) |= COF_ENABLE;
+        else
+            CO_FLAGS(co) &= ~COF_ENABLE;
+
+        if (CO_TYPE(co) == CX_BROKER)
+            BrokerCommand(NULL,CXCMD_LIST_CHG);
+    }
+
+    return(prev);
+}
+
+
+/*****************************************************************************/
+
+
+ULONG ASM CxObjTypeLVO(REG(a0) struct CxObj *co)
+{
+    if (co)
+        return((ULONG)CO_TYPE(co));
+
+    return(CX_INVALID);
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM CxObjErrorLVO(REG(a0) struct CxObj *co)
+{
+    if (co)
+        return((LONG)CO_ERROR(co));
+
+    return(COERR_ISNULL);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM ClearCxObjErrorLVO(REG(a0) struct CxObj *co)
+{
+    if (co)
+        CO_ERROR(co) = 0;
+}
+
+
+/*****************************************************************************/
+
+
+LONG ASM SetCxObjPriLVO(REG(a0) struct CxObj *co,
+                        REG(d0) LONG pri)
+{
+LONG oldPri = 0;
+
+    if (co)
+    {
+        oldPri = CO_PRI(co);
+        CO_PRI(co) = pri;
+    }
+
+    return(oldPri);
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM SetTranslateLVO(REG(a0) struct CxObj *co,
+                         REG(a1) struct InputXpression *ie)
+{
+    if (co)
+    {
+        LockCX();
+
+        if (CO_TYPE(co) == CX_TRANSLATE)
+            CO_DATA(co) = (union CxObjData *) ie;
+        else
+            CO_ERROR(co) |= COERR_BADTYPE;
+
+        UnlockCX();
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM SetFilterIXLVO(REG(a0) struct CxObj *co,
+                        REG(a1) struct InputXpression *ix)
+{
+    if (co)
+    {
+        LockCX();
+
+        if (CO_TYPE(co) == CX_FILTER)
+        {
+            if (ix->ix_Version == IX_VERSION)
+            {
+                *FILTER_IX(co) = *ix;
+                CO_ERROR(co) &= ~COERR_BADFILTER;
+            }
+            else
+            {
+                CO_ERROR(co) |= COERR_BADFILTER;
+            }
+        }
+        else
+        {
+            CO_ERROR(co) |= COERR_BADTYPE;
+        }
+
+        UnlockCX();
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID ASM SetFilterLVO(REG(a0) struct CxObj *co,
+                      REG(a1) STRPTR descr)
+{
+    if (co)
+    {
+        LockCX();
+
+        if (CO_TYPE(co) == CX_FILTER)
+        {
+            if (!descr || ParseIX(descr,FILTER_IX(co)))
+            {
+                CO_ERROR(co) |= COERR_BADFILTER;
+            }
+            else
+            {
+                CO_ERROR(co) &= ~COERR_BADFILTER;
+            }
+        }
+        else
+        {
+            CO_ERROR(co) |= COERR_BADTYPE;
+        }
+
+        UnlockCX();
+    }
+}
+
+
+/*****************************************************************************/
+
+
+/* Commented out until new attributes are needed which would make the
+ * function actually useful
+ *
+ *
+
+/* Tags for SetCxObjAttrs() */
+#define SCOA_TagBase    0x100000
+#define SCOA_ObjEnabled SCOA_TagBase+1
+#define SCOA_Priority   SCOA_TagBase+2
+#define SCOA_Filter     SCOA_TagBase+3
+#define SCOA_FilterIX   SCOA_TagBase+4
+#define SCOA_Translate  SCOA_TagBase+5
+
+
+VOID ASM SetCxObjAttrsALVO(REG(a0) struct CxObj *co, REG(a2) struct TagItem *attrs)
+{
+struct TagItem *tag;
+struct TagItem *tags = attrs;
+ULONG           data;
+
+    if (co)
+    {
+        LockCX();
+
+        while (tag = NextTagItem(&tags))
+        {
+            data = tag->ti_Data;
+            switch (tag->ti_Tag)
+            {
+                case SCOA_ObjEnabled : if (data)
+                                           CO_FLAGS(co) |= COF_ENABLE;
+                                       else
+                                           CO_FLAGS(co) &= ~COF_ENABLE;
+
+                                       if (CO_TYPE(co) == CX_BROKER)
+                                           BrokerCommand(NULL,CXCMD_LIST_CHG);
+
+                                       break;
+
+                case SCOA_Priority   : CO_PRI(co) = data;
+                                       break;
+
+                case SCOA_Filter     : if (CO_TYPE(co) == CX_FILTER)
+                                       {
+                                           if (!data || ParseIX((STRPTR)data,FILTER_IX(co)))
+                                           {
+                                               CO_ERROR(co) |= COERR_BADFILTER;
+                                           }
+                                           else
+                                           {
+                                               CO_ERROR(co) &= ~COERR_BADFILTER;
+                                           }
+                                       }
+                                       else
+                                       {
+                                           CO_ERROR(co) |= COERR_BADTYPE;
+                                       }
+                                       break;
+
+                case SCOA_FilterIX   : if (CO_TYPE(co) == CX_FILTER)
+                                       {
+                                           if (((struct InputXpression *)data)->ix_Version == IX_VERSION)
+                                           {
+                                               *FILTER_IX(co) = *(struct InputXpression *)data;
+                                               CO_ERROR(co) &= ~COERR_BADFILTER;
+                                           }
+                                           else
+                                           {
+                                               CO_ERROR(co) |= COERR_BADFILTER;
+                                           }
+                                       }
+                                       else
+                                       {
+                                           CO_ERROR(co) |= COERR_BADTYPE;
+                                       }
+                                       break;
+
+                case SCOA_Translate  : if (CO_TYPE(co) == CX_TRANSLATE)
+                                           CO_DATA(co) = (union CxObjData *) data;
+                                       else
+                                           CO_ERROR(co) |= COERR_BADTYPE;
+                                       break;
+            }
+        }
+
+        UnlockCX();
+    }
+}
+*/
+@
+
+
+38.5
+log
+@No longer checks for brokers when attaching objects since a broker can't be
+  added in that way
+No longer keeps a count of the number of objects created
+@
+text
+@a12 1
+#include "cxpools.h"
+d18 7
+d26 1
+a26 1
+LONG DataSizeTable[] =
+d81 1
+a81 1
+            case CX_TRANSLATE : XLATE_IE(co) = (struct InputEvent *)arg1;
+d118 1
+a118 1
+VOID CxWalk(struct List *list)
+@
+
+
+38.4
+log
+@Clean up and speed up
+@
+text
+@d49 9
+a57 1
+        LockCX();
+d59 1
+a59 7
+        if ((CxBase->cx_ObjectCount == 1) && (!AttachIHandler()))
+        {
+            UnlockCX();
+            FreeCxObj(co);
+            co = NULL;
+        }
+        else
+d61 2
+a62 2
+            CxBase->cx_ObjectCount++;
+            UnlockCX();
+d64 23
+a86 38
+            CO_DATA(co)  = (union CxObjData *) (extra_data?  &co[1]: 0L);
+            CO_TYPE(co)  = type;
+            CO_FLAGS(co) = COF_ENABLE;
+            CO_ERROR(co) = 0;
+
+            if (type == CX_BROKER)
+                CO_FLAGS(co) |= ((struct NewBroker *)arg1)->nb_Flags;
+
+            NewList((struct List *)CO_LIST(co));
+
+            switch (type)
+            {
+                case CX_FILTER    : SetFilter(co,(STRPTR)arg1);
+                                    break;
+
+                case CX_TYPEFILTER: CO_DATA(co) = (union CxObjData *)arg1;
+                                    break;
+
+                case CX_SEND      : SENDER_PORT(co) = (struct MsgPort *)arg1;
+                                    SENDER_ID(co)   = arg2;
+                                    break;
+
+                case CX_SIGNAL    : SIGNAL_TASK(co)   = (struct Task *)arg1;
+                                    SIGNAL_SIGNAL(co) = arg2;
+                                    break;
+
+                case CX_TRANSLATE : XLATE_IE(co) = (struct InputEvent *)arg1;
+                                    break;
+
+                case CX_BROKER    : InitBroker(co,(struct NewBroker *)arg1);
+                                    break;
+
+                case CX_DEBUG     : CO_DATA(co) = (union CxObjData *)arg1;
+                                    break;
+
+                case CX_CUSTOM    : CUSTOM_ACTION(co) = (LONG (*)()) arg1;
+                                    CUSTOM_ID(co)     = arg2;
+                                    break;
+d88 1
+a88 2
+                case CX_ZERO      : break;
+            }
+a98 17
+VOID KillCxObj(struct CxObj *co)
+{
+    FreeCxObj(co);
+
+    Forbid();
+
+    CxBase->cx_ObjectCount--;
+    if (CxBase->cx_ObjectCount == 1)
+        RemoveIHandler();
+
+    Permit();
+}
+
+
+/*****************************************************************************/
+
+
+d104 1
+a104 1
+        KillCxObj(co);
+d122 1
+a122 1
+         KillCxObj(co);
+d136 1
+a136 1
+        KillCxObj(co);
+a152 2
+        LockCX();
+
+a157 2
+        UnlockCX();
+
+a209 1
+        LockCX();
+a211 1
+        UnlockCX();
+@
+
+
+38.3
+log
+@Uses macros whenever possible
+AttachCxObj() will no longer crash if there is not enough memory
+EnqueueCxObj() and InsertCxObj() now delete the object if the list is NULL
+All calls only do BrokerCommand() when the list actually changes
+@
+text
+@d2 2
+d5 2
+d8 1
+a37 56
+VOID InitCxObj(struct CxObj *co, ULONG type, LONG arg1, LONG arg2)
+{
+    switch (type)
+    {
+        case CX_FILTER    : SetFilter(co,(STRPTR)arg1);
+                            break;
+
+        case CX_TYPEFILTER: CO_DATA(co) = (union CxObjData *)arg1;
+                            break;
+
+        case CX_SEND      : SENDER_PORT(co) = (struct MsgPort *)arg1;
+                            SENDER_ID(co)   = arg2;
+                            break;
+
+        case CX_SIGNAL    : SIGNAL_TASK(co)   = (struct Task *)arg1;
+                            SIGNAL_SIGNAL(co) = arg2;
+                            break;
+
+        case CX_TRANSLATE : XLATE_IE(co) = (struct InputEvent *)arg1;
+                            break;
+
+        case CX_BROKER    : InitBroker(co,(struct NewBroker *)arg1);
+                            break;
+
+        case CX_DEBUG     : CO_DATA(co) = (union CxObjData *)arg1;
+                            break;
+
+        case CX_CUSTOM    : CUSTOM_ACTION(co) = (LONG (*)()) arg1;
+                            CUSTOM_ID(co)     = arg2;
+                            break;
+
+        case CX_ZERO      : break;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID KillCxObj(struct CxObj *co)
+{
+    FreeCxObj(co);
+
+    Forbid();
+
+    CxBase->cx_ObjectCount--;
+    if (CxBase->cx_ObjectCount == 1)
+        RemoveIHandler();
+
+    Permit();
+}
+
+
+/*****************************************************************************/
+
+
+d62 1
+a62 2
+            /* data area follows object */
+            CO_DATA(co) = (union CxObjData *) (extra_data?  &co[1]: 0L);
+d71 32
+a102 1
+            InitCxObj(co,type,arg1,arg2);
+d113 1
+a113 1
+VOID ASM DeleteCxObjLVO(REG(a0) struct CxObj *co)
+d115 10
+a124 3
+    if (co)
+    {
+        LockCX();
+a125 2
+        if (CO_FLAGS(co) & COF_INLIST)
+            RemoveCxObj(co);
+d127 1
+a127 1
+        UnlockCX();
+a128 2
+        if (CO_TYPE(co) == CX_BROKER)
+           BrokerCommand(NULL,(LONG)CXCMD_LIST_CHG);
+d130 5
+a152 4
+
+         if (CO_TYPE(co) == CX_BROKER)
+             BrokerCommand(NULL,CXCMD_LIST_CHG);
+
+d178 1
+a178 1
+LONG prev;
+a194 2
+
+        return(prev);
+d197 1
+a197 1
+    return(0);
+d241 1
+a241 1
+LONG oldPri;
+d249 57
+d307 27
+a333 1
+        return(oldPri);
+d335 1
+d337 91
+a427 1
+    return(0);
+d429 1
+@
+
+
+38.2
+log
+@Now calls AttachIHandler() when the first object is created and RemoveIHandler()
+  when the last object is removed
+@
+text
+@a1 1
+
+d40 1
+a40 1
+        case CX_TYPEFILTER: co->co_Data = (union CxObjData *)arg1;
+d57 1
+a57 1
+        case CX_DEBUG     : co->co_Data  = (union CxObjData *)arg1;
+d115 3
+a117 4
+
+            co->co_Type  = type;
+            co->co_Flags = COF_ENABLE;
+            co->co_Error = 0;
+d120 1
+a120 1
+                co->co_Flags |= ((struct NewBroker *)arg1)->nb_Flags;
+d122 1
+a122 1
+            NewList(CO_LIST(co));
+d140 1
+a140 1
+        if (co->co_Flags & COF_INLIST)
+d145 1
+a145 1
+        if (CxObjType(co) == CX_BROKER)
+d156 1
+a156 1
+BOOL CxWalk(struct List *list)
+a158 2
+struct CxObj *succ;
+struct List  *sublist;
+d160 4
+a163 1
+    for (co = (struct CxObj *)list->lh_Head; succ = (struct CxObj *)co->co_Succ; co = succ)
+d165 8
+a172 15
+        /* call recursively for sublist (if not empty)   */
+        sublist = CO_LIST(co);
+        if (sublist->lh_TailPred != (struct Node *)sublist)
+        {
+            /* list not empty */
+            if (CxWalk(sublist))
+                return(TRUE);
+        }
+
+        if (!co)
+            return(TRUE);
+
+        RemoveCxObj(co);
+        KillCxObj(co);
+    }
+a173 3
+    return(FALSE);
+}
+
+d182 2
+a183 11
+        LockCX();
+
+        if (co->co_Flags & COF_INLIST)
+            RemoveCxObj(co);
+
+        CxWalk(CO_LIST(co));
+        UnlockCX();
+
+        if (CxObjType(co) == CX_BROKER)
+           BrokerCommand(NULL,(LONG)CXCMD_LIST_CHG);
+
+d197 3
+a199 2
+    if (!co)
+        return(0);
+d201 1
+a201 1
+    prev = co->co_Flags & COF_ENABLE;
+d203 4
+a206 1
+    LockCX();
+d208 1
+a208 8
+    if (true)
+    {
+        co->co_Flags |= COF_ENABLE;
+    }
+    else
+    {
+        co->co_Flags &= ~COF_ENABLE;
+    }
+d210 2
+a211 1
+    UnlockCX();
+d213 2
+a214 2
+    if (CxObjType(co) == CX_BROKER)
+        BrokerCommand(NULL,(LONG)CXCMD_LIST_CHG);
+d216 1
+a216 1
+    return (prev);
+d226 1
+a226 1
+        return((ULONG) CO_TYPE(co));
+d257 1
+a257 1
+VOID ASM SetCxObjPriLVO(REG(a0) struct CxObj *co,
+d260 2
+d265 1
+d268 2
+d271 2
+@
+
+
+38.1
+log
+@Initial V38 RCS checkin
+@
+text
+@d73 17
+d101 12
+a112 2
+        /* data area follows object   */
+        CO_DATA(co) = (union CxObjData *) (extra_data?  &co[1]: 0L);
+d114 9
+a122 6
+        co->co_Type  = type;
+        co->co_Flags = COF_ENABLE;
+        co->co_Error = 0;
+
+        if (type == CX_BROKER)
+            co->co_Flags |= ((struct NewBroker *)arg1)->nb_Flags;
+d124 3
+a126 2
+        NewList(CO_LIST(co));
+        InitCxObj(co,type,arg1,arg2);
+d143 1
+a143 1
+           RemoveCxObj(co);
+d150 1
+a150 1
+        FreeCxObj(co);
+d179 1
+a179 1
+        FreeCxObj(co);
+d199 1
+d204 1
+a204 3
+        FreeCxObj(co);
+
+        UnlockCX();
+@

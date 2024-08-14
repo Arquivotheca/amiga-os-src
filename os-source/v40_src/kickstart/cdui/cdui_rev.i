@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	22
+DATE	MACRO
+		dc.b	'12.4.94'
+	ENDM
+VERS	MACRO
+		dc.b	'cdui 40.22'
+	ENDM
+VSTRING	MACRO
+		dc.b	'cdui 40.22 (12.4.94)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: cdui 40.22 (12.4.94)',0
+	ENDM

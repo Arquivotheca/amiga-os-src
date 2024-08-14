@@ -1,0 +1,815 @@
+head     40.1;
+branch   ;
+access   ;
+symbols  V40_4:40.1 V40_3:40.1 V40_1:1.3 V37_3:1.3 V37_2:1.3 V37_1:1.3 V36_26:1.3 V36_22:1.3;
+locks    ; strict;
+comment  @@;
+
+
+40.1
+date     93.03.11.17.22.16;  author mks;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     93.03.11.11.51.21;  author mks;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.04.07.00.44.19;  author dale;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.04.06.17.12.58;  author dale;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     89.09.16.09.39.43;  author dale;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+40.1
+log
+@Added support to build the FPU-Only version of mathieeesingbas
+@
+text
+@*******************************************************************************
+*
+*	$Id: fmul020.asm,v 1.4 93/03/11 11:51:21 mks Exp Locker: mks $
+*
+*******************************************************************************
+
+********************************************************************************
+*
+* If not FPU-Only, we need this...
+*
+	IFND	CPU_FPU
+*
+;	Copyright 1986, Gene H. Olson
+;	All Rights Reserved.
+
+;	:ts=8  bk=0  ma=1
+
+	include	"float.i"
+
+	xref	_CXREN4		; Renormalize
+	xref	_CXADJ4		; Adjust after multiply/divide
+	xref	_CXOVF4		; Overflow handler
+	xref	_CXIND4		; Indefinite handler
+	xref	_CXINF4		; Infinite handler
+	xref	_CXNAN4		; NAN handler
+	xref	_CXZER4		; Zero handler
+
+; exception handling
+
+realxnan:
+
+;**	If X is NAN, return X without further ado.
+
+	move.w	d1,d2		; Y higher precedence?
+	or.w	#$0007,d2
+	sub.w	d0,d2
+	and.w	#$fff8,d2
+	bgt.s	mul13		; - why yes
+
+	cmp.l	#$00007f80,d0	; Test upper mantissa
+	beq.s	mul12		; - INF
+	bra	_CXNAN4		; Process NAN
+
+;**	If Y is NAN, return Y without further ado.
+
+mul12:
+	cmp.w	d7,d1	; Y Exponent NAN or INF?
+	blt.s	mul14		; - nope
+
+	cmp.l	#$7f80,d1	; Test upper mantissa
+	beq.s	mul14		; - INF
+
+mul13:
+	move.l	d1,d0		; Process NAN
+	bra	_CXNAN4
+
+;**	X is infinite.  If Y is zero, result is indefinite.
+
+mul14:
+	tst.l	d1		; Test upper Y
+	bne.s	mul15		; - non-zero
+
+	bra	_CXIND4		; Indefinite
+
+;**	Otherwise, result is infinite.
+
+mul15:
+	bra	_CXINF4		; Infinite
+
+realynan:
+;**	If Y is NAN, result is Y
+
+	cmp.l	#$7f80,d1	; Test Y upper
+	beq.s	mul22		; - INF
+
+	move.l	d1,d0
+	bra	_CXNAN4
+
+;**	Y is INF.  If X == 0, result is indefinite.
+
+mul22:
+	tst.l	d0		; Test X upper
+	bne.s	mul23		; - non-zero
+
+	bra	_CXIND4		; Indefinite result
+
+;**	Otherwise, result is infinite.
+
+mul23:
+	bra	_CXINF4		; Infinite result
+
+realxzerexp:
+	tst.l	d0		; Test upper mantissa
+	bne.s	mul31		; - non-zero
+
+	bra	_CXZER4		; Return zero
+
+mul31:
+	bsr	_CXREN4		; Denormalize zero exponent
+	bra.s	mul40
+realyzerexp:
+;**	If Y is zero, return zero.
+
+	tst.l	d1		; Test mantissa
+	bne.s	mul41		; - non-zero
+
+	bra	_CXZER4		; Return zero
+
+mul41:
+	exg	d0,d1		; Switch X,Y for denormalize
+	exg	d6,d7
+
+	bsr	_CXREN4		; Denormalize zero exponent
+
+	exg	d0,d1		; Switch back
+	exg	d6,d7
+	bra.s	mul50
+
+
+;*************************************************************
+;*	Multiply interface routines.                         *
+;*************************************************************
+
+;**	float			/* Product */
+;**	SPMul(x,y)
+;**	float x ;		/* Multiplicand 2 */
+;**	float y ;		/* Multiplicand 1 */
+
+;**	Entry:
+;**		d0 = single multiplicand 1
+;**		d1 = single multiplicand 2
+;**	Exit:
+;**		d0 = single product
+;**	Uses:
+;**		a0,a1,d1
+
+	xdef	MIIEEESPMul020
+MIIEEESPMul020
+	move.l	d6,a0		; Save d2,d6,d7
+	move.l	d7,a1
+	move.l	d2,-(a7)
+
+	bsr.s	mul0		; Multiply operands
+
+	move.l	a0,d6		; Restore d2,d6,d7
+	move.l	a1,d7
+	move.l	(a7)+,d2
+	rts
+
+; targets for exception branches that are close
+; this is for flow optimization. Make the most common path
+; straight thru with no branches.
+XNAN:	bra	realxnan
+YNAN:	bra	realynan
+XZEREXP:	bra	realxzerexp
+YZEREXP:	bra	realyzerexp
+_myCXOVF4	bra	_CXOVF4	; overflow do it now
+
+;******************************************************
+;*	Floating Multiply                             *
+;******************************************************
+
+;**	Entry:
+;**		d0 = single multiplicand 1
+;**		d1 = single multiplicand 2
+;**	Exit:
+;**		d0 = single product
+;**	Uses:
+;**		d1,d6,d7
+
+mul0:
+
+;*****
+;*****	Unpack sign and form result sign.
+;*****
+
+	move.l	d0,d6		; Find sign of result
+	eor.l	d1,d6		; save in msb
+
+	move.w	#$7f80,d7	; Exponent mask
+
+	swap	d0		; Remove (X) sign
+	and.w	#$7fff,d0
+
+	swap	d1		; Remove (Y) sign
+	and.w	#$7fff,d1
+
+;*****
+;*****	Process X NAN or INF.
+;*****
+
+mul10:
+	cmp.w	d7,d0		; Exponent NAN or INF?
+;	blt.s	mul20		; - nope
+	bge	XNAN
+
+;*****
+;*****	Test for Y INF or NAN.
+;*****
+
+mul20:
+	cmp.w	d7,d1		; Exponent NAN or INF?
+;	blt.s	mul30		; - no
+	bge	YNAN
+
+
+;*****
+;*****	Process zero X exponent.
+;*****
+
+mul30:
+	move.w	d0,d6		; Unpack exponent
+	and.w	d7,d6
+;	bne.s	mul32		; - non-zero
+	beq	XZEREXP
+
+
+mul32:
+	eor.w	d6,d0		; Get mantissa
+;	eor.w	#$0080,d0	; Add hidden bit
+	eor.b	d7,d0		; d7.b is already $80
+
+;*****
+;*****	Process zero Y exponent.
+;*****
+
+mul40:
+	and.w	d1,d7		; Get exponent Y
+;	bne.s	mul42		; - non-zero
+	beq.s	YZEREXP
+
+
+mul42:
+	eor.w	d7,d1		; Get mantissa
+	or.w	#$0080,d1	; Add hidden bit
+
+
+;*****
+;*****	Prepare for multiply.
+;*****
+
+mul50:
+	sub.w	#$3f80,d6	; Subtract exponent base
+	add.w	d7,d6
+
+;	dale optimized here
+	bvs.s	_myCXOVF4	; overflow do it now
+;	bvc.s	mul51		; - no overflow
+
+;	bra	_CXOVF4		; Multiply overflow
+
+mul51:
+	swap	d0		; Left justify X
+	lsl.l	#7,d0
+
+	swap	d1		; Left justify Y
+	lsl.l	#7,d1
+
+*				; d1*d0 -> d0
+	dc.w	$4c01		; mulu d1,d7:d0
+	dc.w	$0407
+
+	move.l	d7,d0		; get the top 32 bits
+
+	bra	_CXADJ4		; Adjust the result
+
+	ENDC
+
+	end
+@
+
+
+1.4
+log
+@Added support for multi-type builld (68000 to 68020)
+@
+text
+@d3 1
+a3 1
+*	$Id$
+d7 6
+d266 2
+@
+
+
+1.3
+log
+@Changes to use 68020 fmul.l and fdiv.l for fmul,fdiv if no 68881.
+@
+text
+@a0 1
+
+d3 1
+a3 1
+*	$Header:
+a6 2
+	section mathieeesingbas
+
+d94 1
+a94 1
+	bra	mul40
+d111 1
+a111 1
+	bra	mul50
+@
+
+
+1.2
+log
+@rcs changes
+@
+text
+@a6 26
+******* mathieeedoubbas.library/IEEEDPMul ***********************************
+*
+*   NAME
+*	IEEEDPMul -- multiply one double precision IEEE number by another
+*
+*   SYNOPSIS
+*	  x   = IEEEDPMul(  y  ,  z  );
+*	d0/d1		  d0/d1 d2/d3
+*
+*	double	x,y,z;
+*
+*   FUNCTION
+*	Compute x = y * z in IEEE double precision.
+*
+*   INPUTS
+*	y -- IEEE double precision floating point value
+*	z -- IEEE double precision floating point value
+*
+*   RESULT
+*	x -- IEEE double precision floating point value
+*
+*   BUGS
+*
+*   SEE ALSO
+*	IEEEDPDiv
+******************************************************************************
+d8 2
+d13 1
+a13 1
+;	:ts=8 bk=0 ma=1
+d17 7
+a23 7
+	xref	_CXREN5		; Renormalize operand
+	xref	_cxadj5		; Adjust after multiply/divide
+	xref	_cxovf5		; Overflow handler
+	xref	_cxnan5		; NAN handler
+	xref	_cxind5		; Indefinite handler
+	xref	_cxinf5		; Infinite handler
+	xref	_cxzer5		; Zero handler
+d25 1
+a25 1
+PRESHIFT	equ	7
+d27 1
+a28 1
+mul20_bar:
+d31 5
+a35 2
+	cmp.w	d2,d0		; Y higher precedence?
+	blt.s	mul13		; - why yes
+d37 1
+a37 4
+	cmp.l	a0,d0	; Test upper mantissa
+	bne.s	mul11		; - NAN
+
+	tst.l	d1		; Test lower mantissa
+d39 1
+a40 4
+mul11:
+donan:
+	bra	_cxnan5		; Process NAN
+
+d44 1
+a44 1
+	cmp.w	d7,d2		; Y Exponent NAN or INF?
+d47 1
+a47 4
+	cmp.l	a0,d2	; Test upper mantissa
+	bne.s	mul13		; - INF
+
+	tst.l	d3		; Test lower mantissa
+d51 2
+a52 3
+	move.l	d2,d0		; Process NAN
+	move.l	d3,d1
+	bra.s	mul11
+d57 1
+a57 1
+	tst.l	d2		; Test upper Y
+d60 1
+a60 2
+	tst.l	d3		; Test lower Y
+	beq	_cxind5		; Indefinate
+d65 1
+a65 2
+doinf:
+	bra	_cxinf5		; Infinite
+d67 1
+a67 1
+mul30_bar:
+d70 1
+a70 4
+	cmp.l	a0,d2	; Test Y upper
+	bne.s	mul21		; - NAN
+
+	tst.l	d3		; Test Y lower
+d73 2
+a74 4
+mul21:
+	move.l	d2,d0
+	move.l	d3,d1
+	bra	donan
+d80 1
+a80 1
+	bne.s	doinf		; - non-zero
+d82 1
+a82 2
+	tst.l	d1		; Test X lower
+	bne.s	doinf		; - non-zero
+d84 1
+a84 1
+	bra	_cxind5		; Indefinite result
+d86 31
+d121 5
+d127 2
+a128 2
+;**		d0,d1 = Operand 1
+;**		d2,d3 = Operand 2
+d130 1
+a130 1
+;**		d0,d1 = Result
+d132 1
+d134 5
+a138 3
+	xdef	MIIEEEDPMul020
+MIIEEEDPMul020:
+	movem.l	d2-d7,-(a7)	; Save d2-d7
+d140 30
+a172 3
+	move.w	#$8000,d6	; Sign mask
+	move.w	#$7ff0,a0	; sign extends
+	move.w	a0,d7		; Exponent mask
+d174 2
+a175 2
+	swap	d0		; Swap mantissas
+	swap	d2
+d177 1
+a177 3
+	move.w	d0,d4		; Isolate sign X
+	and.w	d6,d4		; and magnitude X
+	eor.w	d4,d0
+d179 2
+a180 2
+	and.w	d2,d6		; Isolate sign Y
+	eor.w	d6,d2		; and magnitude Y
+d182 2
+a183 1
+	eor.w	d6,d4		; Get result sign
+d192 1
+a192 1
+	bge.s	mul20_bar	; - yes
+d199 1
+a199 1
+	cmp.w	d7,d2		; Exponent NAN or INF?
+d201 1
+a201 1
+	bge.s	mul30_bar	; - yes
+d203 1
+d209 4
+a212 3
+	move.w	d0,d5		; Unpack exponent
+	and.w	d7,d5
+	bne.s	mul32		; - non-zero; jump forward
+a213 2
+	tst.l	d0		; Test upper mantissa
+	bne.s	mul31		; - non-zero
+a214 37
+	tst.l	d1		; Test lower mantissa
+	bne.s	mul31		; - non-zero
+
+	bra	_cxzer5
+
+mul31:
+	bsr	_CXREN5		; Renormalize zero exponent
+	bra.s	mul40
+
+
+
+;**	If Y is zero, return zero.
+
+mul42_bar:
+	tst.l	d2		; Test upper mantissa
+	bne.s	mul41		; - non-zero
+
+	tst.l	d3		; Test lower mantissa
+	bne.s	mul41		; - non-zero
+
+	bra	_cxzer5		; Return signed zero
+
+mul41:
+	exg	d0,d2		; Switch X,Y for denormalize
+	exg	d1,d3
+	exg	d5,d7
+
+	bsr	_CXREN5		; Renormalize zero exponent
+
+	exg	d0,d2		; Switch back
+	exg	d1,d3
+	exg	d5,d7
+	bra.s	mul50
+
+doovf:
+	bra	_cxovf5
+
+d216 3
+a218 2
+	eor.w	d5,d0		; Get mantissa
+	eor.w	#$0010,d0	; Add hidden bit
+d225 3
+a227 3
+	and.w	d2,d7		; Get exponent Y
+	;bne.s	mul42		; - non-zero
+	beq.s	mul42_bar	; - non-zero
+d231 2
+a232 2
+	eor.w	d7,d2		; Get mantissa
+	or.w	#$0010,d2	; Add hidden bit
+d240 2
+a241 3
+	sub.w	#$3ff0,d5	; Subtract exponent base
+	add.w	d7,d5
+	bvs.s	doovf		; - no overflow
+d243 6
+d251 1
+a251 6
+;	move.l	d1,d7
+;	lsl.l	#8,d0
+;	lsl.l	#8,d1
+;	rol.l	#8,d7
+;	eor.w	d1,d7
+;	eor.w	d7,d0
+d253 2
+a254 7
+	swap	d2		; Left justify Y
+;	move.l	d3,d7
+;	lsl.l	#8,d2
+;	lsl.l	#8,d3
+;	rol.l	#8,d7
+;	eor.w	d3,d7
+;	eor.w	d7,d2
+d256 3
+a258 5
+* if we want to shift left by 8, it is quicker to use:
+;	lsl.l	#8,d0
+;	rol.l	#8,d1
+;	move.b	d1,d0
+;	clr.b	d1
+d260 1
+d262 1
+a262 201
+;*****
+;*****	Multiply
+;*****
+
+;**	d0,d1 = mantissa X
+;**	d2,d3 = mantissa Y
+;**	d4 = result sign
+;**	d5 = result exponent
+;**
+;**	Sum:
+;**				x0 * y3
+;**				x1 * y2
+;**				x2 * y1
+;**				x3 * y0
+;**			x0 * y2
+;**			x1 * y1			
+;**			x2 * y0			
+;**		x0 * y1
+;**		x1 * y0
+;**	x0 * y0
+;**	---------------------------------
+;**	z0	z1	z2	z3
+
+mul60:
+	move.l	d1,d7
+	if =	.extend			; x2/x3=#0?
+		lsl.l	#PRESHIFT,d0		; do fast justify
+		move.l	d3,d7
+		if =			; y2/y3=#0?
+			lsl.l	#PRESHIFT,d2	; do fast justify
+*                       do superfast version
+*                       only need:
+*  x0 * y0
+*       x0 * y1
+*       y0 * x1
+*            x1 * y1
+*---------------------
+*  z0   z1   z2   z3
+* this code does d0.l * d2.l -> d0/d1
+			move.l	d0,d1	; move multiplier into di
+* so for 68020 we could just use  mulu.l d2,d0:d1
+			dc.w    $4c02,$1400
+			bra	_cxadj5		; adjust the result
+		else
+*			d1.l==#0, use modified algorgithm
+;**	d0,d1 = mantissa X,x2/x3=#0
+;**	d2,d3 = mantissa Y
+;**	d4 = result sign
+;**	d5 = result exponent
+;**
+;**	Sum:
+;**				x0 * y3
+;**				x1 * y2
+;**			x0 * y2
+;**			x1 * y1			
+;**		x0 * y1
+;**		x1 * y0
+;**	x0 * y0
+;**	---------------------------------
+;**	z0	z1	z2	z3
+;			finish y justification
+			lsl.l	#PRESHIFT,d2
+			lsl.l	#PRESHIFT,d3
+			rol.l	#PRESHIFT,d7
+			eor.w	d3,d7
+			eor.w	d7,d2
+go_half_fast:
+
+			swap	d0		; x1/x0
+
+			move.w	d3,d1
+			mulu	d0,d1		; y3*x0
+
+			swap	d3		; y3/y2
+
+			swap	d0		; x0/x1
+
+			move.w	d3,d6
+			mulu	d0,d6		; y2*x1
+			add.l	d6,d1		; z2/z3 += (y2*x1)
+;	above may generate, xcarry
+			clr.w	d1
+			swap	d1
+
+			move.l	d0,d6		; d6 = x0/x1
+			swap	d0		; x1/x0
+			swap	d2		; y1/y0
+
+			mulu	d0,d3		; x0*y2
+			addx.l	d3,d1		; z2/z3 += (x0*y2)
+
+			move.w	d2,d7
+			mulu	d2,d0		; (x0*y0)
+
+			swap	d2		; y0/y1
+
+			move.w	d6,d3
+			mulu	d2,d3		; (x1*y1)
+			add.l	d3,d1		; z2/z3 += (x1*y1)
+			clr.l	d3
+			addx.l	d3,d0
+
+			mulu	d6,d7		; (x1*y0)
+			swap	d6		; x1/x0
+			mulu	d2,d6		; (x0*y1)
+			add.l	d6,d7		; (x0*y1)+(x1*y0)
+
+			swap	d1
+			add.w	d7,d1
+			clr.w	d7
+			swap	d7
+			addx.l	d7,d0
+			swap	d1
+			bra	_cxadj5		; adjust the result
+		endif
+	else .extend
+;		continue justifying x
+		lsl.l	#PRESHIFT,d0
+		lsl.l	#PRESHIFT,d1
+		rol.l	#PRESHIFT,d7
+		eor.w	d1,d7
+		eor.w	d7,d0
+
+		move.l	d3,d7
+		if =			; is y2/y3=#0?
+			exg.l	d0,d2
+			move.l	d1,d3
+			lsl.l	#PRESHIFT,d0	; quick justify
+			bra	go_half_fast
+		endif
+;		finish y justification
+		lsl.l	#PRESHIFT,d2
+		lsl.l	#PRESHIFT,d3
+		rol.l	#PRESHIFT,d7
+		eor.w	d3,d7
+		eor.w	d7,d2
+
+		swap	d0		; x1/x0
+		swap	d2		; y1/y0
+		move.w	d1,d7
+		mulu	d2,d7		; x3*y0
+
+		move.w	d3,d6
+		mulu	d0,d6		; y3*x0
+		add.l	d6,d7
+		clr.w	d7
+		swap	d7		; (y3*x0)+(x3*y0)  -> z2/z3
+
+		swap	d1		; x3/x2
+		swap	d3		; y3/y2
+
+		swap	d0		; x0/x1
+		swap	d2		; y0/y1
+
+		move.w	d2,d6
+		mulu	d1,d6		; x2*y1
+		clr.w	d6
+		swap	d6
+		add.l	d6,d7		; z2/z3 += (x2*y1)
+
+		move.w	d3,d6
+		mulu	d0,d6		; y2*x1
+		clr.w	d6
+		swap	d6
+		add.l	d6,d7		; z2/z3 += (y2*x1)
+
+		move.l	d0,d6		; x0/x1
+		swap	d0		; x1/x0
+		swap	d2		; y1/y0
+
+		mulu	d2,d1		; y0*x2
+		add.l	d7,d1		; z2/z3 += (y0*x2)
+
+		mulu	d0,d3		; x0*y2
+		add.l	d3,d1		; z2/z3 += (x0*y2)
+
+		move.w	d2,d7
+		mulu	d2,d0		; (x0*y0)
+
+		swap	d2		; y0/y1
+
+		move.w	d6,d3
+		mulu	d2,d3		; (x1*y1)
+		add.l	d3,d1		; z2/z3 += (x1*y1)
+		clr.l	d3
+		addx.l	d3,d0
+
+		mulu	d6,d7		; (x1*y0)
+		swap	d6		; x1/x0
+		mulu	d2,d6		; (x0*y1)
+		add.l	d6,d7		; (x0*y1)+(x1*y0)
+
+		swap	d1
+		add.w	d7,d1
+		clr.w	d7
+		swap	d7
+		addx.l	d7,d0
+		swap	d1
+	endif
+
+	bra	_cxadj5		; adjust the result
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@@

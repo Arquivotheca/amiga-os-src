@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	5
+DATE	MACRO
+		dc.b	'24.9.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ascii 40.5'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ascii 40.5 (24.9.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ascii 40.5 (24.9.93)',0
+	ENDM

@@ -1,0 +1,299 @@
+*
+* C initial startup procedure under AmigaDOS
+* 
+
+        INCLUDE "exec/types.i"
+        INCLUDE "exec/alerts.i"
+        INCLUDE "exec/nodes.i"
+        INCLUDE "exec/lists.i"
+        INCLUDE "exec/ports.i"
+        INCLUDE "exec/libraries.i"
+        INCLUDE "exec/tasks.i"
+        INCLUDE "libraries/dos.i"
+        INCLUDE "libraries/dosextens.i"
+        INCLUDE "workbench/startup.i"
+        INCLUDE "exec/funcdef.i"
+        INCLUDE "exec/exec_lib.i"
+        INCLUDE "libraries/dos_lib.i"
+
+AbsExecBase EQU 4
+
+; some usefull macros:
+
+callsys macro
+        CALLLIB _LVO\1
+        endm
+        
+        xdef    XCEXIT                 * exit(code) is standard way to leave C.
+
+        xref    LinkerDB               * linker defined base value
+        xref    _BSSBAS                * linker defined base of BSS
+        xref    _BSSLEN                * linker defined length of BSS
+
+*       library references
+
+        csect   text,0,0,1,2    * any xref's after this are 16-bit reloc
+
+        xref    _main                  * Name of C program to start with.
+        xref    MemCleanup
+
+start:
+        movem.l d1-d6/a0-a6,-(a7)
+REGSIZE EQU     (6+7)*4
+        lea     REGSIZE(a7),A5         * determine old stack pointer
+        move.l  a0,a2                  * save command pointer
+        move.l  d0,d2                  * and command length
+        lea     LinkerDB,a4            * load base register
+
+        move.l  AbsExecBase.W,a6
+        move.l  a6,SysBase(A4)
+        move.l  a7,_StackPtr(A4)       * Save stack ptr
+        clr.l   WBenchMsg(A4)
+
+*------ get the address of our task
+        suba.l  a1,a1
+        callsys FindTask
+        move.l  d0,a3
+
+*------ are we running as a son of Workbench?
+        move.l  pr_CurrentDir(A3),curdir(A4)
+        tst.l   pr_CLI(A3)
+        beq     fromWorkbench
+
+*=======================================================================
+*====== CLI Startup Code ===============================================
+*=======================================================================
+*
+* Entry: D2 = command length
+*        A2 = Command pointer
+fromCLI:
+        move.l  a5,D0           * get top of stack
+        sub.l   4(a5),D0        * compute bottom 
+        add.l   #128,D0         * allow for parms overflow
+        move.l  D0,_base(A4)    * save for stack checking
+*------ attempt to open DOS library:
+        bsr     openDOS
+
+*------ find command name:
+        move.l  pr_CLI(a3),a0
+        add.l   a0,a0           * bcpl pointer conversion
+        add.l   a0,a0
+        move.l  cli_CommandName(a0),a1
+        add.l   a1,a1           * bcpl pointer conversion
+        add.l   a1,a1
+
+*------ collect parameters:
+        move.l  d2,d0                   * get command line length
+        moveq.l #0,d1
+        move.b  (a1)+,d1
+        move.l  a1,_ProgramName(A4)
+        add.l   d1,d0                   * add length of command name
+        addq.l  #1,d0                   * allow for space after command 
+
+        clr.w   -(A7)                   * set null terminator for command line
+        addq.l  #1,D0                   * force to even number of bytes
+        andi.w  #$fffe,D0               *(round up)
+        sub.l   D0,A7                   * make room on stack for command line
+        subq.l  #2,D0
+        clr.w   0(A7,D0)
+
+*------ copy command line onto stack
+        move.l  d2,d0                   * get command line length
+        subq.l  #1,d0
+        add.l   d1,d2
+
+copy_line:
+        move.b  0(A2,D0.W),0(A7,D2.W)   * copy command line to stack
+        subq.l  #1,d2
+        dbf     d0,copy_line
+        move.b  #0,0(a7,d2.w)         * add space between command and parms
+        subq.l  #1,d2
+
+copy_cmd:
+        move.b  0(a1,d2.w),0(a7,d2.w)   * copy command name to stack
+        dbf     d2,copy_cmd
+        move.l  A7,A1
+        move.l  A1,-(A7)                * push command line address
+        bra     goto_main                       * call C entrypoint
+
+*=======================================================================
+*====== Workbench Startup Code =========================================
+*=======================================================================
+
+fromWorkbench:
+
+        move.l  TC_SPLOWER(a3),_base(A4)   * set base of stack
+        add.l   #128,_base(A4)             * allow for parms overflow
+*------ open the DOS library:
+        bsr     openDOS
+
+*------ we are now set up.  wait for a message from our starter
+        bsr     waitmsg
+        move.l  d0,WBenchMsg(a4)
+        move.l  d0,-(SP)
+*
+        move.l  d0,a2                   * get first argument
+        move.l  sm_ArgList(a2),d0
+        beq.s   do_cons
+        move.l  DOSBase(a4),a6
+        move.l  d0,a0
+        move.l  wa_Lock(a0),d1
+        move.l  d1,curdir(A4)
+        callsys CurrentDir
+do_cons:
+        move.l  sm_ToolWindow(a2),d1    * get the window argument
+        beq.s   do_main
+        move.l  #MODE_OLDFILE,d2
+        callsys Open
+        move.l  d0,stdin(a4)
+        beq.s   do_main
+        lsl.l   #2,d0
+        move.l  d0,a0
+        move.l  fh_Type(a0),pr_ConsoleTask(A3)
+do_main:
+        move.l  WBenchMsg(A4),a0        * get address of workbench message
+        move.l  a0,-(a7)                * push argv
+        pea     NULL(a4)                * push argc
+        move.l  sm_ArgList(a0),a0       * get address of arguments
+        move.l  wa_Name(a0),_ProgramName(A4)       * get name of program
+
+*=============================================
+*------ common code --------
+*=============================================
+
+goto_main:
+        lea     _BSSBAS,a3             * get base of BSS
+        moveq   #0,d1
+        move.l  #_BSSLEN,d0            * get length of BSS in longwords
+        bra.s   clr_lp                 * and clear for length given
+clr_bss move.l  d1,(a3)+
+clr_lp  dbf     d0,clr_bss
+main    jsr     _main(PC)              * call C entrypoint
+        moveq.l #0,d0                  * set successful status
+        bra.s   exit2
+*
+
+XCEXIT:
+        move.l  4(SP),d0        * extract return code
+exit2:
+        move.l  d0,-(a7)
+        move.l  _ONEXIT(A4),d0     * exit trap function?
+        beq.s   exit3
+        move.l  d0,a0
+        jsr     (a0)
+exit3   jsr     MemCleanup(PC)          * cleanup leftover memory alloc.
+        move.l  AbsExecBase.W,a6
+        move.l  DOSBase(A4),a1
+        callsys CloseLibrary            * close Dos library
+
+        tst.l   MathBase(A4)
+        beq.s   done_1a
+        move.l  MathBase(a4),a1
+        callsys CloseLibrary            * close ffp math library
+
+done_1a tst.l   MathTransBase(A4)
+        beq.s   done_1b
+        move.l  MathTransBase(a4),a1
+        callsys CloseLibrary            * close ffp transcendental
+
+done_1b tst.l   MathIeeeDoubBasBase(A4)
+        beq.s   done_1c
+        move.l  MathIeeeDoubBasBase(A4),a1
+        callsys CloseLibrary            * close Amiga IEEE library
+
+done_1c:
+*------ if we ran from CLI, skip workbench cleanup:
+        tst.l   WBenchMsg(A4)
+        beq.s   exitToDOS
+        move.l  console_dev(A4),d1
+        beq.s   done_2
+        callsys Close
+done_2:
+        move.l  stdin(a4),d1
+        beq.s   done_4
+        callsys Close
+done_4:
+
+*------ return the startup message to our parent
+*       we forbid so workbench can't UnLoadSeg() us
+*       before we are done:
+        move.l  AbsExecBase.W,A6
+        callsys Forbid
+        move.l  WBenchMsg(a4),a1
+        callsys ReplyMsg
+
+*------ this rts sends us back to DOS:
+exitToDOS:
+        MOVE.L  (A7)+,D0
+        movea.l _StackPtr(a4),SP        * restore stack ptr
+        movem.l (a7)+,d1-d6/a0-a6
+        rts
+
+*-----------------------------------------------------------------------
+noDOS:
+                moveq.l #100,d0
+                bra     exit2
+
+
+*-----------------------------------------------------------------------
+* This routine gets the message that workbench will send to us
+* called with task id in A3
+
+waitmsg:
+                lea     pr_MsgPort(A3),a0       * our process base
+                callsys WaitPort
+                lea     pr_MsgPort(A3),a0       * our process base
+                callsys GetMsg
+                rts
+
+*-----------------------------------------------------------------------
+*  Open the DOS library:
+
+openDOS
+                lea     DOSName(A4),A1
+                moveq.l #0,D0
+                callsys OpenLibrary
+                move.l  D0,DOSBase(A4)
+                beq     noDOS
+                rts
+
+        csect   __MERGED,1,,2,2
+*
+        xref    DOSBase
+        xref    MathBase
+        xref    MathTransBase
+
+        xdef    NULL,SysBase,LoadAddress,console_dev,WBenchMsg
+        xdef    curdir,_mbase,_mnext,_msize,_tsize
+        xdef    _oserr,_OSERR,_FPERR,_SIGFPE,_ONERR,_ONEXIT,_ONBREAK
+        xdef    _SIGINT,_ECS
+        xdef    _ProgramName,_StackPtr,_base
+        xdef    MathIeeeDoubBasBase
+*
+NULL           dc.l    0               *
+_base          dc.l    0               * base of stack
+_mbase         dc.l    0               * base of memory pool
+_mnext         dc.l    0               * next available memory location
+_msize         dc.l    0               * size of memory pool
+_tsize         dc.l    0               * total size?
+_oserr         equ     *
+_OSERR         dc.l    0
+_FPERR         dc.l    0
+_SIGFPE        dc.l    0
+_SIGINT        dc.l    0
+_ONERR         dc.l    0
+_ONEXIT        dc.l    0
+_ONBREAK       dc.l    0
+_ECS           dc.l    0               * extended character set flag
+curdir         dc.l    0
+console_dev    dc.l    0
+SysBase        dc.l    0
+LoadAddress    dc.l    0                       * program load address
+WBenchMsg      dc.l    0
+_StackPtr      dc.l    0
+stdin          dc.l    0
+_ProgramName   dc.l    0
+MathIeeeDoubBasBase dc.l       0
+DOSName        dc.b    'dos.library',0
+
+        END

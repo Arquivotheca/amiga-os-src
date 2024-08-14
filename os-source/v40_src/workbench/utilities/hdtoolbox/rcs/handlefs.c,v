@@ -1,0 +1,2754 @@
+head     36.14;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+36.14
+date     93.01.19.16.39.49;  author kaori;  state Exp;
+branches ;
+next     36.13;
+
+36.13
+date     93.01.08.16.39.55;  author kaori;  state Exp;
+branches ;
+next     36.12;
+
+36.12
+date     92.12.07.15.38.41;  author kaori;  state Exp;
+branches ;
+next     36.11;
+
+36.11
+date     92.12.03.11.43.48;  author kaori;  state Exp;
+branches ;
+next     36.10;
+
+36.10
+date     92.12.02.10.55.35;  author kaori;  state Exp;
+branches ;
+next     36.9;
+
+36.9
+date     92.07.31.15.24.01;  author kaori;  state Exp;
+branches ;
+next     36.8;
+
+36.8
+date     92.07.22.10.45.20;  author kaori;  state Exp;
+branches ;
+next     36.7;
+
+36.7
+date     92.07.16.12.11.41;  author kaori;  state Exp;
+branches ;
+next     36.6;
+
+36.6
+date     92.07.07.13.31.49;  author kaori;  state Exp;
+branches ;
+next     36.5;
+
+36.5
+date     92.06.23.18.55.13;  author kaori;  state Exp;
+branches ;
+next     36.4;
+
+36.4
+date     92.06.16.09.23.14;  author kaori;  state Exp;
+branches ;
+next     36.3;
+
+36.3
+date     91.03.05.15.24.46;  author jerryh;  state Exp;
+branches ;
+next     36.2;
+
+36.2
+date     91.02.26.16.37.11;  author jerryh;  state Exp;
+branches ;
+next     36.1;
+
+36.1
+date     90.04.20.07.07.37;  author jesup;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@change fs for partition code
+@
+
+
+36.14
+log
+@Automatically enable the block-size feature if a block size other tahn 512 is selected.
+@
+text
+@/* handleFS.c - code to handle the file system screen */
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <graphics/gfx.h>
+#include <graphics/gfxmacros.h>
+#include <intuition/intuition.h>
+#include <intuition/gadgetclass.h>
+#include <libraries/dos.h>
+#include <libraries/filehandler.h>
+#include <resources/filesysres.h>
+
+#include <dos.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <stdio.h>
+
+/* for lattice */
+#include <clib/exec_protos.h>
+#include <clib/graphics_protos.h>
+#include <clib/intuition_protos.h>
+#include <clib/gadtools_protos.h>
+#include <clib/dos_protos.h>
+
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/graphics_pragmas.h>
+#include <pragmas/intuition_pragmas.h>
+#include <pragmas/gadtools_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+
+#include "refresh.h"
+#include "protos.h"
+
+#include "global.h"
+#include "partglob.h"
+
+#include "gadgetids.h"
+#include "gadgets.h"
+#include "windows.h"
+
+#include "fstype.h"
+
+USHORT BuffersFlags           = 0; // maybe no need this here, transfer to handlepart.c
+USHORT FSBlockSizeFlags       = 0;
+USHORT FSIdentifierFlags      = 0;
+USHORT MaskFlags              = 0;
+USHORT MaxTransferFlags       = 0;
+USHORT CustomNumFlags         = 0;
+USHORT ReservedEndFlags       = 0;
+USHORT ReservedBeginFlags     = 0;
+USHORT FFSCheckFlags          = 0;
+USHORT IntlModeFlags          = 0;
+USHORT DirCacheFlags          = 0;
+USHORT AutoMountFlags         = 0;
+USHORT CustomBootFlags        = 0;
+
+LONG ReservedBeginSInfoLongInt = 0;
+LONG ReservedEndSInfoLongInt   = 0;
+LONG CustomNumSInfoLongInt     = 0;
+
+char PartNameText[44];
+
+UWORD FSTypeActive      = 0;	/* fstype active cycle position      */
+UWORD FSTypeSave        = 0;	/* save original fs position         */
+UWORD FSBlockSizeActive = 0;	/* block size active cycle position  */
+
+struct FSTypeLabels FSTypeLabels;
+STRPTR FSBlockSizeLabels[] =			/* block size labels */
+{
+	"512",
+        "1024",
+	"2048",
+	"4096",
+	"8192",
+	"16384",
+	"32768",
+	NULL,
+};
+
+#define VALID		0x8000
+
+UWORD NumFSType;		/* File system total number */
+
+/* 39.14 - Determine user select "Intenational" or "Dir Cache" select. */
+LONG IntlModeUserCheck = FALSE;
+
+/* 39.18 - for updating fs PatchFlag. This stuff had been in "handlefsm.c",
+ now I put this stuff here for avoiding user confusion. */
+extern WORD FileSysUpdate;
+
+int
+HandleFileSys (w,msg)
+	struct Window *w;
+	struct IntuiMessage *msg;
+{
+	register struct Gadget *gad;
+	register int done = FALSE;
+	UWORD id;
+	char *ptr;
+	LONG x;
+
+	switch (msg->Class)
+	{
+	case GADGETUP:
+	case GADGETDOWN:
+		gad = (struct Gadget *) (msg->IAddress);
+
+		id  = gad->GadgetID & ~REFRESH_MASK;
+
+		switch (id)
+		{
+		case FSTYPE:
+			FSTypeActive = msg->Code;
+			switch(msg->Code)
+			{
+				case STANDARD_CYCLE:
+					DeselectFS(w,DefaultSDFS);
+					break;
+				case CUSTOM_CYCLE:
+					DeselectFS(w,DefaultCustom);
+					break;
+				default:
+					DeselectFS(w,DefaultUser);
+					break;
+			}
+			SetFSBS(w,(CurrentPart->pb_Environment[DE_SIZEBLOCK]*4)*CurrentPart->pb_Environment[DE_SECSPERBLK]);
+			break;
+		case FSBLOCKSIZE:
+			FSBlockSizeActive = msg->Code;
+
+			/* 39.16 --- divide blocksize by sectorsize for sectors/block */
+			x = atoi(FSBlockSizeLabels[FSBlockSizeActive]);
+			x = x / (CurrentPart->pb_Environment[DE_SIZEBLOCK]*4);
+
+			if (x != CurrentPart->pb_Environment[DE_SECSPERBLK])
+			{
+				CurrentPart->pb_Environment[DE_SECSPERBLK] = x;
+				FSUpdate = TRUE;
+			}
+
+			/* 39.18 */
+			if (!(FSTypeLabels.blocksizeflags[FSTypeActive] & VALID))
+			{
+				UpdatePatchFlags(CurrentPart->pb_Environment[DE_DOSTYPE],TRUE);
+				FileSysUpdate = TRUE;
+				FSTypeLabels.blocksizeflags[FSTypeActive] |= VALID;
+			}
+			break;
+		case FFSCHK:
+			ptr = &FSIdentifierSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				if (gad->Flags & SELECTED)
+				{
+					x |= FFS_MASK;
+					FFSCheckFlags |= SELECTED;
+				}
+				else
+				{
+					x &= ~FFS_MASK;
+					FFSCheckFlags &= ~SELECTED;
+				}
+				if (x != CurrentPart->pb_Environment[DE_DOSTYPE])
+					UpdateIdentifier(w,x);
+			}
+			break;
+		case INTLMODE:
+			ptr = &FSIdentifierSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				if (gad->Flags & SELECTED)
+				{
+					x |= INTER_MASK;
+					IntlModeFlags |= SELECTED;
+					/* 39.14 - Set international mode flag for selecting
+					dir cache. */
+					IntlModeUserCheck = TRUE;
+				}
+				else
+				{
+					x &= ~INTER_MASK;
+					IntlModeFlags &= ~SELECTED;
+					/* 39.14 - Clear international mode flag for selecting
+					dir cache. */
+					IntlModeUserCheck = FALSE;
+				}
+				if (x != CurrentPart->pb_Environment[DE_DOSTYPE])
+					UpdateIdentifier(w,x);
+			}
+			break;
+		case DIRCACHE:
+			ptr = &FSIdentifierSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				if (gad->Flags & SELECTED)
+				{
+					DirCacheFlags |= SELECTED;
+					/* Dir cache make automatically International mode */
+					GT_SetGadgetAttrs(IntlMode,w,NULL,
+						GTCB_Checked,TRUE,
+						GA_Disabled,TRUE,TAG_DONE);
+					IntlModeFlags |= (SELECTED|GADGDISABLED);
+					x &= ~(INTER_MASK);
+					x |= (DC_MASK);
+				}
+				else
+				{
+					DirCacheFlags &= ~SELECTED;
+					/* 39.14 */
+					if (!IntlModeUserCheck)
+					{
+						GT_SetGadgetAttrs(IntlMode,w,NULL,
+							GTCB_Checked,FALSE,TAG_DONE);
+						IntlModeFlags &= ~SELECTED;
+        				}
+					GT_SetGadgetAttrs(IntlMode,w,NULL,
+						GA_Disabled,FALSE,TAG_DONE);
+					IntlModeFlags &= ~GADGDISABLED;
+					x &= ~(DC_MASK);
+					if (IntlModeUserCheck)	/* 39.14 */
+						x |= (INTER_MASK);
+				}
+				if (x != CurrentPart->pb_Environment[DE_DOSTYPE])
+					UpdateIdentifier(w,x);
+			}
+			break;
+		case MASK:
+			ptr = &MaskSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				/* 39.13 - No need check any more */
+//				if (x & 1) /* odd */
+//				{
+//					x &= ~1;
+//					sprintf(&MaskSIBuff[0],"0x%lx",x);
+//					RefreshGList(Mask,w,NULL,1L);
+//				}
+				if (x != CurrentPart->pb_Environment[DE_MASK])
+				{
+					CurrentPart->pb_Environment[DE_MASK] = x;
+					FSUpdate = TRUE;
+				}
+			} else
+			{
+				DisplayBeep(w->WScreen);
+				sprintf(&MaskSIBuff[0],"0x%lx",
+				       CurrentPart->pb_Environment[DE_MASK]);
+				RefreshGList(Mask,w,NULL,1L);
+			}
+			break;
+		case MAXTRANSFER:
+			ptr = &MaxTransferSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				if (x != CurrentPart->pb_Environment[DE_MAXTRANSFER])
+				{
+					CurrentPart->pb_Environment[DE_MAXTRANSFER] = x;
+					FSUpdate = TRUE;
+				}
+			} else
+			{
+				DisplayBeep(w->WScreen);
+				sprintf(&MaxTransferSIBuff[0],"0x%lx",
+				   CurrentPart->pb_Environment[DE_MAXTRANSFER]);
+				RefreshGList(MaxTransfer,w,NULL,1L);
+			}
+			break;
+		case RESERVEDEND:
+			ChangeEnvNum(DE_PREFAC,gad/*ReservedEnd*/);
+			break;
+		case RESERVEDBEGIN:
+			ChangeEnvNum(DE_RESERVEDBLKS,gad/*ReservedBegin*/);
+			break;
+		case FSIDENTIFIER:
+			ptr = &FSIdentifierSIBuff[0];
+			if (*ptr++ == '0' && *ptr++ == 'x' &&
+			    stch_l(ptr,&x) == strlen(ptr))
+			{
+				if (x != CurrentPart->pb_Environment[DE_DOSTYPE])
+				{
+					CurrentPart->pb_Environment[DE_DOSTYPE] = x;
+					FSUpdate = TRUE;
+				}
+			}
+			else
+			{
+				DisplayBeep(w->WScreen);
+				sprintf(&FSIdentifierSIBuff[0],"0x%lx",
+					CurrentPart->pb_Environment[DE_DOSTYPE]);
+				RefreshGList(FSIdentifier,w,NULL,1L);
+			}
+			break;
+		case AUTOMOUNT:
+			if (gad->Flags & SELECTED)
+				CurrentPart->pb_Flags &= ~PBFF_NOMOUNT;
+			else
+				CurrentPart->pb_Flags |= PBFF_NOMOUNT;
+			FSUpdate = TRUE;
+			break;
+		case CUSTOMBOOT:
+			if (gad->Flags & SELECTED)
+			{
+				CurrentPart->pb_Environment[DE_TABLESIZE]  =
+								DE_BOOTBLOCKS;
+				MyOnGadget(w,CustomNum);
+			} else {
+				CurrentPart->pb_Environment[DE_TABLESIZE]  = 16;
+				CurrentPart->pb_Environment[DE_BOOTBLOCKS] = 0;
+				MyOffGadget(w,CustomNum);
+				GT_SetGadgetAttrs(CustomNum,w,NULL,
+					GTIN_Number,0,TAG_DONE);
+			}
+			FSUpdate = TRUE;
+			break;
+		case CUSTOMNUM:
+			ChangeEnvNum(DE_BOOTBLOCKS,gad/*CustomNum*/);
+			break;
+
+		case FSCANCEL:
+			*CurrentPart = savecurrpart;	/* restore partition */
+			FreeFSType(FALSE);
+			done = HANDLE_CANCEL;
+			break;
+		case FSOK:
+			if (FileSysUpdate)	/* 39.18 - for PatchFlags update */
+				SelectedDrive->Flags |= UPDATE;
+
+			if (FSUpdate)
+				PartUpdate |= UPDATE;
+			FreeFSType(TRUE);
+			done = HANDLE_DONE;
+			break;
+
+		}
+		break;
+//
+//	case MENUPICK:			// No menu.
+//		HandleMenus(w,msg);
+//		break;
+
+	}
+
+	return done;
+}
+
+/* 39.18 */
+
+void
+UpdatePatchFlags (DosType, Enable)
+	LONG DosType;
+	WORD Enable;
+{
+	register struct FileSysHeaderBlock *fs;
+
+	for (fs = FirstFileSys;
+	     fs;
+	     fs = fs->fhb_Next)
+	{
+		if (IsThisStandardFS(DosType))
+		{
+			if (IsThisStandardFS(fs->fhb_DosType))
+			{
+				if (Enable)
+					fs->fhb_PatchFlags &= ~(1<<DE_SECSPERBLK);
+				else
+					fs->fhb_PatchFlags |= (1<<DE_SECSPERBLK);
+//				printf("Update PatchFlags = %x\n",fs->fhb_PatchFlags & (1<<DE_SECSPERBLK));
+				break;
+			}
+		}
+		else if (fs->fhb_DosType == DosType)
+		{
+			if (Enable)
+				fs->fhb_PatchFlags &= ~(1<<DE_SECSPERBLK);
+			else
+				fs->fhb_PatchFlags |= (1<<DE_SECSPERBLK);
+//			printf("Update PatchFlags = %x\n",fs->fhb_PatchFlags & (1<<DE_SECSPERBLK));
+			break;
+		}
+	}
+}
+
+/* 39.18 */
+
+void
+SetFSBS(w,blocksize)
+	struct Window *w;
+	LONG blocksize;
+{
+	LONG x;
+	STRPTR *tmp;
+	x = 0;
+	for (tmp = FSBlockSizeLabels;
+	    *tmp;
+	    tmp++,x++)
+	{
+		if (atoi(*tmp) == blocksize)
+		{
+			if (FSBlockSize)
+				GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+					GTCY_Active,x,
+					TAG_DONE);
+			FSBlockSizeActive = x;
+			break;
+		}
+	}
+	if (*tmp == NULL) /* did not match */
+	{
+		if (FSBlockSize)
+			GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+				GTCY_Active,0,
+				TAG_DONE);
+		FSBlockSizeActive = 0;
+	}
+}
+
+void
+SetSDFSGadsAttrs (w,ffs,intl,dircache)
+	struct Window *w;
+	LONG ffs;
+	LONG intl;
+	LONG dircache;
+{
+	if (ffs & SELECTED)
+	{
+		if (FFSCheck)
+			GT_SetGadgetAttrs(FFSCheck,w,NULL,GTCB_Checked,TRUE,TAG_DONE);
+		FFSCheckFlags |= SELECTED;
+	}
+        else
+	{
+		if (FFSCheck)
+			GT_SetGadgetAttrs(FFSCheck,w,NULL,GTCB_Checked,FALSE,TAG_DONE);
+		FFSCheckFlags &= ~SELECTED;
+	}
+	if (intl & SELECTED)
+	{
+		if (IntlMode)
+			GT_SetGadgetAttrs(IntlMode,w,NULL,GTCB_Checked,TRUE,TAG_DONE);
+		IntlModeFlags |= SELECTED;
+	}
+        else
+	{
+		if (IntlMode)
+			GT_SetGadgetAttrs(IntlMode,w,NULL,GTCB_Checked,FALSE,TAG_DONE);
+		IntlModeFlags &= ~SELECTED;
+	}
+	if (dircache & SELECTED)
+	{
+		if (DirCache)
+			GT_SetGadgetAttrs(DirCache,w,NULL,GTCB_Checked,TRUE,TAG_DONE);
+		DirCacheFlags |= SELECTED;
+	}
+        else
+	{
+		if (DirCache)
+			GT_SetGadgetAttrs(DirCache,w,NULL,GTCB_Checked,FALSE,TAG_DONE);
+		DirCacheFlags &= ~GADGDISABLED;
+	}
+	if (ffs & GADGDISABLED)
+	{
+		if (FFSCheck)
+			GT_SetGadgetAttrs(FFSCheck,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		FFSCheckFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (FFSCheck)
+			GT_SetGadgetAttrs(FFSCheck,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		FFSCheckFlags &= ~GADGDISABLED;
+	}
+	if (intl & GADGDISABLED)
+	{
+		if (IntlMode)
+			GT_SetGadgetAttrs(IntlMode,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		IntlModeFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (IntlMode)
+			GT_SetGadgetAttrs(IntlMode,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		IntlModeFlags &= ~GADGDISABLED;
+	}
+	if (dircache & GADGDISABLED)
+	{
+		if (DirCache)
+			GT_SetGadgetAttrs(DirCache,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		DirCacheFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (DirCache)
+			GT_SetGadgetAttrs(DirCache,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		DirCacheFlags &= ~GADGDISABLED;
+	}
+}
+
+void
+SetMiscGadsAttrs (w,ident,rsvend,mask,maxtransfer)
+	struct Window *w;
+	LONG ident;
+	LONG rsvend;
+	LONG mask;
+	LONG maxtransfer;
+{
+	if (ident & GADGDISABLED)
+	{
+		if (FSIdentifier)
+			GT_SetGadgetAttrs(FSIdentifier,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		FSIdentifierFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (FSIdentifier)
+			GT_SetGadgetAttrs(FSIdentifier,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		FSIdentifierFlags &= ~GADGDISABLED;
+	}
+	if (rsvend & GADGDISABLED)
+	{
+		if (ReservedEnd)
+			GT_SetGadgetAttrs(ReservedEnd,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		ReservedEndFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (ReservedEnd)
+			GT_SetGadgetAttrs(ReservedEnd,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		ReservedEndFlags &= ~GADGDISABLED;
+	}
+	if (mask & GADGDISABLED)
+	{
+		if (Mask)
+			GT_SetGadgetAttrs(Mask,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		MaskFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (Mask)
+			GT_SetGadgetAttrs(Mask,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		MaskFlags &= ~GADGDISABLED;
+	}
+	if (maxtransfer  & GADGDISABLED)
+	{
+		if (MaxTransfer)
+			GT_SetGadgetAttrs(MaxTransfer,w,NULL,GA_Disabled,TRUE,TAG_DONE);
+		MaxTransferFlags |= GADGDISABLED;
+	}
+        else
+	{
+		if (MaxTransfer)
+			GT_SetGadgetAttrs(MaxTransfer,w,NULL,GA_Disabled,FALSE,TAG_DONE);
+		MaxTransferFlags &= ~GADGDISABLED;
+	}
+}
+
+/* update identifier and refresh gadget */
+
+void
+UpdateIdentifier (w,x)
+	struct Window *w;
+	LONG x;
+{
+	CurrentPart->pb_Environment[DE_DOSTYPE] = x;
+	sprintf(&FSIdentifierSIBuff[0],"0x%lx",
+		CurrentPart->pb_Environment[DE_DOSTYPE]);
+	GT_SetGadgetAttrs(FSIdentifier,w,NULL,
+		GTST_String,FSIdentifierSIBuff,TAG_DONE);
+
+	switch(x)
+	{
+		case ID_DOS_DISK:
+			SetMiscGadsAttrs(w,GADGDISABLED,GADGDISABLED,
+					   GADGDISABLED,GADGDISABLED);
+			break;
+		case ID_FFS_DISK:
+			SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+		case ID_INTER_DOS_DISK:
+			SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+		case ID_INTER_FFS_DISK:
+			SetMiscGadsAttrs(w ,GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+		case ID_DC_DOS_DISK:
+			SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+		case ID_DC_FFS_DISK:
+			SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+		default:
+			SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+					   ~GADGDISABLED,~GADGDISABLED);
+			break;
+	}
+
+	FSUpdate = TRUE;
+}
+
+/* handle mutual exclusion of FS gadgets */
+
+void
+DeselectFS (w,resetrtn)
+	struct Window *w;
+	void (*resetrtn)(struct Window *);
+{
+	(*resetrtn)(w);
+	RefreshGList(FSIdentifier,w,NULL,1L);
+	RefreshGList(Mask,w,NULL,1L);
+	RefreshGList(MaxTransfer,w,NULL,1L);
+	RefreshGList(ReservedBegin,w,NULL,1L);
+	RefreshGList(ReservedEnd,w,NULL,1L);
+	RefreshGList(AutoMount,w,NULL,1L);
+	FSUpdate = TRUE;
+}
+
+/* Standard File System - modified from DefaultFFS() */
+
+void
+DefaultSDFS (w)
+	struct Window *w;
+{
+	/* if original file system user set was standard file system,
+	  provide that information instead of initializing. */
+	if (FSTypeSave == 0)
+		*CurrentPart = savecurrpart;
+	else
+		InitFFS(CurrentPart);
+
+	switch(CurrentPart->pb_Environment[DE_DOSTYPE])
+	{
+		case ID_DOS_DISK:
+			SetSDFSGadsAttrs(w,~SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w,GADGDISABLED,
+					   GADGDISABLED,
+					   GADGDISABLED,
+					   GADGDISABLED);
+			break;
+		case ID_FFS_DISK:
+			SetSDFSGadsAttrs(w, SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w, GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+		case ID_INTER_DOS_DISK:
+			SetSDFSGadsAttrs(w,~SELECTED & ~GADGDISABLED,
+					    SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w, GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+		case ID_INTER_FFS_DISK:
+			SetSDFSGadsAttrs(w, SELECTED & ~GADGDISABLED,
+					    SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w ,GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+		case ID_DC_DOS_DISK:
+			SetSDFSGadsAttrs(w,~SELECTED & ~GADGDISABLED,
+					    SELECTED |  GADGDISABLED,
+					    SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w, GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+		case ID_DC_FFS_DISK:
+			SetSDFSGadsAttrs(w, SELECTED & ~GADGDISABLED,
+					    SELECTED |  GADGDISABLED,
+					    SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w, GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+		default:
+			SetSDFSGadsAttrs(w, SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED,
+					   ~SELECTED & ~GADGDISABLED);
+			SetMiscGadsAttrs(w, GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED,
+					   ~GADGDISABLED);
+			break;
+	}
+
+	RebuildFSGads(w,CurrentPart);
+
+//	BuffersFlags &= ~GADGDISABLED;
+}
+
+/* Custom File System */
+
+void
+DefaultCustom (w)
+	struct Window *w;
+{
+	/* if original file system user set was user custom file system,
+	  provide that information instead of initializing */
+	if (FSTypeSave == 1)
+		*CurrentPart = savecurrpart;
+	else
+		InitCustom(CurrentPart);
+
+	RebuildFSGads(w,CurrentPart);
+	SetMiscGadsAttrs(w,~GADGDISABLED,~GADGDISABLED,
+			   ~GADGDISABLED,~GADGDISABLED);
+
+//	BuffersFlags &= ~GADGDISABLED;
+//	MyOnGadget(w,ReservedBegin);
+
+	/* Set default value for standard file system gadgets */
+	SetSDFSGadsAttrs(w,~SELECTED|GADGDISABLED,
+			   ~SELECTED|GADGDISABLED,
+			   ~SELECTED|GADGDISABLED);
+}
+
+/* File System which user add */
+
+void
+DefaultUser (w)
+	struct Window *w;
+{
+	/* if original file system user set was user special file system,
+	  provide that information instead of initializing */
+	if (savecurrpart.pb_Environment[DE_DOSTYPE] ==
+				FSTypeLabels.identifier[FSTypeActive])
+		*CurrentPart = savecurrpart;
+	else
+		InitUser(CurrentPart);
+
+	RebuildFSGads(w,CurrentPart);
+
+	SetMiscGadsAttrs(w, GADGDISABLED,~GADGDISABLED,
+			   ~GADGDISABLED,~GADGDISABLED);
+
+//	BuffersFlags &= ~GADGDISABLED;
+//	MyOnGadget(w,ReservedBegin);
+
+	/* Set default value for standard file system gadgets */
+	SetSDFSGadsAttrs(w,~SELECTED|GADGDISABLED,
+			   ~SELECTED|GADGDISABLED,
+			   ~SELECTED|GADGDISABLED);
+}
+
+/* reset all the internal gadget buffers for the FS gadgets from p */
+
+void
+RebuildFSGads (w,p)
+	register struct Window *w;
+	register struct PartitionBlock *p;
+{
+	sprintf(FSIdentifierSIBuff,"0x%lx",p->pb_Environment[DE_DOSTYPE]);
+	sprintf(MaskSIBuff,        "0x%lx",p->pb_Environment[DE_MASK]);
+	sprintf(MaxTransferSIBuff, "0x%lx",p->pb_Environment[DE_MAXTRANSFER]);
+
+//	printf("ident = %s\n",FSIdentifierSIBuff);
+
+	if (ReservedBegin)
+		GT_SetGadgetAttrs(ReservedBegin,w,NULL,
+			GTIN_Number,p->pb_Environment[DE_RESERVEDBLKS],TAG_DONE);
+	ReservedBeginSInfoLongInt = p->pb_Environment[DE_RESERVEDBLKS];
+
+	if (ReservedEnd)
+		GT_SetGadgetAttrs(ReservedEnd,w,NULL,
+			GTIN_Number,p->pb_Environment[DE_PREFAC],TAG_DONE);
+	ReservedEndSInfoLongInt = p->pb_Environment[DE_PREFAC];
+
+	if (p->pb_Flags & PBFF_NOMOUNT)
+	{
+		if (AutoMount)
+			GT_SetGadgetAttrs(AutoMount,w,NULL,GTCB_Checked,FALSE,TAG_DONE);
+		AutoMountFlags &= ~SELECTED;
+	}
+	else
+	{
+		if (AutoMount)
+			GT_SetGadgetAttrs(AutoMount,w,NULL,GTCB_Checked,TRUE,TAG_DONE);
+		AutoMountFlags |= SELECTED;
+
+	}
+
+	/* if using custom boot code */
+	if (p->pb_Environment[DE_TABLESIZE] >= DE_BOOTBLOCKS)
+	{
+		if (CustomNum)
+			GT_SetGadgetAttrs(CustomNum,w,NULL,
+				GTIN_Number,p->pb_Environment[DE_BOOTBLOCKS],
+				GA_Disabled,FALSE,
+				TAG_DONE);
+		CustomNumSInfoLongInt = p->pb_Environment[DE_BOOTBLOCKS];
+		CustomNumFlags &= ~GADGDISABLED;
+
+		if (CustomBoot)
+			GT_SetGadgetAttrs(CustomBoot,w,NULL,GTCB_Checked,TRUE,TAG_DONE);
+		CustomBootFlags |= SELECTED;
+	}
+	else
+	{
+		if (CustomNum)
+			GT_SetGadgetAttrs(CustomNum,w,NULL,
+				GTIN_Number,0,
+				GA_Disabled,TRUE,
+				TAG_DONE);
+		CustomNumSInfoLongInt = 0;
+		CustomNumFlags |= GADGDISABLED;
+
+		if (CustomBoot)
+			GT_SetGadgetAttrs(CustomBoot,w,NULL,GTCB_Checked,FALSE,TAG_DONE);
+		CustomBootFlags &= ~SELECTED;
+	}
+}
+
+/* init a partition to be FFS */
+
+void
+InitFFS (p)
+	register struct PartitionBlock *p;
+{
+	p->pb_Environment[DE_TABLESIZE]    = 16;
+	p->pb_Environment[DE_DOSTYPE]      = ID_INTER_FFS_DISK;	// 39.13
+	p->pb_Environment[DE_MEMBUFTYPE]   = 0;
+	p->pb_Environment[DE_NUMBUFFERS]   = 30;
+	p->pb_Environment[DE_RESERVEDBLKS] = 2;
+	p->pb_Environment[DE_PREFAC] 	   = 0;
+
+	/* we want to have the driver deal with dma-ableness */
+	/* for example, the A3000 can DMA anywhere. */
+	/* A590/A2091 had versions of <= 6.xx.  A3000 has Version 36. */
+	/* FIX! */
+	if (scsiversion >= 36)
+	{
+		p->pb_Environment[DE_MASK] = 0x7ffffffe;
+	} else {
+		p->pb_Environment[DE_MASK] = 0x00fffffe;
+	}
+	/* FIX! should change this too */
+	p->pb_Environment[DE_MAXTRANSFER]  = 0x00ffffff;
+	p->pb_Environment[DE_SIZEBLOCK]    = SelectedDrive->rdb->
+					     rdb_BlockBytes >> 2;
+					     	/* 39.16 --- in longs */
+	p->pb_Environment[DE_SECSPERBLK]   = 1;
+	p->pb_Environment[DE_INTERLEAVE]   = 0;
+	p->pb_Environment[DE_BOOTBLOCKS]   = 0;
+	p->pb_Flags                       &= ~PBFF_NOMOUNT;
+}
+
+void
+InitCustom (p)
+	register struct PartitionBlock *p;
+{
+	InitFFS(p);
+	p->pb_Environment[DE_DOSTYPE] = 0x0;
+	/* others? */
+}
+
+void
+InitUser (p)
+	register struct PartitionBlock *p;
+{
+	InitFFS(p);
+	p->pb_Environment[DE_DOSTYPE] = FSTypeLabels.identifier[FSTypeActive];
+	/* others? */
+}
+
+/* general routine for handling Environment Int gads */
+
+void
+ChangeEnvNum (i,gad)
+	int i;
+	struct Gadget *gad;
+{
+	LONG lint;
+
+	lint = ((struct StringInfo *)gad->SpecialInfo)->LongInt;
+	if (lint != CurrentPart->pb_Environment[i])
+	{
+		CurrentPart->pb_Environment[i] = lint;
+		FSUpdate = TRUE;
+	}
+}
+
+/* 39.18 */
+
+int
+IsThisStandardFS (DosType)
+	LONG DosType;
+{
+	if ((DosType == ID_DOS_DISK)
+	 || (DosType == ID_FFS_DISK)
+	 || (DosType == ID_INTER_DOS_DISK)
+	 || (DosType == ID_INTER_FFS_DISK)
+	 || (DosType == ID_DC_DOS_DISK)
+	 || (DosType == ID_DC_FFS_DISK))
+		return(TRUE);
+	else
+		return(FALSE);
+}
+
+/* 39.18 */
+
+int
+MakeFSLabel (i,DosType)
+	int i;
+	LONG DosType;
+{
+	union Id
+	{
+		UBYTE ids[5];
+		long idl;
+	} id;
+	union Tp
+	{
+		UWORD tnum;
+		UBYTE tstr[2];
+	} tp;
+
+	if (!(FSTypeLabels.name[i] = AllocMem(24,MEMF_CLEAR)))
+		return FALSE;
+
+	FSTypeLabels.identifier[i] = id.idl = DosType;
+
+	/* Now check again current file system is special file system
+	 user add or fs resource. See line 1124. */
+	if (CurrentPart->pb_Environment[DE_DOSTYPE] == DosType)
+	{
+		if (FSTypeLabels.identifier[CUSTOM_CYCLE])
+			FSTypeLabels.identifier[CUSTOM_CYCLE] = 0x0;
+		FSTypeActive = FSTypeSave = i;
+		FSIdentifierFlags |= GADGDISABLED;
+	}
+
+	/* Check first 3 byte is printable */
+	if (isalpha(id.ids[0]) && isalpha(id.ids[1]) && isalpha(id.ids[2]))
+	{
+               	strncpy(FSTypeLabels.name[i], id.ids, 3);
+		FSTypeLabels.name[i][3] = 0x5c;	/* \ */
+		tp.tstr[0] = 0x00;
+		tp.tstr[1] = id.ids[3];
+		sprintf(&FSTypeLabels.name[i][4],"%02x",tp.tnum);
+		FSTypeLabels.name[i][6] = NULL;
+	}
+	else
+	{
+		sprintf(FSTypeLabels.name[i],"0x%x",DosType);
+	}
+
+	return(TRUE);
+}
+
+/* 39.18 */
+
+void
+SetBlockSizeFlags (PatchFlags,idx)
+	LONG PatchFlags;
+	int idx;
+{
+	if (!(PatchFlags & (1L << DE_SECSPERBLK)))
+	{
+//		printf("PatchFlags on\n");
+		FSTypeLabels.blocksizeflags[idx] |= VALID;
+	}
+	else
+	{
+//		printf("PatchFlags off\n");
+		FSTypeLabels.blocksizeflags[idx] &= ~VALID;
+	}
+}
+
+/* 39.18 */
+
+int
+AddFSResource (fsr,i)
+	struct FileSysResource *fsr;
+	int *i;	/* file system total number in rdb.
+		 anytime at least 2, even if it is in not rdb. */
+{
+	struct FileSysEntry *fse;
+	int k;
+
+	for (fse = (struct FileSysEntry *)
+		   fsr->fsr_FileSysEntries.lh_Head;
+	     fse->fse_Node.ln_Succ;
+	     fse = (struct FileSysEntry *) fse->fse_Node.ln_Succ)
+	{
+//		printf("fsresource->Identifier,PatchFlags,Version = 0x%x,0x%x,0x%x\n",
+//			fse->fse_DosType,(fse->fse_PatchFlags & (1L<<DE_SECSPERBLK)),fse->fse_Version);
+		for (k = 0; k < *i; k++)
+		{
+//			printf("FSTypeLabels.identifier = 0x%x\n", FSTypeLabels.identifier[k]);
+			if (fse->fse_DosType == FSTypeLabels.identifier[k])
+			{
+				/*
+				 Custom File System..., actually this is more like a dummy.
+				 So I decide to put fs resource label.
+				 ex) 1. set "UNI\01" and select "OK". ("UNI\01" is in fs resource.)
+				     2. go "File Systen Chracteristics".
+				     3. If I don't put this process, File System label shows
+					"Custom File System" instead of "UNI\01".
+				 it does not heart, but not so great.
+				*/
+				if (k == CUSTOM_CYCLE)
+				{
+					if (!(MakeFSLabel(*i, fse->fse_DosType)))
+						return(FALSE);
+					SetBlockSizeFlags(fse->fse_PatchFlags,*i);
+					(*i)++;
+				}
+//				printf("Found match: %d,%x\n",k,fse->fse_DosType);
+				/* Well, if fs is not in rdb, have to check PatchFlags. */
+				if (!FSTypeLabels.rdbflags[k])
+				{
+					SetBlockSizeFlags(fse->fse_PatchFlags,k);
+				}
+				break;	/* found match */
+			}
+		}
+		if (k >= *i)	/* no match - make new label for them */
+		{
+			if (!IsThisStandardFS(fse->fse_DosType))
+				/* not standard rom filesystem... need make label. */
+			{
+//				printf("No match: %x\n",fse->fse_DosType);
+				/* nonstandard FS.  Add it. */
+				if (!(MakeFSLabel(*i, fse->fse_DosType)))
+					return(FALSE);
+				SetBlockSizeFlags(fse->fse_PatchFlags,*i);
+				(*i)++;
+			}
+		}
+	}
+	return(TRUE);
+}
+
+/* 39.18 */
+
+int
+CompareFSRPatchFlags (fs,fsr,idx)
+	struct FileSysHeaderBlock *fs;
+	struct FileSysResource *fsr;
+	int idx;
+{
+	struct FileSysEntry *fse;
+
+	for (fse = (struct FileSysEntry *)
+		   fsr->fsr_FileSysEntries.lh_Head;
+	     fse->fse_Node.ln_Succ;
+	     fse = (struct FileSysEntry *) fse->fse_Node.ln_Succ)
+	{
+//		printf("fsresource->Identifier,PatchFlags,Version = 0x%x,0x%x,0x%x\n",
+//			fse->fse_DosType,(fse->fse_PatchFlags & (1L<<DE_SECSPERBLK)),fse->fse_Version);
+		if (fse->fse_DosType == fs->fhb_DosType)
+		{
+//			printf("Found match: %x\n",fse->fse_DosType);
+			if (fs->fhb_Version >= fse->fse_Version)
+			{	/* take fs in rdb. rdb one is newer version. */
+				FSTypeLabels.rdbflags[idx] = TRUE;
+				SetBlockSizeFlags(fs->fhb_PatchFlags,idx);
+			}
+			else	/* take fs resource */
+			{
+				SetBlockSizeFlags(fse->fse_PatchFlags,idx);
+			}
+			return(TRUE);
+		}
+	}
+	return(FALSE);
+}
+
+/* Allocate File system list for cycle gadgets. */
+
+int
+AllocFSType (void)		// allocate rtn for CYCLE_KIND Gadgets
+{
+	int i;
+	register struct FileSysHeaderBlock *fs;
+	struct FileSysResource *fsr;
+
+	/* Initialize FSTypeLabels structure */
+	for (i = 0; i < 20; i++)
+	{
+		FSTypeLabels.identifier[i] = 0;
+		FSTypeLabels.blocksizeflags[i] = 0;
+		FSTypeLabels.rdbflags[i] = 0;
+	}
+
+	for (i = 0; i < 2; i++)
+	{
+		if (!(FSTypeLabels.name[i] = AllocMem(24,MEMF_CLEAR)))
+			return FALSE;
+	}
+
+	/* Put Labe name and Identifier for default file system stuff */
+	strcpy(FSTypeLabels.name[STANDARD_CYCLE],"Standard File System");
+	strcpy(FSTypeLabels.name[CUSTOM_CYCLE],"Custom File System");
+	if (FSTypeSave == STANDARD_CYCLE)
+		FSTypeLabels.identifier[STANDARD_CYCLE] = CurrentPart->pb_Environment[DE_DOSTYPE];
+	else
+		FSTypeLabels.identifier[STANDARD_CYCLE] = ID_FFS_DISK;
+	/* Set CUSTOM_CYCLE for tenporary. If we can find out current fs type in
+	rdb or fs resource, this information will change in MakeFSLabel().
+	See line 946. */
+	if (FSTypeSave == CUSTOM_CYCLE)
+		FSTypeLabels.identifier[CUSTOM_CYCLE] = CurrentPart->pb_Environment[DE_DOSTYPE];
+	else
+		FSTypeLabels.identifier[CUSTOM_CYCLE] = 0x0;
+
+	/* Make "Custom File System" enable FSBlockSize. */
+	FSTypeLabels.blocksizeflags[CUSTOM_CYCLE] |= VALID;
+
+	FirstFileSys = CopyFileSysList(SelectedDrive->rdb->rdb_FileSysHeaderList);
+
+	/* 39.16 - Scan the filesystem resource.  For each entry,
+	 if it exists already update the FSTypeLabels entry (mainly VALID flag).
+	 If it doesn't exist, add it. */
+	fsr = OpenResource(FSRNAME);
+
+	/* Make label all file system in rdb */
+	for (fs = FirstFileSys;
+	     fs && i < 20;
+	     fs = fs->fhb_Next,i++)
+	{
+//		printf("rdbfs->Identifier,PatchFlags,Version = 0x%x,0x%x,0x%x\n",
+//			fs->fhb_DosType,(fs->fhb_PatchFlags & (1L<<DE_SECSPERBLK)),fs->fhb_Version);
+
+		/* Avoid making label for standard type file system */
+		if (IsThisStandardFS(fs->fhb_DosType))
+		{
+			i--;
+			if (fsr)
+				if (!(CompareFSRPatchFlags(fs,fsr,STANDARD_CYCLE)))
+				{
+					/* Can't find in resource. */
+					SetBlockSizeFlags(fs->fhb_PatchFlags,STANDARD_CYCLE);
+					FSTypeLabels.rdbflags[STANDARD_CYCLE] = TRUE;
+				}
+		}
+		else	/* not standard file system */
+		{
+			if (!(MakeFSLabel(i,fs->fhb_DosType)))
+				return(FALSE);
+			if (fsr)
+				if (!(CompareFSRPatchFlags(fs,fsr,i)))
+					/* Can't find in resource. */
+				{
+					SetBlockSizeFlags(fs->fhb_PatchFlags,i);
+					FSTypeLabels.rdbflags[i] = TRUE;
+				}
+		}
+//		printf("FSTypeLabels.name[i] = %s\n",FSTypeLabels.name[i]);
+	}
+
+	if (fsr)
+		AddFSResource(fsr,&i);
+
+	/* Put total number file system labels */
+	NumFSType = i;
+
+	/* Put NULL for cycle gadget for file system type label. */
+	FSTypeLabels.name[i] = NULL;
+
+	return TRUE;
+}
+
+/* initialize stuff for handlefs */
+
+int
+FSInitialize (w)
+	struct Window *w;
+{
+	/* I have to clean up these value, because the FreeGadget() does not
+	clean gadget pointer.
+	The other gaget pointer is not nessesary, because I don't reffer.
+	See RebuildFSGads() and SetSDFSGadsAttrs().
+	These functions may be called before CreateAllGadgets(). */
+
+	ReservedEnd   = 0;
+	ReservedBegin = 0;
+	AutoMount     = 0;
+	CustomNum     = 0;
+	CustomBoot    = 0;
+	FFSCheck      = 0;
+	IntlMode      = 0;
+	DirCache      = 0;
+	FSIdentifier  = 0;
+	Mask          = 0;
+	MaxTransfer   = 0;
+	FSBlockSize   = 0;	/* 39.18 */
+// 39.9
+//	BuffersFlags       = 0;
+	FSBlockSizeFlags   = 0;
+	FSIdentifierFlags  = 0;
+	MaskFlags          = 0;
+	MaxTransferFlags   = 0;
+	CustomNumFlags     = 0;
+	ReservedEndFlags   = 0;
+	ReservedBeginFlags = 0;
+	FFSCheckFlags      = 0;
+	IntlModeFlags      = 0;
+	DirCacheFlags      = 0;
+	AutoMountFlags     = 0;
+	CustomBootFlags    = 0;
+
+	ReservedBeginSInfoLongInt = 0;
+	ReservedEndSInfoLongInt   = 0;
+	CustomNumSInfoLongInt     = 0;
+//
+	FSUpdate = 0;
+
+	savecurrpart = *CurrentPart;
+
+	RebuildFSGads(w,CurrentPart);
+
+	switch (CurrentPart->pb_Environment[DE_DOSTYPE]) {
+	case ID_DOS_DISK:				// DOS\0
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		SetMiscGadsAttrs(w,GADGDISABLED,
+				   GADGDISABLED,
+				   GADGDISABLED,
+				   GADGDISABLED);
+		break;
+	case ID_FFS_DISK:				// DOS\1
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		FSIdentifierFlags |= GADGDISABLED;
+		SetSDFSGadsAttrs(w,SELECTED,
+				   0,
+				   0);
+		break;
+	case ID_INTER_DOS_DISK:				// DOS\2
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		FSIdentifierFlags |= GADGDISABLED;
+		IntlModeUserCheck = TRUE;	/* 39.14 */
+		SetSDFSGadsAttrs(w,0,
+				   SELECTED,
+				   0);
+		break;
+	case ID_INTER_FFS_DISK:				// DOS\3
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		FSIdentifierFlags |= GADGDISABLED;
+		IntlModeUserCheck = TRUE;	/* 39.14 */
+		SetSDFSGadsAttrs(w,SELECTED,
+				   SELECTED,
+				   0);
+		break;
+	case ID_DC_DOS_DISK:				// DOS\4
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		FSIdentifierFlags |= GADGDISABLED;
+		SetSDFSGadsAttrs(w,0,
+				   SELECTED|GADGDISABLED,
+				   SELECTED);
+		break;
+	case ID_DC_FFS_DISK:				// DOS\5
+		FSTypeActive = FSTypeSave = STANDARD_CYCLE;
+		FSIdentifierFlags |= GADGDISABLED;
+		SetSDFSGadsAttrs(w,SELECTED,
+				   SELECTED|GADGDISABLED,
+				   SELECTED);
+		break;
+	default:					// other
+		FSTypeActive = FSTypeSave = CUSTOM_CYCLE;
+		SetSDFSGadsAttrs(w,GADGDISABLED,
+				   GADGDISABLED,
+				   GADGDISABLED);
+		break;
+	}
+
+	/* add partition name: string is long enough for a 32-char name */
+	strcpy(&PartNameText[0],CurrentPart->pb_DriveName);
+
+	/* Allocate File system list for cycle gadgets. */
+	if (!AllocFSType()) return FALSE;
+
+	/* 39.13 --- if fh_PatchFlags bit (1L<<DE_SECSPERBLK) is on,
+	 get fils system block size */
+	if (FSTypeLabels.blocksizeflags[FSTypeActive] & VALID)
+	{
+		SetFSBS(w,(CurrentPart->pb_Environment[DE_SIZEBLOCK]*4)*CurrentPart->pb_Environment[DE_SECSPERBLK]);
+	}
+	else	/* default is rdb_BlockBytes */
+	{
+		CurrentPart->pb_Environment[DE_SIZEBLOCK]  =
+				SelectedDrive->rdb->rdb_BlockBytes >> 2;
+								/* 39.16 */
+		CurrentPart->pb_Environment[DE_SECSPERBLK] = 1; /* 39.16 */
+
+		/* user can't change until they change flag in add/update file system" */
+		SetFSBS(w,SelectedDrive->rdb->rdb_BlockBytes);
+	}
+
+	return TRUE;
+}
+
+void FreeFSType(WORD Update)
+{
+	int i;
+
+	for (i = 0; i < NumFSType; i++)
+	{
+		if (FSTypeLabels.name[i])
+			FreeMem(FSTypeLabels.name[i],24);
+	}
+
+	if (Update)
+	{
+		FreeFileSysList(SelectedDrive->rdb->rdb_FileSysHeaderList);
+		SelectedDrive->rdb->rdb_FileSysHeaderList = FirstFileSys;
+        }
+        else
+        {
+		FreeFileSysList(FirstFileSys);
+		FirstFileSys = NULL;
+	}
+}
+@
+
+
+36.13
+log
+@Change allocating size from 20 to 24.
+check fs resource if fs is not in rdb block.
+@
+text
+@d45 13
+a57 14
+//
+USHORT BuffersFlags       = 0;	// maybe don't need this here, transfer to handlepart.c
+USHORT FSBlockSizeFlags   = 0;
+USHORT FSIdentifierFlags  = 0;
+USHORT MaskFlags          = 0;
+USHORT MaxTransferFlags   = 0;
+USHORT CustomNumFlags     = 0;
+USHORT ReservedEndFlags   = 0;
+USHORT ReservedBeginFlags = 0;
+USHORT FFSCheckFlags      = 0;
+USHORT IntlModeFlags      = 0;
+USHORT DirCacheFlags      = 0;
+USHORT AutoMountFlags     = 0;
+USHORT CustomBootFlags    = 0;
+d65 1
+a65 1
+UWORD FSTypeActive      = 0;	/* active cycle position             */
+d67 1
+a67 1
+UWORD FSBlockSizeActive = 0;	/* active cycle position             */
+d88 4
+a91 1
+//
+d128 1
+a128 60
+			// printf("block size = %d\n",CurrentPart->pb_Environment[DE_SECSPERBLK]);
+			/* 39.13 - Check PatchFlag for allowing block size */
+			if (FSTypeLabels.blocksizeflags[FSTypeActive] & VALID)
+			{
+				STRPTR *tmp;
+				x = 0;
+				for (tmp = FSBlockSizeLabels;
+				    *tmp;
+				    tmp++,x++)
+				{
+					if (atoi(*tmp) ==
+			    ((CurrentPart->pb_Environment[DE_SIZEBLOCK] * 4) *
+			     CurrentPart->pb_Environment[DE_SECSPERBLK])) /* 39.16 */
+					{
+						GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+							GTCY_Active,x,
+							GA_Disabled,FALSE,
+							TAG_DONE);
+						FSBlockSizeActive = x;
+						break;
+					}
+				}
+				if (*tmp == NULL) /* did not match */
+				{
+					GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+						GTCY_Active,0,	/* 512 deafult */
+						GA_Disabled,FALSE,
+						TAG_DONE);
+					FSBlockSizeActive = 0;
+                                }
+				FSBlockSizeFlags &= ~GADGDISABLED;
+			}
+			else	/* default is rdb_BlockBytes */
+			{
+				STRPTR *tmp;
+				x = 0;
+				for (tmp = FSBlockSizeLabels;
+				    *tmp;
+				    tmp++,x++)
+				{
+					if (atoi(*tmp) ==
+					    SelectedDrive->rdb->rdb_BlockBytes)
+					{
+						GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+							GTCY_Active,x,
+							GA_Disabled,TRUE,
+							TAG_DONE);
+						break;
+					}
+				}
+				if (*tmp == NULL) /* did not match */
+				{
+					GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+							GTCY_Active,0,
+							GA_Disabled,TRUE,
+							TAG_DONE);
+				}
+				FSBlockSizeFlags |= GADGDISABLED;
+				FSBlockSizeActive = 0;
+			}
+d142 8
+d291 2
+a292 1
+			} else
+d294 4
+a297 4
+			    DisplayBeep(w->WScreen);
+			    sprintf(&FSIdentifierSIBuff[0],"0x%lx",
+				CurrentPart->pb_Environment[DE_DOSTYPE]);
+			    RefreshGList(FSIdentifier,w,NULL,1L);
+d328 1
+a328 1
+			FreeFSType();
+d332 2
+a333 5
+			/* make sure gadgets are read out */
+			/* should really handle the 0x... gadgets too - FIX! */
+//			ChangeEnvNum(DE_PREFAC,ReservedEnd);
+//			ChangeEnvNum(DE_RESERVEDBLKS,ReservedBegin);
+//			ChangeEnvNum(DE_BOOTBLOCKS,CustomNum);
+d337 1
+a337 1
+			FreeFSType();
+d353 71
+d778 1
+a778 1
+//printf("ident = %s\n",FSIdentifierSIBuff);
+d861 2
+a862 1
+					     rdb_BlockBytes >> 2;/* 39.16 --- in longs */
+d904 19
+d924 3
+a926 1
+MakeFSLabel (int *i, LONG PatchFlags, LONG DosType)
+d939 1
+a939 1
+	if (!(FSTypeLabels.name[*i] = AllocMem(24,MEMF_CLEAR)))
+d942 1
+a942 10
+	FSTypeLabels.identifier[*i] = id.idl = DosType;
+
+	/* 39.13 --- if file system fh_PatchFlags bit (1L<<DE_SECSPERBLK)
+	is on, get fils system block size */
+	/* 39.15 --- Only PatchFlags is not set, enable to change to file system block size. */
+	/* 39.16 --- use DE_SECSPERBLK. */
+	if (!(PatchFlags & (1L << DE_SECSPERBLK)))
+		FSTypeLabels.blocksizeflags[*i] |= VALID;
+	else
+		FSTypeLabels.blocksizeflags[*i] &= ~VALID;
+d945 1
+a945 1
+	 user add. */
+d948 3
+a950 1
+		FSTypeActive = FSTypeSave = *i;
+d957 2
+a958 2
+               	strncpy(FSTypeLabels.name[*i], id.ids, 3);
+		FSTypeLabels.name[*i][3] = 0x5c;	/* \ */
+d961 22
+a982 2
+		sprintf(&FSTypeLabels.name[*i][4],"%02x",tp.tnum);
+		FSTypeLabels.name[*i][6] = NULL;
+d986 2
+a987 1
+		sprintf(FSTypeLabels.name[*i],"0x%x",DosType);
+d989 3
+d993 60
+d1056 35
+d1099 3
+a1101 2
+	struct FileSysEntry *fse;
+	struct	/* 39.16 - for checking version number of fs in rdb and resource. */
+d1103 4
+a1106 3
+		LONG Version;
+		LONG PatchFlags;
+	} rdb_info;
+d1114 18
+d1134 4
+a1137 3
+	/* Intialize */
+	rdb_info.Version = 0;
+	rdb_info.PatchFlags = 0;
+d1139 1
+a1139 1
+	/* Make label all file system user have */
+d1144 2
+a1145 2
+		/* 39.16 - "sfsexiist" is new parameter for checkng file system is there */
+//printf("rdbfs->Identifier,fhb_PatchFlags = 0x%x,0x%x\n",fs->fhb_DosType,(fs->fhb_PatchFlags & (1L<<DE_SECSPERBLK)));
+d1148 1
+a1148 6
+		if ((fs->fhb_DosType == ID_DOS_DISK)
+		 || (fs->fhb_DosType == ID_FFS_DISK)
+		 || (fs->fhb_DosType == ID_INTER_DOS_DISK)
+		 || (fs->fhb_DosType == ID_INTER_FFS_DISK)
+		 || (fs->fhb_DosType == ID_DC_DOS_DISK)
+		 || (fs->fhb_DosType == ID_DC_FFS_DISK))
+a1149 7
+			/* 39.16 --- check later, becasue have to compare version with fs resource. */
+			/*
+			if (!(fs->fhb_PatchFlags & (1L << DE_SECSPERBLK)))
+				FSTypeLabels.blocksizeflags[0] |= VALID;
+			else
+				FSTypeLabels.blocksizeflags[0] &= ~VALID;
+			*/
+d1151 7
+a1157 3
+			rdb_info.Version = fs->fhb_Version;
+			rdb_info.PatchFlags = fs->fhb_PatchFlags;
+			continue;
+d1159 1
+a1159 17
+		if (!(MakeFSLabel(&i, fs->fhb_PatchFlags, fs->fhb_DosType)))
+			return(FALSE);
+
+//		printf("FSTypeLabels.name[i] = %s\n",FSTypeLabels.name[i]);
+	}
+
+//printf("i,rdb_info exist = %d,%d\n",i,rdb_info.Version ? 1 : 0);
+	/* 39.16 - Scan the filesystem resource.  For each entry,
+	 if it exists already update the FSTypeLabels entry (mainly VALID flag).
+	 If it doesn't exist, add it. */
+	fsr = OpenResource(FSRNAME);
+	if (fsr)
+	{
+		for (fse = (struct FileSysEntry *)
+			   fsr->fsr_FileSysEntries.lh_Head;
+		     fse->fse_Node.ln_Succ;
+		     fse = (struct FileSysEntry *) fse->fse_Node.ln_Succ)
+d1161 5
+a1165 34
+			int k;
+//printf("fsresource->Identifier,fhb_PatchFlags = 0x%x,0x%x\n",fse->fse_DosType,(fse->fse_PatchFlags & (1L<<DE_SECSPERBLK)));
+			for (k = 0; k < i; k++)
+			{
+				if (fse->fse_DosType == FSTypeLabels.identifier[k])
+					break;	/* found match */
+			}
+			if (k >= i)	/* no match - make new label for them */
+			{
+				if ((fse->fse_DosType == ID_DOS_DISK)
+				 || (fse->fse_DosType == ID_FFS_DISK)
+				 || (fse->fse_DosType == ID_INTER_DOS_DISK)
+				 || (fse->fse_DosType == ID_INTER_FFS_DISK)
+				 || (fse->fse_DosType == ID_DC_DOS_DISK)
+				 || (fse->fse_DosType == ID_DC_FFS_DISK))
+				{	/* a standard rom filesystem... no need make label. */
+//printf("rdb = %x / fsr = %x\n",rdb_info.Version, fse->fse_Version);
+					if (rdb_info.Version > fse->fse_Version)
+					{	/* fs was in rdb. rdb one is newer version. */
+						if (!(rdb_info.PatchFlags & (1L << DE_SECSPERBLK)))
+							FSTypeLabels.blocksizeflags[0] |= VALID;
+						else
+							FSTypeLabels.blocksizeflags[0] &= ~VALID;
+						continue;
+					}
+					else	/* not in rdb, have to check in fs resource. */
+					{
+						if (!(fse->fse_PatchFlags & (1L << DE_SECSPERBLK)))
+							FSTypeLabels.blocksizeflags[0] |= VALID;
+						else
+							FSTypeLabels.blocksizeflags[0] &= ~VALID;
+					}
+				}
+				else
+d1167 2
+a1168 4
+					/* nonstandard FS.  Add it. */
+					if (!(MakeFSLabel(&i, fse->fse_PatchFlags, fse->fse_DosType)))
+						return(FALSE);
+					i++;
+a1169 1
+			}
+d1171 1
+d1174 2
+a1175 11
+	/* Put Labe name and Identifier for default file system stff */
+	strcpy(FSTypeLabels.name[0],"Standard File System");
+	strcpy(FSTypeLabels.name[1],"Custom File System");
+	if (FSTypeSave == 0)
+		FSTypeLabels.identifier[0] = CurrentPart->pb_Environment[DE_DOSTYPE];
+	else
+		FSTypeLabels.identifier[0] = ID_FFS_DISK;
+	if (FSTypeSave == 1)
+		FSTypeLabels.identifier[1] = CurrentPart->pb_Environment[DE_DOSTYPE];
+	else
+		FSTypeLabels.identifier[1] = 0x0;
+d1209 1
+a1224 1
+
+d1294 1
+a1294 1
+	/* 39.13 --- if fh_PatchFlags bit (1L<<DE_SIZEBLOCK) is on,
+a1295 1
+// printf("block size = %d\n", CurrentPart->pb_Environment[DE_SECSPERBLK]);
+d1298 1
+a1298 12
+		STRPTR *tmp;
+		int i = 0;
+
+		/* Which block size is selected ? */
+		for (tmp = FSBlockSizeLabels;*tmp;tmp++,i++)
+		{
+			if (atoi(*tmp) ==
+			    ((CurrentPart->pb_Environment[DE_SIZEBLOCK] * 4) *
+			     CurrentPart->pb_Environment[DE_SECSPERBLK])) /* 39.16 */
+				FSBlockSizeActive = i;
+		}
+		FSBlockSizeFlags &= ~GADGDISABLED;
+a1301 2
+		/* user can't change until they change flag in add/update file system" */
+		FSBlockSizeFlags |= GADGDISABLED;
+d1303 2
+a1304 1
+				SelectedDrive->rdb->rdb_BlockBytes >> 2; /* 39.16 */
+a1305 1
+		FSBlockSizeActive = 0;	/* 39.15 --- Bug fix! */
+d1307 2
+d1310 1
+d1314 1
+a1314 1
+void FreeFSType(void)
+d1320 2
+a1321 1
+		if (FSTypeLabels.name[i]) FreeMem(FSTypeLabels.name[i],24);
+d1324 10
+a1333 2
+	FreeFileSysList(FirstFileSys);
+	FirstFileSys = NULL;
+@
+
+
+36.12
+log
+@fhb_PatchFlags opposite.(1<<DE_SIZEBLOCK is not set enable to change fs block size.)
+@
+text
+@d11 1
+d126 1
+a126 1
+			// printf("block size = %d\n",CurrentPart->pb_Environment[DE_SIZEBLOCK]);
+d136 3
+a138 3
+					if (atoi(*tmp)
+					 == CurrentPart->
+						pb_Environment[DE_SIZEBLOCK] * 4)
+d158 1
+a158 1
+			else	/* default is 512 bytes */
+d160 23
+a182 3
+				GT_SetGadgetAttrs(FSBlockSize,w,NULL,
+						GTCY_Active,0,
+						GA_Disabled,TRUE,TAG_DONE);
+d189 2
+d192 3
+a194 1
+			if (x != CurrentPart->pb_Environment[DE_SIZEBLOCK])
+d196 1
+a196 1
+				CurrentPart->pb_Environment[DE_SIZEBLOCK] = x/4;
+d840 3
+a842 2
+	p->pb_Environment[DE_SIZEBLOCK]    = 128;  /* 512 bytes */
+	p->pb_Environment[DE_SECSPERBLK]   = 1;    /* 512 bytes */
+a882 2
+/* Allocate File system list for cycle gadgets. */
+
+d884 1
+a884 1
+AllocFSType (void)		// allocate rtn for CYCLE_KIND Gadgets
+a885 2
+	register UWORD i;
+	register struct FileSysHeaderBlock *fs;
+a890 1
+
+d897 55
+d954 1
+a954 1
+		if (!(FSTypeLabels.name[i] = AllocMem(20,MEMF_CLEAR)))
+d960 4
+d969 2
+a970 1
+// printf("Identifier,fhb_PatchFlags = %x,%x\n",fs->fhb_DosType,fs->fhb_PatchFlags);
+d980 3
+a982 4
+			/* 39.13 --- if file system fh_PatchFlags bit (1l<<DE_SIZEBLOCK)
+			is on, get fils system block size */
+			/* 39.15 --- Only PatchFlags is not set, enable to change to file system block size. */
+			if (!(fs->fhb_PatchFlags & (1L << DE_SIZEBLOCK)))
+d986 1
+d988 2
+d992 2
+a993 2
+		if (!(FSTypeLabels.name[i] = AllocMem(20,MEMF_CLEAR)))
+			return FALSE;
+d995 2
+a996 1
+		FSTypeLabels.identifier[i] = id.idl = fs->fhb_DosType;
+d998 53
+a1050 25
+		/* 39.13 --- if file system fh_PatchFlags bit (1l<<DE_SIZEBLOCK)
+		is on, get fils system block size */
+		/* 39.15 --- Only PatchFlags is not set, enable to change to file system block size. */
+		if (!(fs->fhb_PatchFlags & (1L << DE_SIZEBLOCK)))
+			FSTypeLabels.blocksizeflags[i] |= VALID;
+		else
+			FSTypeLabels.blocksizeflags[i] &= ~VALID;
+
+		/* Now check again current file system is special file system
+		 user add. */
+		if (CurrentPart->pb_Environment[DE_DOSTYPE] == fs->fhb_DosType)
+		{
+			FSTypeActive = FSTypeSave = i;
+			FSIdentifierFlags |= GADGDISABLED;
+                }
+
+		/* Check first 3 byte is printable */
+		if (isalpha(id.ids[0]) && isalpha(id.ids[1]) && isalpha(id.ids[2]))
+		{
+                	strncpy(FSTypeLabels.name[i], id.ids, 3);
+			FSTypeLabels.name[i][3] = 0x5c;	/* \ */
+			tp.tstr[0] = 0x00;
+			tp.tstr[1] = id.ids[3];
+			sprintf(&FSTypeLabels.name[i][4],"%02x",tp.tnum);
+			FSTypeLabels.name[i][6] = NULL;
+a1051 5
+		else
+		{
+			sprintf(FSTypeLabels.name[i],"0x%x",fs->fhb_DosType);
+		}
+//		printf("FSTypeLabels.name[i] = %s\n",FSTypeLabels.name[i]);
+d1183 1
+a1183 1
+	/* 39.13 --- if fh_PatchFlags bit (1l<<DE_SIZEBLOCK) is on,
+d1185 1
+a1185 1
+// printf("block size = %d\n", CurrentPart->pb_Environment[DE_SIZEBLOCK]);
+d1194 3
+a1196 2
+			if (atoi(*tmp)
+				== CurrentPart->pb_Environment[DE_SIZEBLOCK] * 4)
+d1201 1
+a1201 1
+	else	/* default is 512 byte */
+d1205 3
+a1207 1
+		CurrentPart->pb_Environment[DE_SIZEBLOCK] = 128;
+d1220 1
+a1220 1
+		if (FSTypeLabels.name[i]) FreeMem(FSTypeLabels.name[i],20);
+@
+
+
+36.11
+log
+@Add IntlModeUserCheck flags for determining user select or DirCache select.
+@
+text
+@d889 1
+a889 1
+//printf("Identifier,fhb_PatchFlags = %x,%x\n",fs->fhb_DosType,fs->fhb_PatchFlags);
+d901 2
+a902 1
+			if (fs->fhb_PatchFlags & (1L << DE_SIZEBLOCK))
+d904 2
+d916 2
+a917 1
+		if (fs->fhb_PatchFlags & (1L << DE_SIZEBLOCK))
+d919 2
+d1078 1
+a1078 1
+//printf("block size = %d\n", CurrentPart->pb_Environment[DE_SIZEBLOCK]);
+d1098 2
+@
+
+
+36.10
+log
+@Add gadgets for "International Mode", "Fast File System", "Dir Cahce" and "File System Block Size".
+@
+text
+@a67 1
+//UWORD FSBlockSizeSave   = 0;	/* save original block size position */
+d85 3
+d203 3
+d211 3
+d238 7
+d247 1
+a247 1
+					IntlModeFlags &= ~(GADGDISABLED);
+d249 2
+a250 1
+					x |= (INTER_MASK);
+d1029 1
+d1037 1
+@
+
+
+36.9
+log
+@Initialize flags
+@
+text
+@d8 1
+d13 1
+d36 1
+a36 1
+#include "PartGlob.h"
+d42 1
+d45 2
+a46 5
+USHORT BuffersFlags       = 0;
+USHORT ReservedFSFlags    = 0;
+USHORT OldFSFlags         = 0;
+USHORT CustomFSFlags      = 0;
+USHORT FastFSFlags        = 0;
+a49 2
+USHORT AutoMountFlags     = 0;
+USHORT CustomBootFlags    = 0;
+d53 5
+d64 22
+a85 1
+char SelectFSText[44];
+a97 1
+//	LONG pos;
+d99 2
+a100 1
+	switch (msg->Class) {
+d107 103
+a209 20
+		switch (id) {
+		case FASTFS:
+			GT_SetGadgetAttrs(SelectFS,w,NULL,
+					GTTX_Text,"Fast File System",TAG_DONE);
+			DeselectFS(w,FastFS,DefaultFFS);
+			break;
+		case RESERVEDFS:
+			GT_SetGadgetAttrs(SelectFS,w,NULL,
+					GTTX_Text,"Reserved File System",TAG_DONE);
+			DeselectFS(w,ReservedFS,DefaultReserved);
+			break;
+		case CUSTOMFS:
+			GT_SetGadgetAttrs(SelectFS,w,NULL,
+					GTTX_Text,"Custom File System",TAG_DONE);
+			DeselectFS(w,CustomFS,DefaultCustom);
+			break;
+		case OLDFS:
+			GT_SetGadgetAttrs(SelectFS,w,NULL,
+					GTTX_Text,"Old File System",TAG_DONE);
+			DeselectFS(w,OldFS,DefaultSFS);
+d211 29
+d245 14
+a258 12
+			    if (x & 1) /* odd */
+			    {
+				x &= ~1;
+				sprintf(&MaskSIBuff[0],"0x%lx",x);
+				RefreshGList(Mask,w,NULL,1L);
+			    }
+			    if (x != CurrentPart->pb_Environment[DE_MASK])
+			    {
+				CurrentPart->pb_Environment[DE_MASK] = x;
+				FSUpdate = TRUE;
+			    }
+			} else {
+d270 7
+a276 6
+			    if (x!=CurrentPart->pb_Environment[DE_MAXTRANSFER])
+			    {
+				CurrentPart->pb_Environment[DE_MAXTRANSFER] = x;
+				FSUpdate = TRUE;
+			    }
+			} else {
+d284 1
+a284 1
+			ChangeEnvNum(DE_PREFAC,ReservedEnd);
+d287 1
+a287 1
+			ChangeEnvNum(DE_RESERVEDBLKS,ReservedBegin);
+d294 11
+a304 10
+			    if (x != CurrentPart->pb_Environment[DE_DOSTYPE])
+			    {
+				CurrentPart->pb_Environment[DE_DOSTYPE] = x;
+				FSUpdate = TRUE;
+			    }
+			} else {
+				DisplayBeep(w->WScreen);
+				sprintf(&FSIdentifierSIBuff[0],"0x%lx",
+				       CurrentPart->pb_Environment[DE_DOSTYPE]);
+				RefreshGList(FSIdentifier,w,NULL,1L);
+d308 1
+a308 2
+//			if (AutoMount.Flags & SELECTED)
+			if (gad->Flags & SELECTED)	//
+d315 1
+a315 2
+//			if (CustomBoot.Flags & SELECTED)
+			if (gad->Flags & SELECTED)	//
+d319 1
+a319 5
+//				pos = RemoveGList(w,&CustomNum,1L);
+//				CustomNum.Flags &= ~GADGDISABLED;
+//				AddGList(w,&CustomNum,pos,1L,NULL);
+//				RefreshGList(&CustomNum,w,NULL,1L);
+				MyOnGadget(w,CustomNum);	//
+d323 1
+a323 6
+//				pos = RemoveGList(w,&CustomNum,1L);
+//				strcpy(CustomNumSIBuff,"0");
+//				CustomNum.Flags |= GADGDISABLED;
+//				AddGList(w,&CustomNum,pos,1L,NULL);
+//				RefreshGList(&CustomNum,w,NULL,1L);
+				MyOffGadget(w,CustomNum);		//
+d325 1
+a325 1
+					GTIN_Number,0,TAG_DONE);	//
+d330 1
+a330 1
+			ChangeEnvNum(DE_BOOTBLOCKS,CustomNum);
+d335 1
+d341 3
+a343 3
+			ChangeEnvNum(DE_PREFAC,ReservedEnd);
+			ChangeEnvNum(DE_RESERVEDBLKS,ReservedBegin);
+			ChangeEnvNum(DE_BOOTBLOCKS,CustomNum);
+d347 1
+d354 1
+a354 1
+//	case MENUPICK:			// I don't want to use menu now.
+a362 2
+/* handle mutual exclusion of FS gadgets */
+
+d364 1
+a364 1
+DeselectFS (w,newgad,resetrtn)
+d366 85
+a450 2
+	register struct Gadget *newgad;
+	void (*resetrtn)(struct Window *);
+d452 48
+a499 26
+//	register struct Gadget *gad;
+//	register UWORD pos;
+
+//KK	for (gad = FastFS; gad && gad != ReservedFS->NextGadget;
+//	     gad = gad->NextGadget)
+//	{
+//		if (gad != newgad)
+//			GadMXClr(w,gad);
+//	}
+
+	/* if not previously selected, set up defaults */
+//KK	if (!(newgad->Flags & SELECTED))
+//	{
+//		pos = RemoveGList(w,FSIdentifier,6L);
+		(*resetrtn)(w);
+//		AddGList(w,FSIdentifier,pos,6L,NULL);
+//		RefreshGList(FSIdentifier,w,NULL,6L);
+		RefreshGList(FSIdentifier,w,NULL,1L);
+		RefreshGList(Mask,w,NULL,1L);		//
+		RefreshGList(MaxTransfer,w,NULL,1L);	//
+		RefreshGList(ReservedBegin,w,NULL,1L);	//
+		RefreshGList(ReservedEnd,w,NULL,1L);	//
+		RefreshGList(AutoMount,w,NULL,1L);	//
+		FSUpdate = TRUE;
+//	}
+//	GadMXSet(w,newgad);
+d502 2
+d505 1
+a505 1
+DefaultFFS (w)
+d507 1
+d509 5
+a513 2
+	InitFFS(CurrentPart);
+	RebuildFSGads(w,CurrentPart);
+d515 31
+a545 3
+	/* now disable the gads we don't want (aka all before buffers) */
+	/* refresh all the others */
+//	FSIdentifier.Flags  |= GADGDISABLED;
+d547 1
+a547 14
+	/* we disable/undisable Buffers for HandlePart.c */
+//	ReservedEnd.Flags   &= ~GADGDISABLED;
+//	Mask.Flags 	    &= ~GADGDISABLED;
+//	MaxTransfer.Flags   &= ~GADGDISABLED;
+//	Buffers.Flags	    &= ~GADGDISABLED;
+//	ReservedBegin.Flags &= ~GADGDISABLED;
+//
+	MyOffGadget(w,FSIdentifier);
+	MyOnGadget(w,ReservedEnd);
+	MyOnGadget(w,Mask);
+	MyOnGadget(w,MaxTransfer);
+	BuffersFlags &= ~GADGDISABLED;
+	MyOnGadget(w,ReservedBegin);
+//
+d550 2
+d553 1
+a553 1
+DefaultSFS (w)
+d555 17
+d573 6
+a578 2
+	InitSFS(CurrentPart);
+	RebuildFSGads(w,CurrentPart);
+d580 66
+a645 2
+	/* now disable the gads we don't want (aka all before buffers) */
+	/* refresh all the others */
+d647 1
+a647 4
+//	FSIdentifier.Flags  |= GADGDISABLED;
+//	ReservedEnd.Flags   |= GADGDISABLED;
+//	Mask.Flags 	    |= GADGDISABLED;
+//	MaxTransfer.Flags   |= GADGDISABLED;
+d649 1
+a649 10
+//	Buffers.Flags       &= ~GADGDISABLED;
+//	ReservedBegin.Flags &= ~GADGDISABLED;
+//
+	MyOffGadget(w,FSIdentifier);
+	MyOffGadget(w,ReservedEnd);
+	MyOffGadget(w,Mask);
+	MyOffGadget(w,MaxTransfer);
+	BuffersFlags &= ~GADGDISABLED;
+	MyOnGadget(w,ReservedBegin);
+//
+d652 2
+d658 7
+a664 2
+//	InitReserved(CurrentPart);	// This is bug???
+	InitCustom(CurrentPart);
+d666 25
+a691 20
+//	FSIdentifier.Flags  &= ~GADGDISABLED;
+//	ReservedEnd.Flags   &= ~GADGDISABLED;
+//	Mask.Flags 	    &= ~GADGDISABLED;
+//	MaxTransfer.Flags   &= ~GADGDISABLED;
+//	Buffers.Flags 	    &= ~GADGDISABLED;
+//	ReservedBegin.Flags &= ~GADGDISABLED;
+//
+	MyOnGadget(w,FSIdentifier);
+	MyOnGadget(w,ReservedEnd);
+	MyOnGadget(w,Mask);
+	MyOnGadget(w,MaxTransfer);
+	BuffersFlags &= ~GADGDISABLED;
+	MyOnGadget(w,ReservedBegin);
+}
+
+void
+DefaultReserved (w)
+	struct Window *w;
+{
+	InitReserved(CurrentPart);
+d694 10
+a703 14
+//	FSIdentifier.Flags  |= GADGDISABLED;
+//	ReservedEnd.Flags   |= GADGDISABLED;
+//	Mask.Flags 	    |= GADGDISABLED;
+//	MaxTransfer.Flags   |= GADGDISABLED;
+//	Buffers.Flags 	    |= GADGDISABLED;
+//	ReservedBegin.Flags |= GADGDISABLED;
+//
+	MyOffGadget(w,FSIdentifier);
+	MyOffGadget(w,ReservedEnd);
+	MyOffGadget(w,Mask);
+	MyOffGadget(w,MaxTransfer);
+	BuffersFlags |= GADGDISABLED;
+	MyOffGadget(w,ReservedBegin);
+//
+d717 2
+a718 5
+//	stcl_d(ReservedBeginSIBuff,p->pb_Environment[DE_RESERVEDBLKS]);
+//	ReservedBeginSInfo.LongInt = p->pb_Environment[DE_RESERVEDBLKS];
+//	stcl_d(ReservedEndSIBuff,p->pb_Environment[DE_PREFAC]);
+//	ReservedEndSInfo.LongInt = p->pb_Environment[DE_PREFAC];
+//
+d722 2
+a723 2
+	else
+		ReservedBeginSInfoLongInt = p->pb_Environment[DE_RESERVEDBLKS];
+d727 8
+d736 6
+a741 2
+		ReservedEndSInfoLongInt = p->pb_Environment[DE_PREFAC];
+//
+d743 1
+a745 3
+//		stcl_d(CustomNumSIBuff,p->pb_Environment[DE_BOOTBLOCKS]);
+//		CustomNumSInfo.LongInt = p->pb_Environment[DE_BOOTBLOCKS];
+//
+d748 9
+a756 4
+			GTIN_Number,p->pb_Environment[DE_BOOTBLOCKS],TAG_DONE);
+		else
+			CustomNumSInfoLongInt = p->pb_Environment[DE_BOOTBLOCKS];
+//
+d758 9
+d768 4
+a771 2
+
+/*	stcl_d(BytesPerBlockSIBuff,p->pb_Environment[DE_SIZEBLOCK] << 2); */
+d781 1
+a781 1
+	p->pb_Environment[DE_DOSTYPE]      = 0x444f5301;
+d793 1
+a793 1
+		p->pb_Environment[DE_MASK] 	   = 0x7ffffffe;
+d795 1
+a795 1
+		p->pb_Environment[DE_MASK] 	   = 0x00fffffe;
+d803 1
+a803 9
+}
+
+void
+InitSFS (p)
+	register struct PartitionBlock *p;
+{
+	InitFFS(p);
+	p->pb_Environment[DE_DOSTYPE]      = 0x444f5300;
+	/* others? */
+d811 1
+a811 1
+	p->pb_Environment[DE_DOSTYPE]      = 0x0;
+d816 1
+a816 1
+InitReserved (p)
+d820 1
+a820 1
+	p->pb_Environment[DE_DOSTYPE]      = 'RESV';
+d825 1
+a825 13
+/*
+void
+ChangeEnvNum (i,sinfo)
+	int i;
+	struct StringInfo *sinfo;
+{
+	if (sinfo->LongInt != CurrentPart->pb_Environment[i])
+	{
+		CurrentPart->pb_Environment[i] = sinfo->LongInt;
+		FSUpdate = TRUE;
+	}
+}
+*/
+d827 1
+a827 1
+ChangeEnvNum (i,gad)	//
+d841 105
+d952 5
+a956 1
+//	register struct Gadget *gad;
+a957 6
+// I have to clean up these value, because the FreeGadget() does not 
+// clean gadget pointer.
+// The other gaget pointer is not nessesary, because I don't reffer.
+// See RebuildFSGads().
+// These functions may be called before CreateAllGadgets().
+	CustomNum     = 0;
+d960 9
+a968 2
+//
+
+d970 14
+a983 13
+BuffersFlags       = 0;
+ReservedFSFlags    = 0;
+OldFSFlags         = 0;
+CustomFSFlags      = 0;
+FastFSFlags        = 0;
+FSIdentifierFlags  = 0;
+MaskFlags          = 0;
+MaxTransferFlags   = 0;
+AutoMountFlags     = 0;
+CustomBootFlags    = 0;
+CustomNumFlags     = 0;
+ReservedEndFlags   = 0;
+ReservedBeginFlags = 0;
+d985 3
+a987 3
+ReservedBeginSInfoLongInt = 0;
+ReservedEndSInfoLongInt   = 0;
+CustomNumSInfoLongInt     = 0;
+a988 1
+
+a992 18
+//
+//	for (gad = FastFS; gad; gad = gad->NextGadget)
+//		gad->Flags &= ~(SELECTED|GADGDISABLED);
+//
+	if (CurrentPart->pb_Flags & PBFF_NOMOUNT)
+		AutoMountFlags &= ~SELECTED;
+	else
+		AutoMountFlags |= SELECTED;
+
+	if (CurrentPart->pb_Environment[DE_TABLESIZE] >= DE_BOOTBLOCKS)
+	{
+		CustomBootFlags |= SELECTED;
+		CustomNumFlags  &= ~GADGDISABLED;	//
+	} else {
+		CustomBootFlags &= ~SELECTED;
+		CustomNumFlags  |= GADGDISABLED;
+	}
+
+d996 16
+a1011 2
+	case 0x444f5301:				/* FFS */
+		FastFSFlags 	  |= SELECTED;
+d1013 3
+a1015 1
+		strcpy(&SelectFSText[0],"Fast File System");	//
+d1017 26
+a1042 21
+	case 0x444f5300:				/* SFS */
+		OldFSFlags 	  |= SELECTED;
+		FSIdentifierFlags |= GADGDISABLED;
+		ReservedEndFlags  |= GADGDISABLED;
+		MaskFlags	  |= GADGDISABLED;
+		MaxTransferFlags  |= GADGDISABLED;
+		strcpy(&SelectFSText[0],"Old File System");	//
+		break;
+	case 'RESV':					/* Reserved */
+		ReservedFSFlags   |= SELECTED;
+		FSIdentifierFlags |= GADGDISABLED;
+		ReservedEndFlags  |= GADGDISABLED;
+		MaskFlags	  |= GADGDISABLED;
+		MaxTransferFlags  |= GADGDISABLED;
+		BuffersFlags	  |= GADGDISABLED;
+		ReservedBeginFlags|= GADGDISABLED;
+		strcpy(&SelectFSText[0],"Reserved Partition");	//
+		break;
+	default:					/* other */
+		CustomFSFlags     |= SELECTED;
+		strcpy(&SelectFSText[0],"Custom File System");	//
+d1049 26
+d1076 13
+@
+
+
+36.8
+log
+@Call InitCustom().
+@
+text
+@d517 21
+@
+
+
+36.7
+log
+@Clean up comment
+@
+text
+@d326 2
+a327 1
+	InitReserved(CurrentPart);
+@
+
+
+36.6
+log
+@Old File Syetm -> Old File System
+@
+text
+@d73 2
+a74 1
+	LONG x,pos;
+d185 1
+a185 1
+				MyOnGadgetNew(w,CustomNum);	//
+d194 1
+a194 1
+				MyOffGadgetNew(w,CustomNum);		//
+d240 2
+a241 2
+	register struct Gadget *gad;
+	register UWORD pos;
+d286 4
+a289 4
+	MyOffGadgetNew(w,FSIdentifier);
+	MyOnGadgetNew(w,ReservedEnd);
+	MyOnGadgetNew(w,Mask);
+	MyOnGadgetNew(w,MaxTransfer);
+d291 1
+a291 1
+	MyOnGadgetNew(w,ReservedBegin);
+d313 4
+a316 4
+	MyOffGadgetNew(w,FSIdentifier);
+	MyOffGadgetNew(w,ReservedEnd);
+	MyOffGadgetNew(w,Mask);
+	MyOffGadgetNew(w,MaxTransfer);
+d318 1
+a318 1
+	MyOnGadgetNew(w,ReservedBegin);
+d336 4
+a339 4
+	MyOnGadgetNew(w,FSIdentifier);
+	MyOnGadgetNew(w,ReservedEnd);
+	MyOnGadgetNew(w,Mask);
+	MyOnGadgetNew(w,MaxTransfer);
+d341 1
+a341 1
+	MyOnGadgetNew(w,ReservedBegin);
+d358 4
+a361 4
+	MyOffGadgetNew(w,FSIdentifier);
+	MyOffGadgetNew(w,ReservedEnd);
+	MyOffGadgetNew(w,Mask);
+	MyOffGadgetNew(w,MaxTransfer);
+d363 1
+a363 1
+	MyOffGadgetNew(w,ReservedBegin);
+d505 1
+a505 1
+	register struct Gadget *gad;
+d507 5
+a511 5
+// Kaori ------ I have to clean up these value, because the FreeGadget() does not 
+//		clean gadget pointer.
+//		The other gaget pointer is not nessesary, because I don't reffer.
+//		See RebuildFSGads().
+//		These functions may be called before CreateAllGadgets().
+@
+
+
+36.5
+log
+@*** empty log message ***
+@
+text
+@d100 1
+a100 1
+					GTTX_Text,"Old File Syetm",TAG_DONE);
+d221 1
+a221 1
+// Kaori
+@
+
+
+36.4
+log
+@update gadtools gadgets
+@
+text
+@d41 1
+a41 1
+// Kaori
+d168 1
+a168 1
+			if (gad->Flags & SELECTED)	// Kaori
+d176 1
+a176 1
+			if (gad->Flags & SELECTED)	// Kaori
+d184 1
+a184 1
+				MyOnGadgetNew(w,CustomNum);	// Kaori
+d193 1
+a193 1
+				MyOffGadgetNew(w,CustomNum);		// Kaori
+d195 1
+a195 1
+					GTIN_Number,0,TAG_DONE);	// Kaori
+d257 5
+a261 5
+		RefreshGList(Mask,w,NULL,1L);		// Kaori
+		RefreshGList(MaxTransfer,w,NULL,1L);	// Kaori
+		RefreshGList(ReservedBegin,w,NULL,1L);	// Kaori
+		RefreshGList(ReservedEnd,w,NULL,1L);	// Kaori
+		RefreshGList(AutoMount,w,NULL,1L);	// Kaori
+d284 1
+a284 1
+// Kaori
+d311 1
+a311 1
+// Kaori
+d334 1
+a334 1
+// Kaori
+d356 1
+a356 1
+// Kaori
+d381 1
+a381 1
+// Kaori
+d398 1
+a398 1
+// Kaori
+d484 1
+a484 1
+ChangeEnvNum (i,gad)	// Kaori
+d519 1
+a519 1
+// Kaori --- we don't need this.
+d531 1
+a531 1
+		CustomNumFlags  &= ~GADGDISABLED;	// Kaori
+d543 1
+a543 1
+		strcpy(&SelectFSText[0],"Fast File System");	// Kaori
+d551 1
+a551 1
+		strcpy(&SelectFSText[0],"Old File System");	// Kaori
+d561 1
+a561 1
+		strcpy(&SelectFSText[0],"Reserved Partition");	// Kaori
+d565 1
+a565 1
+		strcpy(&SelectFSText[0],"Custom File System");	// Kaori
+@
+
+
+36.3
+log
+@Compile warning messages removed
+
+@
+text
+@d21 1
+d27 1
+d41 23
+d84 3
+a86 1
+			DeselectFS(w,&FastFS,DefaultFFS);
+d89 3
+a91 1
+			DeselectFS(w,&ReservedFS,DefaultReserved);
+d94 3
+a96 1
+			DeselectFS(w,&CustomFS,DefaultCustom);
+d99 3
+a101 1
+			DeselectFS(w,&OldFS,DefaultSFS);
+d112 1
+a112 1
+				RefreshGList(&Mask,w,NULL,1L);
+d123 1
+a123 1
+				RefreshGList(&Mask,w,NULL,1L);
+d140 1
+a140 1
+				RefreshGList(&MaxTransfer,w,NULL,1L);
+d144 1
+a144 1
+			ChangeEnvNum(DE_PREFAC,&ReservedEndSInfo);
+d147 1
+a147 1
+			ChangeEnvNum(DE_RESERVEDBLKS,&ReservedBeginSInfo);
+d163 1
+a163 1
+				RefreshGList(&FSIdentifier,w,NULL,1L);
+d167 2
+a168 1
+			if (AutoMount.Flags & SELECTED)
+d175 2
+a176 1
+			if (CustomBoot.Flags & SELECTED)
+d180 5
+a184 4
+				pos = RemoveGList(w,&CustomNum,1L);
+				CustomNum.Flags &= ~GADGDISABLED;
+				AddGList(w,&CustomNum,pos,1L,NULL);
+				RefreshGList(&CustomNum,w,NULL,1L);
+d188 8
+a195 5
+				pos = RemoveGList(w,&CustomNum,1L);
+				strcpy(CustomNumSIBuff,"0");
+				CustomNum.Flags |= GADGDISABLED;
+				AddGList(w,&CustomNum,pos,1L,NULL);
+				RefreshGList(&CustomNum,w,NULL,1L);
+d200 1
+a200 1
+			ChangeEnvNum(DE_BOOTBLOCKS,&CustomNumSInfo);
+d210 3
+a212 3
+			ChangeEnvNum(DE_PREFAC,&ReservedEndSInfo);
+			ChangeEnvNum(DE_RESERVEDBLKS,&ReservedBeginSInfo);
+			ChangeEnvNum(DE_BOOTBLOCKS,&CustomNumSInfo);
+d221 4
+a224 4
+
+	case MENUPICK:
+		HandleMenus(w,msg);
+		break;
+d242 7
+a248 6
+	for (gad = &FastFS; gad && gad != ReservedFS.NextGadget;
+	     gad = gad->NextGadget)
+	{
+		if (gad != newgad)
+			GadMXClr(w,gad);
+	}
+d250 3
+a252 3
+	if (!(newgad->Flags & SELECTED))
+	{
+		pos = RemoveGList(w,&FSIdentifier,6L);
+d254 8
+a261 2
+		AddGList(w,&FSIdentifier,pos,6L,NULL);
+		RefreshGList(&FSIdentifier,w,NULL,6L);
+d263 2
+a264 2
+	}
+	GadMXSet(w,newgad);
+d276 1
+a277 2
+	FSIdentifier.Flags  |= GADGDISABLED;
+
+d279 13
+a291 5
+	ReservedEnd.Flags   &= ~GADGDISABLED;
+	Mask.Flags 	    &= ~GADGDISABLED;
+	MaxTransfer.Flags   &= ~GADGDISABLED;
+	Buffers.Flags 	    &= ~GADGDISABLED;
+	ReservedBegin.Flags &= ~GADGDISABLED;
+d304 4
+a307 4
+	FSIdentifier.Flags  |= GADGDISABLED;
+	ReservedEnd.Flags   |= GADGDISABLED;
+	Mask.Flags 	    |= GADGDISABLED;
+	MaxTransfer.Flags   |= GADGDISABLED;
+d309 10
+a318 2
+	Buffers.Flags       &= ~GADGDISABLED;
+	ReservedBegin.Flags &= ~GADGDISABLED;
+d328 13
+a340 6
+	FSIdentifier.Flags  &= ~GADGDISABLED;
+	ReservedEnd.Flags   &= ~GADGDISABLED;
+	Mask.Flags 	    &= ~GADGDISABLED;
+	MaxTransfer.Flags   &= ~GADGDISABLED;
+	Buffers.Flags 	    &= ~GADGDISABLED;
+	ReservedBegin.Flags &= ~GADGDISABLED;
+d350 14
+a363 6
+	FSIdentifier.Flags  |= GADGDISABLED;
+	ReservedEnd.Flags   |= GADGDISABLED;
+	Mask.Flags 	    |= GADGDISABLED;
+	MaxTransfer.Flags   |= GADGDISABLED;
+	Buffers.Flags 	    |= GADGDISABLED;
+	ReservedBegin.Flags |= GADGDISABLED;
+d377 16
+a392 4
+	stcl_d(ReservedBeginSIBuff,p->pb_Environment[DE_RESERVEDBLKS]);
+	ReservedBeginSInfo.LongInt = p->pb_Environment[DE_RESERVEDBLKS];
+	stcl_d(ReservedEndSIBuff,p->pb_Environment[DE_PREFAC]);
+	ReservedEndSInfo.LongInt = p->pb_Environment[DE_PREFAC];
+d396 9
+a404 2
+		stcl_d(CustomNumSIBuff,p->pb_Environment[DE_BOOTBLOCKS]);
+		CustomNumSInfo.LongInt = p->pb_Environment[DE_BOOTBLOCKS];
+d407 1
+d470 1
+a470 1
+
+d482 15
+d506 9
+d519 4
+a522 3
+	for (gad = &FastFS; gad; gad = gad->NextGadget)
+		gad->Flags &= ~(SELECTED|GADGDISABLED);
+
+d524 1
+a524 1
+		AutoMount.Flags &= ~SELECTED;
+d526 1
+a526 1
+		AutoMount.Flags |= SELECTED;
+d530 2
+a531 1
+		CustomBoot.Flags |= SELECTED;
+d533 2
+a534 2
+		CustomBoot.Flags &= ~SELECTED;
+		CustomNum.Flags  |= GADGDISABLED;
+d541 3
+a543 2
+		FastFS.Flags 	   |= SELECTED;
+		FSIdentifier.Flags |= GADGDISABLED;
+d546 6
+a551 5
+		OldFS.Flags 	   |= SELECTED;
+		FSIdentifier.Flags |= GADGDISABLED;
+		ReservedEnd.Flags  |= GADGDISABLED;
+		Mask.Flags	   |= GADGDISABLED;
+		MaxTransfer.Flags  |= GADGDISABLED;
+d554 8
+a561 7
+		ReservedFS.Flags   |= SELECTED;
+		FSIdentifier.Flags |= GADGDISABLED;
+		ReservedEnd.Flags  |= GADGDISABLED;
+		Mask.Flags	   |= GADGDISABLED;
+		MaxTransfer.Flags  |= GADGDISABLED;
+		Buffers.Flags	   |= GADGDISABLED;
+		ReservedBegin.Flags |= GADGDISABLED;
+d564 3
+a566 1
+		CustomFS.Flags     |= SELECTED;
+d570 1
+a570 1
+	strcpy(&(PartNameIText.IText[10]),CurrentPart->pb_DriveName);
+@
+
+
+36.2
+log
+@Updated to compile under lc 5.10a
+@
+text
+@a179 1
+		default:
+a186 1
+	default:
+@
+
+
+36.1
+log
+@initial check in
+@
+text
+@d18 9
+a26 4
+#include <proto/exec.h>
+#include <proto/graphics.h>
+#include <proto/intuition.h>
+#include <proto/dos.h>
+@

@@ -1,0 +1,1469 @@
+head     1.18;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.18
+date     93.07.30.18.41.41;  author gregm;  state Exp;
+branches ;
+next     1.17;
+
+1.17
+date     93.02.15.17.03.01;  author kcd;  state Exp;
+branches ;
+next     1.16;
+
+1.16
+date     93.02.15.10.37.51;  author kcd;  state Exp;
+branches ;
+next     1.15;
+
+1.15
+date     92.09.03.16.18.51;  author kcd;  state Exp;
+branches ;
+next     1.14;
+
+1.14
+date     92.07.13.19.16.02;  author kcd;  state Exp;
+branches ;
+next     1.13;
+
+1.13
+date     92.07.13.16.55.53;  author kcd;  state Exp;
+branches ;
+next     1.12;
+
+1.12
+date     92.06.18.12.23.48;  author kcd;  state Exp;
+branches ;
+next     1.11;
+
+1.11
+date     92.06.08.09.56.46;  author kcd;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     92.05.05.17.28.50;  author kcd;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     92.04.10.00.38.35;  author kcd;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     92.03.23.10.21.56;  author gregm;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     92.03.06.20.59.06;  author kcd;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     92.03.04.16.57.24;  author gregm;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     92.02.27.20.58.34;  author kcd;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     92.02.20.11.07.12;  author kcd;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     92.02.18.13.44.29;  author gregm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     92.02.17.09.53.30;  author kcd;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     92.02.13.10.00.10;  author gregm;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@NIPC implementation of the Address Resolution Protocol
+@
+
+
+1.18
+log
+@Some bug fixes by Greg.
+@
+text
+@/**************************************************************************
+**
+** arp.c        - ARP Protocol routines for nipc.library
+**
+** Copyright 1992, Commodore-Amiga, Inc.
+**
+** $Id: arp.c,v 1.17 93/02/15 17:03:01 kcd Exp Locker: gregm $
+**
+***************************************************************************
+
+/*------------------------------------------------------------------------*/
+
+#include "nipcinternal.h"
+#include "externs.h"
+
+#include <string.h>
+
+#include <clib/exec_protos.h>
+#include "nipcinternal_protos.h"
+
+#include <pragmas/exec_pragmas.h>
+
+/*------------------------------------------------------------------------*/
+
+BOOL InitARP()
+{
+    register struct NBase *nb = gb;
+    NewList((struct List *) & gb->ARPList);
+    NewList((struct List *) & gb->ARPBuffer);
+    InitSemaphore(&nb->ARPBufferSemaphore);
+    return(TRUE);
+}
+
+/*------------------------------------------------------------------------*/
+
+void DeinitARP()
+{
+    register struct NBase *nb = gb;
+    struct arpentry *ae;
+    struct arpbuff *ab;
+
+    while(ae = (struct arpentry *)RemHead((struct List *) &nb->ARPList))
+    {
+        FreeMem(ae, sizeof(struct arpentry));
+    }
+
+//    ObtainSemaphore(&nb->ARPBufferSemaphore);
+    while (ab = (struct arpbuff *) RemHead((struct List *) & nb->ARPBuffer))
+    {
+        FreeBuffer(ab->ab_Buffer);
+        FreeMem(ab, sizeof(struct arpbuff));
+    }
+//    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+}
+
+/*------------------------------------------------------------------------*/
+
+void SendARPRequest(dev, ip_addr)
+ULONG ip_addr;
+struct sanadev *dev;
+{
+
+    struct arppkt *tmparp;
+    struct Buffer *bp;
+    struct BuffEntry *be;
+
+    if(bp = AllocBuffer(sizeof(struct arppkt)))
+    {
+        be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+        be->be_length = sizeof(struct arppkt);
+        tmparp = (struct arppkt *) (be->be_data);
+
+        tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+        tmparp->arp_ProtocolType = 0x800;
+        tmparp->arp_HardAddrLen = 6;
+        tmparp->arp_ProtoAddrLen = 4;
+        memcpy(&(tmparp->arp_SenderEtherAddress), &(dev->sanadev_HardAddress), 6);
+        memcpy(&(tmparp->arp_SenderIPAddress), &(dev->sanadev_IPAddress), 4);
+        memcpy(&(tmparp->arp_TargetEtherAddress), "\x00\x00\x00\x00\x00\x00", 6);
+        memcpy(&(tmparp->arp_TargetIPAddress), &ip_addr, 4);
+
+        tmparp->arp_Operation = ARP_REQUEST;
+        PacketWrite(dev, 0L, bp, 0L, PACKET_ARP, TRUE, FALSE);
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void SendARPReply(dev, ip_to, ether_to, ip_us, ether_us)
+ULONG ip_to;                    /* who this is to */
+ULONG ip_us;                    /* our IP address */
+struct sanadev *dev;            /* which device */
+UBYTE *ether_to;                /* their ethernet address */
+UBYTE *ether_us;                /* source ethernet address */
+{
+
+    struct arppkt *tmparp;
+    struct Buffer *bp;
+    struct BuffEntry *be;
+
+    if(bp = AllocBuffer(sizeof(struct arppkt)))
+    {
+        be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+        be->be_length = sizeof(struct arppkt);
+        tmparp = (struct arppkt *) (be->be_data);
+
+        tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+        tmparp->arp_ProtocolType = 0x800;
+        tmparp->arp_HardAddrLen = 6;
+        tmparp->arp_ProtoAddrLen = 4;
+        memcpy(&(tmparp->arp_SenderEtherAddress), ether_us, 6);
+        tmparp->arp_SenderIPAddress = ip_us;
+        memcpy(&(tmparp->arp_TargetEtherAddress), ether_to, 6);
+        tmparp->arp_TargetIPAddress = ip_to;
+
+        tmparp->arp_Operation = ARP_REPLY;
+
+        PacketWrite(dev, 0L, bp, (ULONG) ether_to, PACKET_ARP, FALSE, TRUE);
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void ARPInput(arpbuff, length, dev)
+struct Buffer *arpbuff;
+ULONG length;
+struct sanadev *dev;
+{
+
+    struct arppkt pkt;
+    struct sanadev *devptr;
+
+    CopyFromBuffer((UBYTE *) & pkt, arpbuff, sizeof(struct arppkt));
+    FreeBuffer(arpbuff);
+
+    switch (pkt.arp_Operation)
+    {
+        case ARP_REQUEST:
+        {
+            devptr = (struct sanadev *) gb->DeviceList.lh_Head;
+            while (devptr->sanadev_Node.mln_Succ)
+            {
+                if (devptr->sanadev_IPAddress == pkt.arp_TargetIPAddress)
+                    SendARPReply(dev, pkt.arp_SenderIPAddress,
+                           (UBYTE *) & (pkt.arp_SenderEtherAddress),
+                                 pkt.arp_TargetIPAddress,
+                         (UBYTE *) & (devptr->sanadev_HardAddress));
+                devptr = (struct sanadev *) devptr->sanadev_Node.mln_Succ;
+            }
+            break;
+        }
+
+        case ARP_REPLY:
+        {
+            int x;
+            char *a, *b;
+            a = (char *) &dev->sanadev_HardAddress[0];
+            b =  (char *) &(pkt.arp_TargetEtherAddress);
+            for (x = 0; x < 6; x++)
+            {
+                if (a[x] != b[x])
+                    break;
+            }
+            if (x == 6)
+                AddARPEntry(pkt.arp_SenderIPAddress, (UBYTE *) & (pkt.arp_SenderEtherAddress));
+            break;
+        }
+    }
+}
+
+/*------------------------------------------------------------------------*/
+
+void AddARPEntry(ip, ether)
+ULONG ip;
+UBYTE *ether;
+{
+    register struct NBase *nb = gb;
+    struct arpentry *ae;
+    int x;
+
+    Forbid();
+    x = 0;
+    ae = (struct arpentry *) gb->ARPList.mlh_Head;
+    while (ae->arpentry_link.mln_Succ)
+    {
+        x++;
+        if (ae->arpentry_IP == ip)  /* prevent duplicate entries */
+        {
+            Permit();
+            return;
+        }
+        ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+    }
+
+    if (x == TABLE_SIZE)
+        ae = (struct arpentry *) RemTail((struct List *) & nb->ARPList);
+    else
+        ae = (struct arpentry *) AllocMem(sizeof(struct arpentry), MEMF_CLEAR + MEMF_PUBLIC);
+
+    if(ae)
+    {
+        ae->arpentry_IP = ip;
+        ae->arpentry_Timeout = 1200;  /* Two minutes */
+        memcpy(&(ae->arpentry_ether), ether, 6);
+        AddHead((struct List *) & nb->ARPList, (struct Node *) ae);
+    }
+    Permit();
+
+    DoARPSends(ip);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+BOOL FindArpEntry(dev, IP, etherbuff)
+struct sanadev *dev;
+ULONG IP;
+UBYTE *etherbuff;
+{
+    register struct NBase *nb = gb;
+    struct arpentry *ae;
+
+    Forbid();
+
+    ae = (struct arpentry *) gb->ARPList.mlh_Head;
+    while (ae->arpentry_link.mln_Succ)
+    {
+        if (ae->arpentry_IP == IP)
+        {
+            memcpy(etherbuff, &(ae->arpentry_ether), 6);
+            Remove((struct Node *) ae); /* every time this entry gets used, */
+            ae->arpentry_Timeout = 1200;
+            AddHead((struct List *) & nb->ARPList, (struct Node *) ae);     /* move it to the head
+                                                                         * of the list */
+            Permit();
+            return (TRUE);
+        }
+
+        ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+    }
+
+    Permit();
+    SendARPRequest(dev, IP);
+    return (FALSE);
+
+}
+
+/*------------------------------------------------------------------------*/
+
+void DoARPSends(ipnum)
+ULONG ipnum;
+{
+    register struct NBase *nb = gb;
+    struct arpbuff *ab;
+
+    ObtainSemaphore(&nb->ARPBufferSemaphore);
+
+    ab = (struct arpbuff *) gb->ARPBuffer.mlh_Head;
+    while (ab->ab_link.mln_Succ)
+    {
+        if (ab->ab_IPAddress == ipnum || ab->ab_gateway == ipnum)
+        {
+            struct arpbuff *at;
+            at = ab;
+            ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+            Remove((struct Node *) at);
+            PacketWrite(at->ab_dev, at->ab_gateway, at->ab_Buffer, at->ab_IPAddress, at->ab_PacketType, FALSE, FALSE);
+            at->ab_Buffer->buff_refcnt--;
+            FreeMem(at, sizeof(struct arpbuff));
+        }
+        ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+    }
+
+    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+}
+
+/*------------------------------------------------------------------------*/
+
+void AddBuffList(b, address, dev, gateway, ptype)
+struct Buffer *b;
+ULONG address;
+struct sanadev *dev;
+ULONG gateway;
+UWORD ptype;
+{
+    register struct NBase *nb = gb;
+    struct arpbuff *ab;
+
+    if(ab = (struct arpbuff *) AllocMem(sizeof(struct arpbuff), MEMF_CLEAR))
+    {
+        b->buff_refcnt++;
+        ab->ab_Buffer = b;
+        ab->ab_IPAddress = address;
+        ab->ab_CountDown = BUFFERTIME;
+        ab->ab_dev = dev;
+        ab->ab_gateway = gateway;
+        ab->ab_PacketType = ptype;
+
+        ObtainSemaphore(&nb->ARPBufferSemaphore);
+        AddTail((struct List *) & nb->ARPBuffer, (struct Node *) ab);
+        ReleaseSemaphore(&nb->ARPBufferSemaphore);
+        return;
+    }
+    FreeBuffer(b);
+}
+
+/*------------------------------------------------------------------------*/
+
+/* arp_timeout() times out any old arp-buffered packets */
+void arp_timeout()
+{
+    register struct NBase *nb = gb;
+    struct arpbuff *ab;
+    struct arpentry *ae;
+    struct arpentry *tmp_ae;
+
+    ObtainSemaphore(&nb->ARPBufferSemaphore);
+
+    ab = (struct arpbuff *) gb->ARPBuffer.mlh_Head;
+    while (ab->ab_link.mln_Succ)
+    {
+        ab->ab_CountDown--;
+        if (!ab->ab_CountDown)
+        {
+            struct arpbuff *at;
+            at = ab;
+            ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+            Remove((struct Node *) at);
+            at->ab_Buffer->buff_refcnt--;
+            FreeBuffer(at->ab_Buffer);
+            FreeMem(at, sizeof(struct arpbuff));
+        }
+        ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+    }
+    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+
+    Forbid();
+    ae = (struct arpentry *)gb->ARPList.mlh_Head;
+    while(ae->arpentry_link.mln_Succ)
+    {
+        ae->arpentry_Timeout--;
+        if(!ae->arpentry_Timeout)
+        {
+            tmp_ae = ae;
+            ae = (struct arpentry *) ae->arpentry_link.mln_Pred;
+            Remove((struct Node *)tmp_ae);
+            FreeMem(tmp_ae, sizeof(struct arpentry));
+        }
+        ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+    }
+    Permit();
+}
+/*------------------------------------------------------------------------*/
+@
+
+
+1.17
+log
+@Bad Ken. Bad bad bad.  I was freeing the wrong node when freeing
+an arp request.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.16 93/02/15 10:37:51 kcd Exp Locker: kcd $
+d83 1
+a83 1
+        PacketWrite(dev, 0L, bp, 0L, PACKET_ARP, TRUE);
+d118 1
+a118 1
+        PacketWrite(dev, 0L, bp, 0L, PACKET_ARP, TRUE);
+d139 3
+d143 6
+a148 10
+                devptr = (struct sanadev *) gb->DeviceList.lh_Head;
+                while (devptr->sanadev_Node.mln_Succ)
+                {
+                    if (devptr->sanadev_IPAddress == pkt.arp_TargetIPAddress)
+                        SendARPReply(dev, pkt.arp_SenderIPAddress,
+                               (UBYTE *) & (pkt.arp_SenderEtherAddress),
+                                     pkt.arp_TargetIPAddress,
+                             (UBYTE *) & (devptr->sanadev_HardAddress));
+                    devptr = (struct sanadev *) devptr->sanadev_Node.mln_Succ;
+                }
+d150 2
+d154 6
+d161 4
+d166 2
+a167 3
+                break;
+            }
+
+a168 2
+
+
+d196 1
+a196 1
+        ae = (struct arpentry *) RemHead((struct List *) & nb->ARPList);
+d205 1
+a205 1
+        AddTail((struct List *) & nb->ARPList, (struct Node *) ae);
+d232 1
+d267 1
+a267 1
+            PacketWrite(at->ab_dev, at->ab_gateway, at->ab_Buffer, at->ab_IPAddress, at->ab_PacketType, FALSE);
+d341 9
+a349 9
+    	ae->arpentry_Timeout--;
+    	if(!ae->arpentry_Timeout)
+    	{
+    	    tmp_ae = ae;
+    	    ae = (struct arpentry *) ae->arpentry_link.mln_Pred;
+    	    Remove((struct Node *)tmp_ae);
+    	    FreeMem(tmp_ae, sizeof(struct arpentry));
+    	}
+    	ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+@
+
+
+1.16
+log
+@Added timeouts to arpentry's.  Also changed the AddTail to AddHead
+for moving arpentry's.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.15 92/09/03 16:18:51 kcd Exp Locker: kcd $
+d338 1
+a338 1
+    	    FreeMem(ae, sizeof(struct arpentry));
+@
+
+
+1.15
+log
+@Moved a buffer reference decrement to a safer place.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.14 92/07/13 19:16:02 kcd Exp Locker: kcd $
+d195 1
+d224 1
+a224 1
+            AddTail((struct List *) & nb->ARPList, (struct Node *) ae);     /* move it to the tail
+d305 2
+d326 1
+d328 15
+a342 1
+    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+@
+
+
+1.14
+log
+@Fixed a typo caught by SAS/C 6.x
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.13 92/07/13 16:55:53 kcd Exp Locker: kcd $
+d257 1
+a258 1
+            PacketWrite(at->ab_dev, at->ab_gateway, at->ab_Buffer, at->ab_IPAddress, at->ab_PacketType, FALSE);
+@
+
+
+1.13
+log
+@Made some changes to save space.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.12 92/06/18 12:23:48 kcd Exp Locker: kcd $
+d42 1
+a42 1
+    while(ae = RemHead((struct List *) &nb->ARPList))
+@
+
+
+1.12
+log
+@Fixed the damn 1500 byte memory leak!
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.11 92/06/08 09:56:46 kcd Exp Locker: kcd $
+d40 1
+d42 1
+a42 1
+    while (!IsListEmpty((struct List *) & gb->ARPList))
+a43 1
+        ae = (struct arpentry *) RemHead((struct List *) & nb->ARPList);
+d47 2
+a48 2
+    ObtainSemaphore(&nb->ARPBufferSemaphore);
+    while (!IsListEmpty((struct List *) & gb->ARPBuffer))
+a49 2
+        struct arpbuff *ab;
+        ab = (struct arpbuff *) RemHead((struct List *) & nb->ARPBuffer);
+d53 1
+a53 2
+
+    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+d244 1
+d248 2
+a249 1
+    if (!IsListEmpty((struct List *) & gb->ARPBuffer))
+d251 1
+a251 3
+        struct arpbuff *ab;
+        ab = (struct arpbuff *) gb->ARPBuffer.mlh_Head;
+        while (ab->ab_link.mln_Succ)
+d253 7
+a259 11
+            if (ab->ab_IPAddress == ipnum || ab->ab_gateway == ipnum)
+            {
+                struct arpbuff *at;
+                at = ab;
+                ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+                Remove((struct Node *) at);
+                at->ab_Buffer->buff_refcnt--;
+                PacketWrite(at->ab_dev, at->ab_gateway, at->ab_Buffer, at->ab_IPAddress, at->ab_PacketType, FALSE);
+                FreeMem(at, sizeof(struct arpbuff));
+            }
+            ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+d261 1
+@
+
+
+1.11
+log
+@Minor cleanups and changed to deal with reference counts on Buffers
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.10 92/05/05 17:28:50 kcd Exp Locker: kcd $
+d323 1
+@
+
+
+1.10
+log
+@Changed init routing to return a bool.  Checked and fixed
+any memory allocation bugs.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.9 92/04/10 00:38:35 kcd Exp Locker: kcd $
+d48 1
+a48 1
+    while (!IsListEmpty((struct List *) & gb->ARPList))
+d70 18
+a87 18
+    bp = AllocBuffer(sizeof(struct arppkt));
+    if (!bp)
+        return;
+    be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+    be->be_length = sizeof(struct arppkt);
+    tmparp = (struct arppkt *) (be->be_data);
+
+    tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+    tmparp->arp_ProtocolType = 0x800;
+    tmparp->arp_HardAddrLen = 6;
+    tmparp->arp_ProtoAddrLen = 4;
+    memcpy(&(tmparp->arp_SenderEtherAddress), &(dev->sanadev_HardAddress), 6);
+    memcpy(&(tmparp->arp_SenderIPAddress), &(dev->sanadev_IPAddress), 4);
+    memcpy(&(tmparp->arp_TargetEtherAddress), "\x00\x00\x00\x00\x00\x00", 6);
+    memcpy(&(tmparp->arp_TargetIPAddress), &ip_addr, 4);
+
+    tmparp->arp_Operation = ARP_REQUEST;
+    PacketBroadcast(dev, bp, PACKET_ARP);
+d104 19
+a122 19
+    bp = AllocBuffer(sizeof(struct arppkt));
+    if (!bp)
+        return;
+    be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+    be->be_length = sizeof(struct arppkt);
+    tmparp = (struct arppkt *) (be->be_data);
+
+    tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+    tmparp->arp_ProtocolType = 0x800;
+    tmparp->arp_HardAddrLen = 6;
+    tmparp->arp_ProtoAddrLen = 4;
+    memcpy(&(tmparp->arp_SenderEtherAddress), ether_us, 6);
+    tmparp->arp_SenderIPAddress = ip_us;
+    memcpy(&(tmparp->arp_TargetEtherAddress), ether_to, 6);
+    tmparp->arp_TargetIPAddress = ip_to;
+
+    tmparp->arp_Operation = ARP_REPLY;
+
+    PacketBroadcast(dev, bp, PACKET_ARP);
+a217 6
+    if (!gb->ARPList.mlh_Head->mln_Succ)
+    {
+        Permit();
+        SendARPRequest(dev, IP);
+        return (FALSE);
+    }
+a219 1
+
+d262 2
+a263 1
+                PacketWrite(at->ab_dev, at->ab_gateway, at->ab_Buffer, at->ab_IPAddress, at->ab_PacketType);
+d285 1
+a285 2
+    ab = (struct arpbuff *) AllocMem(sizeof(struct arpbuff), MEMF_CLEAR);
+    if (!ab)
+d287 11
+a297 1
+        FreeBuffer(b);
+d300 1
+a300 12
+
+    ab->ab_Buffer = b;
+    ab->ab_IPAddress = address;
+    ab->ab_CountDown = BUFFERTIME;
+    ab->ab_dev = dev;
+    ab->ab_gateway = gateway;
+    ab->ab_PacketType = ptype;
+
+    ObtainSemaphore(&nb->ARPBufferSemaphore);
+    AddTail((struct List *) & nb->ARPBuffer, (struct Node *) ab);
+    ReleaseSemaphore(&nb->ARPBufferSemaphore);
+
+d309 1
+d312 3
+a314 1
+    if (!IsListEmpty((struct List *) & gb->ARPBuffer))
+d316 2
+a317 3
+        struct arpbuff *ab;
+        ab = (struct arpbuff *) gb->ARPBuffer.mlh_Head;
+        while (ab->ab_link.mln_Succ)
+d319 6
+a324 11
+            ab->ab_CountDown--;
+            if (!ab->ab_CountDown)
+            {
+                struct arpbuff *at;
+                at = ab;
+                ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+                Remove((struct Node *) at);
+                FreeBuffer(at->ab_Buffer);
+                FreeMem(at, sizeof(struct arpbuff));
+            }
+            ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+d326 1
+d328 1
+@
+
+
+1.9
+log
+@Removed Dependencies on old exec_pragmas.h file.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.8 92/03/23 10:21:56 gregm Exp Locker: kcd $
+d25 1
+a25 1
+void InitARP()
+d27 1
+a27 1
+	register struct NBase *nb = gb;
+d31 1
+a31 1
+
+d38 1
+a38 1
+	register struct NBase *nb = gb;
+d172 1
+a172 1
+	register struct NBase *nb = gb;
+d195 6
+a200 4
+    ae->arpentry_IP = ip;
+    memcpy(&(ae->arpentry_ether), ether, 6);
+    AddTail((struct List *) & nb->ARPList, (struct Node *) ae);
+
+d214 1
+a214 1
+	register struct NBase *nb = gb;
+d253 1
+a253 1
+	register struct NBase *nb = gb;
+d288 1
+a288 1
+	register struct NBase *nb = gb;
+d316 1
+a316 1
+	register struct NBase *nb = gb;
+@
+
+
+1.8
+log
+@The_voodoo_stuff_is_GONE!
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.7 92/03/06 20:59:06 kcd Exp Locker: gregm $
+d27 1
+a27 1
+
+d30 1
+a30 1
+    InitSemaphore(&gb->ARPBufferSemaphore);
+d38 1
+a38 1
+
+d43 1
+a43 1
+        ae = (struct arpentry *) RemHead((struct List *) & gb->ARPList);
+d47 1
+a47 1
+    ObtainSemaphore(&gb->ARPBufferSemaphore);
+d51 1
+a51 1
+        ab = (struct arpbuff *) RemHead((struct List *) & gb->ARPBuffer);
+d56 1
+a56 1
+    ReleaseSemaphore(&gb->ARPBufferSemaphore);
+d172 1
+a172 1
+
+d191 1
+a191 1
+        ae = (struct arpentry *) RemHead((struct List *) & gb->ARPList);
+d197 1
+a197 1
+    AddTail((struct List *) & gb->ARPList, (struct Node *) ae);
+d212 1
+a215 1
+//    if (IsListEmpty((struct List *) & gb->ARPList))
+d231 1
+a231 1
+            AddTail((struct List *) & gb->ARPList, (struct Node *) ae);     /* move it to the tail
+d251 3
+a253 1
+    ObtainSemaphore(&gb->ARPBufferSemaphore);
+d274 1
+a274 1
+    ReleaseSemaphore(&gb->ARPBufferSemaphore);
+d286 1
+d303 3
+a305 3
+    ObtainSemaphore(&gb->ARPBufferSemaphore);
+    AddTail((struct List *) & gb->ARPBuffer, (struct Node *) ab);
+    ReleaseSemaphore(&gb->ARPBufferSemaphore);
+d314 1
+d316 1
+a316 1
+    ObtainSemaphore(&gb->ARPBufferSemaphore);
+d336 1
+a336 1
+    ReleaseSemaphore(&gb->ARPBufferSemaphore);
+@
+
+
+1.7
+log
+@Fixed a lurking bug related to sending packets through gateways. I dunno
+how this ever worked at all.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.6 92/03/04 16:57:24 gregm Exp Locker: kcd $
+d28 3
+a30 3
+    NewList((struct List *) & ARPList);
+    NewList((struct List *) & ARPBuffer);
+    InitSemaphore(&ARPBufferSemaphore);
+d41 1
+a41 1
+    while (!IsListEmpty((struct List *) & ARPList))
+d43 1
+a43 1
+        ae = (struct arpentry *) RemHead((struct List *) & ARPList);
+d47 2
+a48 2
+    ObtainSemaphore(&ARPBufferSemaphore);
+    while (!IsListEmpty((struct List *) & ARPList))
+d51 1
+a51 1
+        ab = (struct arpbuff *) RemHead((struct List *) & ARPBuffer);
+d56 1
+a56 1
+    ReleaseSemaphore(&ARPBufferSemaphore);
+d143 2
+a144 1
+                if (!IsListEmpty((struct List *) & DeviceList))
+d146 6
+a151 10
+                    devptr = (struct sanadev *) DeviceList.lh_Head;
+                    while (devptr->sanadev_Node.mln_Succ)
+                    {
+                        if (devptr->sanadev_IPAddress == pkt.arp_TargetIPAddress)
+                            SendARPReply(dev, pkt.arp_SenderIPAddress,
+                                   (UBYTE *) & (pkt.arp_SenderEtherAddress),
+                                         pkt.arp_TargetIPAddress,
+                                 (UBYTE *) & (devptr->sanadev_HardAddress));
+                        devptr = (struct sanadev *) devptr->sanadev_Node.mln_Succ;
+                    }
+a152 1
+                break;
+d178 2
+a179 1
+    if (!IsListEmpty((struct List *) & ARPList))
+d181 2
+a182 2
+        ae = (struct arpentry *) ARPList.mlh_Head;
+        while (ae->arpentry_link.mln_Succ)
+d184 2
+a185 7
+            x++;
+            if (ae->arpentry_IP == ip)  /* prevent duplicate entries */
+            {
+                Permit();
+                return;
+            }
+            ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+d187 1
+d191 1
+a191 1
+        ae = (struct arpentry *) RemHead((struct List *) & ARPList);
+d197 1
+a197 1
+    AddTail((struct List *) & ARPList, (struct Node *) ae);
+d215 2
+a216 1
+    if (IsListEmpty((struct List *) & ARPList))
+d223 1
+a223 1
+    ae = (struct arpentry *) ARPList.mlh_Head;
+d231 1
+a231 1
+            AddTail((struct List *) & ARPList, (struct Node *) ae);     /* move it to the tail
+d251 1
+a251 1
+    ObtainSemaphore(&ARPBufferSemaphore);
+d253 1
+a253 1
+    if (!IsListEmpty((struct List *) & ARPBuffer))
+d256 1
+a256 1
+        ab = (struct arpbuff *) ARPBuffer.mlh_Head;
+d272 1
+a272 1
+    ReleaseSemaphore(&ARPBufferSemaphore);
+d300 3
+a302 3
+    ObtainSemaphore(&ARPBufferSemaphore);
+    AddTail((struct List *) & ARPBuffer, (struct Node *) ab);
+    ReleaseSemaphore(&ARPBufferSemaphore);
+d312 2
+a313 2
+    ObtainSemaphore(&ARPBufferSemaphore);
+    if (!IsListEmpty((struct List *) & ARPBuffer))
+d316 1
+a316 1
+        ab = (struct arpbuff *) ARPBuffer.mlh_Head;
+d332 1
+a332 1
+    ReleaseSemaphore(&ARPBufferSemaphore);
+@
+
+
+1.6
+log
+@Moved globals to globals.c; externs for these in externs.h.
+@
+text
+@d7 1
+a7 1
+** $Id: arp.c,v 1.5 92/02/27 20:58:34 kcd Exp Locker: gregm $
+d265 1
+a265 1
+            if (ab->ab_IPAddress == ipnum)
+@
+
+
+1.5
+log
+@New formatting. Now uses new internal include files.
+@
+text
+@d7 1
+a7 1
+** $Id$
+d14 2
+a24 12
+/* Globals */
+
+struct MinList ARPBuffer;
+struct SignalSemaphore ARPBufferSemaphore;
+struct MinList ARPList;
+
+/* Externals */
+
+extern struct MinList DeviceList;
+
+/*------------------------------------------------------------------------*/
+
+d145 1
+a145 1
+                    devptr = (struct sanadev *) DeviceList.mlh_Head;
+@
+
+
+1.4
+log
+@Routing changed again, so FindArpEntry, etc. had to be changed.
+@
+text
+@d1 27
+d29 1
+a29 4
+/*
+ * $Header: APPN:src/libs/nipc.library/RCS/arp.c,v 1.3 92/02/18 13:44:29 gregm Exp Locker: kcd $
+ *
+ */
+a30 13
+
+#include <exec/memory.h>
+#include "s2io.h"
+#include "memory.h"
+#include "route.h"
+#include <proto/exec.h>
+#include <proto/dos.h>
+
+/* ARP 1 second buffer */
+ struct MinList ARPBuffer;
+ struct SignalSemaphore ARPBufferSemaphore;
+
+/* externals */
+d33 1
+a33 53
+/* defines for constants */
+#define TABLE_SIZE 15
+
+/* BUFFERTIME is the number of tenths of a second that packets are held onto
+ * while we hope for an ARP resolution.
+ */
+#define BUFFERTIME 10
+
+/* currently hardcoded for ethernet.  It CAN be expanded, though. */
+
+struct arppkt
+   {
+   UWORD  arp_HardwareType;
+   UWORD  arp_ProtocolType;
+   UBYTE  arp_HardAddrLen;
+   UBYTE  arp_ProtoAddrLen;
+   UWORD  arp_Operation;
+   UBYTE  arp_SenderEtherAddress[6];
+   ULONG  arp_SenderIPAddress;
+   UBYTE  arp_TargetEtherAddress[6];
+   ULONG  arp_TargetIPAddress;
+   };
+
+
+struct arpentry
+   {
+   struct MinNode arpentry_link;
+   UBYTE          arpentry_ether[6];
+   ULONG          arpentry_IP;
+   };
+
+struct arpbuff
+   {
+   struct MinNode    ab_link;      /* link .. */
+   ULONG             ab_IPAddress; /* The IP address this sucker is going to */
+   struct Buffer    *ab_Buffer;    /* The buffer for this thing */
+   UWORD             ab_CountDown; /* # of tenths of a second this thing has left to live */
+   struct sanadev   *ab_dev;
+   ULONG             ab_gateway;
+   UWORD             ab_PacketType;
+   };
+
+/* the static list for keeping track of entries */
+
+ struct MinList ARPList;
+
+#define ARP_REQUEST 1
+#define ARP_REPLY   2
+
+/* prototypes */
+struct Buffer *AllocBuffer();
+void AddARPEntry();
+void DoARPSends();
+d38 3
+a40 3
+ NewList((struct List *)&ARPList);
+ NewList((struct List *)&ARPBuffer);
+ InitSemaphore(&ARPBufferSemaphore);
+d44 2
+d49 1
+a49 1
+struct arpentry *ae;
+d51 16
+a66 16
+ while (!IsListEmpty((struct List *) &ARPList))
+   {
+   ae = (struct arpentry *) RemHead((struct List *)&ARPList);
+   FreeMem(ae,sizeof(struct arpentry));
+   }
+
+ ObtainSemaphore(&ARPBufferSemaphore);
+ while (!IsListEmpty((struct List *) &ARPList))
+   {
+   struct arpbuff *ab;
+   ab = (struct arpbuff *) RemHead((struct List *)&ARPBuffer);
+   FreeBuffer(ab->ab_Buffer);
+   FreeMem(ab,sizeof(struct arpbuff));
+   }
+
+ ReleaseSemaphore(&ARPBufferSemaphore);
+d69 1
+d71 1
+a71 1
+void SendARPRequest(dev,ip_addr)
+d76 3
+a78 3
+struct arppkt *tmparp;
+struct Buffer *bp;
+struct BuffEntry *be;
+d80 53
+a132 51
+ bp = AllocBuffer(sizeof(struct arppkt));
+ if (!bp) return;
+ be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+ be->be_length = sizeof(struct arppkt);
+ tmparp = (struct arppkt *) (be->be_data);
+
+ tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+ tmparp->arp_ProtocolType = 0x800;
+ tmparp->arp_HardAddrLen = 6;
+ tmparp->arp_ProtoAddrLen = 4;
+ memcpy(&(tmparp->arp_SenderEtherAddress),&(dev->sanadev_HardAddress),6);
+ memcpy(&(tmparp->arp_SenderIPAddress),&(dev->sanadev_IPAddress),4);
+ memcpy(&(tmparp->arp_TargetEtherAddress),"\x00\x00\x00\x00\x00\x00",6);
+ memcpy(&(tmparp->arp_TargetIPAddress),&ip_addr,4);
+
+ tmparp->arp_Operation = ARP_REQUEST;
+// kprintf("SendARPRequest: Looking for %lx.\n",ip_addr);
+ PacketBroadcast(dev, bp, PACKET_ARP);
+}
+
+
+void SendARPReply(dev,ip_to, ether_to, ip_us, ether_us)
+ULONG ip_to;                /* who this is to */
+ULONG ip_us;                /* our IP address */
+struct sanadev *dev;        /* which device */
+UBYTE *ether_to;            /* their ethernet address */
+UBYTE *ether_us;            /* source ethernet address */
+{
+
+struct arppkt *tmparp;
+struct Buffer *bp;
+struct BuffEntry *be;
+
+ bp = AllocBuffer(sizeof(struct arppkt));
+ if (!bp) return;
+ be = (struct BuffEntry *) (bp->buff_list.mlh_Head);
+ be->be_length = sizeof(struct arppkt);
+ tmparp = (struct arppkt *) (be->be_data);
+
+ tmparp->arp_HardwareType = dev->sanadev_HardwareType;
+ tmparp->arp_ProtocolType = 0x800;
+ tmparp->arp_HardAddrLen = 6;
+ tmparp->arp_ProtoAddrLen = 4;
+ memcpy(&(tmparp->arp_SenderEtherAddress),ether_us,6);
+ tmparp->arp_SenderIPAddress = ip_us;
+ memcpy(&(tmparp->arp_TargetEtherAddress),ether_to,6);
+ tmparp->arp_TargetIPAddress = ip_to;
+
+ tmparp->arp_Operation = ARP_REPLY;
+
+ PacketBroadcast(dev, bp, PACKET_ARP);
+d135 1
+d137 1
+a137 1
+void ARPInput(arpbuff,length,dev)
+d143 25
+a167 2
+struct arppkt pkt;
+struct sanadev *devptr;
+d169 1
+a169 11
+ CopyFromBuffer(&pkt,arpbuff,sizeof(struct arppkt));
+ FreeBuffer(arpbuff);
+
+ switch (pkt.arp_Operation)
+   {
+   case ARP_REQUEST:
+      {
+      if (!IsListEmpty( (struct List *) &DeviceList))
+         {
+         devptr = (struct sanadev *) DeviceList.mlh_Head;
+         while (devptr->sanadev_Node.mln_Succ)
+d171 2
+a172 6
+            if (devptr->sanadev_IPAddress == pkt.arp_TargetIPAddress)
+               SendARPReply(dev,pkt.arp_SenderIPAddress,
+                              &(pkt.arp_SenderEtherAddress),
+                                pkt.arp_TargetIPAddress,
+                              &(devptr->sanadev_HardAddress));
+            devptr = (struct sanadev *) devptr->sanadev_Node.mln_Succ;
+a173 3
+         }
+      break;
+      }
+d175 1
+a175 7
+   case ARP_REPLY:
+      {
+      AddARPEntry(pkt.arp_SenderIPAddress,&(pkt.arp_SenderEtherAddress));
+      break;
+      }
+
+   }
+d180 3
+a182 1
+void AddARPEntry(ip,ether)
+d187 2
+a188 2
+struct arpentry *ae;
+int x;
+d190 16
+a205 27
+ Forbid();
+ x = 0;
+ if (!IsListEmpty( (struct List *) &ARPList))
+   {
+   ae = (struct arpentry *) ARPList.mlh_Head;
+   while (ae->arpentry_link.mln_Succ)
+      {
+      x++;
+      if (ae->arpentry_IP == ip)          /* prevent duplicate entries */
+         {
+         Permit();
+         return;
+         }
+      ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+      }
+   }
+
+ if (x == TABLE_SIZE)
+   ae = (struct arpentry *) RemHead((struct List *)&ARPList);
+ else
+   ae = (struct arpentry *) AllocMem(sizeof(struct arpentry),MEMF_CLEAR+MEMF_PUBLIC);
+
+ ae->arpentry_IP = ip;
+ memcpy(&(ae->arpentry_ether),ether,6);
+ AddTail((struct List *)&ARPList,(struct Node *)ae);
+
+ Permit();
+d207 12
+a218 1
+ DoARPSends(ip);
+d222 2
+d229 1
+a229 1
+struct arpentry *ae;
+d231 28
+a258 27
+ Forbid();
+ if (IsListEmpty( (struct List *) &ARPList))
+   {
+   Permit();
+   SendARPRequest(dev,IP);
+   return(FALSE);
+   }
+
+ ae = (struct arpentry *) ARPList.mlh_Head;
+
+ while (ae->arpentry_link.mln_Succ)
+   {
+   if (ae->arpentry_IP == IP)
+      {
+      memcpy(etherbuff,&(ae->arpentry_ether),6);
+      Remove((struct Node *)ae);                /* every time this entry gets used, */
+      AddTail((struct List *)&ARPList,(struct Node *)ae);      /* move it to the tail of the list */
+      Permit();
+      return(TRUE);
+      }
+
+   ae = (struct arpentry *) ae->arpentry_link.mln_Succ;
+   }
+
+ Permit();
+ SendARPRequest(dev,IP);
+ return(FALSE);
+d262 1
+d267 1
+a267 1
+ ObtainSemaphore(&ARPBufferSemaphore);
+d269 18
+a286 18
+ if (!IsListEmpty( (struct List *) &ARPBuffer))
+   {
+   struct arpbuff *ab;
+   ab = (struct arpbuff *) ARPBuffer.mlh_Head;
+   while (ab->ab_link.mln_Succ)
+      {
+      if (ab->ab_IPAddress == ipnum)
+         {
+         struct arpbuff *at;
+         at = ab;
+         ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+         Remove((struct Node *)at);
+         PacketWrite(at->ab_dev,at->ab_gateway,at->ab_Buffer,at->ab_IPAddress,at->ab_PacketType);
+         FreeMem(at,sizeof(struct arpbuff));
+         }
+      ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+      }
+   }
+d288 1
+a288 1
+ ReleaseSemaphore(&ARPBufferSemaphore);
+d291 3
+a293 1
+void AddBuffList(b,address,dev,gateway,ptype)
+d300 1
+a300 1
+ struct arpbuff *ab;
+d302 17
+a318 17
+ ab = (struct arpbuff *) AllocMem(sizeof(struct arpbuff),MEMF_CLEAR);
+ if (!ab)
+   {
+   FreeBuffer(b);
+   return;
+   }
+
+ ab->ab_Buffer = b;
+ ab->ab_IPAddress = address;
+ ab->ab_CountDown = BUFFERTIME;
+ ab->ab_dev = dev;
+ ab->ab_gateway = gateway;
+ ab->ab_PacketType = ptype;
+
+ ObtainSemaphore(&ARPBufferSemaphore);
+ AddTail( (struct List *) &ARPBuffer, (struct Node *)ab);
+ ReleaseSemaphore(&ARPBufferSemaphore);
+d322 1
+d328 21
+a348 21
+ ObtainSemaphore(&ARPBufferSemaphore);
+ if (!IsListEmpty( (struct List *) &ARPBuffer ))
+   {
+   struct arpbuff *ab;
+   ab = (struct arpbuff *) ARPBuffer.mlh_Head;
+   while (ab->ab_link.mln_Succ)
+      {
+      ab->ab_CountDown --;
+      if (!ab->ab_CountDown)
+         {
+         struct arpbuff *at;
+         at = ab;
+         ab = (struct arpbuff *) ab->ab_link.mln_Pred;
+         Remove((struct Node *)at);
+         FreeBuffer(at->ab_Buffer);
+         FreeMem(at,sizeof(struct arpbuff));
+         }
+      ab = (struct arpbuff *) ab->ab_link.mln_Succ;
+      }
+   }
+ ReleaseSemaphore(&ARPBufferSemaphore);
+d350 1
+a350 1
+
+@
+
+
+1.3
+log
+@Fixed a bug vs. s2io.c in the way arp entries are added
+@
+text
+@d3 1
+a3 1
+ * $Header: APPN:src/libs/nipc.library/RCS/arp.c,v 1.2 92/02/17 09:53:30 kcd Exp Locker: gregm $
+d59 2
+a60 1
+   struct NIPCRoute *ab_route;
+d134 1
+a134 1
+
+d310 1
+a310 1
+         PacketWrite(at->ab_route,at->ab_Buffer,at->ab_IPAddress,at->ab_PacketType);
+d320 1
+a320 1
+void AddBuffList(b,address,route,ptype)
+d323 2
+a324 1
+struct NIPCRoute *route;
+d339 2
+a340 1
+ ab->ab_route = route;
+@
+
+
+1.2
+log
+@Added routing code.
+@
+text
+@d3 1
+a3 1
+ * $Header: APPN:src/libs/nipc.library/RCS/arp.c,v 1.1 92/02/13 10:00:10 gregm Exp Locker: kcd $
+d261 1
+d264 1
+a267 2
+
+ Forbid();
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d3 1
+a3 1
+ * $Header$
+d11 1
+d55 6
+a60 6
+   struct MinNode  ab_link;      /* link .. */
+   ULONG           ab_IPAddress; /* The IP address this sucker is going to */
+   struct Buffer  *ab_Buffer;    /* The buffer for this thing */
+   UWORD           ab_CountDown; /* # of tenths of a second this thing has left to live */
+   struct sanadev *ab_sanadev;
+   UWORD           ab_PacketType;
+d309 1
+a309 1
+         PacketWrite(at->ab_sanadev,at->ab_Buffer,at->ab_IPAddress,at->ab_PacketType);
+d319 1
+a319 1
+void AddBuffList(b,address,dev,ptype)
+d322 1
+a322 1
+struct sanadev *dev;
+d337 1
+a337 1
+ ab->ab_sanadev = dev;
+@

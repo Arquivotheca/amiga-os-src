@@ -1,0 +1,1607 @@
+head     38.3;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @*   @;
+
+
+38.3
+date     92.03.11.17.34.06;  author vertex;  state Exp;
+branches ;
+next     38.2;
+
+38.2
+date     92.01.27.12.15.27;  author vertex;  state Exp;
+branches ;
+next     38.1;
+
+38.1
+date     91.11.01.13.46.07;  author vertex;  state Exp;
+branches ;
+next     1.10;
+
+1.10
+date     91.02.06.19.47.20;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.01.28.19.06.05;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.02.17.49.01;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.12.10.23.46.01;  author Jim_Cooper;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.10.12.10.51.03;  author Unknown;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.10.11.22.20.51;  author Unknown;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.04.22.02.29.02;  author andy;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.04.06.15.25.42;  author andy;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.03.01.19.29.36;  author andy;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.01.22.19.52.20;  author andy;  state Exp;
+branches ;
+next     1.0;
+
+1.0
+date     90.01.22.19.30.48;  author andy;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Info command for cdos
+@
+
+
+38.3
+log
+@Added support for DOS\4 and DOS\5 file systems
+@
+text
+@
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* |_o_o|\\ Copyright (c) 1989 The Software Distillery.  All Rights Reserved */
+/* |. o.| || This program may not be distributed without the permission of   */
+/* | .	| || the authors:			      BBS: (919) 382-8265    */
+/* | o	| ||   Dave Baker      Alan Beale	  Jim Cooper		     */
+/* |  . |//    Jay Denebeim    Bruce Drake	  Gordon Keener 	     */
+/* ======      John Mainwaring Andy Mercier	  Jack Rouse		     */
+/*	       John Toebes     Mary Ellen Toebes  Doug Walker		     */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+**/
+
+/*---------------------------------------------------------------------------*/
+/* Command: Info							     */
+/* Author:  Dave F. Baker						     */
+/* Change History:							     */
+/*  Date    Person	  Action					     */
+/* -------  ------------- -----------------				     */
+/* 19MAR89  John Toebes   Initial Creation				     */
+/* 26MAR89  Dave Baker	  Don't call me gutless                              */
+/* 07DEC89  Jim Cooper	  Conversion to 1.4, Code Cleanup, Commenting	     */
+/* 22FEB90  Jim Cooper	  Final code changes.				     */
+/* 11OCT90  Jim Cooper	  Made Info let go of DosList Lock sooner.	     */
+/* 18OCT90  Jim Cooper	  Finally updated to use latest include files.	     */
+/* 10DEC90  Jim Cooper	  Fixed percentage printing, unfortunately, it	     */
+/*			  slowed the code down a bit.			     */
+/* 02JAN91  Jim Cooper	  Fixed to show "unreadable" if disk in drive is not */
+/*			  one of the valid types.  Used to show "No disk"    */
+/*			  unless the disk was specifically marked "BAD\0".   */
+/* 28JAN91  Jim Cooper	  Fixed to use Utility library again.  A little bit  */
+/*			  bigger, but MUCH faster!  Also, rearranged code a  */
+/*			  bit for performance' sake.                         */
+/* 06FEB91  Jim Cooper	  FINALLY!!!  Made the device/volume names work!!!   */
+/* Notes:								     */
+/*---------------------------------------------------------------------------*/
+
+#include <internal/commands.h>
+#include <libraries/filehandler.h>
+#include <dos.h>
+#include <string.h>
+#include "info_rev.h"
+
+#define MSG_VOL_MOUNTED     "[Mounted]"
+#define MSG_DEV_HEADER	    "\nMounted disks:\n\
+Unit	  Size	  Used	  Free Full Errs   Status   Name\n"
+#define MSG_VOL_HEADER	    "\nVolumes available:\n"
+#define MSG_PROT_READ_ONLY  "Read Only"
+#define MSG_PROT_VALIDATING "Validating"
+#define MSG_PROT_READ_WRITE "Read/Write"
+#define MSG_TYPE_NONE	    "No disk present"
+#define MSG_TYPE_BAD	    "Unreadable disk"
+#define MSG_TYPE_KICK	    "Kickstart disk"
+#define MSG_TYPE_NDOS	    "Not a DOS disk"
+/* 28-Jan-91  Moved these here because other countries' "Kilo" or "Mega"
+   may start with different letters. */
+#define MSG_KILOBYTES	    "K"
+#define MSG_MEGABYTES	    "M"
+
+#define TEMPLATE  "DEVICE" CMDREV
+#define OPT_DRIVE 0
+#define OPT_COUNT 1
+
+/*---------------------------------------------------------------------------*/
+/* Private structure for keeping track of DosList entries.		     */
+/*---------------------------------------------------------------------------*/
+struct DosListKeeper {
+  struct DosListKeeper *next;
+  struct DosList doslist;
+  struct InfoData id;
+};
+
+/* because <dos/dos.h> has these incorrectly defined in 2.04 */
+#ifdef ID_INTER_DOS_DISK
+#undef ID_INTER_DOS_DISK
+#endif
+
+#ifdef ID_INTER_FFS_DISK
+#undef ID_INTER_FFS_DISK
+#endif
+
+#define ID_INTER_DOS_DISK (0x444F5302L)	/* 'DOS\2' */
+#define ID_INTER_FFS_DISK (0x444F5303L)	/* 'DOS\3' */
+#define ID_DC_DOS_DISK    (0x444F5304L)	/* 'DOS\4' */
+#define ID_DC_FFS_DISK    (0x444F5305L)	/* 'DOS\5' */
+
+
+/*---------------------------------------------------------------------------*/
+/* Global structure is used to pass info between the two routines.	     */
+/*---------------------------------------------------------------------------*/
+struct Global {
+  struct DosLibrary *DOSBase;
+  struct Library *UtilityBase;
+};
+
+void PrintInfo(struct Global *, struct InfoData *, struct DosList *, BOOL);
+
+#define DOSBase global.DOSBase
+#define UtilityBase global.UtilityBase
+
+int cmd_info(void)
+{
+  struct Library *SysBase = (*((struct Library **) 4));
+  struct Global global;
+  long opts[OPT_COUNT];
+  int i, rc, stopnow=0, printit=0;
+  char *ptr;
+  struct DosList *dlist, *tlist, *device, *volume;
+  struct DosListKeeper *dkhead, *dktail, *dktemp;
+  struct RDargs *rdargs;
+  struct InfoData *id;
+
+  memset((char *)&global, 0, sizeof(global));
+  rc = RETURN_FAIL;
+  dkhead = NULL;
+
+  /*-------------------------------------------------------------------------*/
+  /* I need the DOS library and the Utility library.			     */
+  /*-------------------------------------------------------------------------*/
+  if (((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)) != NULL) &&
+      ((UtilityBase = OpenLibrary("utility.library", DOSVER)) != NULL)) {
+
+    memset((char *)opts, 0, sizeof(opts));
+    rdargs = ReadArgs(TEMPLATE, opts, NULL);
+
+    /*-----------------------------------------------------------------------*/
+    /* If ReadArgs() had a problem, we need to get out.                      */
+    /*-----------------------------------------------------------------------*/
+    if (rdargs == NULL) {
+      PrintFault(IoErr(), NULL);
+    }
+    else {
+
+      /*---------------------------------------------------------------------*/
+      /* Set aside a buffer to use while walking the DosList.		     */
+      /*---------------------------------------------------------------------*/
+      if ((id = AllocVec(sizeof(struct InfoData),
+			 MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+	PrintFault(IoErr(),NULL);
+      } else {
+	if (opts[OPT_DRIVE] == NULL) {
+
+	  /*-----------------------------------------------------------------*/
+	  /* If the user didn't specify a specific device, do 'em all!       */
+	  /*-----------------------------------------------------------------*/
+	  dlist = LockDosList(LDF_DEVICES|LDF_READ);
+	  tlist = dlist;
+	  while (tlist = NextDosEntry(tlist,LDF_DEVICES|LDF_READ)) {
+
+	    /*---------------------------------------------------------------*/
+	    /* Andy added this so we can get out of the middle of the loop.  */
+	    /* Not compatible with the old Info, but... :-)		     */
+	    /*---------------------------------------------------------------*/
+	    if (CheckSignal(SIGBREAKF_CTRL_C)) {
+	      stopnow=TRUE;
+	      PrintFault(ERROR_BREAK,NULL);
+	      break;
+	    }
+	    if (tlist->dol_Task && DoPkt4(tlist->dol_Task, ACTION_DISK_INFO,
+					 MKBADDR(id), NULL, NULL, NULL)) {
+
+	      /*-------------------------------------------------------------*/
+	      /* Ok, we found one.  Now we have to save it!  Can't hog the   */
+	      /* DosList while we print, dontcha know.			     */
+	      /*-------------------------------------------------------------*/
+	      if ((dktemp = AllocVec(sizeof(struct DosListKeeper),
+				     MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+		PrintFault(IoErr(),NULL);
+		break;
+	      }
+
+	      /*-------------------------------------------------------------*/
+	      /* Make a copy of the DosList for later use.		     */
+	      /*-------------------------------------------------------------*/
+	      memcpy((char *)&dktemp->doslist,(char *)tlist,
+		     sizeof(struct DosList));
+
+	      /*-------------------------------------------------------------*/
+	      /* Also need a copy of the InfoData structure.		     */
+	      /*-------------------------------------------------------------*/
+	      memcpy((char *)&dktemp->id,(char *)id,sizeof(struct InfoData));
+
+	      /*-------------------------------------------------------------*/
+	      /* Add it to our private list for later printing. 	     */
+	      /*-------------------------------------------------------------*/
+	      if (dkhead == NULL) {
+		dkhead = dktail = dktemp;
+	      } else {
+		dktail->next = dktemp;
+		dktail = dktemp;
+	      }
+	    }
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Give up the list until we have printed this section.	     */
+	  /*-----------------------------------------------------------------*/
+	  UnLockDosList(LDF_DEVICES|LDF_READ);
+
+	  /*-----------------------------------------------------------------*/
+	  /* Print header for this section.				     */
+	  /*-----------------------------------------------------------------*/
+	  PutStr(MSG_DEV_HEADER);
+
+	  /*-----------------------------------------------------------------*/
+	  /* Walk the list, printing info for each device we found above.  I */
+	  /* know we could have inconsistent data (if somebody popped out a  */
+	  /* disk since we saved this, for instance), but this is all we     */
+	  /* can do if we don't want to block.                               */
+	  /*-----------------------------------------------------------------*/
+	  while (dkhead) {
+	    PrintInfo(&global, (struct InfoData *)&dkhead->id,
+		      (struct DosList *)&dkhead->doslist, 0);
+	    dktemp = dkhead->next;
+	    FreeVec(dkhead);
+	    dkhead = dktemp;
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* If they didn't hit Ctrl-C, do the next section.                 */
+	  /*-----------------------------------------------------------------*/
+	  if (!stopnow) {
+	    dlist = LockDosList(LDF_VOLUMES|LDF_READ);
+	    tlist = dlist;
+	    while (tlist = NextDosEntry(tlist,LDF_VOLUMES|LDF_READ)) {
+
+	      /*-------------------------------------------------------------*/
+	      /* Same thing as above; save things for later.		     */
+	      /*-------------------------------------------------------------*/
+	      if ((dktemp = AllocVec(sizeof(struct DosListKeeper),
+				     MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+		PrintFault(IoErr(),NULL);
+		break;
+	      }
+
+	      /*-------------------------------------------------------------*/
+	      /* Copy necessary data... 				     */
+	      /*-------------------------------------------------------------*/
+	      memcpy((char *)&dktemp->doslist,(char *)tlist,
+		     sizeof(struct DosList));
+	      memcpy((char *)&dktemp->id,(char *)id,sizeof(struct InfoData));
+
+	      /*-------------------------------------------------------------*/
+	      /* ...and add it to the list.				     */
+	      /*-------------------------------------------------------------*/
+	      if (dkhead == NULL) {
+		dkhead = dktail = dktemp;
+	      } else {
+		dktail->next = dktemp;
+		dktail = dktemp;
+	      }
+	    }
+
+	    /*---------------------------------------------------------------*/
+	    /* Let go of the DosList.					     */
+	    /*---------------------------------------------------------------*/
+	    UnLockDosList(LDF_VOLUMES|LDF_READ);
+
+	    /*---------------------------------------------------------------*/
+	    /* Print section header...					     */
+	    /*---------------------------------------------------------------*/
+	    PutStr(MSG_VOL_HEADER);
+
+	    /*---------------------------------------------------------------*/
+	    /* ...and everything we have collected in the list. 	     */
+	    /*---------------------------------------------------------------*/
+	    while (dkhead) {
+	      PrintInfo(&global, (struct InfoData *)&dkhead->id,
+			(struct DosList *)&dkhead->doslist, 1);
+	      dktemp = dkhead->next;
+	      FreeVec(dkhead);
+	      dkhead = dktemp;
+	    }
+	  }
+	} else {
+
+	  /*-----------------------------------------------------------------*/
+	  /* Ok, they DID ask for a specific device.			     */
+	  /*-----------------------------------------------------------------*/
+	  dlist = LockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+
+	  /*-----------------------------------------------------------------*/
+	  /* We have to have the device name WITHOUT the trailing ':'.       */
+	  /*-----------------------------------------------------------------*/
+	  for (ptr=(char *)opts[OPT_DRIVE],i=0;
+		i<strlen((char *)opts[OPT_DRIVE]);
+		ptr++,i++) {
+	    if (*ptr == ':') {
+	      *ptr = 0;
+	      break;
+	    }
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Look for it...						     */
+	  /*-----------------------------------------------------------------*/
+	  if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+				   LDF_DEVICES|LDF_VOLUMES|LDF_READ)) {
+	    if (tlist->dol_Task && DoPkt4(tlist->dol_Task, ACTION_DISK_INFO,
+					 MKBADDR(id), NULL, NULL, NULL)) {
+	      /*-------------------------------------------------------------*/
+	      /* Since we are only doing one, we don't need to do any of the */
+	      /* contortions of the above loops.  All we need to do is	     */
+	      /* decide if we got something, and save it if so. 	     */
+	      /*-------------------------------------------------------------*/
+	      device = volume = tlist;
+	      tlist = dlist;
+
+	      while (tlist = NextDosEntry(tlist,LDF_DEVICES|LDF_VOLUMES)) {
+		if (tlist->dol_Task == device->dol_Task) {
+		  if (tlist->dol_Type != device->dol_Type) {
+		    if (device->dol_Type == DLT_DEVICE) {
+		      volume = tlist;
+		    } else {
+		      device = tlist;
+		    }
+		    break;
+		  }
+		}
+	      }
+	      printit = 1;
+	    }
+	  }
+	  UnLockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+
+	  /*-----------------------------------------------------------------*/
+	  /* If 'printit' is non-zero, we need to print the node just found, */
+	  /* with appropriate headers.					     */
+	  /*-----------------------------------------------------------------*/
+	  if (printit) {
+	    PutStr(MSG_DEV_HEADER);
+	    PrintInfo(&global, id, device, 0);
+	    PutStr(MSG_VOL_HEADER);
+	    PrintInfo(&global, id, volume, 1);
+	  }
+	}
+	FreeVec(id);
+	rc = RETURN_OK;
+      }
+      FreeArgs(rdargs);
+    }
+    CloseLibrary(UtilityBase);
+    CloseLibrary((struct Library *)DOSBase);
+  } else {
+    if (DOSBase) {
+      CloseLibrary((struct Library *)DOSBase);
+    }
+    OPENFAIL;
+  }
+  return(rc);
+}
+
+#define PID_UNIT      0
+#define PID_TYPE      1
+#define PID_SIZE      1
+#define PID_SIZEMULT  2
+#define PID_USED      3
+#define PID_FREE      4
+#define PID_FULL      5
+#define PID_ERR       6
+#define PID_STATUS    7
+#define PID_NAME      8
+#define PID_COUNT     9
+
+#undef DOSBase
+#define DOSBase global->DOSBase
+#undef UtilityBase
+#define UtilityBase global->UtilityBase
+
+void PrintInfo(struct Global *global, struct InfoData *infotoprt,
+	       struct DosList *dlist, BOOL volume)
+{
+  LONG prtinfo[PID_COUNT];
+  LONG temp;
+  LONG size;
+  LONG percent;
+  char *ptr;
+  char devname[ENVMAX];
+  char volname[ENVMAX];
+
+  ptr = (char *)BADDR(dlist->dol_Name);
+  memcpy(devname, &ptr[1], (long)ptr[0]);
+  devname[ptr[0]] = NULL;
+  prtinfo[PID_UNIT] = (long)devname;
+
+  if (volume) {
+
+    /*-----------------------------------------------------------------------*/
+    /* Tell whether the volume is Mounted or not.			     */
+    /*-----------------------------------------------------------------------*/
+    if (dlist->dol_Task) {
+      prtinfo[PID_TYPE] = (long)MSG_VOL_MOUNTED;
+    } else {
+      prtinfo[PID_TYPE] = (long)"";
+    }
+    VPrintf("%s %s\n", prtinfo);
+  } else {
+
+    /*-----------------------------------------------------------------------*/
+    /* Since we stripped the ':' in the other routine, we need to put it     */
+    /* back on for printing purposes.					     */
+    /*-----------------------------------------------------------------------*/
+    strcat(devname,":");
+
+    /*-----------------------------------------------------------------------*/
+    /* Check to see if it is a normal DOS disk. 			     */
+    /*-----------------------------------------------------------------------*/
+    if ((infotoprt->id_DiskType != ID_DOS_DISK) &&
+	(infotoprt->id_DiskType != ID_FFS_DISK) &&
+	(infotoprt->id_DiskType != ID_INTER_DOS_DISK) &&
+	(infotoprt->id_DiskType != ID_INTER_FFS_DISK) &&
+	(infotoprt->id_DiskType != ID_DC_DOS_DISK) &&
+	(infotoprt->id_DiskType != ID_DC_FFS_DISK) &&
+	(infotoprt->id_DiskType != ID_MSDOS_DISK)) {
+
+      /*---------------------------------------------------------------------*/
+      /* If not, figure out Disk Type.					     */
+      /*---------------------------------------------------------------------*/
+      switch (infotoprt->id_DiskType) {
+	case -1:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_NONE;
+	  break;
+	case ID_KICKSTART_DISK:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_KICK;
+	  break;
+	case ID_NOT_REALLY_DOS:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_NDOS;
+	  break;
+	default:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_BAD;
+	  break;
+      }
+      VPrintf("%-10s%s\n", prtinfo);
+    } else {
+
+      /*---------------------------------------------------------------------*/
+      /* It IS a normal DOS disk, so report all necessary info. 	     */
+      /*---------------------------------------------------------------------*/
+      ptr = (char *)BADDR(infotoprt->id_VolumeNode);
+      ptr = (char *)BADDR(((struct DeviceList *)(ptr))->dl_Name);
+      memset(volname, 0, ENVMAX);
+      memcpy(volname, &ptr[1], (long)ptr[0]);
+
+      prtinfo[PID_NAME] = (long)volname;
+
+      /*---------------------------------------------------------------------*/
+      /* Fill in number of blocks used and number of blocks free.	     */
+      /*---------------------------------------------------------------------*/
+      prtinfo[PID_ERR]	= infotoprt->id_NumSoftErrors;
+      prtinfo[PID_USED] = infotoprt->id_NumBlocksUsed;
+      prtinfo[PID_FREE] = ((infotoprt->id_NumBlocks) -
+			   (infotoprt->id_NumBlocksUsed));
+
+      /*---------------------------------------------------------------------*/
+      /* Calculate Disk Size in kilo or mega bytes.  As per discussions      */
+      /* with RJesup, it seems appropriate to leave the number of reserved   */
+      /* blocks OUT of the calculation of total disk space, since you will   */
+      /* NEVER be able to use this space, anyway.			     */
+      /*---------------------------------------------------------------------*/
+      size = UMult32(infotoprt->id_BytesPerBlock,infotoprt->id_NumBlocks);
+      prtinfo[PID_SIZE] = size >> 10;
+      prtinfo[PID_SIZEMULT] = (long)MSG_KILOBYTES;
+      if (prtinfo[PID_SIZE] > 9999) {
+	prtinfo[PID_SIZE] = size >> 20;
+	prtinfo[PID_SIZEMULT] = (long)MSG_MEGABYTES;
+      }
+
+      /*---------------------------------------------------------------------*/
+      /* Calculate Percent Full.					     */
+      /*---------------------------------------------------------------------*/
+      temp = UMult32(100, infotoprt->id_NumBlocksUsed);
+      percent = UDivMod32(temp, (infotoprt->id_NumBlocks));
+      if (getreg(1) >= (infotoprt->id_NumBlocks >> 1)) {
+	++percent;
+      }
+      prtinfo[PID_FULL] = percent;
+
+      /*---------------------------------------------------------------------*/
+      /* Figure out Disk Status.					     */
+      /*---------------------------------------------------------------------*/
+      switch (infotoprt->id_DiskState) {
+	case ID_WRITE_PROTECTED:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_READ_ONLY;
+	  break;
+	case ID_VALIDATING:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_VALIDATING;
+	  break;
+	default:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_READ_WRITE;
+	  break;
+      }
+
+      /*---------------------------------------------------------------------*/
+      /* Finally, print all collected data.				     */
+      /*---------------------------------------------------------------------*/
+      VPrintf("%-8s%5ld%s%8ld%8ld %3ld%% %3ld  %-10s %-s\n", prtinfo);
+    }
+  }
+}
+@
+
+
+38.2
+log
+@*** empty log message ***
+@
+text
+@d86 2
+d414 2
+@
+
+
+38.1
+log
+@Now knows about MSDOS disk types, and internation AmigaDOS and AmigaFFS disks
+@
+text
+@a0 6
+; /*
+lc -cimsf -d -O -rr -v -j73 -iv36:include -iv36:inc.lattice info
+blink info.o to info sc sd nd lib lib:lcr.lib
+protect info +p
+quit
+*/
+@
+
+
+1.10
+log
+@Finally fixed the dev/vol name conflicts!  It all works now!!!
+@
+text
+@d3 1
+a3 1
+blink info.o to info sc sd nd
+d49 1
+d81 13
+d165 1
+a165 1
+	    if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+d305 1
+a305 1
+	    if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+d415 4
+a418 1
+	(infotoprt->id_DiskType != ID_FFS_DISK)) {
+@
+
+
+1.9
+log
+@Fixed to use utility.library again.  Also, a little bit of reorganization
+for performance & internationalization purposes.
+@
+text
+@d42 1
+d100 1
+a100 1
+  struct DosList *dlist, *tlist;
+d296 1
+a296 1
+	      /* decide if we got something, and print it if so.	     */
+d298 15
+d324 1
+a324 1
+	    PrintInfo(&global, id, tlist, 0);
+d326 1
+a326 1
+	    PrintInfo(&global, id, tlist, 1);
+@
+
+
+1.8
+log
+@Fixed problem with message on non-DOS disks.  Was saying "No disk present"
+unless disktype was SPECIFICALLY set to "BAD\0".  This failed if disktype
+was "COPY", or anything other than accepted ("KICK", "NDOS", etc.).
+@
+text
+@d39 3
+d45 3
+a47 2
+#include "internal/commands.h"
+#include "libraries/filehandler.h"
+d61 4
+d79 9
+a87 1
+void PrintInfo(struct DosLibrary *, struct InfoData *, struct DosList *, BOOL);
+d89 3
+d95 2
+a96 1
+  struct DosLibrary *DOSBase;
+a98 1
+  long opts[OPT_COUNT];
+d104 1
+d109 1
+a109 1
+  /* I need just the DOS library.					     */
+d111 2
+a112 1
+  if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)) != NULL) {
+d203 1
+a203 1
+	    PrintInfo(DOSBase, (struct InfoData *)&dkhead->id,
+d259 1
+a259 1
+	      PrintInfo(DOSBase, (struct InfoData *)&dkhead->id,
+d308 1
+a308 1
+	    PrintInfo(DOSBase, id, tlist, 0);
+d310 1
+a310 1
+	    PrintInfo(DOSBase, id, tlist, 1);
+d318 1
+d321 3
+d341 7
+a347 5
+void PrintInfo(DOSBase, infotoprt, dlist, volume)
+struct DosLibrary *DOSBase;
+struct InfoData *infotoprt;
+struct DosList *dlist;
+BOOL volume;
+a352 1
+  LONG i, j;
+a355 2
+  char *kbytes = "K";
+  char *mbytes = "M";
+a430 11
+      /* I got rid of the use of utility.library, and guess what?  The code  */
+      /* is SMALLER, MORE accurate, but a little slower.		     */
+      /*---------------------------------------------------------------------*/
+
+#ifndef USE_UTILITY
+      size = 0L;
+      j = infotoprt->id_BytesPerBlock;
+      for (i=0; i<infotoprt->id_NumBlocks; i++) {
+	size += j;
+      }
+#else
+a431 1
+#endif
+d433 2
+a434 2
+      prtinfo[PID_SIZEMULT] = (long)kbytes;
+      if (prtinfo[PID_SIZE] > 999) {
+d436 1
+a436 1
+	prtinfo[PID_SIZEMULT] = (long)mbytes;
+a441 18
+#ifndef USE_UTILITY
+      /*---------------------------------------------------------------------*/
+      /* Tricky way to multiply by 100 on a binary system.		     */
+      /*---------------------------------------------------------------------*/
+      j = infotoprt->id_NumBlocksUsed;
+      temp = (j << 6) + (j << 5) + (j << 2);
+
+      /*---------------------------------------------------------------------*/
+      /* Now calculate the number to show the user.			     */
+      /*---------------------------------------------------------------------*/
+      i = temp;
+      j = infotoprt->id_NumBlocks;
+      percent = 0L;
+      while ((i -= j) > 0L) percent++;
+      if ((i + j) >= (j >> 1)) {
+	percent++;
+      }
+#else
+d444 3
+a446 1
+#endif
+@
+
+
+1.7
+log
+@Fixed calculation problem with percentages not being rounded properly.
+@
+text
+@d36 3
+d367 3
+a372 3
+	case ID_UNREADABLE_DISK:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_BAD;
+	  break;
+d377 1
+a377 1
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_NONE;
+@
+
+
+1.6
+log
+@Cleaned up a bit and commented.  Otherwise, same as 1.5.
+@
+text
+@d2 3
+a4 3
+lc -d -rr -O -j73  -o/obj/info.o -i/include -v -csf info
+blink /obj/info.o to /bin/info sc sd nd
+protect /bin/info +p
+d33 3
+d68 1
+a68 2
+void PrintInfo(struct DosLibrary *, struct Library *,
+	       struct InfoData *, struct DosList *, BOOL);
+a73 1
+  struct Library *UtilityBase;
+d86 1
+a86 1
+  /* I need BOTH the DOS and Utility libraries. 			     */
+d88 1
+a88 2
+  if ((DOSBase = (struct DosLibrary *)OpenLibrary(DOSLIB, DOSVER)) &&
+      (UtilityBase = OpenLibrary("utility.library",0))) {
+d165 1
+a165 1
+	  UnlockDosList(LDF_DEVICES|LDF_READ);
+d179 1
+a179 1
+	    PrintInfo(DOSBase, UtilityBase, (struct InfoData *)&dkhead->id,
+d224 1
+a224 1
+	    UnlockDosList(LDF_VOLUMES|LDF_READ);
+d235 1
+a235 1
+	      PrintInfo(DOSBase, UtilityBase, (struct InfoData *)&dkhead->id,
+d276 1
+a276 1
+	  UnlockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+d284 1
+a284 1
+	    PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+d286 1
+a286 1
+	    PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+a293 1
+    CloseLibrary(UtilityBase);
+d313 1
+a313 1
+void PrintInfo(DOSBase, UtilityBase, infotoprt, dlist, volume)
+a314 1
+struct Library *UtilityBase;
+d323 1
+d404 3
+d408 7
+d416 1
+d427 19
+a445 1
+      temp = UMult32(100, infotoprt ->id_NumBlocksUsed);
+d447 1
+@
+
+
+1.5
+log
+@Fixed locking of DosList Semaphore.
+@
+text
+@d56 3
+d73 1
+a73 1
+  int i, rc, stopnow=0;
+d84 3
+d93 3
+d100 4
+d109 4
+d116 5
+d128 5
+d138 4
+d144 4
+d149 4
+d161 4
+d166 4
+d171 7
+d185 4
+d193 4
+d202 4
+d209 4
+d220 4
+d225 4
+d230 4
+d243 4
+d249 3
+d260 4
+d268 6
+a273 7
+	      if ((dkhead = AllocVec(sizeof(struct DosListKeeper),
+				     MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+		PrintFault(IoErr(),NULL);
+	      } else {
+		memcpy((char *)&dkhead->doslist,(char *)tlist,
+		       sizeof(struct DosList));
+	      }
+d277 8
+a284 3
+	  while (dkhead) {
+	    PrintInfo(DOSBase, UtilityBase, id,
+		      (struct DosList *)&dkhead->doslist, 0);
+d286 1
+a286 5
+	    PrintInfo(DOSBase, UtilityBase, id,
+		      (struct DosList *)&dkhead->doslist, 1);
+	    dktemp = dkhead->next;
+	    FreeVec(dkhead);
+	    dkhead = dktemp;
+d337 4
+d348 5
+d354 4
+d360 4
+a363 1
+      /* Figure out Disk Types */
+d380 4
+d391 3
+a393 1
+      /* Fill in number of blocks used and number of blocks free */
+d399 1
+d404 1
+d414 3
+a416 1
+      /* Calculate Percent Full */
+d421 3
+a423 1
+      /* Figure out Disk Status */
+d435 4
+@
+
+
+1.4
+log
+@added check for control-C to stop list
+@
+text
+@d32 1
+d56 6
+d74 1
+d79 1
+d89 1
+a89 1
+    } 
+d94 1
+a94 3
+      } 
+      else {
+	PutStr(MSG_DEV_HEADER);
+d99 5
+a103 5
+	     if(CheckSignal(SIGBREAKF_CTRL_C)) {
+		stopnow=TRUE;
+	    	PrintFault(304,NULL);
+	    	break;
+	     }
+d106 14
+a119 1
+	      PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+d123 36
+a158 8
+	  if(!stopnow) {
+	  	PutStr(MSG_VOL_HEADER);
+	  	dlist = LockDosList(LDF_VOLUMES|LDF_READ);
+	  	tlist = dlist;
+	  	while (tlist = NextDosEntry(tlist,LDF_VOLUMES|LDF_READ)) {
+	    	    PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+		}
+	  UnlockDosList(LDF_VOLUMES|LDF_READ);
+d160 1
+a160 2
+	}
+	else {
+d165 1
+a165 1
+	       	ptr++,i++) {
+a171 1
+#ifndef COMPAT
+a172 3
+#else
+				   LDF_DEVICES|LDF_READ)) {
+#endif
+d175 7
+a181 1
+	      PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+d184 4
+a187 2
+	  if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+				   LDF_VOLUMES|LDF_READ)) {
+d189 5
+a193 1
+	    PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+a194 1
+	  UnlockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+@
+
+
+1.3
+log
+@new distillery release
+@
+text
+@d63 1
+a63 1
+  int i, rc;
+d80 2
+a81 1
+    } else {
+d85 2
+a86 1
+      } else {
+d92 5
+d103 8
+a110 6
+
+	  PutStr(MSG_VOL_HEADER);
+	  dlist = LockDosList(LDF_VOLUMES|LDF_READ);
+	  tlist = dlist;
+	  while (tlist = NextDosEntry(tlist,LDF_VOLUMES|LDF_READ)) {
+	    PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+d112 2
+a113 2
+	  UnlockDosList(LDF_VOLUMES|LDF_READ);
+	} else {
+d117 2
+a118 2
+	       i<strlen((char *)opts[OPT_DRIVE]);
+	       ptr++,i++) {
+@
+
+
+1.2
+log
+@fixes memory hits
+@
+text
+@d11 5
+a15 5
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+d18 2
+a19 2
+/**     (C) Copyright 1989 Commodore-Amiga, Inc.
+ **         All Rights Reserved
+d23 10
+a32 9
+/* Command: Info                                                             */
+/* Author:  Dave F. Baker                                                    */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 19MAR89  John Toebes   Initial Creation                                   */
+/* 26MAR89  Dave Baker    Don't call me gutless                              */
+/* 07DEC89  Jim Cooper    Conversion to 1.4, Code Cleanup, Commenting        */
+/* Notes:                                                                    */
+d40 3
+a42 3
+#define MSG_DEV_HEADER      "\nMounted disks:\n\
+Unit      Size    Used    Free Full Errs   Status   Name\n"
+#define MSG_VOL_HEADER      "\nVolumes available:\n"
+d46 4
+a49 4
+#define MSG_TYPE_NONE       "No disk present"
+#define MSG_TYPE_BAD        "Unreadable disk"
+#define MSG_TYPE_KICK       "Kickstart disk"
+#define MSG_TYPE_NDOS       "Not a DOS disk"
+d56 1
+a56 1
+               struct InfoData *, struct DosList *, BOOL);
+d60 1
+d82 2
+a83 2
+                         MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+        PrintFault(IoErr(),NULL);
+d85 11
+a95 11
+        PutStr(MSG_DEV_HEADER);
+        if (opts[OPT_DRIVE] == NULL) {
+          dlist = LockDosList(LDF_DEVICES|LDF_READ);
+          tlist = dlist;
+          while (tlist = NextDosEntry(tlist,LDF_DEVICES|LDF_READ)) {
+            if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+                                         MKBADDR(id), NULL, NULL, NULL)) {
+              PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+            }
+          }
+          UnlockDosList(LDF_DEVICES|LDF_READ);
+d97 9
+a105 9
+          PutStr(MSG_VOL_HEADER);
+          dlist = LockDosList(LDF_VOLUMES|LDF_READ);
+          tlist = dlist;
+          while (tlist = NextDosEntry(tlist,LDF_VOLUMES|LDF_READ)) {
+            PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+          }
+          UnlockDosList(LDF_VOLUMES|LDF_READ);
+        } else {
+          dlist = LockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+d107 9
+a115 9
+          for (ptr=(char *)opts[OPT_DRIVE],i=0;
+               i<strlen((char *)opts[OPT_DRIVE]);
+               ptr++,i++) {
+            if (*ptr == ':') {
+              *ptr = 0;
+              break;
+            }
+          }
+          if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+d117 1
+a117 1
+                                   LDF_DEVICES|LDF_VOLUMES|LDF_READ)) {
+d119 1
+a119 1
+                                   LDF_DEVICES|LDF_READ)) {
+d121 14
+a134 14
+            if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+                                         MKBADDR(id), NULL, NULL, NULL)) {
+              PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+            }
+          }
+          if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+                                   LDF_VOLUMES|LDF_READ)) {
+            PutStr(MSG_VOL_HEADER);
+            PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+          }
+          UnlockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+        }
+        FreeVec(id);
+        rc = RETURN_OK;
+a175 1
+  memset(devname, 0, ENVMAX);
+d177 1
+d190 1
+a190 1
+        (infotoprt->id_DiskType != ID_FFS_DISK)) {
+d193 12
+a204 12
+        case ID_KICKSTART_DISK:
+          prtinfo[PID_TYPE] = (long)MSG_TYPE_KICK;
+          break;
+        case ID_UNREADABLE_DISK:
+          prtinfo[PID_TYPE] = (long)MSG_TYPE_BAD;
+          break;
+        case ID_NOT_REALLY_DOS:
+          prtinfo[PID_TYPE] = (long)MSG_TYPE_NDOS;
+          break;
+        default:
+          prtinfo[PID_TYPE] = (long)MSG_TYPE_NONE;
+          break;
+d216 1
+a216 1
+      prtinfo[PID_ERR]  = infotoprt->id_NumSoftErrors;
+d219 1
+a219 1
+                           (infotoprt->id_NumBlocksUsed));
+d224 1
+a224 1
+      /* NEVER be able to use this space, anyway.                            */
+d230 2
+a231 2
+        prtinfo[PID_SIZE] = size >> 20;
+        prtinfo[PID_SIZEMULT] = (long)mbytes;
+d241 9
+a249 9
+        case ID_WRITE_PROTECTED:
+          prtinfo[PID_STATUS] = (long)MSG_PROT_READ_ONLY;
+          break;
+        case ID_VALIDATING:
+          prtinfo[PID_STATUS] = (long)MSG_PROT_VALIDATING;
+          break;
+        default:
+          prtinfo[PID_STATUS] = (long)MSG_PROT_READ_WRITE;
+          break;
+@
+
+
+1.1
+log
+@new version of command
+@
+text
+@d11 5
+a15 5
+/* | .	| || the authors:			      BBS: (919) 382-8265    */
+/* | o	| ||   Dave Baker      Alan Beale	  Jim Cooper		     */
+/* |  . |//    Jay Denebeim    Bruce Drake	  Gordon Keener 	     */
+/* ======      John Mainwaring Andy Mercier	  Jack Rouse		     */
+/*	       John Toebes     Mary Ellen Toebes  Doug Walker	Mike Witcher */
+d18 2
+a19 2
+/**	(C) Copyright 1989 Commodore-Amiga, Inc.
+ **	    All Rights Reserved
+d23 9
+a31 11
+/* Command: Info							     */
+/* Author:  Dave F. Baker						     */
+/* Change History:							     */
+/*  Date    Person	  Action					     */
+/* -------  ------------- -----------------				     */
+/* 19MAR89  John Toebes   Initial Creation				     */
+/* 26MAR89  Dave Baker	  Don't call me gutless                              */
+/* 07DEC89  Jim Cooper	  Conversion to 1.4, Code Cleanup, Commenting	     */
+/* 03JAN90  Jim Cooper	  After several abortive attempts, and most of a     */
+/*			  re-write, its FINISHED!!!			     */
+/* Notes:								     */
+d39 3
+a41 3
+#define MSG_DEV_HEADER	    "\nMounted disks:\n\
+Unit	  Size	  Used	  Free Full Errs   Status   Name\n"
+#define MSG_VOL_HEADER	    "\nVolumes available:\n"
+d45 4
+a48 4
+#define MSG_TYPE_NONE	    "No disk present"
+#define MSG_TYPE_BAD	    "Unreadable disk"
+#define MSG_TYPE_KICK	    "Kickstart disk"
+#define MSG_TYPE_NDOS	    "Not a DOS disk"
+d55 1
+a55 1
+	       struct InfoData *, struct DosList *, BOOL);
+a69 3
+  /*-------------------------------------------------------------------------*/
+  /* Try to open the dos.library.					     */
+  /*-------------------------------------------------------------------------*/
+a72 3
+    /*-----------------------------------------------------------------------*/
+    /* If we opened the library, we need to set up for the ReadArgs call.    */
+    /*-----------------------------------------------------------------------*/
+a75 3
+    /*-----------------------------------------------------------------------*/
+    /* If there was an error in the ReadArgs call, tell user and quit.	     */
+    /*-----------------------------------------------------------------------*/
+a78 4
+
+      /*---------------------------------------------------------------------*/
+      /* Try to allocate some memory to use as the InfoData storage place.   */
+      /*---------------------------------------------------------------------*/
+d80 2
+a81 2
+			 MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+	PrintFault(IoErr(),NULL);
+d83 11
+d95 9
+a103 4
+	/*-------------------------------------------------------------------*/
+	/* Ok, everything opened up fine.  Now we need to print the header.  */
+	/*-------------------------------------------------------------------*/
+	PutStr(MSG_DEV_HEADER);
+d105 28
+a132 102
+	/*-------------------------------------------------------------------*/
+	/* If they did NOT ask for a specific device/drive, give 'em all we  */
+	/* got listed!							     */
+	/*-------------------------------------------------------------------*/
+	if (opts[OPT_DRIVE] == NULL) {
+
+	  /*-----------------------------------------------------------------*/
+	  /* Ask DOS to lock the available devices.			     */
+	  /*-----------------------------------------------------------------*/
+	  dlist = LockDosList(LDF_DEVICES|LDF_READ);
+	  tlist = dlist;
+	  while (tlist = NextDosEntry(tlist,LDF_DEVICES|LDF_READ)) {
+
+	    /*---------------------------------------------------------------*/
+	    /* IF this device has a valid task pointer, AND it answers the   */
+	    /* ACTION_DISK_INFO packet, tell the user about it, because it   */
+	    /* is almost ASSURED that it is a disk-type device. 	     */
+	    /*---------------------------------------------------------------*/
+	    if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+					 MKBADDR(id), NULL, NULL, NULL)) {
+	      PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+	    }
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Make sure we release what we locked.			     */
+	  /*-----------------------------------------------------------------*/
+	  UnlockDosList(LDF_DEVICES|LDF_READ);
+
+	  /*-----------------------------------------------------------------*/
+	  /* Print the second section's header.                              */
+	  /*-----------------------------------------------------------------*/
+	  PutStr(MSG_VOL_HEADER);
+
+	  /*-----------------------------------------------------------------*/
+	  /* This time, lock the VOLUMES.				     */
+	  /*-----------------------------------------------------------------*/
+	  dlist = LockDosList(LDF_VOLUMES|LDF_READ);
+	  tlist = dlist;
+	  while (tlist = NextDosEntry(tlist,LDF_VOLUMES|LDF_READ)) {
+
+	    /*---------------------------------------------------------------*/
+	    /* Print the volume name, and the mount status.		     */
+	    /*---------------------------------------------------------------*/
+	    PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Again, make sure we release what we locked.		     */
+	  /*-----------------------------------------------------------------*/
+	  UnlockDosList(LDF_VOLUMES|LDF_READ);
+	} else {
+
+	  /*-----------------------------------------------------------------*/
+	  /* First, check to see if what they typed was a DEVICE name.	     */
+	  /*-----------------------------------------------------------------*/
+	  dlist = LockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+
+	  /*-----------------------------------------------------------------*/
+	  /* Uppercase the name (not sure if this is needed), and get rid of */
+	  /* the trailing colon.					     */
+	  /*-----------------------------------------------------------------*/
+	  for (ptr=(char *)opts[OPT_DRIVE],i=0;
+	       i<strlen((char *)opts[OPT_DRIVE]);
+	       ptr++,i++) {
+	    if (*ptr == ':') {
+	      *ptr = 0;
+	      break;
+	    }
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Search for it as a DEVICE first.				     */
+	  /*-----------------------------------------------------------------*/
+	  if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+				   LDF_DEVICES|LDF_READ)) {
+	    if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+					 MKBADDR(id), NULL, NULL, NULL)) {
+	      PrintInfo(DOSBase, UtilityBase, id, tlist, 0);
+	    }
+	  } else {
+
+	    /*---------------------------------------------------------------*/
+	    /* If it wasn't a DEVICE, try VOLUMES.                           */
+	    /*---------------------------------------------------------------*/
+	    if (tlist = FindDosEntry(dlist,(char *)opts[OPT_DRIVE],
+				     LDF_VOLUMES|LDF_READ)) {
+	      if (tlist->dol_Task && DoPkt(tlist->dol_Task, ACTION_DISK_INFO,
+					   MKBADDR(id), NULL, NULL, NULL)) {
+		PutStr(MSG_VOL_HEADER);
+		PrintInfo(DOSBase, UtilityBase, id, tlist, 1);
+	      }
+	    }
+	  }
+
+	  /*-----------------------------------------------------------------*/
+	  /* Make sure we release what we locked.			     */
+	  /*-----------------------------------------------------------------*/
+	  UnlockDosList(LDF_DEVICES|LDF_VOLUMES|LDF_READ);
+	}
+	FreeVec(id);
+	rc = RETURN_OK;
+a143 3
+/*---------------------------------------------------------------------------*/
+/* These routines are used by the PrintInfo routine, hence their location.   */
+/*---------------------------------------------------------------------------*/
+a155 4
+/*---------------------------------------------------------------------------*/
+/* This routine will print out all necessary data for either volumes or      */
+/* devices, depending on the status of the BOOL variable "volume".           */
+/*---------------------------------------------------------------------------*/
+a172 3
+  /*-------------------------------------------------------------------------*/
+  /* First, get the name of this thing from the DosList structure.	     */
+  /*-------------------------------------------------------------------------*/
+a177 5
+  /*-------------------------------------------------------------------------*/
+  /* If we are processing this thing as a VOLUME, we only need to worry      */
+  /* about whether or not it is mounted.  If it IS it will have a valid task */
+  /* pointer, otherwise the task pointer will be NULL.			     */
+  /*-------------------------------------------------------------------------*/
+a185 5
+
+    /*-----------------------------------------------------------------------*/
+    /* If we are processing this thing as a DEVICE, we need to tack a colon  */
+    /* on the end of the name.						     */
+    /*-----------------------------------------------------------------------*/
+a186 4
+
+    /*-----------------------------------------------------------------------*/
+    /* If this device is not a standard DOS disk, tell 'em what type it is!  */
+    /*-----------------------------------------------------------------------*/
+d188 1
+a188 1
+	(infotoprt->id_DiskType != ID_FFS_DISK)) {
+d191 12
+a202 12
+	case ID_KICKSTART_DISK:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_KICK;
+	  break;
+	case ID_UNREADABLE_DISK:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_BAD;
+	  break;
+	case ID_NOT_REALLY_DOS:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_NDOS;
+	  break;
+	default:
+	  prtinfo[PID_TYPE] = (long)MSG_TYPE_NONE;
+	  break;
+a205 4
+
+      /*---------------------------------------------------------------------*/
+      /* Get this thing's Volume Name from the InfoData structure.           */
+      /*---------------------------------------------------------------------*/
+d213 2
+a214 4
+      /*---------------------------------------------------------------------*/
+      /* Fill in number of blocks used and number of blocks free.	     */
+      /*---------------------------------------------------------------------*/
+      prtinfo[PID_ERR]	= infotoprt->id_NumSoftErrors;
+d217 1
+a217 1
+			   (infotoprt->id_NumBlocksUsed));
+a218 1
+      /*---------------------------------------------------------------------*/
+d222 2
+a223 2
+      /* NEVER be able to use this space, anyway.			     */
+      /*---------------------------------------------------------------------*/
+d228 2
+a229 2
+	prtinfo[PID_SIZE] = size >> 20;
+	prtinfo[PID_SIZEMULT] = (long)mbytes;
+d232 1
+a232 3
+      /*---------------------------------------------------------------------*/
+      /* Calculate Percent Full.					     */
+      /*---------------------------------------------------------------------*/
+d237 1
+a237 3
+      /*---------------------------------------------------------------------*/
+      /* Figure out Disk Status 					     */
+      /*---------------------------------------------------------------------*/
+d239 9
+a247 9
+	case ID_WRITE_PROTECTED:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_READ_ONLY;
+	  break;
+	case ID_VALIDATING:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_VALIDATING;
+	  break;
+	default:
+	  prtinfo[PID_STATUS] = (long)MSG_PROT_READ_WRITE;
+	  break;
+a248 4
+
+      /*---------------------------------------------------------------------*/
+      /* Finally, print all the data we collected.			     */
+      /*---------------------------------------------------------------------*/
+@
+
+
+1.0
+log
+@added to rcs
+@
+text
+@d2 3
+a4 3
+lc -d -rr -O -j73  -o/obj/Info.o -i/include -v -csf Info
+blink /obj/Info.o to /bin/Info sc sd nd
+protect /bin/Info +p
+d11 5
+a15 5
+/* | .  | || the authors:                             BBS: (919) 382-8265    */
+/* | o  | ||   Dave Baker      Alan Beale         Jim Cooper                 */
+/* |  . |//    Jay Denebeim    Bruce Drake        Gordon Keener              */
+/* ======      John Mainwaring Andy Mercier       Jack Rouse                 */
+/*             John Toebes     Mary Ellen Toebes  Doug Walker                */
+d23 11
+a33 9
+/* Command: Info                                                             */
+/* Author:  Dave F. Baker                                                    */
+/* Change History:                                                           */
+/*  Date    Person        Action                                             */
+/* -------  ------------- -----------------                                  */
+/* 19MAR89  John Toebes   Initial Creation                                   */
+/* 26MAR89  Dave Baker    Don't call me gutless                              */
+/* 07DEC89  Jim Cooper    Conversion to 1.4, Code Cleanup, Commenting        */
+/* Notes:                                                                    */
+d41 3
+a43 3
+#define MSG_DEV_HEADER      "\nMounted disks:\n\
+Unit      Size    Used    Free Full Errs   Status   Name\n"
+#define MSG_VOL_HEADER      "\nVolumes available:\n"
+d47 4
+a50 4
+#define MSG_TYPE_NONE       "No disk present"
+#define MSG_TYPE_BAD        "Unreadable disk"
+#define MSG_TYPE_KICK       "Kickstart disk"
+#define MSG_TYPE_NDOS       "Not a DOS disk"
+d56 2
+a57 2
+void PrtDskStuff(struct DosLibrary *, struct Library *,
+                 struct InfoData *, char *, char *);
+d63 2
+a64 1
+  int rc;
+a65 3
+  char devname[ENVMAX];
+  char volname[ENVMAX];
+  char *ptr;
+a67 1
+  BPTR dlock;
+d72 3
+d78 3
+d84 3
+d90 4
+d95 2
+a96 2
+                         MEMF_CLEAR|MEMF_PUBLIC)) == NULL) {
+        PrintFault(IoErr(),NULL);
+a97 14
+        dlist = LockDosList(LDF_DEVICES);
+        if (opts[OPT_DRIVE] == NULL) {
+          tlist = dlist;
+          PutStr(MSG_DEV_HEADER);
+          while (tlist = NextDosEntry(tlist, LDF_DEVICES|LDF_READ)) {
+            ptr = (char *)BADDR(tlist->dol_Name);
+            memset(devname, 0, ENVMAX);
+            memcpy(devname, &ptr[1], (long)ptr[0]);
+            NameFromLock(tlist->dol_Lock, volname, ENVMAX);
+            dlock = Lock(devname, ACCESS_READ);
+            Info(dlock, id);
+            PrtDskStuff(DOSBase, UtilityBase, id, devname, volname);
+            UnLock(dlock);
+          }
+d99 107
+a205 15
+        } else {
+          dlist = LockDosList(LDF_DEVICES|LDF_READ);
+          FindDosEntry(dlist, (char *)opts[OPT_DRIVE],LDF_DEVICES|LDF_READ);
+          ptr = (char *)BADDR(dlist->dol_Name);
+          memset(devname, 0, ENVMAX);
+          memcpy(devname, &ptr[1], (long)ptr[0]);
+          NameFromLock(dlist->dol_Lock, volname, ENVMAX);
+          dlock = Lock(devname, ACCESS_READ);
+          Info(dlock, id);
+          PrtDskStuff(DOSBase, UtilityBase, id, devname, volname);
+          UnLock(dlock);
+        }
+        UnlockDosList(LDF_DEVICES|LDF_READ);
+        FreeVec(id);
+        rc = RETURN_OK;
+d217 3
+d232 5
+a236 1
+void PrtDskStuff(DOSBase, UtilityBase, infotoprt, devname, volname)
+d240 2
+a241 1
+char *devname, *volname;
+d247 3
+d253 6
+d260 11
+a270 15
+  if ((infotoprt->id_DiskType) != ID_DOS_DISK) {
+    /* Figure out Disk Types */
+    switch (infotoprt->id_DiskType) {
+      case ID_KICKSTART_DISK:
+        prtinfo[PID_TYPE] = (long)MSG_TYPE_KICK;
+        break;
+      case ID_UNREADABLE_DISK:
+        prtinfo[PID_TYPE] = (long)MSG_TYPE_BAD;
+        break;
+      case ID_NOT_REALLY_DOS:
+        prtinfo[PID_TYPE] = (long)MSG_TYPE_NDOS;
+        break;
+      default:
+        prtinfo[PID_TYPE] = (long)MSG_TYPE_NONE;
+        break;
+d272 1
+a272 1
+    VPrintf("%-10s%s\n", prtinfo);
+a273 1
+    prtinfo[PID_NAME] = (long)volname;
+d275 5
+a279 5
+    /* Fill in number of blocks used and number of blocks free */
+    prtinfo[PID_ERR]  = infotoprt->id_NumSoftErrors;
+    prtinfo[PID_USED] = infotoprt->id_NumBlocksUsed;
+    prtinfo[PID_FREE] = ((infotoprt->id_NumBlocks) -
+                         (infotoprt->id_NumBlocksUsed));
+d281 22
+a302 11
+    /* Calculate Disk Size in kilo or mega bytes.  As per discussions with */
+    /* RJesup, it seems appropriate to leave the number of reserved blocks */
+    /* OUT of the calculation of total disk space, since you will NEVER be */
+    /* able to use this space, anyway.                                     */
+    size = UMult32(infotoprt->id_BytesPerBlock,infotoprt->id_NumBlocks);
+    prtinfo[PID_SIZE] = size >> 10;
+    prtinfo[PID_SIZEMULT] = (long)kbytes;
+    if (prtinfo[PID_SIZE] > 999) {
+      prtinfo[PID_SIZE] = size >> 20;
+      prtinfo[PID_SIZEMULT] = (long)mbytes;
+    }
+d304 7
+a310 4
+    /* Calculate Percent Full */
+    temp = UMult32(100, infotoprt ->id_NumBlocksUsed);
+    percent = UDivMod32(temp, (infotoprt->id_NumBlocks));
+    prtinfo[PID_FULL] = percent;
+d312 50
+a361 11
+    /* Figure out Disk Status */
+    switch (infotoprt->id_DiskState) {
+      case ID_WRITE_PROTECTED:
+        prtinfo[PID_STATUS] = (long)MSG_PROT_READ_ONLY;
+        break;
+      case ID_VALIDATING:
+        prtinfo[PID_STATUS] = (long)MSG_PROT_VALIDATING;
+        break;
+      default:
+        prtinfo[PID_STATUS] = (long)MSG_PROT_READ_WRITE;
+        break;
+a362 1
+    VPrintf("%-8s%5ld%s%8ld%8ld %3ld%% %3ld  %-10s %-s\n", prtinfo);
+@

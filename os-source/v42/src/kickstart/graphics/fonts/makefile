@@ -1,0 +1,30 @@
+##########################################################################
+#
+# $Id: makefile,v 42.0 93/06/16 11:18:39 chrisg Exp $
+#
+##########################################################################
+
+VERSION=42
+MODULETYPE=kickstart
+SYSTEM=graphics
+SUBSYSNAME=fonts
+SUBSYSTEMS=
+INCLUDEDIR=
+ASMOPTS=OPTIMON 0xfdc0000 ADDSYM DEFINE VBLANK_BUG=1
+INFILES=
+AFILES=fonts.asm
+HFILES=
+CFILES=
+OTHERFILES=makefile macros.i open8.i open9.i open11.i
+INFILES=
+TEMPDIR=
+HOMEDIR=
+# defaults to Vxx/src/moduletype/system/subsysname
+
+HOMEINCL=
+LINKEROPTS=
+
+ASM_PREPROCESSOR=spp
+
+.include lib:makemeta
+

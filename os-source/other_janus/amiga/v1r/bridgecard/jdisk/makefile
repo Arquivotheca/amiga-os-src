@@ -1,0 +1,19 @@
+.SUFFIXES: .ld .obj .asm
+
+jdisk.device: abs.obj init.obj dev.obj beginio.obj cmds.obj endcode.obj
+	alink with dev.wth
+
+djmount.ld: djmount.obj
+	alink with djmount.wth
+
+sendanint.ld: sendanint.obj
+	alink with sendanint.wth
+
+sendanint.obj: assembly.i asmsupp.i
+djmount.obj: asmsupp.i assembly.i
+abs.obj endcode.obj: assembly.i
+djmount.obj: djmount.i 
+beginio.obj cmds.obj dev.obj init.obj: jddata.i asmsupp.i assembly.i
+
+.asm.obj:
+	assem $*.asm -i /usr/commodore/amiga/V33/internal/include -o $*.obj

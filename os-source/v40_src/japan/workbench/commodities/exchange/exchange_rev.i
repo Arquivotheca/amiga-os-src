@@ -1,0 +1,14 @@
+VERSION		EQU	38
+REVISION	EQU	9
+DATE	MACRO
+		dc.b	'25.3.92'
+	ENDM
+VERS	MACRO
+		dc.b	'exchange 38.9'
+	ENDM
+VSTRING	MACRO
+		dc.b	'exchange 38.9 (25.3.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: exchange 38.9 (25.3.92)',0
+	ENDM

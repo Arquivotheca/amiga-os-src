@@ -1,0 +1,197 @@
+Here are a few quick observations as to the AAA work needed for
+Intuition.
+
+Most of the hardware-specific stuff is located in just a few files.
+
+view.c:
+
+This file contains all the ViewPort and copper list building stuff.  A
+lot of complex processing takes place here.  The big function is
+rethinkVPorts(), which works out which screens have visible viewports,
+what the parameters for those viewports ought to be, which viewports
+need to be remade, and so on.
+
+A lot of the code here depends on some kind of severity-detection,
+which is typically embodied in the "force" parameter.  The greater the
+force, the more stuff is remade.  For example, MakeVPort() is called
+if the ViewPort height changes, if MakeScreen() had been called
+recently, or if the ViewPort was previously hidden, or if the "force"
+parameter is set.  Things like RemakeDisplay() or a change in the
+active monitor (sync rate) set the force parameter.
+
+remakeCopList() takes care of actually doing the MrgCop() and handling
+some amount of failure.  The compiled-out WAITTOF_OPTIMIZE was a way
+of eliminating a WaitTOF() (which slows down all RethinkDisplay() type
+operations).  This is done by deferring the request to free the old
+copper lists until we eventually later notice that enough time has
+passed that we can safely free them.  It made a small but measurable
+improvement in performance, but increased code size beyond what we
+could afford for V40.  There are other parts to this change, in
+other files.
+
+AAA notes for view.c:
+
+For full RTG, view.c would probably be the place where the most hard
+work would need to happen, mostly on account of multiple active
+physical monitors and multiple View structures.  That would be a
+significant change in the model.  (Some IntuitionBase changes would be
+needed to handle multiple monitors too).  Of course, how multiple
+monitors behave from the mouse-keyboard needs to be established.
+
+Assuming AAA doesn't mean RTG and therefore doesn't mean multiple
+physical monitors/display boards, things should be pretty good here.
+I don't think AAA introduces any significant changes to the
+MakeVPort() or MrgCop() problem.
+
+
+coercion.c:
+
+This file takes care of most logic involving determining the mode id
+of a screen based on coercion, promotion, etc.  Most of the hard part
+of figuring out what to use is now inside graphics.library (BestModeID()
+and CoerceMode()).  This file contains that logic which drives those
+functions, as well as code to set up all kinds of cached constants
+per screen (resolution, mouse ticks to pixel ratios).
+
+The logic for handling screen exclusion due to compatibility or
+SA_Exclusive is here, in coerceScreenGrunt().  This function also
+takes care of informing graphics through VideoControl() and the
+VTAG_xxx_DISP_SET tags.  setScreenDisplayID() is used to establish
+the screen's display mode initially.
+
+AAA notes for coercion.c:
+
+Again, until we get multiple active displays, not too much horrible
+here either.  We may see more modes excluded by others, but the
+code pretty much handles it.
+
+
+
+pointer.c:
+
+All the code dealing with managing the pointer sprite is now gathered
+up in this file.  The new API is abstracted to the extent that
+pointerclass deals in bitmaps and tags, which is nice.  The other
+good thing is that pointer creation and pointer installation are
+separated.  Pointerclass handles the creation, and can do any cooking
+required.  SetWindowPointer() does the actual installation based on
+the private data structures set up by pointerclass.  If AAA adds new
+pointer features, new tags and handling would be required, and best
+possible mapping for old tags is needed too.
+
+The basic logic needs to answer this goal:
+- Try to put up the best possible pointer, but always have something
+  to fall back to.
+
+Since AA has three incompatible sprite sizes (i.e.  all sprites must
+be of the same size), we initially generate the default arrow in all
+three sizes.  That way, no matter what size we need to display, we can
+always put up something without needing a memory allocation.  This
+means that to change the default pointer, we try to get all three sizes
+of the new imagery before relinquishing the old three.
+
+If a window has a custom pointer, we try to generate it in the
+necessary width.  If that works, great, if not, we fall back to the
+suitable default pointer.
+
+Graphics.library currently does not tell us how many pointers to
+generate.  A simple little macro called NUMPOINTERS() works for ECS
+and AA, but needs rework for AAA.  In particular, I think
+graphics.library needs to become more communicative as to the range of
+sprite possibilities.
+
+There's also some non-general stuff when we need to convert back and
+forth between sprite width in words (AA allows 1,2,4) and a sprite
+number index (0,1,2).  All those would need to be teased out.  I
+think all are easily findable.  I would have made this more general
+but we couldn't afford the ROM.
+
+The function setDefaultMousePointer() is the one to build a new set
+of default pointers.  Be very careful with the return value:  IPrefs
+has very specific expectations!
+
+updateMousePointer() is pretty thorny.  It's responsible to figure
+out in whose ViewPort the sprite must be moved.  Prior to 2.04, we
+suffered from a lot of pointer jumping and flashing.  Most of that was
+caused by updateMousePointer() not handling all the cases correctly.
+The key is that the sprite must start or end in the ViewPort it's
+MoveSprite()d in, else it vanishes.  MoveSprite() with a NULL ViewPort
+tends to cause the mouse to jump, so it's only used as a last resort.
+
+Because AA only allows a single sprite width for all sprites, graphics
+maintains fields with which Intuition can determine if any other
+sprites are in use, and then slave its pointer sprite width to match.
+The calcSpriteWidth() function handles that.  The Intuition sprite
+is the only SoftSprite, which is graphics' way of labelling a sprite
+as one whose size will be adjusted to match the others.  The mechanism
+sounds general, but in fact only Intuition can use it, since graphics
+only has a single callback (not a list) to handle conflicts.
+
+If someone allocates a sprite incompatible with a SoftSprite (i.e.
+the pointer), graphics blanks the pointer and calls Intuition through
+the callback.  Intuition just notes the fact (notePointerKill()).
+Next time it wakes up, it discovers this fact and regenerates a new
+pointer, which should be compatible.
+
+Another key design factor was that although the hardware deals with
+concepts like sprite pixel speed, the API should present friendlier
+things like 320 sprite pixels per line (call it lores).  The
+setSpriteSpeed() function figures out what the most appropriate
+possible sprite resolution is to best match the request, based on
+things like database resolution information.  This involves figuring
+out what the optimum size would be, then picking the nearest possible
+size.  Most Amiga modes are simple multiples, but keep in mind such
+things as Super72, where you can't get a sprite whose pixel size
+corresponds to 640 pixels per line.
+
+setSpriteHeight() is similar, for Y-size.
+
+Another funky thing is that the private data of pointerclass begins
+with data that looks like the embedded pointer info in a Window
+structure:
+
+    UWORD *Pointer;	/* sprite data */
+    BYTE PtrHeight;	/* sprite height (not including sprite padding) */
+    BYTE PtrWidth;	/* sprite width (must be less than or equal to 16) */
+    BYTE XOffset, YOffset;	/* sprite offsets */
+
+
+AAA notes for pointer.c:
+
+The APIs and functional breakdown should still hold under AAA, but the
+big thing is that as the sprite possibilities grow, graphics will have
+to be more informative about the space of possibilities.  If AAA
+removes any restrictions on all sprites needing to be of the same
+sprite width, then some code needn't run on AAA systems.
+
+If the space of resolutions and sizes grows, then the code to
+determine which sprite to pick needs to become more general and
+flexible.
+
+
+Color Palette Issues:
+
+Intuition uses regular graphics rendering functions.  Presumably,
+graphics will grow some function like SetAColor(rp,red,green,blue)
+which permits true color rendering.  I'll further assume that graphics
+will maintain a 256-entry color map, so that you can still do
+pen-based rendering.  The easiest option is to leave the bulk of
+Intuition using pen-based rendering, and leave true-color rendering up
+to the application.  The most likely candidate for SetAColor() use
+would be boopsi classes.  In any case, it shouldn't be too hard to
+track down all the rendering.
+
+Intuition palette defaults are tricky.  There's a lot of craftiness
+going on where we set up the first four and last four colors in the
+color table to be the eight we set up for the app, which allows
+complementing to still be reasonable.  Proceed with care through any
+of that stuff.  Since true color doesn't really affect what you do
+with the colormap, I think not much work needs to be done there.
+
+You could opt to extend Intuition's drawing primitives (PrintIText(),
+DrawBorder(), DrawImage()) to allow 24-bit specification.
+Alternately, you could view these as unnecessary holdovers, and that
+24-bit rendering should be done directly through graphics, or if you
+insist, through new boopsi image classes that replace PrintIText()
+and friends.
+

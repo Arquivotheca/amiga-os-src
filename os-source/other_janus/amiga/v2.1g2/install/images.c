@@ -1,0 +1,145 @@
+#include "exec/types.h"
+#include "intuition/intuition.h"
+
+USHORT chip CheckData[]=
+   {
+   0x0300,
+   0x0600,
+   0x0C00,
+   0xD800,
+   0x7000,
+   0x2000,
+   /**/
+   0x0300,
+   0x0600,
+   0x0C00,
+   0xD800,
+   0x7000,
+   0x2000,
+   };
+
+struct Image chip CheckMark =
+   {
+   -7, -6,  /* left top */
+   8, 6, 2,
+   CheckData,
+   0x3, 0x0,   /* PlanePick, PlaneOnOff */
+   NULL,      /* NextImage */
+   };
+
+USHORT chip XData[]=
+   {
+   0xC600,
+   0x6C00,
+   0x3800,
+   0x3800,
+   0x6c00,
+   0xc600,
+   /**/
+   0xC600,
+   0x6C00,
+   0x3800,
+   0x3800,
+   0x6c00,
+   0xc600,
+   };
+
+struct Image chip XMark =
+   {
+   -7, -6,  /* left top */
+   8, 6, 2,
+   XData,
+   0x3, 0x0,   /* PlanePick, PlaneOnOff */
+   NULL,      /* NextImage */
+   };
+
+USHORT chip UpData[] =
+    {
+    0xFFF8,
+    0x8008,
+    0x8208,
+    0x8508,
+    0x8888,
+    0x9048,
+    0xA028,
+    0xF078,
+    0x8888,
+    0x8888,
+    0x8F88,
+    0x8008,
+    0xFFF8,
+    0x0000,
+    0x0000,
+     /**/
+    0x0000,
+    0x0000,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x3FFE,
+    0x3FFE,
+    };
+
+USHORT chip DownData[] =
+    {
+    0xFFF8,
+    0x8008,
+    0x8F88,
+    0x8888,
+    0x8888,
+    0xF078,
+    0xA028, 
+    0x9048, 
+    0x8888,
+    0x8508,
+    0x8208,
+    0x8008,
+    0xFFF8,
+    0x0000,
+    0x0000,
+     /**/
+    0x0000,
+    0x0000,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x0006,
+    0x3FFE,
+    0x3FFE,
+    };
+
+struct Image chip UpImage =
+    {
+    -1, -1,
+    15, 15,
+    2,
+    &UpData[0],
+    0x03, 0x00,
+    NULL,
+    };
+
+struct Image chip DownImage =
+    {
+    -1, -1,
+    15, 15,
+    2,
+    &DownData[0],
+    0x03, 0x00,
+    NULL,
+    };
+

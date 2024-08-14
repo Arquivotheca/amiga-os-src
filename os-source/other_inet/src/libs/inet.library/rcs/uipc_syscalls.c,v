@@ -1,0 +1,2319 @@
+head     1.4;
+branch   ;
+access   ;
+symbols  ;
+locks    ;
+comment  @ * @;
+
+
+1.4
+date     92.08.14.14.52.20;  author gregm;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.11.07.12.45.09;  author gregm;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.10.09.16.31.18;  author martin;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.12.01.19.41.00;  author martin;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+1.4
+log
+@Martin changed the sleep() and sbwait() calls to handle CTRL-C.
+@
+text
+@/*
+ * Copyright (c) 1982, 1986 Regents of the University of California.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms are permitted
+ * provided that the above copyright notice and this paragraph are
+ * duplicated in all such forms and that any documentation,
+ * advertising materials, and other materials related to such
+ * distribution and use acknowledge that the software was developed
+ * by the University of California, Berkeley.  The name of the
+ * University may not be used to endorse or promote products derived
+ * from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
+ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ *	@@(#)uipc_syscalls.c	7.5 (Berkeley) 6/29/88
+ */
+
+#include <sys/param.h>
+#include <sys/user.h>
+#include <sys/file.h>
+#include <sys/buf.h>
+#include <sys/mbuf.h>
+#include <sys/protosw.h>
+#include <sys/socket.h>
+#include <sys/socketvar.h>
+#include <sys/uio.h>
+#include <sys/time.h>
+#include <socket.h>
+
+#include "proto.h"
+
+/*
+ * System call interface to the socket abstraction.
+ */
+
+#define VALIDSO ('S'<<24 | 'O'<<16 | 'C'<<8 | 'K')
+#define VALIDATESO(so) (((struct socket *)so)->so_stamp == VALIDSO)
+#define VALIDATE(AP, so) if((((long)AP)&1) || AP==0 || !VALIDATESO(so)) return;
+
+#ifdef LATTICE
+#define ARGLIST register __d1 caddr_t AP
+#define ARGDEFS 
+#define FUNCDEF	void __asm __saveds
+#include <proto/exec.h>
+#else
+#define ARGLIST AP
+#define ARGDEFS caddr_t AP;
+#define __asm
+#define FUNCDEF void
+#endif
+
+
+/* LOCAL FUNCTIONS */
+static void sendit(register struct socket *so,register struct msghdr *mp,int flags, short *errno, long *rval);
+static sockargs(struct mbuf **aname, caddr_t name, int namelen, int type);
+static void recvit(register struct socket *, register struct msghdr *, int , short *, caddr_t , short * , long *);
+
+
+FUNCDEF
+_socket(ARGLIST)
+	ARGDEFS
+{
+	register struct sockargs *uap = (struct sockargs *)AP;
+	extern struct Task *FindTask();
+	struct socket *so;
+
+#ifdef DEBUG_IT
+	kprintf("Creating socket with type=%ld protocol=%ld domain=%ld\n",uap->type,uap->protocol,uap->domain);
+#endif
+	uap->rval = 0l;
+	uap->errno = socreate(uap->domain, &so, uap->type, uap->protocol);
+	if (uap->errno){
+		return;
+	}
+
+	so->so_pgrp = FindTask(0L);
+	so->so_sigio = uap->sigio;
+	so->so_sigurg = uap->sigurg;
+	so->so_stamp = VALIDSO;
+	uap->rval = so;
+
+	DEBUG("Finished socket\n");
+	return;
+}
+
+/*
+ * inherit - used when inetd passes off open socket to new daemon.  Resets
+ *	     signal bits and task pntr in socket struct.
+ */
+FUNCDEF
+_inherit(ARGLIST)
+	ARGDEFS
+{
+	register struct inheritargs *uap = (struct inheritargs *)AP;
+	register struct socket *so;
+DEBUG("INHERIT\n");
+	VALIDATE(AP, uap->fp);
+	so = (struct socket *)uap->fp;
+	so->so_pgrp = FindTask(0L);
+	so->so_sigurg = uap->sigurg;
+	so->so_sigio = uap->sigio;
+	so->so_rcv.sb_sel = so->so_snd.sb_sel = 0;
+	so->so_rcv.sb_flags &= ~SB_SEL;
+	so->so_snd.sb_flags &= ~SB_SEL;
+DEBUG("finished INHERIT\n");
+}
+
+FUNCDEF
+_networkclose(ARGLIST)
+	ARGDEFS
+{
+	register struct closeargs *uap = (struct closeargs *)AP;
+DEBUG("NETWORK CLOSE\n");
+	VALIDATE(AP, uap->fp);
+	((struct socket *)(uap->fp))->so_pgrp = 0;
+	((struct socket *)(uap->fp))->so_stamp = -1;
+	uap->errno = soclose(((struct socket *)(uap->fp)));
+DEBUG("Finished closing\n");
+}
+
+FUNCDEF
+_bind(ARGLIST)
+	ARGDEFS
+{
+	register struct bindargs *uap = (struct bindargs *)AP;
+	struct mbuf *nam;
+
+DEBUG("bind\n");
+	VALIDATE(AP, uap->fp);
+	uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+	if (uap->errno){
+		return;
+	}
+
+	uap->errno = sobind((struct socket *)uap->fp, nam);
+	m_freem(nam);
+DEBUG("finished bind\n");
+}
+
+FUNCDEF
+_listen(ARGLIST)
+	ARGDEFS
+{
+	register struct listenargs *uap = (struct listenargs *)AP;
+
+DEBUG("listen\n");
+	VALIDATE(AP, uap->fp);
+	uap->errno = solisten((struct socket *)uap->fp, uap->backlog);
+DEBUG("finished listen\n");
+}
+
+FUNCDEF
+_accept(ARGLIST)
+	ARGDEFS
+{
+	register struct acceptargs *uap = (struct acceptargs *)AP;
+	register struct socket *so, *aso;
+	struct mbuf *nam;
+	int s;
+DEBUG("accept\n");
+	VALIDATE(AP, uap->fp);
+	if (uap->name == 0){
+		goto noname;
+	}
+
+noname:
+	s = splnet();
+	so = (struct socket *)uap->fp;
+	if ((so->so_options & SO_ACCEPTCONN) == 0) {
+		uap->errno = EINVAL;
+		splx(s);
+		return;
+	}
+	if ((so->so_state & SS_NBIO) && so->so_qlen == 0) {
+		uap->errno = EWOULDBLOCK;
+		splx(s);
+		return;
+	}
+	while (so->so_qlen == 0 && so->so_error == 0) {
+		if (so->so_state & SS_CANTRCVMORE) {
+			so->so_error = ECONNABORTED;
+			break;
+		}
+		if(sleep((ulong)&so->so_timeo, PZERO+1)) {
+			so->so_error = EINTR;
+			break;
+		}
+	}
+	if (so->so_error) {
+		uap->errno = so->so_error;
+		so->so_error = 0;
+		splx(s);
+		return;
+	}
+
+	aso = so->so_q;
+  	if (soqremque(aso, 1) == 0){
+		panic("accept");
+	}
+
+	uap->rval = aso;
+	aso->so_stamp = VALIDSO;
+	nam = m_get(M_WAIT, MT_SONAME);
+	(void) soaccept(aso, nam);
+	if (uap->name) {
+		if (uap->namelen > nam->m_len){
+			uap->namelen = nam->m_len;
+		}
+		bcopy(mtod(nam, caddr_t), (caddr_t)uap->name,
+				    (u_int)uap->namelen);
+	}
+	m_freem(nam);
+	splx(s);
+DEBUG("finished accept\n");
+}
+
+FUNCDEF
+_connect(ARGLIST)
+	ARGDEFS
+{
+	register struct connectargs *uap = (struct connectargs*)AP;
+	register struct socket *so;
+	struct mbuf *nam;
+
+	DEBUG("connect\n");
+	VALIDATE(AP, uap->fp);
+	DEBUG("CONNECT 1\n");
+	so = (struct socket *)uap->fp;
+	if ((so->so_state & SS_NBIO) &&
+	    (so->so_state & SS_ISCONNECTING)) {
+		uap->errno = EALREADY;
+		DEBUG("CONNECT: ERROR 1\n");
+		return;
+	}
+	uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+DEBUG("Back from sockargs\n");
+	if (uap->errno){
+		DEBUG("CONNECT: ERROR 2\n");
+		return;
+	}
+
+	uap->errno = soconnect(so, nam);
+DEBUG("Back from soconnect\n");
+	if (uap->errno){
+		DEBUG("CONNECT: ERROR 3\n");
+		goto bad;
+	}
+	if ((so->so_state & SS_NBIO) && (so->so_state & SS_ISCONNECTING)) {
+		uap->errno = EINPROGRESS;
+		DEBUG("CONNECT: ERROR 4\n");
+		m_freem(nam);
+		return;
+	}
+	Forbid();	/* s = splnet(); */
+// kprintf("so =%lx so->so_state=%lx so->timeo=%lx\n",so,so->so_state,so->so_timeo);
+	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0){
+		if(sleep((ulong)&so->so_timeo, PZERO+1))
+			so->so_error = EINTR;
+	}
+DEBUG("Back from sleep\n");
+	uap->errno = so->so_error;
+	so->so_error = 0;
+bad2:
+	Permit();	/* splx(s); */
+bad:
+	so->so_state &= ~SS_ISCONNECTING;
+	m_freem(nam);
+	DEBUG("leaving connect\n");
+}
+
+FUNCDEF
+_sendto(ARGLIST)
+	ARGDEFS
+{
+	register struct sendtoargs *uap = (struct sendtoargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+
+//	DEBUG("sendto\n");
+
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = uap->to;
+	msg.msg_namelen = uap->tolen;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+
+//	DEBUG("leaving sendto\n");
+}
+
+FUNCDEF
+_send(ARGLIST)
+	ARGDEFS
+{
+	register struct sendargs *uap = (struct sendargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+	DEBUG("send\n");
+
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = 0;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+
+	DEBUG("leaving send\n");
+
+}
+
+FUNCDEF
+_sendmsg(ARGLIST)
+	ARGDEFS
+{
+	register struct sendmsgargs *uap = (struct sendmsgargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov[MSG_MAXIOVLEN];
+DEBUG("sendmsg\n");
+	VALIDATE(AP, uap->fp);
+	bcopy(uap->msg, (caddr_t)&msg, sizeof (msg));
+	if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+		uap->errno = EMSGSIZE;
+		return;
+	}
+	bcopy((caddr_t)msg.msg_iov, (caddr_t)aiov,
+			(unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+	msg.msg_iov = aiov;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+DEBUG("finished sendmsg\n");
+}
+
+FUNCDEF
+_recvfrom(ARGLIST)
+	ARGDEFS
+{
+	register struct recvfromargs *uap = (struct recvfromargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+	short len;
+
+// DEBUG("recvfrom\n");
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = uap->from;
+	len = msg.msg_namelen = uap->fromlen;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	recvit(uap->fp, &msg, uap->flags, &len, (caddr_t)0, &uap->errno, &uap->rval);
+
+	uap->fromlen = len;
+// DEBUG("finished recvfrom\n");
+}
+
+FUNCDEF
+_recv(ARGLIST)
+	ARGDEFS
+{
+	register struct recvargs *uap = (struct recvargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+DEBUG("recv\n");
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = 0;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	recvit(uap->fp, &msg, uap->flags, (caddr_t)0, (caddr_t)0,
+			&uap->errno, &uap->rval);
+DEBUG("finished recv\n");
+}
+
+FUNCDEF
+_recvmsg(ARGLIST)
+	ARGDEFS
+{
+	register struct recvmsgargs *uap = (struct recvmsgargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov[MSG_MAXIOVLEN];
+DEBUG("recvmsg\n");
+	VALIDATE(AP, uap->fp);
+	bcopy((caddr_t)uap->msg, (caddr_t)&msg, sizeof (msg));
+	if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+		uap->errno = EMSGSIZE;
+		return;
+	}
+	bcopy((caddr_t)msg.msg_iov, (caddr_t)aiov,
+				(unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+	msg.msg_iov = aiov;
+	recvit(uap->fp, &msg, uap->flags, (short *)&uap->msg->msg_namelen, (caddr_t)&uap->msg->msg_accrightslen,
+				&uap->errno, &uap->rval);
+DEBUG("finished recvmsg\n");
+}
+
+FUNCDEF
+_shutdown(ARGLIST)
+	ARGDEFS
+{
+	register struct shutdownargs *uap = (struct shutdownargs *)AP;
+DEBUG("shutdown\n");
+	VALIDATE(AP, uap->fp);
+	uap->errno = soshutdown((struct socket *)uap->fp, uap->how);
+DEBUG("finished shutdown\n");
+}
+
+FUNCDEF
+_setsockopt(ARGLIST)
+	ARGDEFS
+{
+	register struct setsockoptargs *uap = (struct setsockoptargs *)AP;
+	struct mbuf *m = NULL;
+
+	DEBUG("setsockopt\n");
+	VALIDATE(AP, uap->fp);
+	if (uap->valsize > MLEN) {
+		uap->errno = EINVAL;
+		return;
+	}
+	if (uap->val) {
+		m = m_get(M_WAIT, MT_SOOPTS);
+		if (m == NULL) {
+			uap->errno = ENOBUFS;
+			return;
+		}
+		bcopy(uap->val, mtod(m, caddr_t), (u_int)uap->valsize);
+		m->m_len = uap->valsize;
+	}
+	uap->errno = sosetopt((struct socket *)uap->fp, 
+		    			uap->level, uap->name, m);
+	DEBUG("leaving setsockopt\n");
+
+}
+
+FUNCDEF
+_getsockopt(ARGLIST)
+	ARGDEFS
+{
+	register struct getsockoptargs *uap = (struct getsockoptargs *)AP;
+	struct mbuf *m = NULL;
+
+	DEBUG("getsockopt\n");
+
+	VALIDATE(AP, uap->fp);
+	uap->errno = sogetopt((struct socket *)uap->fp, 
+	    				uap->level, uap->name, &m);
+	if (uap->errno){
+		goto bad;
+	}
+	if (uap->val && uap->valsize && m != NULL) {
+		if (uap->valsize > m->m_len){
+			uap->valsize = m->m_len;
+		}
+		bcopy(mtod(m, caddr_t), uap->val, (u_int)uap->valsize);
+	}
+
+bad:	if (m != NULL){
+		(void) m_free(m);
+	}
+
+	DEBUG("leaving getsockopt\n");
+
+}
+
+/*
+ * Get socket name.
+ */
+FUNCDEF
+_getsockname(ARGLIST)
+	ARGDEFS
+{
+	register struct getsocknameargs *uap = (struct getsocknameargs *)AP;
+	register struct socket *so;
+	struct mbuf *m;
+	int len;
+
+	VALIDATE(AP, uap->fp);
+	len = uap->len;
+	so = (struct socket *)uap->fp;
+	m = m_getclr(M_WAIT, MT_SONAME);
+	if (m == NULL) {
+		uap->errno = ENOBUFS;
+		return;
+	}
+	uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_SOCKADDR, 0, m, 0);
+	if (uap->errno){
+		goto bad;
+	}
+	if (len > m->m_len){
+		len = m->m_len;
+	}
+	bcopy(mtod(m, caddr_t), (caddr_t)uap->asa, (u_int)len);
+	uap->len = len;
+
+bad:	m_freem(m);
+}
+
+/*
+ * Get name of peer for connected socket.
+ */
+FUNCDEF
+_getpeername(ARGLIST)
+	ARGDEFS
+{
+	register struct getpeernameargs *uap = (struct getpeernameargs *)AP;
+	register struct socket *so;
+	struct mbuf *m;
+DEBUG("getpeername\n");
+	VALIDATE(AP, uap->fp);
+	so = (struct socket *)uap->fp;
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
+		uap->errno = ENOTCONN;
+		return;
+	}
+	m = m_getclr(M_WAIT, MT_SONAME);
+	if (m == NULL) {
+		uap->errno = ENOBUFS;
+		return;
+	}
+	uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_PEERADDR, 0, m, 0);
+	if (uap->errno){
+		goto bad;
+	}
+	if (uap->len > m->m_len){
+		uap->len = m->m_len;
+	}
+	bcopy(mtod(m, caddr_t), (caddr_t)uap->asa, (u_int)uap->len);
+
+bad:	m_freem(m);
+DEBUG("finished getpeername\n");
+}
+
+FUNCDEF
+_select(ARGLIST)
+	ARGDEFS
+{
+	register struct selectargs *uap = (struct selectargs *)AP;
+	register int fd, off, bit;
+	register struct socket *so;
+DEBUG("select\n");	
+	Forbid();	/* s = splnet(); */
+	uap->rval = 0;
+	bit = 1;
+	for(off = fd = 0; fd < uap->numfds; fd++, bit <<= 1){
+		so = uap->socks[fd];
+
+		if(bit == (1<<NFDBITS)){
+			off++;
+			bit = 1;
+		}
+#define SEL_ISSET(set) (set->fds_bits[off] & bit)
+#define SEL_CLR(set)   (set->fds_bits[off] &= ~bit)
+
+		if(uap->rd_set && SEL_ISSET(uap->rd_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!soreadable(so)){
+				SEL_CLR(uap->rd_set);
+				so->so_rcv.sb_sel = uap->task;
+				so->so_rcv.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+
+		if(uap->wr_set && SEL_ISSET(uap->wr_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!sowriteable(so)){
+				SEL_CLR(uap->wr_set);
+				so->so_snd.sb_sel = uap->task;
+				so->so_snd.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+	
+		if(uap->ex_set && SEL_ISSET(uap->ex_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!(so->so_oobmark || (so->so_state & SS_RCVATMARK))){
+				SEL_CLR(uap->ex_set);
+				so->so_snd.sb_sel = uap->task;
+				so->so_snd.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+#undef SEL_ISSET
+#undef SEL_CLR
+	}
+	Permit();	/* splx(s); */
+DEBUG("finished select\n");
+}
+
+FUNCDEF
+_ioctl(ARGLIST)
+	ARGDEFS
+{
+	struct ioctlargs *uap = (struct ioctlargs *)AP;
+	DEBUG("ioctl\n");
+	VALIDATE(AP, uap->fp);
+	uap->errno = soo_ioctl(uap->fp, uap->cmd, uap->data);	
+	DEBUG("leaving ioctl\n");
+
+}
+
+/*
+** Local functions.
+*/
+static void
+recvit(so, mp, flags, namelenp, rightslenp, errno, rval)
+	register struct socket *so;
+	register struct msghdr *mp;
+	int flags;
+	caddr_t rightslenp;
+	short *errno, *namelenp;
+	long *rval;
+{
+	struct uio auio;
+	register struct iovec *iov;
+	register int i;
+	struct mbuf *from, *rights;
+	int len;
+	
+	auio.uio_iov = mp->msg_iov;
+	auio.uio_iovcnt = mp->msg_iovlen;
+	auio.uio_resid = 0;
+	iov = mp->msg_iov;
+	for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+		if (iov->iov_len < 0) {
+			*errno = EINVAL;
+			return;
+		}
+		if (iov->iov_len == 0)
+			continue;
+		auio.uio_resid += iov->iov_len;
+	}
+	len = auio.uio_resid;
+	*errno = soreceive(so, &from, &auio, flags, &rights);
+	*rval = len - auio.uio_resid;
+	if (mp->msg_name) {
+		len = mp->msg_namelen;
+		if (len <= 0 || from == 0){
+			len = 0;
+		} else {
+			if (len > from->m_len){
+				len = from->m_len;
+			}
+			bcopy((caddr_t)mtod(from, caddr_t),
+				    (caddr_t)mp->msg_name, (unsigned)len);
+		}
+		*namelenp = len;
+	}
+	if (mp->msg_accrights) {
+		len = mp->msg_accrightslen;
+		if (len <= 0 || rights == 0){
+			len = 0;
+		} else {
+			if (len > rights->m_len){
+				len = rights->m_len;
+			}
+			bcopy((caddr_t)mtod(rights, caddr_t),
+				    (caddr_t)mp->msg_accrights, (unsigned)len);
+		}
+		bcopy((caddr_t)&len, rightslenp, sizeof (int));
+	}
+	if (rights){
+		m_freem(rights);
+	}
+	if (from){
+		m_freem(from);
+	}
+}
+
+static
+sockargs(aname, name, namelen, type)
+	struct mbuf **aname;
+	caddr_t name;
+	int namelen, type;
+{
+	register struct mbuf *m;
+
+	if ((u_int)namelen > MLEN){
+		return (EINVAL);
+	}
+	m = m_get(M_WAIT, type);
+	if (m == NULL){
+		return (ENOBUFS);
+	}
+	m->m_len = namelen;
+	bcopy(name, mtod(m, caddr_t), (u_int)namelen);
+	*aname = m;
+	return (0);
+}
+
+static void
+sendit(so, mp, flags, errno, rval)
+	register struct socket *so;
+	register struct msghdr *mp;
+	int flags;
+	short *errno;
+	long *rval;
+{
+	struct uio auio;
+	register struct iovec *iov;
+	register int i;
+	struct mbuf *to, *rights;
+	int len;
+	
+	auio.uio_iov = mp->msg_iov;
+	auio.uio_iovcnt = mp->msg_iovlen;
+	auio.uio_resid = 0;
+	iov = mp->msg_iov;
+	for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+		if (iov->iov_len < 0) {
+			*errno = EINVAL;
+			return;
+		}
+		if (iov->iov_len == 0){
+			continue;
+		}
+		auio.uio_resid += iov->iov_len;
+	}
+	if (mp->msg_name) {
+		*errno =
+		    sockargs(&to, mp->msg_name, mp->msg_namelen, MT_SONAME);
+		if (*errno)
+			return;
+	} else
+		to = 0;
+	if (mp->msg_accrights) {
+		*errno =
+		    sockargs(&rights, mp->msg_accrights, mp->msg_accrightslen,
+		    MT_RIGHTS);
+		if (*errno){
+			goto bad;
+		}
+	} else {
+		rights = 0;
+	}
+	len = auio.uio_resid;
+	*errno =
+	    sosend(so, to, &auio, flags, rights);
+	*rval = len - auio.uio_resid;
+	if (rights){
+		m_freem(rights);
+	}
+bad:
+	if (to){
+		m_freem(to);
+	}
+}
+
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@d17 1
+a17 1
+ *      @@(#)uipc_syscalls.c     7.5 (Berkeley) 6/29/88
+d44 2
+a45 2
+#define ARGDEFS
+#define FUNCDEF void __asm __saveds
+d63 1
+a63 1
+        ARGDEFS
+d65 3
+a67 3
+        register struct sockargs *uap = (struct sockargs *)AP;
+        extern struct Task *FindTask();
+        struct socket *so;
+d70 1
+a70 1
+        kprintf("Creating socket with type=%ld protocol=%ld domain=%ld\n",uap->type,uap->protocol,uap->domain);
+d72 11
+a82 11
+        uap->rval = 0l;
+        uap->errno = socreate(uap->domain, &so, uap->type, uap->protocol);
+        if (uap->errno){
+                return;
+        }
+
+        so->so_pgrp = FindTask(0L);
+        so->so_sigio = uap->sigio;
+        so->so_sigurg = uap->sigurg;
+        so->so_stamp = VALIDSO;
+        uap->rval = so;
+d84 2
+a85 2
+        DEBUG("Finished socket\n");
+        return;
+d90 1
+a90 1
+ *           signal bits and task pntr in socket struct.
+d94 1
+a94 1
+        ARGDEFS
+d96 2
+a97 2
+        register struct inheritargs *uap = (struct inheritargs *)AP;
+        register struct socket *so;
+d99 8
+a106 8
+        VALIDATE(AP, uap->fp);
+        so = (struct socket *)uap->fp;
+        so->so_pgrp = FindTask(0L);
+        so->so_sigurg = uap->sigurg;
+        so->so_sigio = uap->sigio;
+        so->so_rcv.sb_sel = so->so_snd.sb_sel = 0;
+        so->so_rcv.sb_flags &= ~SB_SEL;
+        so->so_snd.sb_flags &= ~SB_SEL;
+d112 1
+a112 1
+        ARGDEFS
+d114 1
+a114 1
+        register struct closeargs *uap = (struct closeargs *)AP;
+d116 4
+a119 4
+        VALIDATE(AP, uap->fp);
+        ((struct socket *)(uap->fp))->so_pgrp = 0;
+        ((struct socket *)(uap->fp))->so_stamp = -1;
+        uap->errno = soclose(((struct socket *)(uap->fp)));
+d125 1
+a125 1
+        ARGDEFS
+d127 2
+a128 2
+        register struct bindargs *uap = (struct bindargs *)AP;
+        struct mbuf *nam;
+d131 5
+a135 5
+        VALIDATE(AP, uap->fp);
+        uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+        if (uap->errno){
+                return;
+        }
+d137 2
+a138 2
+        uap->errno = sobind((struct socket *)uap->fp, nam);
+        m_freem(nam);
+d144 1
+a144 1
+        ARGDEFS
+d146 1
+a146 1
+        register struct listenargs *uap = (struct listenargs *)AP;
+d149 2
+a150 2
+        VALIDATE(AP, uap->fp);
+        uap->errno = solisten((struct socket *)uap->fp, uap->backlog);
+d156 1
+a156 1
+        ARGDEFS
+d158 4
+a161 4
+        register struct acceptargs *uap = (struct acceptargs *)AP;
+        register struct socket *so, *aso;
+        struct mbuf *nam;
+        int s;
+d163 4
+a166 4
+        VALIDATE(AP, uap->fp);
+        if (uap->name == 0){
+                goto noname;
+        }
+d169 47
+a215 44
+        s = splnet();
+        so = (struct socket *)uap->fp;
+        if ((so->so_options & SO_ACCEPTCONN) == 0) {
+                uap->errno = EINVAL;
+                splx(s);
+                return;
+        }
+        if ((so->so_state & SS_NBIO) && so->so_qlen == 0) {
+                uap->errno = EWOULDBLOCK;
+                splx(s);
+                return;
+        }
+        while (so->so_qlen == 0 && so->so_error == 0) {
+                if (so->so_state & SS_CANTRCVMORE) {
+                        so->so_error = ECONNABORTED;
+                        break;
+                }
+                sleep((ulong)&so->so_timeo, PZERO+1);
+        }
+        if (so->so_error) {
+                uap->errno = so->so_error;
+                so->so_error = 0;
+                splx(s);
+                return;
+        }
+
+        aso = so->so_q;
+        if (soqremque(aso, 1) == 0){
+                panic("accept");
+        }
+
+        uap->rval = aso;
+        aso->so_stamp = VALIDSO;
+        nam = m_get(M_WAIT, MT_SONAME);
+        (void) soaccept(aso, nam);
+        if (uap->name) {
+                if (uap->namelen > nam->m_len){
+                        uap->namelen = nam->m_len;
+                }
+                (void) copyout(mtod(nam, caddr_t), (caddr_t)uap->name,
+                                    (u_int)uap->namelen);
+        }
+        m_freem(nam);
+        splx(s);
+d221 1
+a221 1
+        ARGDEFS
+d223 15
+a237 15
+        register struct connectargs *uap = (struct connectargs*)AP;
+        register struct socket *so;
+        struct mbuf *nam;
+
+        DEBUG("connect\n");
+        VALIDATE(AP, uap->fp);
+        DEBUG("CONNECT 1\n");
+        so = (struct socket *)uap->fp;
+        if ((so->so_state & SS_NBIO) &&
+            (so->so_state & SS_ISCONNECTING)) {
+                uap->errno = EALREADY;
+                DEBUG("CONNECT: ERROR 1\n");
+                return;
+        }
+        uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+d239 4
+a242 4
+        if (uap->errno){
+                DEBUG("CONNECT: ERROR 2\n");
+                return;
+        }
+d244 1
+a244 1
+        uap->errno = soconnect(so, nam);
+d246 11
+a256 11
+        if (uap->errno){
+                DEBUG("CONNECT: ERROR 3\n");
+                goto bad;
+        }
+        if ((so->so_state & SS_NBIO) && (so->so_state & SS_ISCONNECTING)) {
+                uap->errno = EINPROGRESS;
+                DEBUG("CONNECT: ERROR 4\n");
+                m_freem(nam);
+                return;
+        }
+        Forbid();       /* s = splnet(); */
+d258 4
+a261 3
+        while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0){
+                (void)sleep((ulong)&so->so_timeo, PZERO+1);
+        }
+d263 2
+a264 2
+        uap->errno = so->so_error;
+        so->so_error = 0;
+d266 1
+a266 1
+        Permit();       /* splx(s); */
+d268 3
+a270 3
+        so->so_state &= ~SS_ISCONNECTING;
+        m_freem(nam);
+        DEBUG("leaving connect\n");
+d275 1
+a275 1
+        ARGDEFS
+d277 16
+a292 16
+        register struct sendtoargs *uap = (struct sendtoargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov;
+
+//      DEBUG("sendto\n");
+
+        VALIDATE(AP, uap->fp);
+        msg.msg_name = uap->to;
+        msg.msg_namelen = uap->tolen;
+        msg.msg_iov = &aiov;
+        msg.msg_iovlen = 1;
+        aiov.iov_base = uap->buf;
+        aiov.iov_len = uap->len;
+        msg.msg_accrights = 0;
+        msg.msg_accrightslen = 0;
+        sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+d294 1
+a294 1
+//      DEBUG("leaving sendto\n");
+d299 1
+a299 1
+        ARGDEFS
+d301 17
+a317 17
+        register struct sendargs *uap = (struct sendargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov;
+        DEBUG("send\n");
+
+        VALIDATE(AP, uap->fp);
+        msg.msg_name = 0;
+        msg.msg_namelen = 0;
+        msg.msg_iov = &aiov;
+        msg.msg_iovlen = 1;
+        aiov.iov_base = uap->buf;
+        aiov.iov_len = uap->len;
+        msg.msg_accrights = 0;
+        msg.msg_accrightslen = 0;
+        sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+
+        DEBUG("leaving send\n");
+d323 1
+a323 1
+        ARGDEFS
+d325 3
+a327 3
+        register struct sendmsgargs *uap = (struct sendmsgargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov[MSG_MAXIOVLEN];
+d329 10
+a338 16
+        VALIDATE(AP, uap->fp);
+        uap->errno = copyin(uap->msg, (caddr_t)&msg, sizeof (msg));
+        if (uap->errno){
+                return;
+        }
+        if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+                uap->errno = EMSGSIZE;
+                return;
+        }
+        uap->errno = copyin((caddr_t)msg.msg_iov, (caddr_t)aiov,
+                        (unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+        if (uap->errno){
+                return;
+        }
+        msg.msg_iov = aiov;
+        sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+d344 1
+a344 1
+        ARGDEFS
+d346 4
+a349 4
+        register struct recvfromargs *uap = (struct recvfromargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov;
+        short len;
+d352 10
+a361 10
+        VALIDATE(AP, uap->fp);
+        msg.msg_name = uap->from;
+        len = msg.msg_namelen = uap->fromlen;
+        msg.msg_iov = &aiov;
+        msg.msg_iovlen = 1;
+        aiov.iov_base = uap->buf;
+        aiov.iov_len = uap->len;
+        msg.msg_accrights = 0;
+        msg.msg_accrightslen = 0;
+        recvit(uap->fp, &msg, uap->flags, &len, (caddr_t)0, &uap->errno, &uap->rval);
+d363 1
+a363 1
+        uap->fromlen = len;
+d369 1
+a369 1
+        ARGDEFS
+d371 3
+a373 3
+        register struct recvargs *uap = (struct recvargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov;
+d375 11
+a385 11
+        VALIDATE(AP, uap->fp);
+        msg.msg_name = 0;
+        msg.msg_namelen = 0;
+        msg.msg_iov = &aiov;
+        msg.msg_iovlen = 1;
+        aiov.iov_base = uap->buf;
+        aiov.iov_len = uap->len;
+        msg.msg_accrights = 0;
+        msg.msg_accrightslen = 0;
+        recvit(uap->fp, &msg, uap->flags, (caddr_t)0, (caddr_t)0,
+                        &uap->errno, &uap->rval);
+d391 1
+a391 1
+        ARGDEFS
+d393 3
+a395 3
+        register struct recvmsgargs *uap = (struct recvmsgargs *)AP;
+        struct msghdr msg;
+        struct iovec aiov[MSG_MAXIOVLEN];
+d397 11
+a407 17
+        VALIDATE(AP, uap->fp);
+        uap->errno = copyin((caddr_t)uap->msg, (caddr_t)&msg, sizeof (msg));
+        if (uap->errno){
+                return;
+        }
+        if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+                uap->errno = EMSGSIZE;
+                return;
+        }
+        uap->errno = copyin((caddr_t)msg.msg_iov, (caddr_t)aiov,
+                                (unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+        if (uap->errno){
+                return;
+        }
+        msg.msg_iov = aiov;
+        recvit(uap->fp, &msg, uap->flags, (short *)&uap->msg->msg_namelen, (caddr_t)&uap->msg->msg_accrightslen,
+                                &uap->errno, &uap->rval);
+d413 1
+a413 1
+        ARGDEFS
+d415 1
+a415 1
+        register struct shutdownargs *uap = (struct shutdownargs *)AP;
+d417 2
+a418 2
+        VALIDATE(AP, uap->fp);
+        uap->errno = soshutdown((struct socket *)uap->fp, uap->how);
+d424 1
+a424 1
+        ARGDEFS
+d426 2
+a427 2
+        register struct setsockoptargs *uap = (struct setsockoptargs *)AP;
+        struct mbuf *m = NULL;
+d429 18
+a446 23
+        DEBUG("setsockopt\n");
+        VALIDATE(AP, uap->fp);
+        if (uap->valsize > MLEN) {
+                uap->errno = EINVAL;
+                return;
+        }
+        if (uap->val) {
+                m = m_get(M_WAIT, MT_SOOPTS);
+                if (m == NULL) {
+                        uap->errno = ENOBUFS;
+                        return;
+                }
+                uap->errno =
+                        copyin(uap->val, mtod(m, caddr_t), (u_int)uap->valsize);
+                if (uap->errno) {
+                        (void) m_free(m);
+                        return;
+                }
+                m->m_len = uap->valsize;
+        }
+        uap->errno = sosetopt((struct socket *)uap->fp,
+                                        uap->level, uap->name, m);
+        DEBUG("leaving setsockopt\n");
+d452 1
+a452 1
+        ARGDEFS
+d454 2
+a455 2
+        register struct getsockoptargs *uap = (struct getsockoptargs *)AP;
+        struct mbuf *m = NULL;
+d457 18
+a474 22
+        DEBUG("getsockopt\n");
+
+        VALIDATE(AP, uap->fp);
+        uap->errno = sogetopt((struct socket *)uap->fp,
+                                        uap->level, uap->name, &m);
+        if (uap->errno){
+                goto bad;
+        }
+        if (uap->val && uap->valsize && m != NULL) {
+                if (uap->valsize > m->m_len){
+                        uap->valsize = m->m_len;
+                }
+                uap->errno = copyout(mtod(m, caddr_t), uap->val,
+                                        (u_int)uap->valsize);
+                if (uap->errno){
+                        goto bad;
+                }
+        }
+
+bad:    if (m != NULL){
+                (void) m_free(m);
+        }
+d476 1
+a476 1
+        DEBUG("leaving getsockopt\n");
+d485 1
+a485 1
+        ARGDEFS
+d487 22
+a508 25
+        register struct getsocknameargs *uap = (struct getsocknameargs *)AP;
+        register struct socket *so;
+        struct mbuf *m;
+        int len;
+
+        VALIDATE(AP, uap->fp);
+        len = uap->len;
+        so = (struct socket *)uap->fp;
+        m = m_getclr(M_WAIT, MT_SONAME);
+        if (m == NULL) {
+                uap->errno = ENOBUFS;
+                return;
+        }
+        uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_SOCKADDR, 0, m, 0);
+        if (uap->errno){
+                goto bad;
+        }
+        if (len > m->m_len){
+                len = m->m_len;
+        }
+        uap->errno = copyout(mtod(m, caddr_t), (caddr_t)uap->asa, (u_int)len);
+        if (uap->errno){
+                goto bad;
+        }
+        uap->len = len;
+d510 1
+a510 1
+bad:    m_freem(m);
+d518 1
+a518 1
+        ARGDEFS
+d520 3
+a522 3
+        register struct getpeernameargs *uap = (struct getpeernameargs *)AP;
+        register struct socket *so;
+        struct mbuf *m;
+d524 19
+a542 23
+        VALIDATE(AP, uap->fp);
+        so = (struct socket *)uap->fp;
+        if ((so->so_state & SS_ISCONNECTED) == 0) {
+                uap->errno = ENOTCONN;
+                return;
+        }
+        m = m_getclr(M_WAIT, MT_SONAME);
+        if (m == NULL) {
+                uap->errno = ENOBUFS;
+                return;
+        }
+        uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_PEERADDR, 0, m, 0);
+        if (uap->errno){
+                goto bad;
+        }
+        if (uap->len > m->m_len){
+                uap->len = m->m_len;
+        }
+        uap->errno = copyout(mtod(m, caddr_t), (caddr_t)uap->asa,
+                                (u_int)uap->len);
+        if (uap->errno){
+                goto bad;
+        }
+d544 1
+a544 1
+bad:    m_freem(m);
+d550 1
+a550 1
+        ARGDEFS
+d552 9
+a560 9
+        register struct selectargs *uap = (struct selectargs *)AP;
+        register int fd, off, bit;
+        register struct socket *so;
+DEBUG("select\n");
+        Forbid();       /* s = splnet(); */
+        uap->rval = 0;
+        bit = 1;
+        for(off = fd = 0; fd < uap->numfds; fd++, bit <<= 1){
+                so = uap->socks[fd];
+d562 4
+a565 4
+                if(bit == (1<<NFDBITS)){
+                        off++;
+                        bit = 1;
+                }
+d569 44
+a612 44
+                if(uap->rd_set && SEL_ISSET(uap->rd_set)){
+                        if(!VALIDATESO(so)){
+                                uap->errno = EBADF;
+                                break;
+                        }
+                        if(!soreadable(so)){
+                                SEL_CLR(uap->rd_set);
+                                so->so_rcv.sb_sel = uap->task;
+                                so->so_rcv.sb_sigbit = uap->sigbit;
+                        } else {
+                                /* leave bit set */
+                                uap->rval++;
+                        }
+                }
+
+                if(uap->wr_set && SEL_ISSET(uap->wr_set)){
+                        if(!VALIDATESO(so)){
+                                uap->errno = EBADF;
+                                break;
+                        }
+                        if(!sowriteable(so)){
+                                SEL_CLR(uap->wr_set);
+                                so->so_snd.sb_sel = uap->task;
+                                so->so_snd.sb_sigbit = uap->sigbit;
+                        } else {
+                                /* leave bit set */
+                                uap->rval++;
+                        }
+                }
+
+                if(uap->ex_set && SEL_ISSET(uap->ex_set)){
+                        if(!VALIDATESO(so)){
+                                uap->errno = EBADF;
+                                break;
+                        }
+                        if(!(so->so_oobmark || (so->so_state & SS_RCVATMARK))){
+                                SEL_CLR(uap->ex_set);
+                                so->so_snd.sb_sel = uap->task;
+                                so->so_snd.sb_sigbit = uap->sigbit;
+                        } else {
+                                /* leave bit set */
+                                uap->rval++;
+                        }
+                }
+d615 2
+a616 2
+        }
+        Permit();       /* splx(s); */
+d622 1
+a622 1
+        ARGDEFS
+d624 5
+a628 5
+        struct ioctlargs *uap = (struct ioctlargs *)AP;
+        DEBUG("ioctl\n");
+        VALIDATE(AP, uap->fp);
+        uap->errno = soo_ioctl(uap->fp, uap->cmd, uap->data);
+        DEBUG("leaving ioctl\n");
+d637 61
+a697 61
+        register struct socket *so;
+        register struct msghdr *mp;
+        int flags;
+        caddr_t rightslenp;
+        short *errno, *namelenp;
+        long *rval;
+{
+        struct uio auio;
+        register struct iovec *iov;
+        register int i;
+        struct mbuf *from, *rights;
+        int len;
+
+        auio.uio_iov = mp->msg_iov;
+        auio.uio_iovcnt = mp->msg_iovlen;
+        auio.uio_resid = 0;
+        iov = mp->msg_iov;
+        for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+                if (iov->iov_len < 0) {
+                        *errno = EINVAL;
+                        return;
+                }
+                if (iov->iov_len == 0)
+                        continue;
+                auio.uio_resid += iov->iov_len;
+        }
+        len = auio.uio_resid;
+        *errno = soreceive(so, &from, &auio, flags, &rights);
+        *rval = len - auio.uio_resid;
+        if (mp->msg_name) {
+                len = mp->msg_namelen;
+                if (len <= 0 || from == 0){
+                        len = 0;
+                } else {
+                        if (len > from->m_len){
+                                len = from->m_len;
+                        }
+                        (void) copyout((caddr_t)mtod(from, caddr_t),
+                                    (caddr_t)mp->msg_name, (unsigned)len);
+                }
+                *namelenp = len;
+        }
+        if (mp->msg_accrights) {
+                len = mp->msg_accrightslen;
+                if (len <= 0 || rights == 0){
+                        len = 0;
+                } else {
+                        if (len > rights->m_len){
+                                len = rights->m_len;
+                        }
+                        (void) copyout((caddr_t)mtod(rights, caddr_t),
+                                    (caddr_t)mp->msg_accrights, (unsigned)len);
+                }
+                (void) copyout((caddr_t)&len, rightslenp, sizeof (int));
+        }
+        if (rights){
+                m_freem(rights);
+        }
+        if (from){
+                m_freem(from);
+        }
+d702 3
+a704 3
+        struct mbuf **aname;
+        caddr_t name;
+        int namelen, type;
+d706 13
+a718 18
+        register struct mbuf *m;
+        int error;
+
+        if ((u_int)namelen > MLEN){
+                return (EINVAL);
+        }
+        m = m_get(M_WAIT, type);
+        if (m == NULL){
+                return (ENOBUFS);
+        }
+        m->m_len = namelen;
+        error = copyin(name, mtod(m, caddr_t), (u_int)namelen);
+        if (error){
+                (void) m_free(m);
+        } else {
+                *aname = m;
+        }
+        return (error);
+d723 50
+a772 50
+        register struct socket *so;
+        register struct msghdr *mp;
+        int flags;
+        short *errno;
+        long *rval;
+{
+        struct uio auio;
+        register struct iovec *iov;
+        register int i;
+        struct mbuf *to, *rights;
+        int len;
+
+        auio.uio_iov = mp->msg_iov;
+        auio.uio_iovcnt = mp->msg_iovlen;
+        auio.uio_resid = 0;
+        iov = mp->msg_iov;
+        for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+                if (iov->iov_len < 0) {
+                        *errno = EINVAL;
+                        return;
+                }
+                if (iov->iov_len == 0){
+                        continue;
+                }
+                auio.uio_resid += iov->iov_len;
+        }
+        if (mp->msg_name) {
+                *errno =
+                    sockargs(&to, mp->msg_name, mp->msg_namelen, MT_SONAME);
+                if (*errno)
+                        return;
+        } else
+                to = 0;
+        if (mp->msg_accrights) {
+                *errno =
+                    sockargs(&rights, mp->msg_accrights, mp->msg_accrightslen,
+                    MT_RIGHTS);
+                if (*errno){
+                        goto bad;
+                }
+        } else {
+                rights = 0;
+        }
+        len = auio.uio_resid;
+        *errno =
+            sosend(so, to, &auio, flags, rights);
+        *rval = len - auio.uio_resid;
+        if (rights){
+                m_freem(rights);
+        }
+d774 3
+a776 3
+        if (to){
+                m_freem(to);
+        }
+@
+
+
+1.2
+log
+@changed splimp/splx to Forbid/Permit
+@
+text
+@d17 1
+a17 1
+ *	@@(#)uipc_syscalls.c	7.5 (Berkeley) 6/29/88
+d44 2
+a45 2
+#define ARGDEFS 
+#define FUNCDEF	void __asm __saveds
+d63 1
+a63 1
+	ARGDEFS
+d65 3
+a67 3
+	register struct sockargs *uap = (struct sockargs *)AP;
+	extern struct Task *FindTask();
+	struct socket *so;
+d70 1
+a70 1
+	kprintf("Creating socket with type=%ld protocol=%ld domain=%ld\n",uap->type,uap->protocol,uap->domain);
+d72 11
+a82 11
+	uap->rval = 0l;
+	uap->errno = socreate(uap->domain, &so, uap->type, uap->protocol);
+	if (uap->errno){
+		return;
+	}
+
+	so->so_pgrp = FindTask(0L);
+	so->so_sigio = uap->sigio;
+	so->so_sigurg = uap->sigurg;
+	so->so_stamp = VALIDSO;
+	uap->rval = so;
+d84 2
+a85 2
+	DEBUG("Finished socket\n");
+	return;
+d90 1
+a90 1
+ *	     signal bits and task pntr in socket struct.
+d94 1
+a94 1
+	ARGDEFS
+d96 2
+a97 2
+	register struct inheritargs *uap = (struct inheritargs *)AP;
+	register struct socket *so;
+d99 8
+a106 8
+	VALIDATE(AP, uap->fp);
+	so = (struct socket *)uap->fp;
+	so->so_pgrp = FindTask(0L);
+	so->so_sigurg = uap->sigurg;
+	so->so_sigio = uap->sigio;
+	so->so_rcv.sb_sel = so->so_snd.sb_sel = 0;
+	so->so_rcv.sb_flags &= ~SB_SEL;
+	so->so_snd.sb_flags &= ~SB_SEL;
+d112 1
+a112 1
+	ARGDEFS
+d114 1
+a114 1
+	register struct closeargs *uap = (struct closeargs *)AP;
+d116 4
+a119 4
+	VALIDATE(AP, uap->fp);
+	((struct socket *)(uap->fp))->so_pgrp = 0;
+	((struct socket *)(uap->fp))->so_stamp = -1;
+	uap->errno = soclose(((struct socket *)(uap->fp)));
+d125 1
+a125 1
+	ARGDEFS
+d127 2
+a128 2
+	register struct bindargs *uap = (struct bindargs *)AP;
+	struct mbuf *nam;
+d131 5
+a135 5
+	VALIDATE(AP, uap->fp);
+	uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+	if (uap->errno){
+		return;
+	}
+d137 2
+a138 2
+	uap->errno = sobind((struct socket *)uap->fp, nam);
+	m_freem(nam);
+d144 1
+a144 1
+	ARGDEFS
+d146 1
+a146 1
+	register struct listenargs *uap = (struct listenargs *)AP;
+d149 2
+a150 2
+	VALIDATE(AP, uap->fp);
+	uap->errno = solisten((struct socket *)uap->fp, uap->backlog);
+d156 1
+a156 1
+	ARGDEFS
+d158 4
+a161 4
+	register struct acceptargs *uap = (struct acceptargs *)AP;
+	register struct socket *so, *aso;
+	struct mbuf *nam;
+	int s;
+d163 4
+a166 4
+	VALIDATE(AP, uap->fp);
+	if (uap->name == 0){
+		goto noname;
+	}
+d169 44
+a212 44
+	s = splnet();
+	so = (struct socket *)uap->fp;
+	if ((so->so_options & SO_ACCEPTCONN) == 0) {
+		uap->errno = EINVAL;
+		splx(s);
+		return;
+	}
+	if ((so->so_state & SS_NBIO) && so->so_qlen == 0) {
+		uap->errno = EWOULDBLOCK;
+		splx(s);
+		return;
+	}
+	while (so->so_qlen == 0 && so->so_error == 0) {
+		if (so->so_state & SS_CANTRCVMORE) {
+			so->so_error = ECONNABORTED;
+			break;
+		}
+		sleep((ulong)&so->so_timeo, PZERO+1);
+	}
+	if (so->so_error) {
+		uap->errno = so->so_error;
+		so->so_error = 0;
+		splx(s);
+		return;
+	}
+
+	aso = so->so_q;
+  	if (soqremque(aso, 1) == 0){
+		panic("accept");
+	}
+
+	uap->rval = aso;
+	aso->so_stamp = VALIDSO;
+	nam = m_get(M_WAIT, MT_SONAME);
+	(void) soaccept(aso, nam);
+	if (uap->name) {
+		if (uap->namelen > nam->m_len){
+			uap->namelen = nam->m_len;
+		}
+		(void) copyout(mtod(nam, caddr_t), (caddr_t)uap->name,
+				    (u_int)uap->namelen);
+	}
+	m_freem(nam);
+	splx(s);
+d218 1
+a218 1
+	ARGDEFS
+d220 15
+a234 15
+	register struct connectargs *uap = (struct connectargs*)AP;
+	register struct socket *so;
+	struct mbuf *nam;
+
+	DEBUG("connect\n");
+	VALIDATE(AP, uap->fp);
+	DEBUG("CONNECT 1\n");
+	so = (struct socket *)uap->fp;
+	if ((so->so_state & SS_NBIO) &&
+	    (so->so_state & SS_ISCONNECTING)) {
+		uap->errno = EALREADY;
+		DEBUG("CONNECT: ERROR 1\n");
+		return;
+	}
+	uap->errno = sockargs(&nam, uap->name, uap->namelen, MT_SONAME);
+d236 4
+a239 4
+	if (uap->errno){
+		DEBUG("CONNECT: ERROR 2\n");
+		return;
+	}
+d241 1
+a241 1
+	uap->errno = soconnect(so, nam);
+d243 11
+a253 11
+	if (uap->errno){
+		DEBUG("CONNECT: ERROR 3\n");
+		goto bad;
+	}
+	if ((so->so_state & SS_NBIO) && (so->so_state & SS_ISCONNECTING)) {
+		uap->errno = EINPROGRESS;
+		DEBUG("CONNECT: ERROR 4\n");
+		m_freem(nam);
+		return;
+	}
+	Forbid();	/* s = splnet(); */
+d255 3
+a257 3
+	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0){
+		(void)sleep((ulong)&so->so_timeo, PZERO+1);
+	}
+d259 2
+a260 2
+	uap->errno = so->so_error;
+	so->so_error = 0;
+d262 1
+a262 1
+	Permit();	/* splx(s); */
+d264 3
+a266 3
+	so->so_state &= ~SS_ISCONNECTING;
+	m_freem(nam);
+	DEBUG("leaving connect\n");
+d271 1
+a271 1
+	ARGDEFS
+d273 16
+a288 16
+	register struct sendtoargs *uap = (struct sendtoargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+
+//	DEBUG("sendto\n");
+
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = uap->to;
+	msg.msg_namelen = uap->tolen;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+d290 1
+a290 1
+//	DEBUG("leaving sendto\n");
+d295 1
+a295 1
+	ARGDEFS
+d297 17
+a313 17
+	register struct sendargs *uap = (struct sendargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+	DEBUG("send\n");
+
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = 0;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+
+	DEBUG("leaving send\n");
+d319 1
+a319 1
+	ARGDEFS
+d321 3
+a323 3
+	register struct sendmsgargs *uap = (struct sendmsgargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov[MSG_MAXIOVLEN];
+d325 16
+a340 16
+	VALIDATE(AP, uap->fp);
+	uap->errno = copyin(uap->msg, (caddr_t)&msg, sizeof (msg));
+	if (uap->errno){
+		return;
+	}
+	if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+		uap->errno = EMSGSIZE;
+		return;
+	}
+	uap->errno = copyin((caddr_t)msg.msg_iov, (caddr_t)aiov,
+			(unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+	if (uap->errno){
+		return;
+	}
+	msg.msg_iov = aiov;
+	sendit(uap->fp, &msg, uap->flags, &uap->errno, &uap->rval);
+d346 1
+a346 1
+	ARGDEFS
+d348 4
+a351 4
+	register struct recvfromargs *uap = (struct recvfromargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+	short len;
+d354 10
+a363 10
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = uap->from;
+	len = msg.msg_namelen = uap->fromlen;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	recvit(uap->fp, &msg, uap->flags, &len, (caddr_t)0, &uap->errno, &uap->rval);
+d365 1
+a365 1
+	uap->fromlen = len;
+d371 1
+a371 1
+	ARGDEFS
+d373 3
+a375 3
+	register struct recvargs *uap = (struct recvargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov;
+d377 11
+a387 11
+	VALIDATE(AP, uap->fp);
+	msg.msg_name = 0;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &aiov;
+	msg.msg_iovlen = 1;
+	aiov.iov_base = uap->buf;
+	aiov.iov_len = uap->len;
+	msg.msg_accrights = 0;
+	msg.msg_accrightslen = 0;
+	recvit(uap->fp, &msg, uap->flags, (caddr_t)0, (caddr_t)0,
+			&uap->errno, &uap->rval);
+d393 1
+a393 1
+	ARGDEFS
+d395 3
+a397 3
+	register struct recvmsgargs *uap = (struct recvmsgargs *)AP;
+	struct msghdr msg;
+	struct iovec aiov[MSG_MAXIOVLEN];
+d399 17
+a415 17
+	VALIDATE(AP, uap->fp);
+	uap->errno = copyin((caddr_t)uap->msg, (caddr_t)&msg, sizeof (msg));
+	if (uap->errno){
+		return;
+	}
+	if ((u_int)msg.msg_iovlen >= sizeof (aiov) / sizeof (aiov[0])) {
+		uap->errno = EMSGSIZE;
+		return;
+	}
+	uap->errno = copyin((caddr_t)msg.msg_iov, (caddr_t)aiov,
+				(unsigned)(msg.msg_iovlen * sizeof (aiov[0])));
+	if (uap->errno){
+		return;
+	}
+	msg.msg_iov = aiov;
+	recvit(uap->fp, &msg, uap->flags, (short *)&uap->msg->msg_namelen, (caddr_t)&uap->msg->msg_accrightslen,
+				&uap->errno, &uap->rval);
+d421 1
+a421 1
+	ARGDEFS
+d423 1
+a423 1
+	register struct shutdownargs *uap = (struct shutdownargs *)AP;
+d425 2
+a426 2
+	VALIDATE(AP, uap->fp);
+	uap->errno = soshutdown((struct socket *)uap->fp, uap->how);
+d432 1
+a432 1
+	ARGDEFS
+d434 2
+a435 2
+	register struct setsockoptargs *uap = (struct setsockoptargs *)AP;
+	struct mbuf *m = NULL;
+d437 23
+a459 23
+	DEBUG("setsockopt\n");
+	VALIDATE(AP, uap->fp);
+	if (uap->valsize > MLEN) {
+		uap->errno = EINVAL;
+		return;
+	}
+	if (uap->val) {
+		m = m_get(M_WAIT, MT_SOOPTS);
+		if (m == NULL) {
+			uap->errno = ENOBUFS;
+			return;
+		}
+		uap->errno =
+			copyin(uap->val, mtod(m, caddr_t), (u_int)uap->valsize);
+		if (uap->errno) {
+			(void) m_free(m);
+			return;
+		}
+		m->m_len = uap->valsize;
+	}
+	uap->errno = sosetopt((struct socket *)uap->fp, 
+		    			uap->level, uap->name, m);
+	DEBUG("leaving setsockopt\n");
+d465 1
+a465 1
+	ARGDEFS
+d467 2
+a468 2
+	register struct getsockoptargs *uap = (struct getsockoptargs *)AP;
+	struct mbuf *m = NULL;
+d470 22
+a491 22
+	DEBUG("getsockopt\n");
+
+	VALIDATE(AP, uap->fp);
+	uap->errno = sogetopt((struct socket *)uap->fp, 
+	    				uap->level, uap->name, &m);
+	if (uap->errno){
+		goto bad;
+	}
+	if (uap->val && uap->valsize && m != NULL) {
+		if (uap->valsize > m->m_len){
+			uap->valsize = m->m_len;
+		}
+		uap->errno = copyout(mtod(m, caddr_t), uap->val, 
+					(u_int)uap->valsize);
+		if (uap->errno){
+			goto bad;
+		}
+	}
+
+bad:	if (m != NULL){
+		(void) m_free(m);
+	}
+d493 1
+a493 1
+	DEBUG("leaving getsockopt\n");
+d502 1
+a502 1
+	ARGDEFS
+d504 25
+a528 25
+	register struct getsocknameargs *uap = (struct getsocknameargs *)AP;
+	register struct socket *so;
+	struct mbuf *m;
+	int len;
+
+	VALIDATE(AP, uap->fp);
+	len = uap->len;
+	so = (struct socket *)uap->fp;
+	m = m_getclr(M_WAIT, MT_SONAME);
+	if (m == NULL) {
+		uap->errno = ENOBUFS;
+		return;
+	}
+	uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_SOCKADDR, 0, m, 0);
+	if (uap->errno){
+		goto bad;
+	}
+	if (len > m->m_len){
+		len = m->m_len;
+	}
+	uap->errno = copyout(mtod(m, caddr_t), (caddr_t)uap->asa, (u_int)len);
+	if (uap->errno){
+		goto bad;
+	}
+	uap->len = len;
+d530 1
+a530 1
+bad:	m_freem(m);
+d538 1
+a538 1
+	ARGDEFS
+d540 3
+a542 3
+	register struct getpeernameargs *uap = (struct getpeernameargs *)AP;
+	register struct socket *so;
+	struct mbuf *m;
+d544 23
+a566 23
+	VALIDATE(AP, uap->fp);
+	so = (struct socket *)uap->fp;
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
+		uap->errno = ENOTCONN;
+		return;
+	}
+	m = m_getclr(M_WAIT, MT_SONAME);
+	if (m == NULL) {
+		uap->errno = ENOBUFS;
+		return;
+	}
+	uap->errno = (*so->so_proto->pr_usrreq)(so, PRU_PEERADDR, 0, m, 0);
+	if (uap->errno){
+		goto bad;
+	}
+	if (uap->len > m->m_len){
+		uap->len = m->m_len;
+	}
+	uap->errno = copyout(mtod(m, caddr_t), (caddr_t)uap->asa, 
+				(u_int)uap->len);
+	if (uap->errno){
+		goto bad;
+	}
+d568 1
+a568 1
+bad:	m_freem(m);
+d574 1
+a574 1
+	ARGDEFS
+d576 9
+a584 9
+	register struct selectargs *uap = (struct selectargs *)AP;
+	register int fd, off, bit;
+	register struct socket *so;
+DEBUG("select\n");	
+	Forbid();	/* s = splnet(); */
+	uap->rval = 0;
+	bit = 1;
+	for(off = fd = 0; fd < uap->numfds; fd++, bit <<= 1){
+		so = uap->socks[fd];
+d586 4
+a589 4
+		if(bit == (1<<NFDBITS)){
+			off++;
+			bit = 1;
+		}
+d593 44
+a636 44
+		if(uap->rd_set && SEL_ISSET(uap->rd_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!soreadable(so)){
+				SEL_CLR(uap->rd_set);
+				so->so_rcv.sb_sel = uap->task;
+				so->so_rcv.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+
+		if(uap->wr_set && SEL_ISSET(uap->wr_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!sowriteable(so)){
+				SEL_CLR(uap->wr_set);
+				so->so_snd.sb_sel = uap->task;
+				so->so_snd.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+	
+		if(uap->ex_set && SEL_ISSET(uap->ex_set)){
+			if(!VALIDATESO(so)){
+				uap->errno = EBADF;
+				break;
+			}
+			if(!(so->so_oobmark || (so->so_state & SS_RCVATMARK))){
+				SEL_CLR(uap->ex_set);
+				so->so_snd.sb_sel = uap->task;
+				so->so_snd.sb_sigbit = uap->sigbit;
+			} else {
+				/* leave bit set */
+				uap->rval++;
+			}
+		}
+d639 2
+a640 2
+	}
+	Permit();	/* splx(s); */
+d646 1
+a646 1
+	ARGDEFS
+d648 5
+a652 5
+	struct ioctlargs *uap = (struct ioctlargs *)AP;
+	DEBUG("ioctl\n");
+	VALIDATE(AP, uap->fp);
+	uap->errno = soo_ioctl(uap->fp, uap->cmd, uap->data);	
+	DEBUG("leaving ioctl\n");
+d661 61
+a721 61
+	register struct socket *so;
+	register struct msghdr *mp;
+	int flags;
+	caddr_t rightslenp;
+	short *errno, *namelenp;
+	long *rval;
+{
+	struct uio auio;
+	register struct iovec *iov;
+	register int i;
+	struct mbuf *from, *rights;
+	int len;
+	
+	auio.uio_iov = mp->msg_iov;
+	auio.uio_iovcnt = mp->msg_iovlen;
+	auio.uio_resid = 0;
+	iov = mp->msg_iov;
+	for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+		if (iov->iov_len < 0) {
+			*errno = EINVAL;
+			return;
+		}
+		if (iov->iov_len == 0)
+			continue;
+		auio.uio_resid += iov->iov_len;
+	}
+	len = auio.uio_resid;
+	*errno = soreceive(so, &from, &auio, flags, &rights);
+	*rval = len - auio.uio_resid;
+	if (mp->msg_name) {
+		len = mp->msg_namelen;
+		if (len <= 0 || from == 0){
+			len = 0;
+		} else {
+			if (len > from->m_len){
+				len = from->m_len;
+			}
+			(void) copyout((caddr_t)mtod(from, caddr_t),
+				    (caddr_t)mp->msg_name, (unsigned)len);
+		}
+		*namelenp = len;
+	}
+	if (mp->msg_accrights) {
+		len = mp->msg_accrightslen;
+		if (len <= 0 || rights == 0){
+			len = 0;
+		} else {
+			if (len > rights->m_len){
+				len = rights->m_len;
+			}
+			(void) copyout((caddr_t)mtod(rights, caddr_t),
+				    (caddr_t)mp->msg_accrights, (unsigned)len);
+		}
+		(void) copyout((caddr_t)&len, rightslenp, sizeof (int));
+	}
+	if (rights){
+		m_freem(rights);
+	}
+	if (from){
+		m_freem(from);
+	}
+d726 3
+a728 3
+	struct mbuf **aname;
+	caddr_t name;
+	int namelen, type;
+d730 18
+a747 18
+	register struct mbuf *m;
+	int error;
+
+	if ((u_int)namelen > MLEN){
+		return (EINVAL);
+	}
+	m = m_get(M_WAIT, type);
+	if (m == NULL){
+		return (ENOBUFS);
+	}
+	m->m_len = namelen;
+	error = copyin(name, mtod(m, caddr_t), (u_int)namelen);
+	if (error){
+		(void) m_free(m);
+	} else {
+		*aname = m;
+	}
+	return (error);
+d752 50
+a801 50
+	register struct socket *so;
+	register struct msghdr *mp;
+	int flags;
+	short *errno;
+	long *rval;
+{
+	struct uio auio;
+	register struct iovec *iov;
+	register int i;
+	struct mbuf *to, *rights;
+	int len;
+	
+	auio.uio_iov = mp->msg_iov;
+	auio.uio_iovcnt = mp->msg_iovlen;
+	auio.uio_resid = 0;
+	iov = mp->msg_iov;
+	for (i = 0; i < mp->msg_iovlen; i++, iov++) {
+		if (iov->iov_len < 0) {
+			*errno = EINVAL;
+			return;
+		}
+		if (iov->iov_len == 0){
+			continue;
+		}
+		auio.uio_resid += iov->iov_len;
+	}
+	if (mp->msg_name) {
+		*errno =
+		    sockargs(&to, mp->msg_name, mp->msg_namelen, MT_SONAME);
+		if (*errno)
+			return;
+	} else
+		to = 0;
+	if (mp->msg_accrights) {
+		*errno =
+		    sockargs(&rights, mp->msg_accrights, mp->msg_accrightslen,
+		    MT_RIGHTS);
+		if (*errno){
+			goto bad;
+		}
+	} else {
+		rights = 0;
+	}
+	len = auio.uio_resid;
+	*errno =
+	    sosend(so, to, &auio, flags, rights);
+	*rval = len - auio.uio_resid;
+	if (rights){
+		m_freem(rights);
+	}
+d803 3
+a805 3
+	if (to){
+		m_freem(to);
+	}
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@a222 1
+	int s;
+d253 1
+a253 2
+	s = splnet();
+DEBUG("Back from splnet\n");
+d262 1
+a262 1
+	splx(s);
+a299 1
+
+d577 1
+a577 1
+	register int fd, off, bit, s;
+d580 1
+a580 1
+	s = splnet();
+d640 1
+a640 1
+	splx(s);
+@

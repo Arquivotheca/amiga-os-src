@@ -1,0 +1,201 @@
+How to write a hardware driver for CAMD.
+
+CAMD drivers are fairly simple entities. Each one consists of a single
+load file (i.e. a file which can be loaded with LoadSeg), and lives in
+DEVS:midi. The "MidiPorts" preferences editor is capable of finding all
+of the drivers that are in that directory.
+
+The load file for the driver begins with special sequence of code and
+data, similar to the RomTag structure used for disk-based libraries.
+
+    The first thing in the driver is the instruction sequence:
+
+        MOVEQ   #0,d0
+        RTS
+
+    The prevents the driver from crashing if anybody tries to run it
+as an executable. Note that other instruction sequences may be subsituted,
+as long as they are exactly the same length.
+
+    After the two instructions comes the MidiDeviceData structure:
+
+        struct MidiDeviceData
+        {
+            ULONG Magic;                /* MDD_Magic */
+            char *Name;                 /* driver name */
+            char *IDString;
+            UWORD Version;
+            UWORD Revision;
+
+            BOOL (*Init)(void);         /* called after LoadSeg() */
+            void (*Expunge)(void);      /* called before UnLoadSeg() */
+            struct MidiPortData *(*OpenPort)();
+            void (*ClosePort)();
+
+            UBYTE NPorts;               /* number of ports */
+            UBYTE Flags;                /* currently none */
+        };
+
+        #define MDD_Magic   ((ULONG)'M' << 24 | (ULONG)'D' << 16 | 'E' << 8 | 'V')
+
+    Explanation of fields:
+
+        Magic -- must be the character string 'MDEV'.
+
+        Name -- pointer to the name of the driver. This should be the same as
+            the filename, including upper/lower case.
+
+        IDString -- This is the "full" name of the driver. This need not be
+            the same as the driver file name. (For example, the driver
+            "checkpoint" has an IDString of "Checkpoint Serial Solution").
+
+            NOTE: Because the driver format was created before Amiga version
+            strings were standardized, there is no "version string" field,
+            however it is suggested that each driver incorporate a version
+            string using the standard techniques. (Unfortunately, the driver
+            format cannot be radically changed because at least one music
+            application has been using the drivers directly long before the
+            CAMD library itself was finalized).
+
+        Version, Revision -- same as for libraries.
+
+        Init -- this is a function pointer to the initialization routine
+            for the driver. This routine initializes any global data
+            needed by the driver, finds the address of the hardware
+            expansion board (and determines if multiple boards are installed),
+            and patches the NPorts fields to indicate the number of
+            ports available.
+
+            This function takes no parameters.
+
+        Expunge -- this is a function pointer that de-allocates all global
+            data allocated by the Init routine.
+
+            This function takes no parameters.
+
+        OpenPort -- this is a pointer to a function that opens a single
+            hardware port and returns a pointer to a MidiPortData structure,
+            which is created by the driver. (Note that this structure may
+            be created either dynamically at the time of the call, or may
+            be statically allocated in the driver seglist).
+
+            This function may also lock any hardware resources needed to
+                gain exclusive access to the hardware, and may program
+                interrupts and baud rates for the port.
+
+            The function returns TRUE if the initialization succeeded,
+                otherwise it returns FALSE. CAMD will expect to receive
+                MIDI data at any time after this function succeeds.
+
+            The parameters to this function are described in detail below.
+
+        ClosePort -- this is a pointer to a function that closes a single
+            midi port. It may also free hardware resources if needed.
+
+            The parameters to this function are described in detail below.
+
+The OpenPort Function
+~~~~~~~~~~~~~~~~~~~~~
+    This function takes the following parameters:
+
+    register            type                explanation
+    ~~~~~~~~            ~~~~                ~~~~~~~~~~~
+        a3      struct MidiDeviceData *     pointer to MidiDeviceData
+        d0              LONG                port number to open
+        a0              (void *)()          serial transmit handler
+        a1              (void *)()          serial receive handler
+        a2              APTR                userdata for handlers
+
+    The OpenPort call returns a pointer to the following structure in d0:
+
+        struct MidiPortData
+        {
+                /* function to activate transmitter interrupt when idle */
+
+            void (*ActivateXmit)();
+        };
+
+    The serial transmit handler and serial recieve handler are function
+    pointers to functions inside of camd.library which handle the transfer
+    of midi data. When CAMD calls the OpenPort function, it will supply
+    these pointers.
+
+    The general scheme is that the driver should call CAMD whenever it
+    has recieved more data, or when it is ready to send more data. This
+    allows CAMD to handle the details of buffering and timestamping.
+
+    Each function call transfers a single byte of data.
+
+    The serial receive handler is called whenever a new byte of data is
+    received from the hardware. Register a2 should contain the userdata which
+    was passed to the OpenPort call. Register d0 should contain both the
+    received byte and a status code. Bits 0-7 will contain the received byte.
+    Bit 15 will be set if an overrun error occured, in other words, if
+    data was lost. Bits 8-14 should be zero. Bits higher than 15 are ignored,
+    and can be anything.
+
+    The serial transmit handler should be called whenever the hardware is
+    ready to accept another outgoing byte. When calling this function,
+    register a2 should be set to the userdata which was passed to the OpenPort
+    call. The results will be returned in register d0 and d1. Bits 0-7
+    of d0 will contain the byte to be transmitted. (Bits 8-15 will
+    be cleared). Register d1 will be zero if CAMD has more data available
+    to send in it's buffer, or it will be non-zero if the buffer is empty.
+    In the latter case (buffer empty), the driver should send the byte in
+    d0 (which was the last byte remaining in the buffer), and then temporarily
+    suspend output processing, in other words do _not_ call the serial
+    transmit function again until CAMD has indicated that it has some data
+    in the buffer again. CAMD will do this by calling the ActivateXMit()
+    function using the function pointer in the MidiPortData structure.
+    Register A0 will contain the address of the MidiPortData structure
+    which was returned from OpenPort.
+        An example of how this works: The internal amiga serial driver
+    uses an interrupt for writing to the hardware. Whenever a byte is
+    sent out, an interrupt is generated which indicated that the hardware
+    is ready to accept another byte. The driver calls the serial handler
+    function to get the next byte from CAMD and then writes it to the
+    hardware. Then, it checks the "last byte" flag in d1. If the flag is
+    set, it disabled the interrupt. Note that the interrupt is not cleared,
+    merely disabled -- when the byte that was pending in the hardware
+    is sent out, the interrupt signal will still be generated, but it
+    will have no effect because it is disabled. When CAMD gets more data
+    to send, it calls the driver's ActivateXMit function, which re-enables
+    the interrupt. At this point, the interrupt which was pending goes off,
+    causing the driver to once again call CAMD to get another byte from it's
+    buffer.
+        Note that ActivateXMit may be called even if the driver is already
+    activated, i.e. the "last byte" flag was never set.
+
+The ClosePort Function
+~~~~~~~~~~~~~~~~~~~~~~
+    This function takes the following parameters:
+
+    register            type                explanation
+    ~~~~~~~~            ~~~~                ~~~~~~~~~~~
+        a3      struct MidiDeviceData *     pointer to MidiDeviceData
+        d0              LONG                port number to close
+
+Writing drivers for serial cards
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Obviously, the CAMD driver mechanism is optimized for this type of
+device. Each byte is sent one at a time, and the driver need not know
+anything about MIDI (since it is assumed that the serial output is
+connected to a hardware device which is capable of parsing MIDI streams).
+    We have tried to make as few assumptions as possible about the
+interface to the hardware. In our example drivers, one has a seperate
+interrupt for reading and writing, while the other has a single interrupt
+that handles reading and writing for all ports.
+    In addition, in cases where the hardware provides little or no FIFO
+buffering, it is possible to process multiple bytes in a single interrupt
+by polling the hardware. This avoids the overhead of a 68000 interrupt and
+can increase performance and reduce overrun errors.
+
+Writing drivers for other kinds of devices
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    In many cases, you will want to write a driver for a device that has no
+native understanding of MIDI, such as a DSP card. In this case, it is
+probably advisable that either the driver parse the MIDI stream itself,
+or place the incoming bytes into a software FIFO buffer, where they can be
+read and parsed by a task dedicated to that particular hardware. You can
+refer to the documentation file "middbasics.doc" for more information on
+understanding MIDI.

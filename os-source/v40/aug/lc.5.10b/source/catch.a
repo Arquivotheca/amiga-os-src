@@ -1,0 +1,1022 @@
+*
+* C initial startup procedure under AmigaDOS
+*
+* Use the following command line to make catch.o (standard GURU catcher)
+* asm -u -iINCLUDE: catch.a
+*
+* Use the following command line to make catchnr.o (GURU catcher w/out requester)
+* asm -u -iINCLUDE: -dNOREQ -ocatchnr.o catch.a
+*
+* Use the following command line to make catchres.o (resident GURU catcher)
+* asm -u -iINCLUDE: -dRESIDENT -ocatchres.o catch.a
+*
+* Use the following command line to make catchresnr.o (resi GURU catcher w/out req)
+* asm -u -iINCLUDE: -dRESIDENT -dNOREQ -ocatchresnr.o catch.a
+*
+
+	INCLUDE "exec/types.i"
+	INCLUDE "exec/alerts.i"
+	INCLUDE "exec/nodes.i"
+	INCLUDE "exec/lists.i"
+	INCLUDE "exec/ports.i"
+	INCLUDE "exec/libraries.i"
+	INCLUDE "exec/tasks.i"
+
+	INCLUDE "exec/memory.i"
+	INCLUDE "exec/execbase.i"
+	INCLUDE "libraries/dos.i"
+	INCLUDE "libraries/dosextens.i"
+	INCLUDE "workbench/startup.i"
+	INCLUDE "intuition/intuition.i"
+FUNCDEF 	MACRO	* function
+_LVO\1		EQU	FUNC_CNT
+FUNC_CNT	SET	FUNC_CNT-6
+		ENDM
+
+FUNC_CNT	SET	LIB_NONSTD
+	INCLUDE "exec/exec_lib.i"
+	INCLUDE "libraries/dos_lib.i"
+
+VERSION 	equ	1
+REVISION	equ	0
+
+CATCH		set	1
+	IFND NOREQ
+AUTOREQ 	set	1
+	ENDC
+
+
+MEMFLAGS EQU	MEMF_CLEAR+MEMF_PUBLIC
+AbsExecBase EQU 4
+
+callsys macro
+	CALLLIB _LVO\1
+	endm
+
+	xdef	XCEXIT				; exit(code) is standard way to leave C.
+	xdef	@XCEXIT
+
+	xref	DOSBase
+	xref	LinkerDB			; linker defined base value
+	xref	_BSSBAS 			; linker defined base of BSS
+	xref	_BSSLEN 			; linker defined length of BSS
+
+	IFD	RESIDENT
+	xref	RESLEN
+	xref	RESBASE
+	xref	NEWDATAL
+	ENDC
+
+*	library references
+
+	section   text,code
+
+	xref	_main			* Name of C program to start with.
+	xref	MemCleanup
+	xref	__fpinit		* initialize floating point
+	xref	__fpterm		* terminate floating point
+
+start:
+	movem.l d1-d6/a0-a6,-(a7)
+REGSIZE EQU	(6+7)*4
+	lea	REGSIZE(a7),A5                  ; determine old stack pointer
+	move.l	a0,a2				; save command pointer
+	move.l	d0,d2				; and command length
+	lea	LinkerDB,a4			; load base register
+
+	IFND	RESIDENT
+	lea	_BSSBAS,a3			* get base of BSS
+	moveq	#0,d1
+	move.l	#_BSSLEN,d0	       * get length of BSS in longwords
+	bra.s	clr_lp		       * and clear for length given
+clr_bss move.l	d1,(a3)+
+clr_lp	dbf	d0,clr_bss
+	ENDC
+
+	IFD	RESIDENT
+	move.l	AbsExecBase.W,a6
+	movem.l d0-d1/a0-a2,-(a7)
+	sub.l	#RESBASE,a4
+	move.l	#RESLEN,d0
+	move.l	#MEMFLAGS,d1
+	callsys AllocMem
+	tst.l	d0
+	beq.w	abort
+	move.l	d0,a0
+	move.l	d0,a2
+;a2 now has difference
+	move.l	d0,a1
+	move.l	#NEWDATAL,d0
+;copy data over
+cpy:	move.l	(a4)+,(a0)+
+	subq.l	#1,d0
+	bne	cpy
+;a4 now points at number of relocs
+	move.l	(a4)+,d0
+reloc:	beq.s	nreloc
+	move.l	a1,a0
+	add.l	(a4)+,a0                        ; a0 now has add of reloc
+	add.l	(a0),a2
+	move.l	a2,(a0)
+	move.l	a1,a2			; restore offset
+	subq.l	#1,d0
+	bra.s	reloc
+
+nreloc: move.l	a1,a4			; set up new base register
+	add.l	#RESBASE,a4
+	movem.l (A7)+,d0-d1/a0-a2
+	ENDC
+
+	move.l	AbsExecBase.W,a6
+	move.l	a6,SysBase(A4)
+
+	ifd	CATCH
+	move.w	AttnFlags(a6),Environment+2(a4) ; save copy for dump
+	endc
+
+	move.l	a7,_StackPtr(A4)                ; Save stack ptr
+	clr.l	WBenchMsg(A4)
+
+*------ attempt to open DOS library:
+	bsr.w	openDOS
+
+	ifd	CATCH
+	 ifd	 AUTOREQ
+*------ attempt to open Intuition library:
+		bsr.w		openIntui
+	 endc
+	endc
+
+*-----	clear any pending signals
+	moveq	#0,d0
+	move.l	#$00003000,d1
+	callsys SetSignal
+
+*------ get the address of our task
+	move.l	ThisTask(a6),A3
+
+	ifd	CATCH
+	move.l	A3,TaskID(a4)
+
+*------ initialize exception handler
+*------ Remember to preserve the old handler first
+	move.l	TC_TRAPDATA(a3),oldtrapdata(A4)
+	move.l	TC_TRAPCODE(a3),d0              ; check current exception
+	move.l	d0,oldtrapcode(A4)
+
+	move.l	d0,a1
+	callsys TypeOfMem
+	tst.l d0
+	bne.s	1$				; somebody else (debugger?) has vector
+
+	move.l	#Exception,TC_TRAPCODE(a3)      ; install pointers to code
+	move.l	a4,TC_TRAPDATA(a3)              ; ...and data
+1$:
+	endc
+
+*------ are we running as a son of Workbench?
+	move.l	pr_CurrentDir(A3),curdir(A4)
+	tst.l	pr_CLI(A3)
+	beq	fromWorkbench
+
+*=======================================================================
+*====== CLI Startup Code ===============================================
+*=======================================================================
+*
+* Entry: D2 = command length
+*	 A2 = Command pointer
+fromCLI:
+	ifd	CATCH
+	moveq	#-1,d0
+	move.l	d0,Starter(a4)          ; non-zero means CLI
+	move.l	a5,StackTop(a4)
+	endc
+
+	move.l	a5,D0			; get top of stack
+	sub.l	4(a5),D0                ; compute bottom
+	add.l	#128,D0 		; allow for parms overflow
+	move.l	D0,_base(A4)            ; save for stack checking
+
+*------ find command name:
+	move.l	pr_CLI(a3),a0
+	add.l	a0,a0		* bcpl pointer conversion
+	add.l	a0,a0
+	move.l	cli_CommandName(a0),a1
+	IFND	AUTOREQ
+	move.l	cli_StandardOutput(a0),GConsole(a4)     * save output fh
+	ENDC
+	add.l	a1,a1		* bcpl pointer conversion
+	add.l	a1,a1
+
+*------ collect parameters:
+	move.l	d2,d0			* get command line length
+	moveq.l #0,d1
+	move.b	(a1)+,d1
+	move.l	a1,_ProgramName(A4)
+	add.l	d1,d0			* add length of command name
+	addq.l	#7,d0		   * allow for space after command and quotes
+				   * and force to long word boundary
+	andi.w	#$fffc,D0	      *(round up)
+	move.l	 d0,Commandlen(a4)
+
+	movem.l  d1/a1,-(a7)
+	move.l	#MEMFLAGS,d1
+	callsys AllocMem
+	movem.l  (a7)+,d1/a1
+	tst.l	d0
+	bne.s	ok_copy
+
+	move.l	#1000,d0	* what should the return code be for out of mem?
+	move.l	d0,-(a7)        * put a return code on the stack
+	bra.w 	nodofree	* exitToDOS
+
+ok_copy:
+	move.l	 d0,a0
+	move.l	 d0,Commandbuf(a4)
+
+*------ copy command line into memory
+	move.l	d2,d0		   * get command line length
+	subq.l	#1,d0
+	add.l	d1,d2
+
+copy_line:
+	move.b	0(A2,D0.W),2(A0,D2.W)   * copy command line to stack
+	subq.l	#1,d2
+	dbf	d0,copy_line
+	move.b	#' ',2(a0,d2.w)  * add space between command and parms
+	subq.l	#1,d2
+	move.b	#'"',2(a0,d2.w)  * add end quote
+
+copy_cmd:
+	move.b	0(a1,d2.w),1(a0,d2.w)   * copy command name to stack
+	dbf	d2,copy_cmd
+	move.b	#'"',(a0)
+	move.l	A0,-(A7)                * push command line address
+	bra.w	main			* call C entrypoint
+
+*=======================================================================
+*====== Workbench Startup Code =========================================
+*=======================================================================
+
+fromWorkbench:
+	move.l	TC_SPLOWER(a3),_base(A4)        * set base of stack
+	add.l	#128,_base(A4)             * allow for parms overflow
+
+	ifd	CATCH
+	move.l	TC_SPUPPER(a3),StackTop(a4)     ; set top of stack
+	endc
+
+*------ we are now set up.  wait for a message from our starter
+	lea	pr_MsgPort(A3),a0       * our process base
+	callsys WaitPort
+	lea	pr_MsgPort(A3),a0       * our process base
+	callsys GetMsg
+	move.l	d0,WBenchMsg(a4)
+	move.l	d0,-(SP)
+*
+	move.l	d0,a2			* get first argument
+	move.l	sm_ArgList(a2),d0
+	beq.s	do_cons
+	move.l	DOSBase(a4),a6
+	move.l	d0,a0
+	move.l	wa_Lock(a0),d1
+	callsys DupLock
+	move.l	d0,curdir(A4)
+	move.l	d0,d1
+	callsys CurrentDir
+do_cons:
+	move.l	sm_ToolWindow(a2),d1    * get the window argument
+	beq.s	do_main
+	move.l	#MODE_OLDFILE,d2
+	callsys Open
+	move.l	d0,stdin(a4)
+	beq.s	do_main
+	lsl.l	#2,d0
+	move.l	d0,a0
+	move.l	fh_Type(a0),pr_ConsoleTask(A3)
+do_main:
+	move.l	WBenchMsg(A4),a0        * get address of workbench message
+	move.l	a0,-(a7)                * push argv
+	pea	NULL(a4)                * push argc
+	move.l	sm_ArgList(a0),a0       * get address of arguments
+	move.l	wa_Name(a0),_ProgramName(A4)    * get name of program
+
+*=============================================
+*------ common code --------
+*=============================================
+
+main	jsr	__fpinit(PC)            * Initialize floating point
+	jsr	_main(PC)               * call C entrypoint
+	moveq.l #0,d0			* set successful status
+	bra.s	exit2
+*
+
+XCEXIT:
+	move.l	4(SP),d0        * extract return code
+@XCEXIT
+exit2:
+	movea.l _StackPtr(a4),SP        * restore stack ptr
+	move.l	d0,-(a7)
+
+	move.l	_ONEXIT(A4),d0  * exit trap function?
+	beq.s	exit3
+	move.l	d0,a0
+	jsr	(a0)
+exit3:
+	jsr	MemCleanup(PC)          ; cleanup leftover memory alloc.
+
+	move.l	AbsExecBase.W,a6
+
+*------ Restore the original exception handler
+	move.l	ThisTask(a6),A3
+	move.l	oldtrapdata(A4),TC_TRAPDATA(a3)
+	move.l	oldtrapcode(A4),TC_TRAPCODE(a3) ; check current exception
+
+
+	ifd	CATCH
+	 ifd	 AUTOREQ
+		move.l	IntuiBase(a4),a1
+		callsys 	CloseLibrary		; close Intuition library
+	 endc
+	endc
+
+	jsr	__fpterm(PC)            * clean up any floating point
+
+*------ if we ran from CLI, skip workbench cleanup:
+	tst.l	WBenchMsg(A4)
+	beq.s	exitToDOS
+	move.l	DOSBase(A4),a6
+	move.l	stdin(a4),d1
+	beq.s	done_4
+	callsys Close
+done_4:
+
+*------ return the startup message to our parent
+*	we forbid so workbench can't UnLoadSeg() us
+*	before we are done:
+	move.l	curdir(a4),d1
+	beq.s	done_5
+	callsys UnLock
+done_5:
+	move.l	AbsExecBase.W,A6
+	callsys Forbid
+	move.l	WBenchMsg(a4),a1
+	callsys ReplyMsg
+	bra.s	 nodofree
+
+*------ free the command line buffer
+exitToDOS:
+	move.l	 Commandlen(a4),d0
+	beq.s	 nodofree
+	move.l	 Commandbuf(a4),a1
+	move.l	AbsExecBase.W,a6
+	callsys FreeMem
+
+*------ this rts sends us back to DOS:
+nodofree:
+	move.l	DOSBase(A4),a1
+	callsys CloseLibrary		; close Dos library
+
+	IFD	RESIDENT
+	move.l	#RESLEN,d0
+	move.l	a4,a1
+	sub.l	#RESBASE,a1
+	move.l	AbsExecBase.W,a6
+	callsys FreeMem
+	ENDC
+	MOVE.L	(A7)+,D0
+	movem.l (a7)+,d1-d6/a0-a6
+	rts
+
+
+	IFD	RESIDENT
+abort:
+	movem.l     (a7)+,d0-d1/a0-a2
+	rts
+	ENDC
+
+*-----------------------------------------------------------------------
+noDOS:
+		moveq.l #100,d0
+		bra.w	exit2
+
+
+*-----------------------------------------------------------------------
+*	Open the DOS library:
+
+openDOS
+		lea	DOSName(PC),A1
+		moveq.l #0,D0
+		callsys OpenLibrary
+		move.l	D0,DOSBase(A4)
+		beq.s	noDOS
+		rts
+DOSName 	dc.b	'dos.library',0
+
+	ifd	CATCH
+*-----------------------------------------------------------------------
+*	Open the Intuition library:
+
+openIntui:
+		lea	IntuiName(PC),A1
+		moveq.l #0,D0
+		callsys OpenLibrary
+		move.l	D0,IntuiBase(A4)
+		beq.s	noDOS
+		rts
+IntuiName	dc.b	'intuition.library',0
+
+*-----------------------------------------------------------------------
+*	The Exception Handler - catches GURUs and exits (semi)cleanly
+Exception:
+	movem.l  a0,-(a7)
+	move.l	AbsExecBase.W,a0
+	move.l	ThisTask(a0),a0
+	move.l	TC_TRAPDATA(a0),a0              ; ...and data
+	move.l   (sp)+,ADump(a0)         ; save a0
+	move.l   d0,ADump+4(a0)          ; and d0
+
+	move.l	(a7)+,d0                ; get exception # from stack
+	move.l	d0,GURUNum(a0)          ; and save it
+	cmpi.l	#3,d0			; ADDRESS or BUS error?
+	bgt.s	2$			; no, skip adjustment
+	btst	#0,Environment+3(a0)    ; is it 68010 or 68020?
+	beq.s	1$			; 0 means NO
+	bset	#7,8(a7)                ; set Rerun flag
+	bra.s	2$
+1$:
+	addq.l	#8,a7			; adjust for 68000
+2$:
+	move.l	2(a7),d0                ; get PC at crash
+	move.l	d0,GURUAddr(a0)         ; and save it
+	move.l	ADump+4(a0),d0          ; restore a0 and d0
+	move.l	ADump(a0),a0
+	move.l	#GURUExit,2(a7)         ; use our own exit point
+	rte
+
+*-----------------------------------------------------------------------
+*	The Exception exit routine - write 'PGTB' IFF chunk to file
+*	'SnapShot.TB' in current directory, then exit to system.
+
+GURUExit:
+	movem.l d0-d7/a0-a7,-(sp)       ; save all registers
+	move.l	AbsExecBase.W,a6	; make sure we are working with Exec
+	callsys GetCC			; safe way - works with all CPUs
+	move.l	ThisTask(a6),a3
+	move.l	TC_TRAPDATA(a3),a4      ; make sure we have a valid # in a4
+	move.l	d0,Flags(a4)            ; save area
+	movem.l (sp)+,d0-d7
+	movem.l d0-d7,DDump(a4)         ; save data reg contents
+	movem.l (sp)+,d0-d7
+	movem.l d0-d7,ADump(a4)         ; save address reg contents
+	tst.l	StackPtr(a4)            ; if there's something there
+	bne	GExit1			; ...we've been here before!
+	lea	TempStore(a4),a0        ; calculate addr of TempStore
+	move.l	a0,TempAddr(a4)         ; ...and save for later access
+	move.l	A7Store(a4),d0          ; make sure we have proper TOS
+	move.l	d0,StackPtr(a4)         ; ...and save it
+	moveq	#0,d0
+	move.l	_ProgramName(a4),a0     ; find length of program name
+
+	ifd	AUTOREQ
+	move.l	a0,PName(a4)
+	endc
+
+	subq.l	#1,a0
+	move.b	(a0),d0
+	addq.l	#4,d0			; adjust for shift
+	lsr.l	#2,d0
+	move.l	d0,NameLen(a4)          ; store length
+	add.l	d0,FAILlen(a4)          ; and sub-chunk total
+
+	moveq	#0,d0			; clear d0 for use
+	lea	VBlankFrequency(a6),a0  ; set up a0 to find correct data
+	move.b	(a0)+,d0                ; get just in case
+	move.l	d0,VBlankFreq(a4)       ; ...so we can figure what
+	move.b	(a0),d0          ; ...type of machine
+	move.l	d0,PowerSupFreq(a4)     ; ...we're working on
+
+	lea	start-4(pc),a0          ; get seglist ptr
+	moveq	#-1,d0			; always at least 1
+2$:
+	addq.l	#1,d0
+	move.l	(a0),d1          ; find end of list
+	beq.s	3$
+	lsl.l	#2,d1			; BPTR!!!!!
+	move.l	d1,a0
+	bra.s	2$
+3$:
+	add.l	d0,SegCount(a4)  ; store # of seglist pointers
+	lsl.l	#1,d0			; multiply by 2 for longword count
+	add.l	d0,FAILlen(a4)          ; and sub-chunk length
+
+	move.l	StackTop(a4),d0  ; get top of stack
+	sub.l	StackPtr(a4),d0  ; find number of bytes used
+	addq.l	#4,d0			; adjust for longword conversion
+	lsr.l	#2,d0			; convert from bytes to long
+	move.l	d0,StackLen(a4)  ; and save
+	add.l	d0,s2len(a4)            ; and sub-chunk total
+
+	move.l	a5,-(sp)                ; save a5 for later
+	callsys Forbid			; don't let 'em change while we ask
+	move.l	MemList+LH_HEAD(a6),d0  ; first node in MemList
+checkchip:
+	move.l	d0,a5			; move node address to address reg
+	move.w	MH_ATTRIBUTES(a5),d4    ; get node attributes
+	btst	#MEMB_CHIP,d4		; is it chip?
+	beq.s	checkfast		; no, go on
+	lea	chipAvail(a4),a3
+	bsr.w	AddIt
+checkfast:
+	btst	#MEMB_FAST,d4		; is it fast?
+	beq.s	next			; no, go on
+	lea	fastAvail(a4),a3
+	bsr.w	AddIt
+next:
+	move.l	LN_SUCC(a5),d0          ; get address of next node
+	bne.s	checkchip		; ...and loop back if valid
+	callsys Permit			; allow others access again
+	move.l	#MEMF_CHIP+MEMF_LARGEST,d1 ; to find largest hunk in chip ram
+	callsys AvailMem
+	move.l	d0,chipLargest(a4)      ; store
+	move.l	#MEMF_FAST+MEMF_LARGEST,d1 ; to find largest hunk in fast ram
+	callsys AvailMem
+	move.l	d0,fastLargest(a4)      ; store
+	move.l	(sp)+,a5                ; and restore a5
+
+	ifd	AUTOREQ
+	moveq	#0,d0			; PosFlag
+	move.l	d0,d1			; NegFlag
+	move.l	d0,a0			; 0 means use current window
+	lea	IText1(a4),a1           ; Body Text
+	lea	IText5(a4),a2           ; Positive Gadget Text
+	lea	IText6(a4),a3           ; Negative Gadget Text
+	moveq	#1,d2
+	lsl.l	#8,d2			; quick way to set Width
+	moveq	#76,d3			; Height
+	move.l	IntuiBase(a4),a6        ; get intuition library pointer
+	jsr	-$15c(A6)               ; callsys       AutoRequest
+	move.l	AbsExecBase.W,a6
+	tst.l	d0			; save SnapShot?
+	beq.w	GExit2			; no, just exit
+	endc
+
+	move.l	DOSBase(a4),a6
+	lea	DumpName(a4),a0  ; get name of output file
+	move.l	a0,d1
+	move.l	#MODE_NEWFILE,d2	; create new file
+	callsys Open
+	bne.s	4$
+	lea	DumpPath(a4),a0  ; if error in current dir, try DF1:
+	move.l	a0,d1
+	move.l	#MODE_NEWFILE,d2
+	callsys Open
+	bne.s	4$
+	move.b	#'0',DumpPath+2(a4)     ; still error?  Try DF0:
+	lea	DumpPath(a4),a0
+	move.l	a0,d1
+	move.l	#MODE_NEWFILE,d2
+	callsys Open
+
+	ifnd	AUTOREQ
+	bne.s	4$			; if no error, continue (finally!)
+	move.l	GConsole(a4),d1
+	beq.w	GExit2
+	lea	failmsg(a4),a0
+	move.l	a0,d2
+	move.l	#23,d3
+	callsys Write
+	endc
+
+	bra.w	GExit2			; else, print msg & DIE gracefully
+4$:
+	move.l	d0,d5			; save file handle for Write
+	move.l	d0,fp(a4)               ; ...and in a safe place for later
+	move.l	d5,d1			; get file handle
+	lea	PGTB(a4),a0             ; first part of fixed
+	move.l	a0,d2
+	move.l	#chunk_len_1,d3 	; length of first
+	callsys Write			; ...since it gets written over
+
+	move.l	d5,d1			; get file handle
+	move.l	_ProgramName(a4),d2     ; get address of program name
+	move.l	NameLen(a4),d3          ; get # longs in program name
+	lsl.l	#2,d3			; ..and convert to bytes
+	callsys Write
+
+	move.l	d5,d1			; get file handle
+	lea	Environment(a4),a0      ; second part of fixed
+	move.l	a0,d2
+	move.l	#chunk_len_2,d3 	; length of second part
+	callsys Write
+
+	lea	start-8(pc),a0          ; address of seglist (size of seg)
+	move.l	(a0)+,d0                ; segsize
+	move.l	d0,TempStore+4(a4)      ; save it
+	move.l	a0,TempStore(a4)        ; store first number
+	move.l	SegCount(a4),d4
+5$:
+	move.l	d5,d1			; get file handle
+	move.l	TempAddr(a4),d2  ; address of write buffer
+	moveq	#TempSize,d3		; size of segment pointer
+	callsys Write
+	move.l	TempStore(a4),a0        ; retrieve pointer
+	move.l	(a0),d0          ; get next seg pointer
+	lsl.l	#2,d0			; adjust
+	move.l	d0,TempStore(a4)        ; ..and save
+	move.l	d0,a0
+	move.l	-4(a0),d0               ; get segsize
+	move.l	d0,TempStore+4(a4)      ; ...and save it
+	subq.l	#1,d4			; done yet?
+	bne.s	5$			; no, do next
+
+	tst.l	_FMEM(a4)               ; do they want memory reported?
+	beq.s	55$			; no, forget it
+	move.l	d5,d1
+	lea	subFMEM(a4),a0
+	move.l	a0,d2
+	move.l	#FMEMlen,d3
+	callsys Write
+
+55$:
+	move.l	d5,d1			; (get the idea?)
+	lea	subREGS(a4),a0          ; third part of fixed
+	move.l	a0,d2
+	move.l	#chunk_len_3,d3 	; length of third
+	callsys Write
+
+	move.l	StackLen(a4),d0  ; get length of stack used
+	cmpi.l	#2048,d0		; > 8k ?
+	bgt.s	6$			; yes, dump two chunks
+	move.l	d5,d1
+	lea	STAK2(a4),a0            ; whole stack chunk
+	move.l	a0,d2
+	moveq	#STAK2len,d3		; length of fixed part
+	callsys Write
+
+	move.l	d5,d1
+	move.l	StackPtr(a4),d2  ; address of stack
+	move.l	StackLen(a4),d3  ; get # longwords on stack
+	lsl.l	#2,d3			; ..and convert to bytes
+	callsys Write
+	bra.s	7$
+6$:
+	move.l	d5,d1
+	lea	STAK3(a4),a0            ; top4k chunk
+	move.l	a0,d2
+	moveq	#STAK3len,d3		; length of fixed part
+	callsys Write
+
+	move.l	d5,d1
+	move.l	StackTop(a4),d2  ; find top of stack
+	sub.l	#4096,d2		; find top-4k
+	move.l	#4096,d3		; # bytes to write
+	callsys Write
+
+	move.l	d5,d1
+	lea	STAK4(a4),a0            ; bottom4k chunk
+	move.l	a0,d2
+	moveq	#STAK4len,d3		; length of fixed part
+	callsys Write
+
+	move.l	d5,d1
+	move.l	StackPtr(a4),d2  ; current stack address
+	move.l	#4096,d3		; # bytes to write
+	callsys Write
+7$:
+	move.l	_STAKOffset(a4),d3
+	beq.s	8$
+	lsr.l	#2,d3
+	addq.l	#1,d3
+	move.l	d3,_STAKOffset(a4)
+	addq.l	#1,d3
+	move.l	d5,d1
+	lea	STAK5(a4),a0
+	move.l	a0,d2
+	moveq	#STAK5len,d3
+	callsys Write
+
+	move.l	d5,d1
+	move.l	StackPtr(a4),d2
+	move.l	_STAKOffset(a4),d3
+	subq.l	#1,d3
+	move.l	StackLen(a4),d4
+	cmp.l	d3,d4
+	bge.s	75$
+	move.l	StackLen(a4),d3
+75$:
+	lsl.l	#2,d3
+	callsys Write
+8$:
+	tst.l	_ONGURU(A4)             ; user GURU function?
+	beq.s	9$
+	move.l	d5,-(sp)
+	move.l	d5,d1
+	lea	UDAT(a4),a0
+	move.l	a0,d2
+	move.l	#UDATlen,d3
+	callsys Write
+	move.l	d5,d1
+	moveq	#0,d2			; zero offset
+	moveq	#1,d3			; ...from EOF
+	callsys Seek
+	move.l	d0,SeekStore(a4)
+	move.l	_ONGURU(a4),a0
+	jsr	(a0)
+	addq.l	#4,sp
+9$:
+	move.l	fp(a4),d5
+	move.l	d5,d1
+	moveq	#0,d2			; offset from EOF
+	moveq	#1,d3			; OFFSET_END
+	callsys Seek			; Seek returns OLD position
+	move.l	d0,d1
+	andi.l	#3,d1			; did user write even longwords?
+	beq.s	10$			; Yep!	Nice Human.
+	move.l	d1,d6			; Nope, save for later.
+	clr.l	TempStore(a4)           ; clear temp storage
+	move.l	d5,d1
+	move.l	TempAddr(a4),d2
+	moveq	#4,d3
+	sub.l	d6,d3			; find how many NULLs to pad
+	callsys Write
+	bra.s	9$
+10$:
+	tst.l	SeekStore(a4)           ; did we write UDAT?
+	beq.s	11$			; nope!
+	sub.l	SeekStore(a4),d0        ; find length of UDAT section
+	lsr.l	#2,d0			; adjust to longwords
+	move.l	d0,TempStore(a4)        ; save UDAT length for write
+	move.l	d5,d1
+	move.l	SeekStore(a4),d2        ; find where to write it
+	subq.l	#4,d2
+	moveq	#-1,d3			; OFFSET_BEGINNING
+	callsys Seek
+	move.l	d5,d1
+	move.l	TempAddr(a4),d2
+	move.l	#4,d3
+	callsys Write			; write length of UDAT field to file
+11$:
+	move.l	d5,d1
+	moveq	#0,d2			; offset to 'Length' field
+	moveq	#1,d3			; OFFSET_END
+	callsys Seek			; make sure we are at end of file
+	move.l	d5,d1
+	moveq	#4,d2			; offset to 'Length' field
+	moveq	#-1,d3			; OFFSET_BEGINNING
+	callsys Seek
+	subq.l	#8,d0			; adjust total length
+	lsr.l	#2,d0			; adjust to longwords
+	move.l	d0,TempStore(a4)        ; save for write
+	move.l	d5,d1
+	move.l	TempAddr(a4),d2
+	move.l	#4,d3
+	callsys Write			; write 'Length' field
+GExit1:
+	move.l	fp(a4),d1
+	beq.s	GExit2
+	move.l	DOSBase(a4),a6
+	callsys Close
+
+	ifnd	AUTOREQ
+	move.l	GConsole(a4),d1
+	beq.s	GExit2
+	lea	success(a4),a0
+	move.l	a0,d2
+	move.l	#32,d3
+	callsys Write
+	endc
+GExit2:
+	move.l	TaskID(a4),a6
+	move.l	AbsExecBase.W,a6
+	moveq	#$47,d0
+	bra.w	exit2
+
+*-----------------------------------------------------------------------
+* AddIt:	routine to add memory parts to variables
+
+AddIt:
+	move.l	MH_FREE(a5),d0
+	add.l	d0,(a3)          ; add to available
+	move.l	MH_UPPER(a5),d0
+	sub.l	MH_LOWER(a5),d0
+	add.l	d0,4(a3)                ; add to Max section
+	rts
+	endc
+
+
+	section   __MERGED,DATA
+*
+
+	xdef	NULL,SysBase,WBenchMsg
+	xdef	curdir,_mbase,_mnext,_msize,_tsize
+	xdef	_oserr,_OSERR,_FPERR,_SIGFPE,_ONERR,_ONEXIT,_ONBREAK
+	xdef	_SIGINT
+	xdef	_ProgramName,_StackPtr,_base
+
+	ifd	CATCH
+	xdef	_ONGURU,_FMEM,_STAKOffset
+	endc
+*
+NULL		dc.l	0		*
+Commandbuf	dc.l	0
+Commandlen	dc.l	0
+_base		dc.l	0		* base of stack
+_mbase		dc.l	0		* base of memory pool
+_mnext		dc.l	0		* next available memory location
+_msize		dc.l	0		* size of memory pool
+_tsize		dc.l	0		* total size?
+_oserr:
+_OSERR		dc.l	0
+_FPERR		dc.l	0
+_SIGFPE 	dc.l	0
+_SIGINT 	dc.l	0
+_ONERR		dc.l	0
+_ONEXIT 	dc.l	0
+_ONBREAK	dc.l	0
+curdir		dc.l	0
+SysBase 	dc.l	0
+WBenchMsg	dc.l	0
+oldtrapcode	dc.l	0
+oldtrapdata	dc.l	0
+_StackPtr	dc.l	0
+stdin		dc.l	0
+_ProgramName	dc.l	0
+
+	ifd	CATCH
+_ONGURU 	dc.l	0
+IntuiBase	dc.l	0
+TaskID		dc.l	0
+	ifnd	AUTOREQ
+GConsole	dc.l	0
+failmsg 	dc.b	7,'Can''t write SnapShot!',10
+success 	dc.b	7,'GURU caught; SnapShot written!',10
+	endc
+	cnop	0,4
+_FMEM		dc.l	0
+fp		dc.l	0		; save SnapShot file pointer
+DumpPath	dc.b	'DF1:'
+DumpName	dc.b	'SnapShot.TB',0
+SeekStore	dc.l	0
+TempAddr	dc.l	0		; Storage for &TempStore
+TempStore	dc.l	0,0		; Temporary storage for BPTR -> APTR
+TempSize	equ	*-TempStore
+
+	cnop	0,4
+	ifd	AUTOREQ
+TAttr:				; Text attributes for font
+	dc.l	TName		; name of font
+	dc.w	TOPAZ_EIGHTY	; font size
+	dc.b	FS_NORMAL	; font style
+	dc.b	FPF_ROMFONT	; font preferences
+TName:
+	dc.b	'topaz.font',0
+	cnop	0,4
+
+IText1: 			; Text definitions for AutoReq call
+	dc.b	3,0,RP_JAM1,0	; front & back pens, drawmode and filler byte
+	dc.w	6,4		; XY origin relative to container TopLeft
+	dc.l	TAttr		; font pointer or NULL for default
+	dc.l	ITextText1	; pointer to text
+	dc.l	IText2		; next IntuiText structure
+ITextText1:
+	dc.b	'Program:',0
+	cnop 0,4
+IText2:
+	dc.b	3,0,RP_JAM1,0
+	dc.w	78,4
+	dc.l	TAttr
+PName	dc.l	0
+	dc.l	IText3
+	cnop	0,4
+IText3:
+	dc.b	3,0,RP_JAM1,0
+	dc.w	55,16
+	dc.l	TAttr
+	dc.l	ITextText3
+	dc.l	IText4
+ITextText3:
+	dc.b	'I caught a GURU!',0
+	cnop 0,4
+IText4:
+	dc.b	3,0,RP_JAM1,0
+	dc.w	20,28
+	dc.l	TAttr
+	dc.l	ITextText4
+	dc.l	0
+ITextText4:
+	dc.b	'Should I make a SnapShot?',0
+	cnop 0,4
+IText5:
+	dc.b	3,0,RP_JAM2,0
+	dc.w	6,3
+	dc.l	TAttr
+	dc.l	ITextText5
+	dc.l	0
+ITextText5:
+	dc.b	'YES',0
+	cnop 0,4
+IText6:
+	dc.b	3,0,RP_JAM2,0
+	dc.w	6,3
+	dc.l	TAttr
+	dc.l	ITextText6
+	dc.l	0
+ITextText6:
+	dc.b	'NO',0
+	endc
+
+	cnop 0,4
+
+*--------------------------------------------------------------------------
+* New IFF chunk format -
+*	PGTB = Program Traceback, header for chunk
+*	FAIL = reason for and environment of crash
+*	REGS = registers at time of crash, including PC and CCR
+*	VERS = version, revision, name of this program
+*	STAK = ENTIRE stack at time of crash or, alternately,
+*		the top and bottom 4k if the stack used is > 8k
+*	UDAT = optional user data dump (if _ONGURU is set to a
+*		function pointer in the user's program)
+*--------------------------------------------------------------------------
+
+PGTB		dc.b	'PGTB'
+Length		dc.l	0		; length of chunk (in longwords)
+
+subFAIL 	dc.b	'FAIL'
+FAILlen 	dc.l	9
+NameLen 	dc.l	0		; length of program name
+chunk_len_1	equ	*-PGTB
+Environment	dc.l	0		; CPU (, Math)
+VBlankFreq	dc.l	0		;	PAL = 50, NTSC = 60 (approx.)
+PowerSupFreq	dc.l	0		; Europe = 50,	USA = 60 (approx.)
+Starter 	dc.l	0		; 0 = WB, -1 = CLI
+GURUNum 	dc.l	0		; cause of crash (GURU #)
+SegCount	dc.l	1		; # hunks in seglist
+chunk_len_2	equ	*-Environment
+
+subFMEM 	dc.b	'FMEM'          ; FMEM - free memory at crash
+		dc.l	6
+chipAvail	dc.l	0		; available chip memory
+chipMax 	dc.l	0		;	maximum chip memory
+chipLargest	dc.l	0		;	largest chip memory
+fastAvail	dc.l	0		; available fast memory
+fastMax 	dc.l	0		;	maximum fast memory
+fastLargest	dc.l	0		;	largest fast memory
+FMEMlen 	equ	*-subFMEM
+
+subREGS 	dc.b	'REGS'          ; REGS - register storage field
+REGSlen 	dc.l	18
+GURUAddr	dc.l	0		; PC at time of crash
+Flags		dc.l	0		; Condition Code Register (CCR)
+DDump		dc.l	0,0,0,0,0,0,0,0 ; data registers
+ADump		dc.l	0,0,0,0,0,0,0	; address registers
+A7Store 	dc.l	0
+
+subVERS 	dc.b	'VERS'          ; VERS - program version field
+		dc.l	6
+		dc.l	VERSION 	; version #
+		dc.l	REVISION	; revision #
+		dc.l	3		; length of name of program
+		IFD	RESIDENT
+		dc.b	'catchres.o',0,0 ; name
+		ENDC
+		IFND	RESIDENT
+		dc.b	'catch.o   ',0,0 ; name
+		ENDC
+
+subSTAK 	dc.b	'STAK'          ; STAK - stack field
+STAKlen 	dc.l	4
+Type		dc.l	0		; 0 = Info
+StackTop	dc.l	0		; top of stack pointer
+StackPtr	dc.l	0		; current Stack Pointer
+StackLen	dc.l	0		; # bytes used on stack
+chunk_len_3	equ	*-subREGS
+
+STAK2		dc.b	'STAK'
+s2len		dc.l	1		; length of subtype
+		dc.l	1		; 1 = whole stack
+STAK2len	equ	*-STAK2
+
+STAK3		dc.b	'STAK'
+		dc.l	1025
+		dc.l	2		; 2 = top 4k of stack
+STAK3len	equ	*-STAK3
+
+STAK4		dc.b	'STAK'
+		dc.l	1025
+		dc.l	3		; 3 = bottom 4k of stack
+STAK4len	equ	*-STAK4
+
+STAK5		dc.b	'STAK'
+_STAKOffset	dc.l	0
+		dc.l	4		; 4 = user defined amount
+STAK5len	equ	*-STAK5
+
+UDAT		dc.b	'UDAT'
+		dc.l	0
+UDATlen 	equ	*-UDAT
+	endc
+
+	END
+

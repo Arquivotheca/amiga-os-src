@@ -1,0 +1,14 @@
+VERSION		EQU	3
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'12.1.93'
+	ENDM
+VERS	MACRO
+		dc.b	'ping 3.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'ping 3.4 (12.1.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: ping 3.4 (12.1.93)',0
+	ENDM

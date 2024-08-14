@@ -1,0 +1,681 @@
+head     39.6;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+39.6
+date     92.08.10.16.39.05;  author vertex;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.07.29.14.37.42;  author vertex;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.07.07.16.13.50;  author vertex;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.07.02.18.09.59;  author vertex;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.07.01.18.54.56;  author vertex;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.23.15.01.24;  author vertex;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Beep!
+@
+
+
+39.6
+log
+@Changes to support the new "split the seglist in half" trick.
+@
+text
+@
+/* includes */
+#include <exec/devices.h>
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/ports.h>
+#include <exec/execbase.h>
+#include <dos/dos.h>
+#include <devices/audio.h>
+#include <prefs/sound.h>
+#include <libraries/iffparse.h>
+#include <datatypes/datatypes.h>
+#include <datatypes/datatypesclass.h>
+#include <datatypes/soundclass.h>
+
+/* prototypes */
+#include <clib/exec_protos.h>
+#include <clib/iffparse_protos.h>
+#include <clib/dos_protos.h>
+#include <clib/datatypes_protos.h>
+
+/* direct ROM interface */
+#include <pragmas/exec_pragmas.h>
+#include <pragmas/iffparse_pragmas.h>
+#include <pragmas/dos_pragmas.h>
+#include <pragmas/datatypes_pragmas.h>
+
+/* application includes */
+#include "sound.h"
+#include "iprefs.h"
+#include "pread.h"
+#include "backdrop.h"
+
+
+/*****************************************************************************/
+
+
+extern struct ExecBase *SysBase;
+extern struct Library  *IntuitionBase;
+extern struct Library  *IFFParseBase;
+extern struct Library  *DOSBase;
+extern struct Library  *DataTypesBase;
+extern struct MsgPort   audioPort;
+
+
+/*****************************************************************************/
+
+
+VOID __stdargs BeginIO(struct IORequest *io);
+LONG __stdargs TimeDelay( long unit, unsigned long secs, unsigned long microsecs );
+ULONG __stdargs DoMethodA (Object *obj, Msg message);
+
+
+/*****************************************************************************/
+
+
+VOID (* __asm oldDisplayBeep)(register __a0 APTR,register __a6 APTR);
+struct IOAudio     ioa;
+struct SoundPrefs  sp;
+BOOL               doFlash;
+Object            *soundObj;
+
+
+/*****************************************************************************/
+
+
+static UBYTE audioChannels[] = {3,6,1,2,4,8};
+
+static char __chip BeepSamples[] =
+{
+    0x00, 0x30, 0x56, 0x6E, 0x78, 0x72, 0x56, 0x2C,
+    0xFF, 0xD3, 0xAC, 0x8F, 0x84, 0x90, 0xAC, 0xD1
+};
+
+static char BeepVolume[] =
+{
+    0x40, 0x3C, 0x38, 0x34, 0x30, 0x2C, 0x28, 0x24,
+    0x20, 0x1C, 0x18, 0x14, 0x10, 0x0C, 0x08, 0x04
+};
+
+
+/*****************************************************************************/
+
+
+VOID DoAudio(VOID)
+{
+ULONG            delay;
+UWORD            vol;
+struct IOAudio   ioa2;
+struct dtTrigger dtt;
+
+/* This causes a sound NOT to interrupt any currently playing sound
+ *
+ *   if (ioa.ioa_Request.io_Device)
+ *      return;
+ */
+
+    CleanUpAudio();
+
+    if (sp.sop_AudioQueue)
+    {
+        if ((sp.sop_AudioType == SPTYPE_SAMPLE) && soundObj)
+        {
+            SetDTAttrs(soundObj,NULL,NULL,SDTA_Period, sp.sop_AudioPeriod,
+                                          SDTA_Volume, sp.sop_AudioVolume,
+                                          TAG_DONE);
+
+            dtt.MethodID     = DTM_TRIGGER;
+            dtt.dtt_Function = STM_PLAY;
+            DoMethodA(soundObj,&dtt);
+        }
+        else
+        {
+            ioa.ioa_Request.io_Message.mn_Node.ln_Pri  = 85;
+            ioa.ioa_Request.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+            ioa.ioa_Request.io_Message.mn_Length       = sizeof(struct IOAudio);
+            ioa.ioa_Request.io_Message.mn_ReplyPort    = &audioPort;
+            ioa.ioa_Data                               = audioChannels;
+            ioa.ioa_Length                             = sizeof(audioChannels);
+
+            if (!OpenDevice("audio.device",0,&ioa,0))
+            {
+                ioa.ioa_Request.io_Flags   = ADIOF_PERVOL;
+                ioa.ioa_Request.io_Command = CMD_WRITE;
+                ioa.ioa_Volume             = sp.sop_AudioVolume;
+                ioa.ioa_Period             = sp.sop_AudioPeriod;
+                ioa.ioa_Cycles             = 0;
+                ioa.ioa_Length             = sizeof(BeepSamples);
+                ioa.ioa_Data               = (APTR)&BeepSamples;
+                ioa.ioa_Volume             = sp.sop_AudioVolume;
+
+                ioa2                        = ioa;
+                ioa2.ioa_Request.io_Command = ADCMD_PERVOL;
+
+                if (!(SetSignal(0,0) & SIGBREAKF_CTRL_F))
+                {
+                    BeginIO(&ioa);
+
+                    delay = sp.sop_AudioDuration * 400;
+
+                    for (vol = 1; vol < sizeof(BeepVolume); vol++)
+                    {
+                        if (SetSignal(0,0) & SIGBREAKF_CTRL_F)
+                           break;
+
+                        ioa2.ioa_Volume           = (BeepVolume[vol] * sp.sop_AudioVolume) / 64;
+                        ioa2.ioa_Request.io_Flags = IOF_QUICK | ADIOF_SYNCCYCLE;
+                        BeginIO(&ioa2);
+                        TimeDelay(UNIT_MICROHZ,0,delay);
+                    }
+                    AbortIO(&ioa);
+                }
+                else
+                {
+                    CloseDevice(&ioa);
+                    ioa.ioa_Request.io_Device = NULL;
+                }
+            }
+            else
+            {
+                (*oldDisplayBeep)(NULL,IntuitionBase);
+            }
+        }
+    }
+}
+
+
+/*****************************************************************************/
+
+
+VOID CleanUpAudio(VOID)
+{
+    if (ioa.ioa_Request.io_Device)
+    {
+        AbortIO(&ioa);
+        WaitIO(&ioa);
+        CloseDevice(&ioa);
+        ioa.ioa_Request.io_Device = NULL;
+    }
+}
+
+
+/*****************************************************************************/
+
+
+BOOL ChangeAudio(VOID)
+{
+BOOL result = FALSE;
+
+    CleanUpAudio();
+
+    if (soundObj)
+    {
+        DisposeDTObject(soundObj);
+        soundObj = NULL;
+        AttemptCloseDT();
+    }
+
+    if (sp.sop_DisplayQueue)
+        doFlash = TRUE;
+    else
+        doFlash = FALSE;
+
+    if ((!sp.sop_AudioQueue) || (sp.sop_AudioType == SPTYPE_BEEP))
+        return(TRUE);
+
+    if (AttemptOpenDT())
+    {
+        if (soundObj = NewDTObject(sp.sop_AudioFileName,DTA_SourceType, DTST_FILE,
+                                                        TAG_DONE))
+        {
+            return(TRUE);
+        }
+        UserProblems(MSG_IP_ERROR_NO_SOUND,sp.sop_AudioFileName);
+    }
+
+    return(result);
+}
+@
+
+
+39.5
+log
+@Closes datatypes if "Make Sound" is unchecked
+@
+text
+@a55 5
+/*
+#define ID_8SVX MAKE_ID('8','S','V','X')
+#define ID_VHDR MAKE_ID('V','H','D','R')
+#define ID_BODY MAKE_ID('B','O','D','Y')
+*/
+a56 9
+/*****************************************************************************/
+
+
+VOID DisplayBeepPatch(VOID);
+
+
+/*****************************************************************************/
+
+
+a59 1
+ULONG              sampleLength;
+d61 1
+a61 1
+Object            *soundObj = NULL;
+a79 15
+
+
+/*****************************************************************************/
+
+
+VOID InstallAudioPatch(VOID)
+{
+    doFlash             = TRUE;
+    sp.sop_DisplayQueue = TRUE;
+    sp.sop_AudioQueue   = FALSE;
+
+    Forbid();
+    oldDisplayBeep = (APTR)SetFunction(IntuitionBase,-96,(VOID *)DisplayBeepPatch);
+    Permit();
+}
+@
+
+
+39.4
+log
+@Now uses datatypes.library to load sounds
+@
+text
+@d218 1
+a218 1
+BOOL  result = FALSE;
+d234 1
+a234 1
+    if (sp.sop_AudioType != SPTYPE_SAMPLE)
+@
+
+
+39.3
+log
+@No longer minds odd-length 8SVX files
+@
+text
+@d12 3
+d20 1
+d26 1
+d31 2
+d42 1
+d51 1
+d56 1
+a56 15
+
+#define CMP_NONE     0
+#define CMP_FIBDELTA 1
+
+struct VoiceHeader
+{
+    ULONG vh_OneShotHiSamples;
+    ULONG vh_RepeatHiSamples;
+    ULONG vh_SamplesPerHiCycle;
+    UWORD vh_SamplesPerSec;
+    UBYTE vh_Octaves;
+    UBYTE vh_Compression;
+    ULONG vh_Volume;
+};
+
+d60 1
+a60 1
+
+a73 1
+APTR               sample;
+d76 1
+a99 51
+/* Fibonacci delta encoding for sound data */
+static BYTE codeToDelta[16] = {-34,-21,-13,-8,-5,-3,-2,-1,0,1,2,3,5,8,13,21};
+
+/* Unpack Fibonacci-delta encoded data from n byte source
+ * buffer into 2*n byte dest buffer, given initial data
+ * value x.  It returns the lats data value x so you can
+ * call it several times to incrementally decompress the data.
+ */
+
+BYTE D1Unpack(BYTE source[], LONG n, BYTE dest[], BYTE x)
+{
+UBYTE d;
+LONG i, lim;
+
+    lim = n << 1;
+    for (i=0; i < lim; ++i)
+    {
+        /* Decode a data nibble, high nibble then low nibble */
+        d = source[i >> 1];     /* get a pair of nibbles */
+        if (i & 1)              /* select low or high nibble */
+            d &= 0xf;           /* mask to get the low nibble */
+        else
+            d >>= 4;            /* shift to get the high nibble */
+
+        x += codeToDelta[d];    /* add in the decoded delta */
+        dest[i] = x;            /* store a 1 byte sample */
+    }
+
+    return(x);
+}
+
+
+/*****************************************************************************/
+
+
+/* Unpack Fibonacci-delta encoded data from n byte
+ * source buffer into 2*(n-2) byte dest buffer.
+ * Source buffer has a pad byte, an 8-bit initial
+ * value, followed by n-2 bytes comprising 2*(n-2)
+ * 4-bit encoded samples.
+ */
+
+VOID DUnpack(UBYTE *source, ULONG n, APTR dest)
+{
+    D1Unpack(source+2, n-2, dest, source[1]);
+}
+
+
+/*****************************************************************************/
+
+
+d117 4
+a120 3
+ULONG          delay;
+UWORD          vol;
+struct IOAudio ioa2;
+d132 5
+a136 6
+        ioa.ioa_Request.io_Message.mn_Node.ln_Pri  = 85;
+        ioa.ioa_Request.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+        ioa.ioa_Request.io_Message.mn_Length       = sizeof(struct IOAudio);
+        ioa.ioa_Request.io_Message.mn_ReplyPort    = &audioPort;
+        ioa.ioa_Data                               = audioChannels;
+        ioa.ioa_Length                             = sizeof(audioChannels);
+d138 5
+a142 1
+        if (!OpenDevice("audio.device",0,&ioa,0))
+d144 6
+a149 4
+            ioa.ioa_Request.io_Flags   = ADIOF_PERVOL;
+            ioa.ioa_Request.io_Command = CMD_WRITE;
+            ioa.ioa_Volume             = sp.sop_AudioVolume;
+            ioa.ioa_Period             = sp.sop_AudioPeriod;
+d151 1
+a151 1
+            if ((sp.sop_AudioType == SPTYPE_SAMPLE) && sample)
+d153 8
+a160 12
+                ioa.ioa_Cycles = 1;
+                ioa.ioa_Length = sampleLength;
+                ioa.ioa_Data   = sample;
+                SetSignal(0,1L << audioPort.mp_SigBit);
+                BeginIO(&ioa);
+            }
+            else
+            {
+		ioa.ioa_Cycles = 0;
+		ioa.ioa_Length = sizeof(BeepSamples);
+		ioa.ioa_Data   = (APTR)&BeepSamples;
+		ioa.ioa_Volume = sp.sop_AudioVolume;
+d162 2
+a163 2
+		ioa2                        = ioa;
+		ioa2.ioa_Request.io_Command = ADCMD_PERVOL;
+d189 4
+a192 4
+        }
+        else
+        {
+            (*oldDisplayBeep)(NULL,IntuitionBase);
+d218 1
+a218 8
+BOOL                   result     = FALSE;
+LONG                   error;
+struct IFFHandle      *iff;
+struct ContextNode    *cn;
+BPTR                   fp;
+struct StoredProperty *stp;
+APTR                   data;
+struct VoiceHeader     sampleHeader;
+d221 7
+a227 2
+    FreeVec(sample);
+    sample = NULL;
+d237 1
+a237 1
+    if (fp = Open(sp.sop_AudioFileName,MODE_OLDFILE))
+d239 2
+a240 1
+        if (iff = AllocIFF())
+d242 1
+a242 66
+            iff->iff_Stream = fp;
+            InitIFFasDOS(iff);
+
+            if (!OpenIFF(iff,IFFF_READ))
+            {
+                if (!PropChunk(iff,ID_8SVX,ID_VHDR))
+                {
+                    if (!StopChunk(iff,ID_8SVX,ID_BODY))
+                    {
+                        if (!StopOnExit(iff,ID_8SVX,ID_FORM))
+                        {
+                            if (!ParseIFF(iff,IFFPARSE_STEP))
+                            {
+                                while (TRUE)
+                                {
+                                    error = ParseIFF(iff,IFFPARSE_SCAN);
+
+                                    if ((error == IFFERR_EOC) || (error == IFFERR_EOF))
+                                    {
+                                        break;
+                                    }
+                                    else if (error)
+                                    {
+                                        doFlash = TRUE;
+                                        result = FALSE;
+                                        break;
+                                    }
+                                    else
+                                    {
+                                        if (!(stp = FindProp(iff,ID_8SVX,ID_VHDR)))
+                                            break;
+
+                                        sampleHeader = *((struct VoiceHeader *)stp->sp_Data);
+
+                                        cn = CurrentChunk(iff);
+
+                                        sampleLength = cn->cn_Size;
+				        if (sampleHeader.vh_Compression == CMP_FIBDELTA)
+                                            sampleLength = (sampleLength - 2) * 2;
+
+                                        if (!(sample = AllocVec(sampleLength,MEMF_CLEAR|MEMF_CHIP)))
+                                            break;
+
+				 	data = (APTR)((ULONG)sample + sampleLength - cn->cn_Size);
+
+                                        if (ReadChunkBytes(iff,data,cn->cn_Size) != cn->cn_Size)
+                                        {
+                                            FreeVec(sample);
+                                            sample = NULL;
+                                            break;
+                                        }
+
+				        if (sampleHeader.vh_Compression == CMP_FIBDELTA)
+				            DUnpack(data,cn->cn_Size,sample);
+
+				        result = TRUE;
+				        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                CloseIFF(iff);
+            }
+            FreeIFF(iff);
+d244 1
+a244 1
+        Close(fp);
+d246 1
+@
+
+
+39.2
+log
+@Changed patch handling. Now much simpler since we assume IPrefs can't quit
+@
+text
+@d353 1
+@
+
+
+39.1
+log
+@Initial V39 RCS checkin
+@
+text
+@a23 1
+#include "soundpatch.h"
+d30 1
+a34 1
+
+d70 6
+a75 2
+VOID PatchStart(VOID);
+extern ULONG __far patchSize;
+a77 3
+struct IOAudio     ioa2;
+struct SoundPatch *patch;
+UBYTE              audioChannels[]  = {3,6,1,2,4,8};
+d79 1
+a79 1
+APTR               sample = NULL;
+d81 1
+a81 1
+struct VoiceHeader sampleHeader;
+d87 2
+d105 10
+a114 1
+VOID InstallAudioPatch(VOID)
+d116 2
+a117 1
+    Forbid();
+d119 2
+a120 1
+    if (!(patch = FindSemaphore(IPREFSNAME)))
+d122 9
+a130 13
+        if (patch = AllocVec(patchSize,MEMF_PUBLIC))
+        {
+            CopyMem((APTR)PatchStart,patch,patchSize);
+            InitSemaphore(&patch->sp_Semaphore);
+            patch->sp_Semaphore.ss_Link.ln_Name = patch->sp_Name;
+            patch->sp_Semaphore.ss_Link.ln_Pri  = -100;
+            AddSemaphore(&patch->sp_Semaphore);
+            oldDisplayBeep = (APTR)SetFunction(IntuitionBase,-96,(VOID *)&patch->sp_PatchCodeStart);
+            patch->sp_OldDisplayBeep = oldDisplayBeep;
+            patch->sp_Flash          = TRUE;
+            patch->sp_SysBase        = SysBase;
+            CacheClearU();
+        }
+d133 13
+a145 2
+    sp.sop_DisplayQueue  = TRUE;
+    sp.sop_AudioQueue    = FALSE;
+d147 3
+a149 1
+    Permit();
+d156 1
+a156 1
+VOID RemoveAudioPatch()
+d158 7
+a164 2
+    FreeVec(sample);
+    sample = NULL;
+d173 3
+a175 2
+ULONG delay;
+UWORD vol;
+a269 14
+BOOL GetVHDR(struct IFFHandle *iff)
+{
+struct StoredProperty *sp;
+
+    if (sp = FindProp(iff,ID_8SVX,ID_VHDR))
+    {
+	sampleHeader = *((struct VoiceHeader *)sp->sp_Data);
+	return(TRUE);
+    }
+
+    return(FALSE);
+}
+
+
+d272 8
+a279 5
+BOOL                result     = FALSE;
+LONG                error;
+struct IFFHandle   *iff;
+struct ContextNode *cn;
+BPTR                fp;
+d286 1
+a286 1
+        patch->sp_Flash = TRUE;
+d288 1
+a288 1
+        patch->sp_Flash = FALSE;
+d320 1
+a320 1
+                                        patch->sp_Flash = TRUE;
+d326 1
+a326 1
+                                        if (!GetVHDR(iff))
+d329 2
+d332 6
+a337 1
+                                        if (!(sample = AllocVec(cn->cn_Size,MEMF_CHIP)))
+d340 3
+a342 1
+                                        if (ReadChunkBytes(iff,sample,cn->cn_Size) != cn->cn_Size)
+d348 5
+a352 2
+                                        result = TRUE;
+                                        sampleLength = cn->cn_Size;
+@

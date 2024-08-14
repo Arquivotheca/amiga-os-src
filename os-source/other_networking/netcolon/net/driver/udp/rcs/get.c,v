@@ -1,0 +1,574 @@
+head     1.5;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.5; strict;
+comment  @ * @;
+
+
+1.5
+date     91.08.02.09.11.48;  author dlarson;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     91.07.25.19.20.58;  author dlarson;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     91.07.08.10.05.49;  author dlarson;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     91.06.21.11.53.28;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.06.05.12.47.39;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@**  Bolt NET-UDP.library:
+**  get.c -- Receive RPackets.
+@
+
+
+1.5
+log
+@First Alpha?
+@
+text
+@/*
+**  Bolt NET-UDP.library:
+**  get.c -- Receive RPackets.
+**
+**		$Log:	get.c,v $
+ * Revision 1.4  91/07/25  19:20:58  dlarson
+ * working!
+ * 
+ * Revision 1.3  91/07/08  10:05:49  dlarson
+ * continuing development...
+ *
+ * Revision 1.2  91/06/21  11:53:28  dlarson
+ * work in progress...
+ *
+ * Revision 1.1  91/06/05  12:47:39  dlarson
+ * Initial revision
+ *
+*/
+
+#include "bolt-udp.h"
+
+/***** NET-UDP.library/SDNAccept ***********************************
+*
+*   NAME
+*	SDNAccept -- Get any new RPacket or connection.
+*
+*   SYNOPSIS
+*	rc = SDNAccept(drglobal, rp)
+*	D0	       A0	 A1
+*
+*	int SDNAccept(APTR, struct RPacket **);
+*
+*   FUNCTION
+*	Read next incoming RPacket and accept new connections.  If rc ==
+*	SDN_OK, the *rp will point to a new RPacket, else *rp will point to
+*	never-never land.
+*
+*   INPUTS
+*	drglobal  	- Driver-specific global data pointer obtained from
+*			  SDNSerInit()
+*	rp		- RPacket that has arrived
+*
+*   RESULTS
+*	rc		- SDN_OK, SDN_ERR == read error,
+*			  SDN_NONE == nothing to read
+*
+*   NOTES
+*	This routine is only called by the server.
+*
+*	Driver must be prepared to handle this being called when nothing is
+*	pending since multiple drivers may be sharing a signal bit.  If an
+*	RPacket did come in, but is munged, SDN_ERR is returned;  if no
+*	RPacket was available, SDN_NONE is returned.  If a pending write
+*	request has been completed, a special RPacket  type is returned and
+*	a copy of the original RPacket structure's 'statedata' pointer is
+*	returned.
+*
+*	The memory pointed to by RP is owned by the NET: code until
+*	SDNFreeRPacket() is called.  SDNFreeRPacket() should be called ASAP
+*	after calling SDNAccept() to allow the driver to reuse the RPacket
+*	for the next read request.
+*
+*	When a new connection is established, this routine will return an
+*	RPacket	with an action indicating the establishment of the connection
+*	(ACTION_NETWORK_START) and Arg1 filled with a pointer to the
+*	"connection" (i.e. what you'd get from SDNGetCon()).  For connections
+*	that are broken, a phoney RPacket is returned (ACTION_NETWORK_END).
+*
+*	The driver should ensure that the first RPacket received on a
+*	new connection (or as sequence number zero) is an
+*	ACTION_NETWORK_START.
+*
+*   BUGS
+*	Returns SDN_NONE if there is an error sending the acknowledgement.
+*
+*	If an ACTION_NETWORK_START is received for a "connection" already
+*	"connected" no ACTION_NETWORK_END is received for the old
+*	"connection."  THIS IS A BIG PROBLEM.
+*
+*	Need to make sure that ACTION_NETWORK_START is not replied by server
+*	and is properly freed.
+*
+*   SEE ALSO
+*	SDNReply(), SDNFreeRPacket()
+*
+*********************************************************************************
+*
+*  We could start by setting *accepted=NULL, but why bother to protect
+*  against the server or handler not checking rc?  They better check!
+*
+*
+*  We would bump the sequence number here and have the rms process keep it's
+*  own sequence #, but only the rms process uses it, so...
+*
+*/
+
+int LIBENT UDPSDNAccept (register __a0 UDPGLOBAL tg,
+			register __a1 struct RPacket **accepted,
+			register __a6 struct DrLibrary *DriverBase)
+{
+struct RMSMsg *msg;
+
+	BUG(("SDNAccept()... "));
+
+	msg = (struct RMSMsg *)GetMsg(tg->rmsport);
+	if(msg)
+	{
+		*accepted = msg->rp;
+		FreeMem(msg, sizeof(*msg));
+		BUG(("returning packet #%ld\n", ((struct UDPRPacket *)*accepted)->sequence));
+		return(SDN_OK);
+	}
+	BUG(("Nothing there.\n"));
+	return(SDN_NONE);
+}
+
+
+/****** NET-UDP.library/SDNReceive **********************************
+*
+*   NAME
+*	SDNReceive -- Get the next response packet
+*
+*   SYNOPSIS
+*	rc = SDNReceive(drglobal, mask, RP);
+*	D0		A0	  D0    A1
+*
+*	int SDNReceive(APTR, ULONG, struct RPacket **);
+*
+*   FUNCTION
+*	Read the next incomming packet.
+*
+*   INPUTS
+*	drglobal	- Driver-specific global data pointer
+*	mask		- Mask of signal bits that have gone off
+*	RP		- RPacket that has arrived
+*
+*   RESULT
+*	rc		- SDN_OK, SDN_ERR == read error,
+*			  SDN_NONE == nothing to read
+*
+*   NOTES
+*	This routine is called only by the handler.
+*
+*	Driver must be prepared to handle this being called when nothing is
+*	pending since multiple drivers may be sharing a signal bit.  If a
+*	packet did come in, but is munged, SDN_ERR is returned;  if no packet
+*	was available, SDN_NONE is returned.  If a pending write request has
+*	been completed, a special packet type is returned and a copy of the
+*	original RPacket structure's 'statedata' pointer is returned.
+*
+*	The memory pointed to by RP is owned by the NET: code
+*	until SDNFreeRPacket() is called.  SDNFreeRPacket() should be called
+*	ASAP after calling SDNReceive() to allow the driver to reuse the
+*	RPacket for the next read request.
+*
+*	For those drivers which support multiple connections and want some
+*	connections to appear on the workbench automatically, it should
+*	generate a phoney ACTION_NETWORK_START RPacket for each node that is
+*	to be auto-mounted.  If the user did not specify the AUTO * option in
+*	the handler-config configuration file then these packets will simply
+*	be noted as nodes attached to the driver and not made immediately
+*	visible.
+*
+*   BUGS
+*
+*   SEE ALSO
+*	SDNAccept(), SDNFreeRPacket()
+*
+*****************************************************************************
+*
+*  As long as no one tries to initiate a conversation with the handler
+*  by sending an ACTION_NETWORK_START RPacket with sequence number zero,
+*  we can just call SDNAccept().
+*
+*/
+int LIBENT UDPSDNReceive (register __a0 UDPGLOBAL tg,
+			    register __d0 ULONG mask,
+			    register __a1 struct RPacket **rp,
+			    register __a6 struct DrLibrary *DriverBase)
+{
+	BUG(("SDNReceive()... "));
+	return(SDNAccept((APTR)tg, rp));
+}
+@
+
+
+1.4
+log
+@working!
+@
+text
+@d6 3
+@
+
+
+1.3
+log
+@continuing development...
+@
+text
+@d6 3
+d51 1
+a51 1
+*	request has been completed, a special RPacket type is returned and
+d89 2
+a90 1
+*  We could probably gain a lot by caching a few pointers here.
+d94 1
+a94 3
+struct timeval NoTime = {0L, 0L};  /* something to give select() */
+
+int __saveds LIBENT UDPSDNAccept (register __a0 UDPGLOBAL tg,
+d98 1
+a98 16
+int n,		/*  number of bytes recvfrom()ed  */
+    fromlen;	/*  number of bytes the address (from) takes up  */
+struct sockaddr_in from;  /* the address the RPacket is from  */
+struct UDPCon *i; 	  /* index for searching our list of "connections" */
+struct UDPRPacket *candidate; /* candidate for us to accept as a RPacket */
+int error;
+fd_set mask;	/* mask for select() */
+
+	BUG(("\nSDNAccept(): SDNAccept()\n"));
+/*
+**  Check to see if there is really an RPacket waiting for us to read.
+**
+**  Unfortunately, there isn't a nice, simple s_datawaiting(socket)
+**  function in the socket library.  Select() can be made to check
+**  for us, though.
+*/
+d100 1
+a100 62
+	mask = tg->recv_mask;
+	error = select(tg->sock_recv+1, &mask, NULL, NULL, &NoTime);
+	if(error == 0)
+	{
+		BUG(("false alarm.\n"));
+		return(SDN_NONE);
+	}
+	if(error == -1)
+	{
+		BUG(("error on select() -- %s.\n", strerror(errno) ));
+		return(SDN_ERR);
+	}
+/*
+**  Get an RPacket and fill it with the data received.
+*/
+	BUG(("SDNAccept(): About to AllocRPakcet. "));
+	if((candidate = (struct UDPRPacket *)
+	   SDNAllocRPacket((APTR)tg, NULL, NETBUFSIZE)) == NULL)
+	{
+		BUG(("SDNAccept() can't AllocRPacket.\n"));
+		return(SDN_ERR);
+	}
+	fromlen=sizeof(from);
+	n = recvfrom(tg->sock_recv, (char *)RPBASE((struct RPacket *)candidate),
+			UDPRPALLOCN, 0L, (struct sockaddr *)&from, &fromlen);
+	BUG(("SDNAccept(): packet %ld (length %ld) from %s\n", candidate->sequence, n,
+		inet_ntoa(from.sin_addr.s_addr) ));
+	SETRPDATA(candidate);
+	candidate->rp.DLen = n-RPSIZEN;
+/*
+**  Search for a "connection" pointer to match the address of the sender
+**  of this RPacket. (We compare only the machine address, not the port
+**  number.  This would be important if there were multiple handler/servers
+**  per machine.)
+*/
+	candidate->con = NULL;
+	for(i=tg->con; i != NULL; i=i->next)
+	{
+		BUG(("SDNAccept(): Comparing %lx and %lx -- ",
+		i->address.sin_addr.s_addr, from.sin_addr.s_addr));
+		if(i->address.sin_addr.s_addr == from.sin_addr.s_addr)
+		{
+			BUG(("They're equal.\n"));
+			candidate->con = i;
+			break;
+		}
+		BUG(("They weren't equal\n"));
+	}
+/*
+**  Check to see if it is an ACTION_NETWORK_START RPacket.  If it is,
+**  check the sequence number.  If the sequence number is zero, establish
+**  the "connection" (adding it to our list of "connections").  If it is
+**  non-zero, we ignore the RPacket (returning SDN_NONE) because only the
+**  first RPacket should be ACTION_NETWORK_START.  (If one side reboots,
+**  the other will eventually time-out the connection.)  Note that we
+**  don't check to make sure that nothing other than ACTION_NETWORK_START
+**  is zero -- the sequence counter may have wrapped.
+*/
+	if(candidate->rp.Type == ACTION_NETWORK_START)
+	{
+/******************
+	The comment above is wrong.  How can a server time-out a connection?
+d102 7
+a108 40
+		if(candidate->sequence != 0)
+		{
+			BUG(("SDNAccept() returning because \n"));
+			return(SDN_NONE);
+		}
+*******************/
+		BUG(("SDNAccept(): ACTION_NETWORK_START\n"));
+	/*
+	**  If there is an old "connection" for the address we're
+	**  establishing a new connection for, reuse the old connection.
+	**  Otherwise, add a new node to the list of "connections" (using
+	**  code copied from SDNInitNode()).
+	*/
+		if(candidate->con != NULL)
+		{
+			BUG(("Zeroring sequence for existing connection\n"));
+			candidate->con->sequence = 0;
+		}
+		else
+		{
+			if( (i = AllocMem(sizeof(*i), MEMF_CLEAR)) == NULL)
+				return(SDN_ERR);
+			if(tg->con == NULL)
+			{
+				tg->con = i;
+				tg->con->next = NULL;
+			}else
+			{
+				i->next = tg->con;
+				tg->con = i;
+			}
+			candidate->con = i;
+			candidate->con->address.sin_addr.s_addr = from.sin_addr.s_addr;
+			candidate->con->address.sin_family = AF_INET;
+			candidate->con->address.sin_port = from.sin_port;
+			BUG(("SDNAccept(): new connection %lx  %s\n", candidate->con,
+			     inet_ntoa(candidate->con->address.sin_addr.s_addr) ));
+			BUG(("SDNAccept(): from %s\n", inet_ntoa(from.sin_addr.s_addr) ));
+		}
+		candidate->rp.Arg1 = (LONG) candidate->con;
+d110 2
+a111 64
+/*********  I don't know why this was here, so I'll leave it 'til this works:
+	else
+	{
+		return(SDN_NONE);
+	}
+***************/
+/*
+**  Remember that we started by setting candidate->con to NULL?  If we found a
+**  "connection" matching the sender or created a new "connection" to match
+**  the sender, candidate->con won't be NULL any more.  If it is still NULL,
+**  it must be from a sender who hasn't yet sent an ACTION_NETWORK_START
+**  so we'll ignore it.
+*/
+	if(candidate->con == NULL)
+	{
+		BUG(("SDNAccept() giving up becase no connection.\n"));
+		return(SDN_NONE);
+	}
+/*
+**  If the sequence number of this RPacket is greater than the sequence
+**  number we expected, the RPacket we were expected must have been lost.
+**  We'll ignore this RPacket and hope we get the RPacket we were expecting
+**  later.
+*/
+	if(candidate->sequence > candidate->con->sequence)
+	{
+		BUG(("SDNAccept() giving up - sequence mismatch (%ld,%ld).\n",
+		     candidate->sequence, candidate->con->sequence));
+		return(SDN_NONE);
+	}
+/*
+**  The RPacket we've received must either be one we are going to accept or
+**  one which we've already processed.  In the first case we wish to
+**  acknowledge the RPacket, in the second case we wish to re-acknowledge the
+**  RPacket (since our original acknowledgement may have been lost).
+**
+**  SHOULD I RETURN sdn_none OR sdn_err HERE?
+*/
+	if( (sendto(tg->sock_recv, (char *)&candidate->sequence,
+	     sizeof(candidate->sequence), 0L, (struct sockaddr *)&from,
+	    fromlen)) == -1)
+	{
+		BUG(("SDNAccept error in send ack -- %s.\n", strerror(errno) ));
+		return(SDN_NONE);
+	}
+/*
+**  If the sequence number is less than we expected, we can forget about this
+**  RPacket now that we have re-acknowledged it.
+*/
+	if(candidate->sequence < candidate->con->sequence)
+	{
+		BUG(("Forgetting about packet now that we've acknowledged.\n"));
+		return(SDN_NONE);
+	}
+/*
+**  This is an RPacket we're going to accept!  Bump the expected sequence
+**  number for the next RPacket on this "connection."
+**  Then accept our candidate RPacket as worthy of processing
+**  (by pointing *accepted to it and returning SDN_OK).
+*/
+	candidate->con->sequence++;
+	*accepted = candidate;
+	BUG(("SDNAccept(): Accepting packet %ld.\n", candidate->sequence));
+	return(SDN_OK);
+d178 1
+@
+
+
+1.2
+log
+@work in progress...
+@
+text
+@d6 3
+d14 1
+a14 1
+#include "net-udp.h"
+d74 3
+a88 1
+const struct timeval NoTime = {0L, 0L};   /* something to give select() */
+d90 3
+a92 1
+int LIBENT UDPSDNAccept (register __a0 UDPGLOBAL tg,
+d96 1
+a96 2
+int error,	/*  a place to store the return from select()  */
+    n,		/*  number of bytes recvfrom()ed  */
+d101 1
+d104 1
+d112 1
+d114 1
+a114 1
+	error = select(tg->sock_recv+1, mask, NULL, NULL, &NoTime);
+d116 2
+d119 1
+d121 2
+d124 1
+d128 2
+a129 1
+	if((candidate = (struct RPacket *)
+d131 2
+d134 8
+a141 2
+	n = recvfrom(tg->sock_recv, (char *)candidate, NETBUFSIZE, 0,
+			(struct sockaddr *)&from, &fromlen);
+d151 3
+a153 2
+		if(i->address.sin_addr.s_addr ==
+		   candidate->reply.sin_addr.s_addr)
+d155 1
+d159 1
+d173 3
+d177 2
+d180 3
+d186 2
+a187 2
+	**  Otherwise, add a new node to the list of "connections" using
+	**  code copied from SDNInitNode().
+d190 2
+d193 1
+d208 6
+d215 4
+a218 2
+		candidate->rp.Arg1 = candidate->con;
+	}else
+d222 1
+d231 2
+d234 1
+d242 3
+d246 1
+a246 1
+
+d255 5
+a259 2
+	if(sendto(tg->sock_recv, (char *)&candidate->sequence,
+	   sizeof(candidate->sequence), 0, &from, fromlen) != n)
+d261 1
+d267 2
+d270 1
+d279 1
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d6 3
+d83 2
+a91 1
+const struct timeval NoTime = {0L, 0L};   /* something to give select() */
+d95 1
+d104 2
+a105 1
+	error = select(tg->sock_recv+1, tg->mask, NULL, NULL, NoTime);
+d114 1
+a114 1
+	   SDNAllocRPacket((APTR)tg, NULL, 0)) == NULL)
+d116 1
+a116 1
+	n = recvfrom(tg->sock_recv, (char *)candidate, MAX_PACKET_SIZE, 0,
+d120 3
+a122 1
+**  of this RPacket.
+d127 2
+a128 1
+		if(i->address == candidate->reply)
+d144 1
+a144 1
+	if(candidate->rp->type == ACTION_NETWORK_START)
+a154 1
+		{
+d156 1
+a156 1
+		}else
+a168 1
+			*con = (APTR)tg->con;
+d171 1
+a171 1
+		candidate->Arg1 = rp->con;
+d203 1
+a203 1
+	   sizeof(candidate->sequence), &from, fromlen) != n
+d210 1
+a210 1
+	return(SDN_NONE);
+d212 1
+a212 1
+**  This is a RPacket we're going to accept!  Bump the expected sequence
+@

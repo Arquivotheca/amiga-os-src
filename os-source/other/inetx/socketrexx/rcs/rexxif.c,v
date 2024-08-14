@@ -1,0 +1,535 @@
+head     1.1;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.1
+date     91.02.07.10.29.04;  author Unknown;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@@
+
+
+
+1.1
+log
+@Initial revision
+@
+text
+@/*
+ * network interface related controls
+ */
+
+#include <rexxinet.h>
+#include <net/if.h>
+#include <net/route.h>
+#include <netinet/if_ether.h>
+#include <netinet/slip.h>
+
+/*
+ * Common routing routine
+ */
+static int routing(rm, code)
+	struct RexxMsg *rm;
+{
+	struct rtentry rt;
+	int inval;
+
+    	bzero(&rt, sizeof(rt));
+	inval = 0;
+
+	if(strcasecmp(rm->rm_Args[1], "net") == 0){
+		rt.rt_flags |= RTF_GATEWAY | RTF_UP;
+	} else if(strcasecmp(rm->rm_Args[1], "host") == 0){
+		rt.rt_flags |= RTF_HOST | RTF_UP;
+	} else {
+		inval++;
+		return REPLY;
+	}
+
+	if(rvitosa(rm, rm->rm_Args[2], &rt.rt_dst, sizeof(rt.rt_dst)) < 0){
+		inval++;
+	}
+	if(rvitosa(rm, rm->rm_Args[3], &rt.rt_gateway, sizeof(rt.rt_dst)) < 0){
+		inval++;
+	}
+
+	if(inval){
+		seterror(rm, EINVAL);
+		return REPLY;
+	}
+
+	if(ioctl(controlsock, code, &rt) < 0){
+		seterror(rm, errno);
+	}
+	return REPLY;
+}
+
+/*
+ * add a routing entry
+ */
+addrt(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	return routing(rm, SIOCADDRT);
+}
+
+/*
+ * delete a routing entry
+ */
+delrt(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	return routing(rm, SIOCDELRT);
+}
+
+/*
+ * common routine to set the various addresses associated with
+ * a network interface: local addr, dest addr, broadcast addr, netmask.
+ */
+static int setaddr(rm, ifrp, sap, funccode)
+	struct RexxMsg *rm;
+	struct sockaddr *sap;
+	struct ifreq *ifrp;
+	int funccode;
+{
+	struct ifreq ifr;
+
+	strncpy(ifrp->ifr_name, rm->rm_Args[1], sizeof(ifrp->ifr_name));
+	if(rvitosa(rm, rm->rm_Args[2], sap, sizeof(*sap)) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	if(ioctl(controlsock, funccode, ifrp) < 0){
+		seterror(rm, errno);
+	}
+
+	return REPLY;
+}
+
+/*
+ * set the interface address
+ */
+sifaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return setaddr(rm, &ifr, &ifr.ifr_addr, SIOCSIFADDR);
+}
+
+/*
+ * set the destination address in a point to point like
+ */
+sifdstaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return setaddr(rm, &ifr, &ifr.ifr_dstaddr, SIOCSIFDSTADDR);
+}
+
+/*
+ * set the broadcast interface for an interface
+ */
+sifbrdaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return setaddr(rm, &ifr, &ifr.ifr_broadaddr, SIOCSIFBRDADDR);
+}
+
+/*
+ * set the network mask for an interface
+ */
+sifnetmask(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return setaddr(rm, &ifr, &ifr.ifr_broadaddr, SIOCSIFNETMASK);
+}
+
+/*
+ * common routine to query address settings
+ */
+static int getaddr(rm, ifrp, sap, funccode)
+	struct RexxMsg *rm;
+	struct sockaddr *sap;
+	struct ifreq *ifrp;
+	int funccode;
+{
+	strncpy(ifrp->ifr_name, rm->rm_Args[1], sizeof(ifrp->ifr_name));
+	if(ioctl(controlsock, funccode, ifrp) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	if(satorvi(sap, sizeof(*sap), rm, rm->rm_Args[2])){
+		seterror(rm, errno);
+	}
+
+	return REPLY;
+}
+
+/*
+ * get the current address of an interface
+ */
+gifaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return getaddr(rm, &ifr, &ifr.ifr_addr, SIOCGIFADDR);
+}
+
+/*
+ * get the current destination address of an interface
+ */
+gifdstaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return getaddr(rm, &ifr, &ifr.ifr_addr, SIOCGIFDSTADDR);
+}
+
+/*
+ * get the broadcast address of an interface
+ */
+gifbrdaddr(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return getaddr(rm, &ifr, &ifr.ifr_addr, SIOCGIFBRDADDR);
+}
+
+/*
+ * get the current network mask of an interface
+ */
+gifnetmask(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	return getaddr(rm, &ifr, &ifr.ifr_addr, SIOCGIFNETMASK);
+}
+
+static struct {
+	char	*name;
+	int	value;
+} ifflags[] = {
+	{"UP ",		IFF_UP}, 
+	{"BROADCAST ",	IFF_BROADCAST},
+	{"DEBUG ",	IFF_DEBUG},
+	{"LOOPBACK ",	IFF_LOOPBACK},
+	{"POINTTOPOINT ",IFF_POINTOPOINT},
+	{"NOTRAILERS ",	IFF_NOTRAILERS},
+	{"RUNNING ",	IFF_RUNNING},
+	{"NOARP ",	IFF_NOARP},
+	{"PROMISC ",	IFF_PROMISC},
+	{"ALLMULTI ",	IFF_ALLMULTI},
+	{"BIT10 ",	0x0400},
+	{"BIT11 ",	0x0800},
+	{"BIT12 ",	0x1000},
+	{"BIT13 ",	0x2000},
+	{"BIT14 ",	0x4000},
+	{"BIT15 ",	0x8000},
+	{0}
+};
+
+/*
+ * set the control flags of a given interface.  If a given name is mentioned,
+ * or the entry begins with "+" the corresponding flag bit is set.  If the
+ * entry begins with "-" then the corresponding bit is cleared.  Bits not
+ * mentioned are not affected by the call.
+ *
+ * the logic relation for the operation is this:
+ *
+ * 	new_flags = (old_flags & ~clear_bits) | set_bits;
+ */
+sifflags(port, rm)
+	struct port *port;
+	struct RexxMsg *rm;
+{
+	int clear_bits, set_bits, use_clear, i;
+	register char *p, *name;
+	struct ifreq ifr;
+
+	strncpy(ifr.ifr_name, rm->rm_Args[1], sizeof(ifr.ifr_name));
+	if(ioctl(controlsock, SIOCGIFFLAGS, &ifr) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	clear_bits = set_bits = 0;
+	for(p = (char *)rm->rm_Args[2]; *p;){
+		while(*p && isspace(*p)){ /* skip whitespace */
+			p++;
+		}
+		name = p;
+		while(*p && !isspace(*p)){ /* skip over token */
+			p++;
+		}
+
+		/*
+		 * if p != name then name points to the start of
+		 * a flag name.
+		 */
+		if(p != name){
+			switch(*name){
+			case '-': use_clear = 1; 	name++; break;
+			case '+': 			name++; /* fall into */
+			default:  use_clear = 0; 		break;
+			}
+
+			for(i = 0; ifflags[i].name; i++){
+				if(strncasecmp(ifflags[i].name, name, p-name)==0){
+					break;
+				}
+			}
+
+			if(ifflags[i].name){
+				if(use_clear){
+					clear_bits |= ifflags[i].value;
+				} else {
+					set_bits |= ifflags[i].value;
+				}
+			} else {
+				seterror(rm, EINVAL);
+				return REPLY;
+			}
+		}
+	}
+
+	ifr.ifr_flags = (ifr.ifr_flags & ~clear_bits) | set_bits;
+	if(ioctl(controlsock, SIOCSIFFLAGS, &ifr) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	return REPLY;
+}
+
+/*
+ * Print out interface flag settings as a single string.  A flag is
+ * mentioned if set, otherwise not.
+ */
+gifflags(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	char buf[128];
+	int i;
+
+	strncpy(ifr.ifr_name, rm->rm_Args[1], sizeof(ifr.ifr_name));
+	if(ioctl(controlsock, SIOCGIFFLAGS, &ifr) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	buf[0] = 0;
+	for(i = 0; ifflags[i].name; i++){
+		if((ifflags[i].value & ifr.ifr_flags) != 0){
+			strcat(buf, ifflags[i].name);
+		}
+	}
+
+	if(rm->rm_Action & RXFF_RESULT){
+		rm->rm_Result2 = (long)CreateArgstring(buf, strlen(buf));
+	}
+	return REPLY;
+}
+
+/*
+ * get the names of all the interfaces known to inet.library and return
+ * them as a space separated string.
+ */
+gifconf(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	register struct ifreq *ifrp;
+	char buf[512], buf1[512];
+	struct ifconf ifc;
+	int i, n;
+
+	ifc.ifc_buf = buf;
+	ifc.ifc_len = sizeof(buf);
+	if(ioctl(controlsock, SIOCGIFCONF, &ifc) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	ifrp = ifc.ifc_req;
+	n = ifc.ifc_len / sizeof(*ifrp);
+	buf1[0] = 0;
+	for(i = 0; i < n; i++){
+		strcat(buf1, ifrp->ifr_name);
+		strcat(buf1, " ");
+		ifrp++;
+	}
+	
+	if(rm->rm_Action & RXFF_RESULT){
+		rm->rm_Result2 = (long)CreateArgstring(buf1, strlen(buf1));
+	}
+	return REPLY;
+}
+
+/*
+ * set the interface metric
+ */
+sifmetric(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	int metric;
+
+	metric = atoi(rm->rm_Args[2]);
+	ifr.ifr_data = (caddr_t)&metric;
+	strncpy(ifr.ifr_name, rm->rm_Args[1], sizeof(ifr.ifr_name));
+	if(ioctl(controlsock, SIOCSIFMETRIC, &ifr) < 0){
+		seterror(rm, errno);
+	}
+
+	return REPLY;
+}
+
+/*
+ * get the interface metric
+ */
+gifmetric(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct ifreq ifr;
+	int metric;
+
+	strncpy(ifr.ifr_name, rm->rm_Args[1], sizeof(ifr.ifr_name));
+	if(ioctl(controlsock, SIOCGIFMETRIC, &ifr) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	if(rm->rm_Action & RXFF_RESULT){
+		rm->rm_Result2 = CVi2arg(ifr.ifr_metric, 8);
+	}
+	return REPLY;
+}
+
+/*
+ * IFsetslipdev(ifname, device, unit, baud, [flags]) - set the slip serial device/unit
+ */
+sslipdev(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct slipvars sl;
+	struct ifreq ifr;
+
+	if(strlen(rm->rm_Args[2]) >= DEVNMSIZE || 
+			strlen(rm->rm_Args[1]) >= sizeof(ifr.ifr_name)){
+		seterror(rm, E2BIG);
+		return REPLY;
+	}
+
+	bzero(&ifr, sizeof(ifr));
+	strcpy(ifr.ifr_name, rm->rm_Args[1]);
+	ifr.ifr_data = (caddr_t)&sl;
+
+	strcpy(sl.sl_devname, rm->rm_Args[2]);
+	sl.sl_unit = atoi(rm->rm_Args[3]);
+	sl.sl_baud = atoi(rm->rm_Args[4]);
+	sl.sl_flags = 0;
+	if(rm->rm_Args[5]){
+		sl.sl_flags = atoi(rm->rm_Args[5]);
+	}
+
+	if(ioctl(controlsock, SIOCSSLIPDEV, &ifr) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	return REPLY;
+}
+
+/*
+ * set (add) an ARP table entry
+ * arpsetaddr(protocol_addr, hardware_addr, flags)
+ */
+sarp(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct arpreq ar;
+
+	bzero(&ar.arp_ha, sizeof(ar.arp_ha));
+	ar.arp_ha.sa_family = AF_UNSPEC;
+	if(rvitosa(rm, rm->rm_Args[1], &ar.arp_pa, sizeof(ar.arp_pa)) < 0
+	   || rvitosa(rm, rm->rm_Args[2], &ar.arp_ha, sizeof(ar.arp_ha)) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	ar.arp_flags = ATF_COM;
+	if(ioctl(controlsock, SIOCSARP, &ar) < 0){
+		seterror(rm, errno);
+	}
+	return REPLY;
+}
+
+/*
+ * delete a specified ARP table entry
+ */
+darp(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct arpreq ar;
+
+	if(rvitosa(rm, rm->rm_Args[1], &ar.arp_pa, sizeof(ar.arp_pa)) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	if(ioctl(controlsock, SIOCDARP, &ar) < 0){
+		seterror(rm, errno);
+	}
+	return REPLY;
+}
+
+/*
+ * get ARP entry corresponding to a given address.
+ */
+garp(p, rm)
+	struct port *p;
+	struct RexxMsg *rm;
+{
+	struct arpreq ar;
+
+	bzero(&ar, sizeof(ar));
+	if(rvitosa(rm, rm->rm_Args[1], &ar.arp_pa, sizeof(ar.arp_pa)) < 0
+	   || ioctl(controlsock, SIOCGARP, &ar) < 0){
+		seterror(rm, errno);
+		return REPLY;
+	}
+
+	if(satorvi(&ar.arp_ha, sizeof(ar.arp_ha), rm, rm->rm_Args[2]) < 0){
+		seterror(rm, errno);
+	}
+	return REPLY;
+}
+@

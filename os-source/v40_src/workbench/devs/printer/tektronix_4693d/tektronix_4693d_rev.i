@@ -1,0 +1,12 @@
+VERSION		EQU	35
+REVISION	EQU	8
+DATE	MACRO
+		dc.b	'17 Dec 1989'
+	ENDM
+VERS	MACRO
+		dc.b	'tektronix_4693D 35.8'
+	ENDM
+VSTRING	MACRO
+		dc.b	'tektronix_4693D 35.8 (17 Dec 1989)',13,10,0
+		ds.w	0
+	ENDM

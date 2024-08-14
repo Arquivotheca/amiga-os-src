@@ -1,0 +1,1748 @@
+head	40.9;
+access;
+symbols;
+locks; strict;
+
+
+40.9
+date	93.05.21.00.48.57;	author LPOMA;	state Exp;
+branches;
+next	40.8;
+
+40.8
+date	93.03.05.02.34.45;	author LPOMA;	state Exp;
+branches;
+next	38.7;
+
+38.7
+date	92.11.25.12.15.59;	author LPOMA;	state Exp;
+branches;
+next	38.5;
+
+38.5
+date	92.04.23.14.25.48;	author LPOMA;	state Exp;
+branches;
+next	38.4;
+
+38.4
+date	92.03.07.21.31.18;	author LPOMA;	state Exp;
+branches;
+next	38.3;
+
+38.3
+date	92.02.21.11.35.01;	author LPOMA;	state Exp;
+branches;
+next	38.2;
+
+38.2
+date	92.01.15.10.45.57;	author LPOMA;	state Exp;
+branches;
+next	38.1;
+
+38.1
+date	91.12.04.18.24.06;	author LPOMA;	state Exp;
+branches;
+next	;
+
+
+desc
+@CrossDOS for AmigaDOS V2.1
+@
+
+
+40.9
+log
+@Added better supprt for allocating and freeing track buffer.
+
+Provided better error reporting.
+@
+text
+@**************************************************************************
+** Copyright 1991 CONSULTRON
+*
+*       IOCmds.a  -- device IO command processor code
+*
+**************************************************************************
+        section ,CODE
+        include "mfm.i"
+        include "mfm_ext.i"
+        include "dos/filehandler.i"
+
+        XDEF    _cmdtable
+        XREF    _TermIO
+        XDEF    Cmd_Update
+        XDEF    Cmd_Flush
+		XDEF  	TD_ChangeNum
+
+
+;--------------------------------------------------------------------------
+; cmdtable is used to look up the address of a routine that will implement
+; the device command.  
+; The values pointing to the functions are a displacement from _cmdtable
+_cmdtable:
+        ;------- this is the standard IO commands in the IO_COMMAND field
+        dc.w    Cmd_Invalid-_cmdtable     ; $00000001 IMMED
+        dc.w    Cmd_Reset-_cmdtable       ; $00000002 IMMED
+        dc.w    Cmd_Read-_cmdtable        ; $00000004 QUEUED
+        dc.w    Cmd_Write-_cmdtable       ; $00000008 QUEUED
+        dc.w    Cmd_Update-_cmdtable      ; $00000010 QUEUED
+        dc.w    Cmd_Clear-_cmdtable       ; $00000020 QUEUED
+        dc.w    Cmd_Stop-_cmdtable        ; $00000040 IMMED
+        dc.w    Cmd_Start-_cmdtable       ; $00000080 IMMED
+        dc.w    Cmd_Flush-_cmdtable       ; $00000100 IMMED
+        ;------- this is the non-standard IO commands in the IO_COMMAND field
+        ;        device specific commands.
+        dc.w    TD_Motor-_cmdtable        ; $00000200
+        dc.w    MD_Seek-_cmdtable         ; $00000400 QUEUED
+        dc.w    MD_Format-_cmdtable       ; $00000800 QUEUED
+        dc.w    TD_Remove-_cmdtable       ; $00001000 QUEUED
+        dc.w    TD_ChangeNum-_cmdtable    ; $00002000 IMMED
+        dc.w    TD_ChangeState-_cmdtable  ; $00004000 IMMED
+        dc.w    TD_ProtStatus-_cmdtable   ; $00008000
+        dc.w    TD_RawRead-_cmdtable      ; $00010000 QUEUED
+        dc.w    TD_RawWrite-_cmdtable     ; $00020000 QUEUED
+        dc.w    TD_GetDriveType-_cmdtable ; $00040000 IMMED
+        dc.w    MD_GetNumTracks-_cmdtable ; $00080000 IMMED
+        dc.w    MD_AddChangeInt-_cmdtable ; $00100000 QUEUED
+        dc.w    TD_RemChangeInt-_cmdtable ; $00200000 IMMED ;*** Make sure this command is NEVER queued!
+                                            ; If queued, this command will fail BIG TIME!
+        dc.w    MD_GetGeometry-_cmdtable  ; $00400000 QUEUED
+        dc.w    MD_Eject-_cmdtable        ; $00800000 QUEUED
+        dc.w    MD_Misc-_cmdtable         ; $01000000
+        dc.w    MD_Misc-_cmdtable         ; $02000000
+        dc.w    MD_Misc-_cmdtable         ; $04000000
+        dc.w    MD_Misc-_cmdtable         ; $08000000
+        dc.w    MD_Misc-_cmdtable         ; $10000000
+        dc.w    MD_SetParms-_cmdtable     ; $20000000 QUEUED
+cmdtable_end:
+
+;--------------------------------------------------------------------------
+; IOCmds Section
+;
+; The device IO commands as specified in the IO_COMMAND field of the IOReq.
+; All functions are called with:
+;
+; Inputs:
+; =======
+; a1 = ioReq pointer
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; The fields of the IOReq struct are filled as necessary.
+; If ERROR occurred -- set IO_ERROR field in IOReq struct
+;--------------------------------------------------------------------------
+
+;--------------------------------------------------------------------------
+; Invalid sets the IO_ERROR with "Command not supported"
+
+Cmd_Invalid:
+        move.b  #IOERR_NOCMD,IO_ERROR(IOReq)
+        rts
+
+;--------------------------------------------------------------------------
+; Clear is an internal buffering command.  
+; Clear invalidates all internal buffers.
+;
+;   Added routine to remove chip memory when not needed.
+;
+;       Register usage:
+;       ================
+TrackStrt  equr    a0      ;= track buffer struct ptr
+MemEntry  equr    a0   ;= MemEntry pointer
+
+Cmd_Clear:
+        bsr     Free_Trk_Buffer
+        rts
+
+;--------------------------------------------------------------------------
+; Reset clears internal buffers and FLUSHES all pending I/O requests
+;   This command may cause problems if the Unit Task is processing a
+;   command that will need to write a track to the disk.
+;       Register usage:
+;       ================
+;TrackStrt  equr    a0      ;= track buffer struct ptr
+
+Cmd_Reset:
+        move.l  mdu_TrkStrt(Unit),TrackStrt  ; store track buffer struct ptr in reg
+        bset    #MDUB_STOPPED,UNIT_FLAGS(Unit)  ; set STOPPED flag bit
+
+        move.l  #NOTRACK,trk_in_buf(TrackStrt)    ; set NO TRACK in buffer
+        bsr     Cmd_Flush                   ; go FLUSH all pending I/O requests
+
+        rts
+
+;--------------------------------------------------------------------------
+; Update is an internal buffering command.  Update forces all
+; IO out to its final resting spot, and does not return until this is done.
+;       Register usage:
+;       ================
+;IOReq   equr    a2      ;= IO Request ptr
+TrkStrt equr    a4      ;= track buffer struct ptr
+
+        XREF    write_track
+
+MM_Cmd_Update   equr     a4
+
+Cmd_Update:
+Update_Disk:
+    IFND    READONLY
+
+        btst    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; test TRACK MODIFIED flag
+        beq.s   Cmd_Update_end
+
+        bsr     Check_Disk_Status
+        bne     function_err        ; go if we received an error
+
+        move.l  MM_Cmd_Update,-(sp)
+
+        move.l  mdu_TrkStrt(Unit),TrkStrt; pass track buffer struct ptr in reg
+
+        jsr     write_track             ;go write track to disk
+
+        move.b  RetD0,IO_ERROR(IOReq)   ; return error
+
+Cmd_Update_Fini:
+        move.l  (sp)+,MM_Cmd_Update
+
+
+    ENDC
+
+Cmd_Update_end:
+        rts
+
+;
+;--------------------------------------------------------------------------
+; The Stop command stops all future IO requests from being processed until
+; a "start" command is received.  The stop command is not stackable: e.g.
+; no matter how many stops have been issued, it only takes one "start" to
+; restart processing.
+
+Cmd_Stop:
+        bset    #MDUB_STOPPED,UNIT_FLAGS(Unit)  ; set STOPPED flag bit
+
+        rts
+
+Cmd_Start:
+        bsr.s   InternalStart
+
+        move.l  IOReq,ArgA1
+
+        rts
+
+InternalStart:
+        ;------- turn processing back on.
+        bclr    #MDUB_STOPPED,UNIT_FLAGS(Unit)
+
+        ;------- kick the task to start it moving
+        move.l  Unit,ArgA1
+        CLEAR   ArgD0
+        move.b  MP_SIGBIT(Unit),ArgD1
+        bset    ArgD1,ArgD0
+        CALLSYS Signal
+
+        rts
+
+;--------------------------------------------------------------------------
+; Flush pulls all IO requests off the queue and sends them back.  We must
+; careful not to destroy work in progress, and also that we do not let some
+; IO requests slip by.
+;
+; Some funny magic goes on with the STOPPED bit here.  Stop is defined as
+; not being reentrant.  We therefore save the old state of the bit and then
+; restore it later.  This keeps us from needing to DISABLE in flush.  It may
+; also fail miserably if someone does a start in the middle of a flush.
+;
+; Registers used:
+; ===============
+Stopbit   equr    d2      ;= prev state of MDU_STOPPED bit
+;IOReq   equr    a2      ;= IO Request ptr
+
+
+MM_Cmd_Flush    reg     d2/a2/a4
+
+Cmd_Flush:
+Flush_pend_IO:
+        movem.l MM_Cmd_Flush,-(sp)
+
+        bset    #MDUB_STOPPED,UNIT_FLAGS(Unit)  ; set STOPPED flag bit
+        sne     Stopbit                         ; store prev state
+
+Flush_Loop:
+        move.l  Unit,ArgA0      ; pass unit ptr
+        CALLSYS GetMsg          ; get message
+
+        tst.l   RetD0           ; test for message avail
+        beq.s   Flush_End       ; go if no more messages
+
+        move.l  RetD0,IOReq                     ; pass IO Request ptr
+        move.b  #IOERR_ABORTED,IO_ERROR(IOReq)  ; return error
+        jsr     _TermIO
+
+        bra.s   Flush_Loop      ; go for more messages
+
+Flush_End:
+        move.l  Stopbit,RetD0   ; restore prev state of STOPPED flag bit
+        movem.l (sp)+,MM_Cmd_Flush
+
+        tst.b   d0              ; test
+        beq.s   1$              ; go ignore Internal Start if not set
+
+        bsr.s   InternalStart   ; go do Internal Start
+
+1$:
+        move.l  IOReq,a1        ; pass IOReq
+        rts
+;
+;--------------------------------------------------------------------------
+;   Check_Disk_Status()
+;   Check the status of the disk for these parameters (Update UNIT_FLAGS)
+;       1.  No Disk present in drive
+;       2.  write protect
+;       3.  Drive Type
+;           - 3 1/2"
+;           - 3 1/2" HD (150 RPM)
+;           - 5 1/4"
+;
+; Inputs:
+; =======
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+; a6 = AbsExecBase pointer
+;
+; Results:
+; ========
+; d0 = 0 = Disk in drive; no write protect; no errors
+; d0 = TDERR_WriteProt = Disk in drive; write protect
+; d0 = TDERR_DiskChanged = NO Disk in drive
+; d0 = TDERR_NoMem = Insufficient track memory; allocation failed
+; d0 = TDERR_????  = Error occurred
+;
+;       Register usage:
+;       ================
+Temp1   equr    d2      ;= temp store
+Temp2   equr    d3      ;= temp store
+MM_Check_Disk_Status     reg      d2/d3
+
+Check_Disk_Status:
+CDS:
+
+        bclr    #MDUB_DISK_CHANGED,UNIT_FLAGS(Unit) ; test if Disk changed bit        
+        beq     CDS_Chk_Trk_Mem         ; go if disk not changed
+        movem.l MM_Check_Disk_Status,-(sp)
+        move.w  IO_COMMAND(IOReq),Temp1 ; temp store command
+
+        move.b  IO_FLAGS(IOReq),Temp2   ; temp store flags
+        move.b  #0,IO_FLAGS(IOReq)      ; put 0 in flags
+
+        move.w  #TD_CHANGESTATE,IO_COMMAND(IOReq)  ; pass new command
+
+        jsr     TD_ChangeState
+
+        tst.l   IO_ACTUAL(IOReq)          ; check actual return = Disk change state
+        beq.s   Disk_Present
+
+Disk_Not_Present:
+        bset    #MDUB_NO_DISK,UNIT_FLAGS(Unit)  ; set No Disk bit
+        bsr     Free_Trk_Buffer
+
+        move.b  #TDERR_DiskChanged,mdu_error(Unit)  ; return disk changed
+        bra     CDS_Fini                        ; go finish
+
+Disk_Present:
+        bclr    #MDUB_NO_DISK,UNIT_FLAGS(Unit)  ; clear No Disk bit
+
+CDS_chk_DT:
+   ;******** Store Retry Count for most drives
+        move.b  #RETRYCNT_NORM,mdu_RetryCnt(Unit)   ; set retry count
+
+;** Find drive type and set the default Environment vector for Set_Phys_Params()
+        move.w  #TD_GETDRIVETYPE,IO_COMMAND(IOReq)  ; pass new command
+
+        jsr     TD_GetDriveType
+
+        move.l  mdu_MemEntL(Unit),a0        ; Load MemEntryList
+        move.l  mel_def_DosEnvec(a0),a0     ; load default Environment vector
+
+CDS_chk_Drive3_5:
+        cmpi.l  #DRIVE3_5,IO_ACTUAL(IOReq)  ; check actual return = Drive type
+        bne.s   CDS_chk_Drive5_25           ; go if not 3.5 Drive
+
+CDS_Drive3_5:
+        move.l  #DEFSECNUM,de_BlocksPerTrack(a0)    ; set default sectors per track
+        move.l  #DEFHICYLNUM,de_HighCyl(a0) ; set default High Cylinder
+        move.l  #TRACKBUFF_MSZ,mdu_trk_buf_sz(Unit) ; store tracksize needed
+        bra.s   CDS_Drive_end               ; go chk drive end
+
+CDS_chk_Drive5_25:
+        cmpi.l  #DRIVE5_25,IO_ACTUAL(IOReq) ; check actual return = Drive type
+        bne.s   CDS_chk_DRIVE3_5_150RPM     ; go if not 5.25 Drive
+
+        move.l  #DEFSECNUM,de_BlocksPerTrack(a0)    ; set default sectors per track
+        move.l  #DEFHICYLNUM_5_25,de_HighCyl(a0)    ; set default High Cylinder
+   ;******** Store Retry Count for 5 1/4" drives
+        move.b  #RETRYCNT_5_25,mdu_RetryCnt(Unit)   ; set retry count
+        move.l  #TRACKBUFF_MSZ,mdu_trk_buf_sz(Unit) ; store tracksize needed
+        bra.s   CDS_Drive_end               ; go chk drive end
+
+CDS_chk_DRIVE3_5_150RPM:
+        cmpi.l  #DRIVE3_5_150RPM,IO_ACTUAL(IOReq)   ; check actual return = Drive type
+        bne.s   CDS_DriveUNKNOWN            ; go if not 150 RPM drive
+
+        move.l  #DEFSECNUM_HD,de_BlocksPerTrack(a0)    ; set default sectors per track
+        move.l  #DEFHICYLNUM,de_HighCyl(a0) ; set default High Cylinder
+        move.l  #TRACKBUFF_HD_MSZ,mdu_trk_buf_sz(Unit)    ; store HD tracksize needed
+        bra.s   CDS_Drive_end               ; go chk drive end
+
+CDS_DriveUNKNOWN:
+        bra.s   CDS_Drive3_5                ; UNKNOWN drive type, default to 3.5 parms
+CDS_Drive_end:
+
+CDS_Set_Phys_Params:
+******** Set physical disk params and create sector header array 
+        moveq   #0,ArgD0                        ; pass default pointer
+        bsr     Set_Phys_Params                 ; go set physical params
+
+CDS_chk_WP:
+        move.w  #TD_PROTSTATUS,IO_COMMAND(IOReq)  ; pass new command
+
+        jsr     TD_ProtStatus
+
+        tst.l   IO_ACTUAL(IOReq)        ; check for write protect
+        beq.s   Not_Write_Prot          ; go not write protected
+
+        bset    #MDUB_WRITE_PROT,UNIT_FLAGS(Unit)   ; set write protect bit
+        move.b  #TDERR_WriteProt,mdu_error(Unit)    ; return write protect status
+        bra.s   CDS_Fini
+
+Not_Write_Prot:
+        bclr    #MDUB_WRITE_PROT,UNIT_FLAGS(Unit)  ; clear write protect bit
+        move.b   #0,mdu_error(Unit)
+CDS_Fini:
+        move.w  Temp1,IO_COMMAND(IOReq) ; put back old command
+        move.b  Temp2,IO_FLAGS(IOReq)   ; put back old flags
+        movem.l (sp)+,MM_Check_Disk_Status
+
+CDS_Chk_Trk_Mem:
+        btst    #MDUB_NO_TRK_MEM,UNIT_FLAGS(Unit) ; test if No track buffer memory allocated bit        
+        beq.s   CDS_End
+
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,UNIT_FLAGS(Unit)  ; chk if no disk in drive
+        bne.s   CDS_End                         ; go if disk changed; error code already set
+        bsr     Alloc_Trk_Buffer                ; go allocate track buffer memory        
+
+        tst.l   RetD0
+        bne.s   CDS_End                 ;  go if allocated track buffer memory
+
+        moveq   #TDERR_NoMem,RetD0               ; return NO memory available error
+        rts
+        
+CDS_End:
+        move.b  mdu_error(Unit),RetD0
+        rts
+
+function_err:
+        move.b  RetD0,IO_ERROR(IOReq)  ; return error
+        move.l  #0,IO_ACTUAL(IOReq)
+        rts
+;
+        XREF    read_data_mfm
+        XREF    write_data_mfm
+
+;--------------------------------------------------------------------------
+; Format() -- Format a track
+;
+TrackLen equr   d0      ;= track length
+;TrkStrt equr    a4      ;= track buffer struct ptr
+;       a2 = ioReq ptr
+;       a3 = unit pointer
+
+MM_MD_Format equr     a4
+
+MD_Format:
+
+    IFD     READONLY
+        move.b  #TDERR_WriteProt,IO_ERROR(IOReq)  ; return error
+        move.l  #0,IO_ACTUAL(IOReq)
+        rts
+    ENDC
+
+    IFND    READONLY
+;-- Find if write protected
+        bsr     Check_Disk_Status
+        bne     function_err        ; go if we received an error
+
+        move.l  MM_MD_Format,-(sp)
+
+        move.l  mdu_TrkStrt(Unit),TrkStrt ; store track buffer struct ptr in reg
+
+;-- make sure old modified track is updated
+        btst    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; test TRACK MODIFIED flag
+        beq.s   ft_notrack                      ; go if track not modified
+
+        jsr     write_track                     ; track modified; go write track
+
+;-- set NOTRACK to guarantee format of track even if it was the current track
+ft_notrack:
+        move.l  #NOTRACK,trk_in_buf(TrkStrt)     ; set NO TRACK in buffer
+
+        bset    #MDUB_TRK_FORMAT,mdu_DFLAGS(Unit)  ; set TRACK FORMAT flag
+
+        lea     write_data_mfm,a0   ; put block operation address
+        bsr     Cmd_Block
+        bclr    #MDUB_TRK_FORMAT,mdu_DFLAGS(Unit)  ; clear TRACK FORMAT flag
+
+        tst.l   RetD0
+        bne.s   format_fini     ; go if error found
+
+;-- update the current track and then invalidate the track buffer.
+        bsr     Cmd_Update      ; update disk if track buffer dirty, first
+
+        tst.l   RetD0
+        bne.s   format_fini     ; go if error found
+
+format_clear_buff:
+;TrackStrt  equr    a0      ;= track buffer struct ptr
+        move.l  mdu_TrkStrt(Unit),TrackStrt  ; store track buffer struct ptr in reg
+        move.l  #NOTRACK,trk_in_buf(TrackStrt)    ; set NO TRACK in buffer
+
+format_fini:
+        move.l  (sp)+,MM_MD_Format
+        rts
+
+
+    ENDC
+
+
+;--------------------------------------------------------------------------
+; Seek() -- Seek to track requested.  Update track if modified before seeking
+; new track.
+; These commands will pass off the ioReq directly to the trackdisk driver
+; to handle and reply back to the originator.
+;
+; The track will be seeked to but the sector into will not be filled in
+; in the header array.
+;
+; Registers used:
+; ===============
+;TrkStrt  equr    a4      ;= track buffer struct ptr
+TempLen equr    d2      ;= temp io_Length reg
+; a0 = Operation address to jump to.
+
+MM_MD_Seek     equr     d2
+
+MD_Seek:
+;***** It's legal to not do Disk status checking. That's why this code has been commented out
+        bsr     Check_Disk_Status
+
+        move.l  MM_MD_Seek,-(sp)
+
+        move.l  IO_LENGTH(IOReq),TempLen ; temp store io_Length
+        move.l  #0,IO_LENGTH(IOReq)     ; get zero length
+                                        ; this should result in IOERR_BADLENGTH
+                                        ; which should be cleared when returned
+
+        bset    #MDUB_TRK_SEEK,mdu_DFLAGS(Unit)  ; set TRACK SEEK flag
+
+        lea     MD_Seek_Dummy_rts,a0   ; put block operation address
+
+        bsr.s   Cmd_Block
+
+        bclr    #MDUB_TRK_SEEK,mdu_DFLAGS(Unit)  ; clr TRACK SEEK flag
+
+        move.l  TempLen,IO_LENGTH(IOReq) ; put back io_Length
+        cmp.b   #IOERR_BADLENGTH,IO_ERROR(IOReq)   ; test if IOERR_BADLENGTH
+        bne.s   MD_Seek_Fini                ; go if not IOERR_BADLENGTH
+
+        move.b  #0,IO_ERROR(IOReq)   ; clear io_Error
+
+MD_Seek_Fini:
+        move.l  (sp)+,MM_MD_Seek
+
+MD_Seek_Dummy_rts:      ; dummy rts for Block Operation to be performed
+        moveq.l #0,RetD0
+        rts
+
+
+;--------------------------------------------------------------------------
+; The Write command finds the block(s) specified from the unit and copies the 
+; data pointed to in IO_DATA into the track buffer.
+;       Register usage:
+;       ================
+; a0 = Operation address to jump to.
+
+Cmd_Write:
+
+    IFND    READONLY
+
+        bsr     Check_Disk_Status
+        bne     function_err        ; go if we received an error
+
+        lea     write_data_mfm,a0   ; put block operation address
+        bra.s   Cmd_Block
+
+    ENDC
+
+    IFD     READONLY
+        move.b  #TDERR_WriteProt,IO_ERROR(IOReq)  ; return error
+        move.l  #0,IO_ACTUAL(IOReq)
+        rts
+    ENDC
+
+;--------------------------------------------------------------------------
+; The READ command finds the block(s) specified from the unit and copies the 
+; data into the buffer pointed to in IO_DATA.
+;       Register usage:
+;       ================
+; a0 = Operation address to jump to.
+
+Cmd_Read:
+;ILLEGAL
+        bsr     Check_Disk_Status
+        beq.s   1$                  ; go if no error
+        cmp.b   #TDERR_WriteProt,RetD0
+        beq.s   1$                  ; go if just write protected
+        bra     function_err        ; go if we received an error
+1$
+        lea     read_data_mfm,a0    ; put block operation address
+;
+
+;--------------------------------------------------------------------------
+; The Block operation routine.  Both CMD_READ and CMD_WRITE operate through
+; this routine. The appropriate block operation (ie. read or write) will be
+; passed through register a0.
+;
+;       Register usage:
+;       ================
+TrackNum equr   d0      ;= physical track number
+SecLen  equr    d1      ;= sector length
+Data    equr    d4      ;= IO_DATA ptr
+SecLenCpy equr  d5      ;= sector length copy
+DataLen equr    d6      ;= data length
+Offset  equr    d7      ;= disk byte offset
+;
+Header  equr   a0      ;= temp header array ptr
+;       a0 = Block operation address
+;       a2 = ioReq ptr
+;       a3 = unit pointer
+;TrkStrt  equr    a4      ;= track buffer struct ptr
+BlockOp   equr    a5      ;= block operation address
+;       a6 = AbsExecBase ptr
+
+        XREF    calc_psec
+        XREF    read_track
+
+
+MM_Cmd_Block     reg     d2/d4/d5/d6/d7/a4/a5
+
+Cmd_Block:
+        movem.l MM_Cmd_Block,-(sp)
+        move.l  a0,BlockOp                ; stack block operation address
+
+        move.l  #0,IO_ACTUAL(IOReq)     ; clear io_Actual
+        move.l  mdu_TrkStrt(Unit),TrkStrt ; store track buffer struct ptr in reg
+
+         ; calculate physical sector params
+;------ check for valid length
+        move.l  IO_DATA(IOReq),Data             ; store io_data
+        move.l  IO_LENGTH(IOReq),DataLen        ; store io_length
+        move.l  IO_OFFSET(IOReq),Offset         ; store disk byte offset
+
+        move.b  mdu_RetryCnt(Unit),mdu_CurrRetryCnt(Unit) ; set current retry counter
+
+get_sec:
+        move.l  Offset,ArgD0    ; pass byte offset
+        jsr     calc_psec       ; calculate physical sector displacement
+*******
+** return = d0:physical track
+        cmpi.l  #-1,RetD0       ; chk track # for error
+        beq     Cmd_Block_Done  ; found error
+
+    ;*** track number in RetD0
+        jsr     read_track      ; go read physical track
+
+        tst.l   RetD0
+        bne.s   read_track_err  ; go if error found
+
+		btst	#MDUB_TRK_SEEK,mdu_DFLAGS(Unit)
+		bne 	Cmd_Block_End
+
+find_sec:
+        move.w  num_sec_trk(TrkStrt),d0  ; load sector array element counter
+        move.l  head(TrkStrt),Header     ; temp store sector header.
+
+        move.l  slct_trk(TrkStrt),d1     ; get physical track,head,sector & sec len
+
+        bra.s   chk_sec
+get_nxt_sec:
+        add.l   #header_sz,Header   ; inc to next array element
+chk_sec:
+        subq.w  #1,d0                   ; dec sector array element counter
+        blt.s   find_no_sec             ; could not find sector;
+
+        cmp.l   h_track(Header),d1      ; check if track,head,sector & sec len matches
+        bne.s   get_nxt_sec             ; get next sector
+
+save_sec_hdr_err:
+        move.b  h_sec_err(Header),IO_ERROR(IOReq) ; put sector header error
+
+get_sec_data:
+    ; adjust data length by subtracting sector length.
+        moveq.l #7,d0                   ;correct for 0=128 normalized sec len
+        add.b   h_sec_len(Header),d0    ; add sec length value (0=128; 1=256 etc)
+        moveq.l #0,SecLen
+        bset    d0,SecLen               ; pass actual sector byte length
+        move.l  SecLen,SecLenCpy        ; copy Sector Length to copy reg
+
+        sub.l   SecLen,DataLen  ; chk if data len < sector len
+        blt.s   wrong_data_len  ; data len not multiple of sector len
+
+        move.l  Header,ArgD0    ; pass sector array element ptr
+        move.l  Data,ArgD2      ; pass data ptr
+
+        jsr     (BlockOp)       ; go perform decode/encode of MFM data 
+                                ; into real bytes
+
+        tst.w   RetD0           ; chk for CRC error
+        bne.s   data_crc_error  ; go if CRC error; IO_ERROR already set.
+
+        tst.l   DataLen         ; data len = 0
+        ble.s   Cmd_Block_Done
+
+        add.l   SecLenCpy,Offset   ; byte offset = byte offset + sector len
+        add.l   SecLenCpy,Data     ; data ptr = data ptr + sector len
+
+        bra.s   get_sec         ; get next sector
+
+Cmd_Block_Done:
+        neg.l   DataLen                  ;=> -DataLen
+        add.l   IO_LENGTH(IOReq),DataLen ; IO_LENGTH-DataLen=>DataLen
+        move.l  DataLen,IO_ACTUAL(IOReq)
+Cmd_Block_End:
+        movem.l (sp)+,MM_Cmd_Block
+        rts
+
+wrong_data_len:
+        add.l   SecLenCpy,DataLen  ; add back Sector length
+        move.b  #IOERR_BADLENGTH,IO_ERROR(IOReq)   ; data len not mult of sec len
+        bra.s   Cmd_Block_Done
+read_track_err:
+        move.b  RetD0,IO_ERROR(IOReq)   ; return error from read_track routine
+        bra.s   Cmd_Block_Done
+find_no_sec:
+        move.b  #TDERR_BadSecID,IO_ERROR(IOReq)    ; could not find sector
+        moveq.l #0,d0           ; clear d0 = SectorLen Add Reg
+;fix for losing track of track location
+        bra.s   read_err_retry
+data_crc_error:
+        move.b  #TDERR_BadSecSum,IO_ERROR(IOReq)   ; bad sector header CRC
+        move.l  SecLenCpy,d0           ; Sector Length -> d0 = SectorLen Add Reg
+read_err_retry:
+        add.l   d0,DataLen      ; add back Sector length from reg
+        btst    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; test TRACK MODIFIED flag
+        bne.s   Cmd_Block_Done  ; no retries; track modified
+
+        sub.b   #1,mdu_CurrRetryCnt(Unit)    ; dec retry counter
+        ble.s   Cmd_Block_Done  ; go if no more retries; IO_ERROR already set.
+reread_track:
+        move.l  #NOTRACK,trk_in_buf(TrkStrt)    ; set NO TRACK in buffer
+        bra     get_sec         ; go if retry > 0
+;
+;--------------------------------------------------------------------------
+; MD_SETPARMS is the command to set the physical disk parameters.  This
+; cmd can be called at the time the device is opened or anytime afterwards.
+;
+; The FileSysStartupMsg environment array pointer is passed to this routine
+; in io_Data.  The array is then converted and stored in the format this 
+; device code requires.
+;
+;TrkStrt        equr    a4   ;= track buffer struct ptr
+;--------------------------------------------------------------------------
+        XDEF    Set_Phys_Params
+
+MM_MD_SetParms     reg     d2/a4/a5
+
+MD_SetParms:
+        movem.l MM_MD_SetParms,-(sp)
+
+        move.l  IO_DATA(IOReq),ArgD0            ; pass fssm Environment ptr
+        bsr.s   Set_Phys_Params                 ; go set physical params
+
+        tst.l   RetD0
+        bne     Param_err                       ; go if error
+
+MD_SetParms_End:
+        movem.l (sp)+,MM_MD_SetParms
+        rts
+
+Param_err:
+        move.b  #MDERR_InvParam,IO_ERROR(IOReq)
+        bra.s   MD_SetParms_End
+
+;--------------------------------------------------------------------------
+; SET_PHYSICAL_PARAMS is the routine to set the physical disk parameters.  
+; This routine can be called at the time the device is opened or anytime 
+; afterwards.
+;
+; The FileSysStartupMsg environment array pointer is passed to this routine
+; in IO_DATA(IOReq).  The array is then converted and stored in the format 
+; this device code requires.  The correct amount of sector header array is
+; allocated.
+;
+; If IO_DATA(IOReq) = 0 then set to default parameters
+;
+; Inputs:
+; =======
+; d0 = FileSysStartupMsg environment array pointer
+; a3 = unit pointer
+;
+; Results:
+; ========
+; d0 = 0 = successful
+;    /= 0 = ERROR
+;
+; Registers used:
+; ===============
+prevSPT        equr    d2      ;= previous #secs/track
+newSPT         equr    d3      ;= new #secs/track
+newHAS         equr    d4      ;= new header array size
+newTBMS        equr    d4      ;= new track buffer memory ptr
+NumTrks        equr    d5      ;= temp # of tracks
+def_fssm_Env   equr    a0      ;= default FileSysStartupMsg environment array pointer
+MemEnt         equr    a2   ;= MemEntry pointer
+;TrkStrt        equr    a4   ;= track buffer struct ptr
+fssm_Env       equr    a5   ;= FileSysStartupMsg environment array pointer
+;--------------------------------------------------------------------------
+MM_Set_Phys_Params     reg     d2/d3/d4/d5/a2/a4/a5
+
+
+Set_Phys_Params:
+        movem.l MM_Set_Phys_Params,-(sp)
+
+        move.l  mdu_TrkStrt(Unit),TrkStrt ; store track buffer struct ptr in reg
+        move.l  mdu_MemEntL(Unit),MemEnt  ; store MemEntry list ptr in reg
+
+        move.l  #DM_AM_NULL_MIN_MSZ,sec_gap_min(TrkStrt)
+                                        ; set default sector gap minimum
+                                        ; for sector header searches
+        move.l  mdu_MemEntL(Unit),def_fssm_Env        ; Load MemEntryList
+        move.l  mel_def_DosEnvec(def_fssm_Env),def_fssm_Env ; load default Environment vector
+
+        move.l  ArgD0,fssm_Env            ; get fssm ptr
+        tst.l   ArgD0                   ; if fssm ptr = 0
+        bne.s   Calc_num_trks           ; go if user supplied fssm_Env
+
+SPP_defaults:
+        move.l  def_fssm_Env,fssm_Env   ; load default Environment vector
+
+;**** Determine #tracks
+Calc_num_trks:
+    ; Use the lower # of tracks. Either default fssm_Envc or user supplied fssm_Env
+        move.l  de_HighCyl(fssm_Env),NumTrks ; get high cylinder # from user
+        cmp.l   de_HighCyl(def_fssm_Env),NumTrks    ; cmp default # to user # of trks
+        ble     Correct_cyl_num         ; go if user # of trks lower or equal
+
+        move.l  de_HighCyl(def_fssm_Env),NumTrks ; get high cylinder # from default
+Correct_cyl_num:
+        addq.l  #1,NumTrks                  ; inc cyl # since they start at 0
+
+        cmpa.l  def_fssm_Env,fssm_Env       ; chk again if user fssm_Env
+        beq.s   Calc_dbl_step_end           ; go if default fssm_Env
+
+SPP_user_fssm_Env:
+        move.l  de_DosType(fssm_Env),de_DosType(def_fssm_Env)  ; save default Dostype
+
+;**** Determine if tracks to be double-stepped
+Calc_dbl_step:
+        cmp.l   #$4D444400,de_DosType(fssm_Env) ; check if second byte = 'D'
+        bne.s   3$                          ; tracks not to be double-stepped
+
+        bset    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; set track double-stepped flag
+    ; Since the tracks are to be doubled-stepped, the logical # of tracks must be
+    ; doubled to equal the physical # of tracks
+        lsl.l   #1,NumTrks          ; calc actual trks
+        bra.s   Calc_dbl_step_end
+
+3$:     bclr    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; reset track double-stepped flag
+Calc_dbl_step_end:
+
+;**** Determine sector length
+Calc_sec_len:
+        move.l  de_SizeBlock(fssm_Env),d0   ; get size of block (sector) in LWs
+        lsl.l   #2,d0                       ; multiply by 4 to correct for LW
+        move.w  d0,sec_len(TrkStrt)          ; put sector length
+
+    ;*** Determine sector length shift value
+        clr.l   d1
+1$:     addi.b  #1,d1                       ; inc bit counter
+        btst    d1,d0                       ; check if bit set
+        beq.s   1$                          ; bit not set
+
+        move.b  d1,sec_len_shift(TrkStrt)    ; put sector length shift value
+        subq.l  #7,d1                       ; calc S34 sector length shift value
+        move.b  d1,slct_sec_len(TrkStrt)     ; put S34 sector length shift value
+
+;**** Determine sector offset
+Calc_sec_off:
+        move.l  de_SecOrg(fssm_Env),d0      ; set sector offset
+        move.b  d0,sec_off(TrkStrt)          ; set sector offset
+
+;**** Determine if single-sided
+Calc_num_surfaces:
+        move.l  de_Surfaces(fssm_Env),d0    ; get # of surfaces
+        cmpi.l  #1,d0                       ; check if 1, 2 or more surfaces
+        bgt.s   2$                          ; Surfaces > 1
+
+        bset    #MDUB_SINGLE_SIDED,mdu_DFLAGS(Unit) ; set single-sided flag
+        bra.s   store_num_trks
+
+2$:     bclr    #MDUB_SINGLE_SIDED,mdu_DFLAGS(Unit) ; reset single-sided flag
+        mulu    d0,NumTrks                  ; mult = #tracks
+
+store_num_trks:
+        move.w  NumTrks,num_trks(TrkStrt)         ; put #tracks in struct
+
+;**** Determine #secs/track  ASSUME 1 SECTOR = 1 BLOCK
+Calc_num_secs_trk:
+        move.l  de_BlocksPerTrack(fssm_Env),newSPT  ; get #blocks/track
+
+    ;**** check to see if enough sector header memory allocated
+        move.w  num_sec_trk(TrkStrt),prevSPT ; get prev #secs/track
+
+        cmp.w   prevSPT,newSPT          ; cmp new to previous Sectors Per Track
+        ble     Store_num_secs_trk      ; prevSPT => newSPT; already got enough header mem
+
+alloc_new_head:
+        move.w  newSPT,newHAS            ; get new #secs/track
+        mulu    #(header_sz),newHAS  ; calc header array size
+
+        cmp.l   mels_head(MemEnt),newHAS ; chk if enough header array mem
+        ble.s   Store_num_secs_trk       ; go if enough header array memory
+
+    ;**** Free previous header array memory 
+        move.l  mel_head(MemEnt),ArgA1  ; pass prev header array ptr
+        move.l  mels_head(MemEnt),ArgD0 ; pass array size
+        beq.s   alloc_head              ; if size of prev header array = 0
+
+        CALLSYS FreeMem
+
+        move.l  #0,mel_head(MemEnt)     ; clear header array ptr in MemEnt
+        move.l  #0,mels_head(MemEnt)    ; clear header array size in MemEnt
+
+    ;**** Allocate new header array memory 
+alloc_head:
+        move.l  #MEMF_PUBLIC|MEMF_CLEAR,ArgD1   ; pass mem requirements
+        move.l  newHAS,ArgD0             ; pass header array size
+
+        CALLSYS AllocMem                ; return sec header array ptr
+
+        tst.l   RetD0
+        beq     SPP_AllocMem_Err
+
+Store_header_array:
+        move.l  RetD0,mel_head(MemEnt)  ; store new header array ptr in MemEnt
+        move.l  newHAS,mels_head(MemEnt)  ; store new header array size in MemEnt
+        move.l  RetD0,head(TrkStrt)      ; store new header array ptr in TrkStrt
+
+Store_num_secs_trk:
+        move.w  newSPT,num_sec_trk(TrkStrt)      ; put new #secs/track
+
+;**** Determine if more track buffer memory is needed
+Calc_trk_buff_mem:
+    ;***  calculate minimum track buffer size needed using minimum sector size (including gaps)
+        cmpi.l  #TRACKBUFF_MSZ,mdu_trk_buf_sz(Unit); check what size track buffer to use
+        ble.s   CTBM_LD             ; LD track buff mem enough
+
+CTBM_HD:
+        move.l  #TRACKBUFF_HD_MSZ,newTBMS  ; store HD tracksize in new TBM reg
+        move.l  #TRACKMAX_HD_MSZ,trk_read_size(TrkStrt)     ; store HD track read buffer size
+        move.l  #TRACKRAW_HD_MSZ,trk_writesz_max(TrkStrt)   ; store HD track write buffer size
+        bra.s   CTBM_chk
+
+CTBM_LD:
+        move.l  #TRACKBUFF_MSZ,newTBMS  ; store LD tracksize in new TBM reg
+        move.l  #TRACKMAX_MSZ,trk_read_size(TrkStrt)     ; store LD track read buffer size
+        move.l  #TRACKRAW_MSZ,trk_writesz_max(TrkStrt)   ; store LD track write buffer size
+
+CTBM_chk:
+        tst.l   mel_trkbuf_mem(MemEnt)  ;chk if track buffer mem ptr allocated
+        beq.s   CTBM_alloc_trk_buff_mem  ; go if no track buffer mem ptr allocated
+        cmp.l   mels_trkbuf_mem(MemEnt),newTBMS ; chk if enough track buffer mem allocated
+        ble.s   CTBM_fini          ; go if enough track buffer memory already allocated
+
+    ;**** Free previous track buffer memory 
+        bsr     Free_Trk_Buffer
+
+    ;**** Allocate new track buffer memory 
+CTBM_alloc_trk_buff_mem:
+        move.l  newTBMS,mels_trkbuf_mem(MemEnt)  ; store new track buffer size in MemEnt
+;        bsr     Alloc_Trk_Buffer
+
+;        tst.l   RetD0
+;        beq.s   SPP_AllocMem_Err
+        
+CTBM_fini:
+    ;*** Determine optimal gap between sectors
+Find_sec_gap_optimal:
+        move.w  #DM_AM_GAP_MSZ,sec_gap_opti(TrkStrt)
+                                        ; set default sector gap optimum
+    ;** use the following routine to determine if the optimum gap should be reduced
+    ;** Formula: trackbuffersize = I_AM_GAP_SZ + (#sec_trk * (SECTOR_GAP_SZ)) - DM_AM_GAP_SZ
+        move.w  sec_len(TrkStrt),d0      ; put sector length
+        add.w   #SECTOR_GAP_SZ,d0       ; add # of bytes in sector (other than data)
+        mulu    newSPT,d0               ; mult by # of sectors on the track
+        add.l   #(I_AM_GAP_SZ-DM_AM_GAP_SZ),d0   ; add index and index gaps
+                                        ; and subtract out gap for very first sector
+        lsl.l   #1,d0                   ; make data  bytes into MFM bytes
+        sub.l   trk_writesz_max(TrkStrt),d0 ; find if size needed exceeds maximum write size
+        ble.s   Find_sec_gap_optimal_end    ; go if size <= max write size
+
+    ;** need to reduce gap size.
+        sub.w   #1,newSPT               ; =  # sectors per track - 1
+        add.l   newSPT,d0               ; add (# sectors per track - 1) to excess gap
+        divu    newSPT,d0               ; divide the excess gap between the sectors
+        sub.w   d0,sec_gap_opti(TrkStrt) ; subtract the excess gap from the optimum (neg value)
+Find_sec_gap_optimal_end:
+
+Set_Phys_Params_NoErr:
+        moveq.l #0,RetD0                ; return = no error
+
+Set_Phys_Params_End:
+        movem.l (sp)+,MM_Set_Phys_Params
+        rts
+
+Set_Phys_Params_Err:
+        moveq.l #TDERR_NotSpecified,RetD0               ; return error "not specified"
+        bra.s   Set_Phys_Params_End
+SPP_AllocMem_Err:
+        move.l  #TDERR_NoMem,RetD0               ; return NO memory available error
+        bra.s   Set_Phys_Params_End
+
+;;--------------------------------------------------------------------------
+;   Alloc_Trk_Buffer() -- Allocate Track Buffer memory
+;
+; Inputs:
+; =======
+; a3 = unit pointer
+; a6 = AbsExecBase pointer
+;
+; Return:
+; =======
+; d0 = 0 if memory allocation failed
+; d0 = track buffer ptr
+;
+; Registers:
+; ==========
+;TrackStrt  equr    a0      ;= track buffer struct ptr
+;MemEntry  equr    a0   ;= MemEntry pointer
+
+
+Alloc_Trk_Buffer:
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+        move.l  mel_trkbuf_mem(MemEntry),RetD0  ; test if track bufer memeory already allocated
+
+        bne.s   Store_trkbuf_mem            ; go if track buffer memory already allocated
+
+        move.l  #MEMF_CHIP,ArgD1            ; pass mem requirements
+        move.l  mels_trkbuf_mem(MemEntry),ArgD0   ; pass track buffer size
+
+        beq.s   Alloc_Trk_Buffer_End        ; go if size = 0
+        CALLSYS AllocMem                    ; return sec track buffer ptr
+
+        tst.l   RetD0
+        beq.s   Alloc_Trk_Buffer_End
+
+Store_trkbuf_mem:
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+        move.l  RetD0,mel_trkbuf_mem(MemEntry) ; store new track buffer ptr in MemEnt
+
+        add.l   #I_AM_GAP_MSZ,RetD0         ; correct for Index Gap
+        move.l  mdu_TrkStrt(Unit),TrackStrt ; store track buffer struct ptr in reg
+        move.l  RetD0,trk_buf(TrackStrt)    ; store read track buffer mem ptr
+        bclr    #MDUB_NO_TRK_MEM,UNIT_FLAGS(Unit) ; clear No Track Memory bit        
+        move.l  #NOTRACK,trk_in_buf(TrackStrt) ; store starting track #
+
+Alloc_Trk_Buffer_End:
+
+        rts    
+
+;--------------------------------------------------------------------------
+;   Free_Trk_Buffer() -- Free Track Buffer memory
+;
+; Inputs:
+; =======
+; a3 = unit pointer
+; a6 = AbsExecBase pointer
+;
+; Return:
+; =======
+; d0 = size of track buffer freed
+;
+; Registers:
+; ==========
+;TrackStrt  equr    a0      ;= track buffer struct ptr
+;MemEntry  equr    a0   ;= MemEntry pointer
+
+
+Free_Trk_Buffer:
+*** Added to remove chip memory for the track buffer when not in use.  *
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+    ;**** Free previous track buffer memory 
+        move.l  mel_trkbuf_mem(MemEntry),d0     ; pass mem size
+        beq.s   Free_Trk_Buffer_End ; if ptr to prev track buffer = 0
+        move.l  d0,ArgA1            ; pass prev track buffer ptr
+        move.l  mels_trkbuf_mem(MemEntry),ArgD0 ; pass mem size
+        beq.s   Free_Trk_Buffer_End ; if size of prev track buffer = 0
+
+        CALLSYS FreeMem
+
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+        move.l  #0,mel_trkbuf_mem(MemEntry)   ; clear track buffer ptr in MemEnt
+    ; This is to signal track buffer related commands (such as CMD_READ, CMD_WRITE,
+    ; CMD_FORMAT, CMD_SEEK to reallocate the chip memory for the track buffer using
+    ; the DiskChange() function.
+Free_Trk_Buffer_End:
+        move.l  mdu_TrkStrt(Unit),TrackStrt ; store track buffer struct ptr in reg
+        move.l  #0,trk_buf(TrackStrt)       ; store read track buffer mem ptr
+        move.l  #NOTRACK,trk_in_buf(TrackStrt) ; store starting track #
+        bclr    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; clear TRACK MODIFIED flag
+        bset    #MDUB_NO_TRK_MEM,UNIT_FLAGS(Unit) ; set No Track Memory bit        
+
+        rts    
+
+;
+;--------------------------------------------------------------------------
+; MD_GetGeometry() -- Get the geometry of the current disk.
+;
+; The geometry may change depending on the actual disk in the drive
+; and the setting from the Set_Phys_Params().
+; 
+; Inputs:
+; =======
+; IO_DATA = DriveGeometry struct pointer
+; a3 = unit pointer
+;
+; Results:
+; ========
+; d0 = 0 = successful
+;    /= 0 = ERROR
+;
+;TrackStrt  equr    a0      ;= track buffer struct ptr
+DGeometry  equr    a1      ;= DriveGeometry struct ptr
+
+MM_GG   equr    d2
+
+MD_GetGeometry:
+
+        bsr     Check_Disk_Status   ; update with current disk status if changed
+
+        move.l  IO_DATA(IOReq),d0   ; get DriveGeometry struct ptr
+        beq     GG_Param_err        ; go if DriveGeometry struct ptr not passed
+        move.l  d0,DGeometry        ; pass DriveGeometry struct ptr
+
+        move.l  mdu_TrkStrt(Unit),TrackStrt  ; get TrackBuff struct ptr
+
+Fill_Geometry:
+        moveq.l #0,d0
+        moveq.l #0,d1
+        move.w  sec_len(TrackStrt),d0        ; get sector length in bytes
+        move.l  d0,dg_SectorSize(DGeometry) ; ULONG dg_SectorSize
+
+        moveq.w #2,d1                   ; start with 2 heads 
+        btst    #MDUB_SINGLE_SIDED,mdu_DFLAGS(Unit) ; test single-sided flag
+        beq.s   1$                  ; double-sided
+
+        moveq.w #1,d1               ; one head
+1$:
+        move.l  d1,dg_Heads(DGeometry) ; ULONG  dg_Heads
+
+        move.w  num_sec_trk(TrackStrt),d0   ; get # sectors/track
+        move.l  d0,dg_TrackSectors(DGeometry) ; ULONG  dg_TrackSectors
+
+        mulu    d1,d0                   ; calc dg_CylSectors
+        move.l  d0,dg_CylSectors(DGeometry) ; ULONG  dg_CylSectors
+
+        move.w  num_trks(TrackStrt),d0   ; get # tracks
+        divu    d1,d0                   ; calc cyls
+        andi.l  #$0FFFF,d0
+        btst    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; test track double-stepped flag
+        beq.s   2$                      ; go if not double-stepped
+        lsr.l   #1,d0                   ; div by 2; double-stepped
+2$
+        move.l  d0,dg_Cylinders(DGeometry) ; ULONG  dg_Cylinders
+
+        move.l  dg_CylSectors(DGeometry),d1  ; calc dg_TotalSectors
+        mulu    d1,d0                   ; calc dg_TotalSectors
+        move.l  d0,dg_TotalSectors(DGeometry) ; ULONG  dg_TotalSectors
+
+        move.l  #MEMF_PUBLIC,dg_BufMemType(DGeometry)   ; ULONG  dg_BufMemType
+        move.b  #DG_DIRECT_ACCESS,dg_DeviceType(DGeometry) ; UBYTE  dg_DeviceType
+        move.b  #DGF_REMOVABLE,dg_Flags(DGeometry)      ; UBYTE  dg_Flags
+
+        rts
+
+GG_Param_err:
+        move.b  #MDERR_InvParam,IO_ERROR(IOReq)
+        rts
+;;--------------------------------------------------------------------------
+; Misc() -- Miscellaneous Device specific commands
+;
+; These commands will pass off the ioReq directly to the trackdisk driver
+; to handle and reply back to the originator.
+;
+; Inputs:
+; =======
+; a1 = ioReq pointer
+; a2 = ioReq pointer (copy)
+; a3 = unit pointer
+; a5 = device pointer
+; a6 = AbsExecBase pointer
+;
+
+MD_Misc:
+
+TD_Motor:
+TD_Remove:
+TD_ChangeNum:
+TD_ChangeState:
+TD_ProtStatus:
+TD_GetDriveType:
+TD_RawRead:
+TD_RawWrite:
+TD_RemChangeInt:
+
+TDIOReq     equr    a4
+MM_Cmd_Misc reg     a4
+
+        movem.l MM_Cmd_Misc,-(sp)
+
+        lea.l   mdu_TDREQ(Unit),TDIOReq     ; store TD ioReq ptr in reg (IMMEDIATE)
+
+        btst    #IOB_IMMED,IO_FLAGS(IOReq)  ; check if immediate or queued cmd
+        beq.s   Cmd_Misc_Queue              ; go if queued
+
+Cmd_Misc_Immed:
+; temp replace params of the MFM IOReq to TD IOReq.  It is assumed that the
+; BeginIO() routine when doing an IMMED will load the IOReq with the TD Req
+; device and unit ptrs.  The BeginIO() will have to retore those ptrs when
+; returning.
+;
+; IORequest = ArgA1                       ; pass IOReq ptr instead of TDReq
+
+        move.l  IO_UNIT(TDIOReq),IO_UNIT(IOReq)     ; move TD unit ptr into IOReq
+        move.l  IO_DEVICE(TDIOReq),IO_DEVICE(IOReq) ; move TD device ptr into IOReq
+        move.l  IOReq,ArgA1     ; pass IOReq ptr
+        BEGINIO
+
+        move.l  IOReq,ArgA1     ; pass IOReq ptr
+        CALLSYS WaitIO          ; wait for return from MFM cmd made now TD cmd
+
+
+        move.l  Unit,IO_UNIT(IOReq)         ; replace orig unit ptr into IOReq
+        move.l  Device,IO_DEVICE(IOReq)     ; replace orig Device ptr into IOReq
+
+        bra.s   Cmd_Misc_End
+
+Cmd_Misc_Queue:
+        move.l  IO_OFFSET(IOReq),IO_OFFSET(TDIOReq)
+        move.b  IO_FLAGS(IOReq),IO_FLAGS(TDIOReq)
+        move.w  IO_COMMAND(IOReq),IO_COMMAND(TDIOReq)
+        move.l  IO_DATA(IOReq),IO_DATA(TDIOReq)
+        move.l  IO_LENGTH(IOReq),IO_LENGTH(TDIOReq)
+		move.l 	IOTD_COUNT(IOReq),IOTD_COUNT(TDIOReq)
+		move.l 	IOTD_SECLABEL(IOReq),IOTD_SECLABEL(TDIOReq)
+		
+
+        move.l  TDIOReq,ArgA1               ; pass TD IOReq ptr
+        BEGINIO
+
+        move.l  TDIOReq,ArgA1   ; pass TD IOReq ptr
+        CALLSYS WaitIO          ; wait for return from MFM cmd made now TD cmd
+
+        move.l  IO_ACTUAL(TDIOReq),IO_ACTUAL(IOReq)
+        move.b  IO_ERROR(TDIOReq),IO_ERROR(IOReq)
+        move.l  IO_LENGTH(TDIOReq),IO_LENGTH(IOReq)
+
+Cmd_Misc_End:
+        movem.l (sp)+,MM_Cmd_Misc
+
+Cmd_End_NOTerm:
+        rts
+
+
+;--------------------------------------------------------------------------
+; MD_Eject() -- Eject the disk if the drive supports it
+;
+; My understanding of this command is the the track buffer should be flushed
+; first if "dirty".
+; 
+; Results:
+; ========
+; d0 = 0 = successful
+;    /= 0 = ERROR
+;
+
+MD_Eject:
+        bsr     Cmd_Update      ; update disk if track buffer dirty, first
+
+        bsr     MD_Misc         ; go do regular TD_EJECT cmd
+        rts
+
+
+;--------------------------------------------------------------------------
+; MD_AddChangeInt() -- Add a diskchange interrupt to the interrupt server
+;
+; This routine never returns the IORequest.  To remove the interrupt,
+; use TD_REMCHANGEINT with this same IORequest.
+; 
+; DO
+;
+; Inputs:
+; =======
+; IO_DATA = interrupt structure
+; IO_LENGTH = sizeof(interrupt structure)
+;
+; Results:
+; ========
+; d0 = 0 = successful
+;    /= 0 = ERROR
+;
+TDIOR   equr    a0  ; temp reg for TD IO Request
+
+MD_AddChangeInt:
+
+;*** Make sure this command is NEVER queued!  If queued, this command will fail BIG TIME!
+        ; TDReq = ArgA1
+        lea.l   mdu_TDREQ(Unit),TDIOR     ; store TD ioReq ptr in reg
+; move params of TD IOReq to MFM IOReq PERMANENTLY.
+
+        move.l  IO_UNIT(TDIOR),IO_UNIT(IOReq)
+        move.l  IO_DEVICE(TDIOR),IO_DEVICE(IOReq)
+
+        move.l  IOReq,ArgA1     ; pass IOReq ptr instead of TDReq
+        BEGINIO                 ; send MFM cmd made now TD cmd
+
+        bset    #IOB_QUICK,IO_FLAGS(IOReq)  ; set io_Quick flag for NO reply
+
+        rts                     ; return with no reply
+
+
+;--------------------------------------------------------------------------
+; MD_GetNumTracks() -- Get the current number of tracks of the disk
+;
+; The number of tracks are dependent on first the type of drive connected
+; and secondly the values set by Set_Physical_Params().  The actual tracks
+; on the disk can be limited if SINGLE_SIDED is set and again if DOUBLE_STEP
+; is set.
+; 
+; Inputs:
+; =======
+; IO_DATA = DriveGeometry struct pointer
+; a3 = unit pointer
+;
+; Results:
+; ========
+; d0 = 0 = successful
+;    /= 0 = ERROR
+;
+
+MD_GetNumTracks:
+        bsr     MD_Misc         ; go do regular TD_GetNumTracks cmd
+
+gnt_single_sided:
+        btst    #MDUB_SINGLE_SIDED,mdu_DFLAGS(Unit) ; test if single-sided
+        beq.s   gnt_double_step         ; go if not single-sided
+
+        lsr.w   IO_ACTUAL(IOReq)        ; single-sided; # tracks = /2 
+
+gnt_double_step:
+        btst    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; test if single-sided
+        beq.s   gnt_fini                ; go if not double stepped
+
+        lsr.w   IO_ACTUAL(IOReq)        ; double stepped; # tracks = /2 
+gnt_fini:
+        rts
+
+        end
+@
+
+
+40.8
+log
+@Added code to support the ETD commands.
+
+Fixed a bug in the return error code of TD_SEEK.
+@
+text
+@d79 1
+a79 1
+;
+d99 1
+a99 22
+        move.l  mdu_TrkStrt(Unit),TrackStrt  ; store track buffer struct ptr in reg
+        bclr    #MDUB_TRK_MOD,mdu_DFLAGS(Unit)  ; clear TRACK MODIFIED flag
+        move.l  #NOTRACK,trk_in_buf(TrackStrt)    ; set NO TRACK in buffer
+
+*** Added to remove chip memory for the track buffer when not in use.  *
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+    ;**** Free previous track buffer memory 
+        move.l  mel_trkbuf_mem(MemEntry),ArgA1  ; pass prev track buffer ptr
+        move.l  mels_trkbuf_mem(MemEntry),ArgD0 ; pass mem size
+        beq.s   1$               ; if size of prev track buffer = 0
+
+        CALLSYS FreeMem
+
+        move.l  mdu_MemEntL(Unit),MemEntry  ; store MemEntry list ptr in reg
+        move.l  #0,mel_trkbuf_mem(MemEntry)   ; clear track buffer ptr in MemEnt
+        move.l  #0,mels_trkbuf_mem(MemEntry)  ; clear track buffer size in MemEnt
+1$:
+    ; This is to signal track buffer related commands (such as CMD_READ, CMD_WRITE,
+    ; CMD_FORMAT, CMD_SEEK to reallocate the chip memory for the track buffer using
+    ; the DiskChange() function.
+        bset    #MDUB_DISK_CHANGED,UNIT_FLAGS(Unit) ; set Disk changed bit        
+
+a138 1
+        tst.b   RetD0
+a140 9
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,RetD0 ; chk if no disk in drive
+        bne     no_disk             ; go if no disk
+
+;-- Find if write protected
+        btst    #MDUB_WRITE_PROT,RetD0 ; chk if write protected
+        bne     write_prot          ; go if write protected
+
+d259 5
+a263 1
+; d0 = UNIT_FLAGS
+a268 1
+
+d272 1
+a272 2
+        btst    #MDUB_DISK_CHANGED,UNIT_FLAGS(Unit) ; test if Disk changed bit        
+        beq     CDS_End         ; go if Disk not changed
+d274 2
+a275 1
+CDS:
+a276 1
+
+d291 1
+d293 1
+d345 5
+d358 3
+a360 1
+        bset    #MDUB_WRITE_PROT,UNIT_FLAGS(Unit)  ; set write protect bit
+a361 1
+        bra.s   CDS_Fini                ; go finish
+d364 1
+a364 1
+
+d370 3
+a372 2
+******** Set physical disk params and create sector header array 
+        moveq.l #0,ArgD0                        ; pass default pointer
+d374 4
+a377 1
+        bsr     Set_Phys_Params                 ; go set physical params
+d379 2
+a380 2
+        tst.b   RetD0
+        bne.s   CDS_error_End                   ; go if error
+d382 3
+a384 1
+        bclr    #MDUB_DISK_CHANGED,UNIT_FLAGS(Unit)  ; clear Disk changed bit        
+d386 1
+a386 2
+        moveq.l #0,RetD0                ; return no error
+CDS_error_End:
+a388 1
+
+a390 7
+        bra.s   disk_err
+no_disk:
+        move.b  #TDERR_DiskChanged,IO_ERROR(IOReq)  ; return no disk in drive
+        bra.s   disk_err
+write_prot:
+        move.b  #TDERR_WriteProt,IO_ERROR(IOReq)    ; return write protect status
+disk_err:
+d410 3
+a412 1
+        bra     write_prot          ; go if write protected
+a417 1
+        tst.b   RetD0
+a419 9
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,RetD0 ; chk if no disk in drive
+        bne     no_disk             ; go if no disk
+
+;-- Find if write protected
+        btst    #MDUB_WRITE_PROT,RetD0 ; chk if write protected
+        bne     write_prot          ; go if write protected
+
+d480 1
+a481 7
+        tst.b   RetD0
+        bne     function_err        ; go if we received an error
+
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,RetD0 ; chk if no disk in drive
+        bne     no_disk             ; go if no disk
+a491 1
+;ILLEGAL
+a523 1
+        tst.b   RetD0
+a525 9
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,RetD0 ; chk if no disk in drive
+        bne     no_disk             ; go if no disk
+
+;-- Find if write protected
+        btst    #MDUB_WRITE_PROT,RetD0 ; chk if write protected
+        bne     write_prot          ; go if write protected
+
+d532 3
+a534 1
+        bra     write_prot          ; go if write protected
+d545 1
+d547 5
+a551 8
+        tst.b   RetD0
+        bne     function_err        ; go if we received an error
+
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+;-- Find if No Disk
+        btst    #MDUB_NO_DISK,RetD0 ; chk if no disk in drive
+        bne     no_disk             ; go if no disk
+
+a762 2
+        XREF    fill_index
+
+d885 1
+a885 1
+        beq     Set_Phys_Params_Err
+d904 1
+a904 1
+        move.l  #TRACKMIN_HD_MSZ,trk_writesz_max(TrkStrt)    ; store HD track write buffer size
+d910 1
+a910 1
+        move.l  #TRACKMIN_MSZ,trk_writesz_max(TrkStrt)    ; store LD track write buffer size
+d913 2
+d919 1
+a919 8
+        move.l  mel_trkbuf_mem(MemEnt),ArgA1  ; pass prev track buffer ptr
+        move.l  mels_trkbuf_mem(MemEnt),ArgD0 ; pass mem size
+        beq.s   alloc_TBM               ; if size of prev track buffer = 0
+
+        CALLSYS FreeMem
+
+        move.l  #0,mel_trkbuf_mem(MemEnt)   ; clear track buffer ptr in MemEnt
+        move.l  #0,mels_trkbuf_mem(MemEnt)  ; clear track buffer size in MemEnt
+d922 1
+a922 10
+alloc_TBM:
+        move.l  #MEMF_CHIP,ArgD1    ; pass mem requirements
+        move.l  newTBMS,ArgD0        ; pass track buffer size
+
+        CALLSYS AllocMem            ; return sec track buffer ptr
+
+        tst.l   RetD0
+        beq.s   SPP_AllocMem_Err
+
+Store_trkbuf_mem:
+d924 1
+a924 4
+        move.l  RetD0,mel_trkbuf_mem(MemEnt)    ; store new track buffer ptr in MemEnt
+
+        add.l   #I_AM_GAP_MSZ,RetD0             ; correct for Index Gap
+        move.l  RetD0,trk_buf(TrkStrt)           ; store read track buffer mem ptr
+d926 3
+a928 2
+        move.l  #NOTRACK,trk_in_buf(TrkStrt)     ; store starting track #
+    
+a929 1
+
+d966 93
+@
+
+
+38.7
+log
+@Changed formatting so that it performs a track update then track clear
+function before finishing the TD_FORMAT command.
+
+We now do an explicit look for the MDD\0 dostype instead of look for just
+the 'D' in the second character of the dostype.  This appeared to cause
+problems when 'forcing' alternate format types that had a 'D' for the
+second character.
+@
+text
+@d16 1
+a438 1
+; ILLEGAL
+d496 1
+a496 1
+; new track
+d530 1
+d661 3
+d1172 3
+@
+
+
+38.5
+log
+@Fix problem with formatting devices specified with ID_MSDOS_DISK_DS as
+the DosType.
+@
+text
+@d470 4
+d475 2
+d478 7
+a484 1
+        bclr    #MDUB_TRK_FORMAT,mdu_DFLAGS(Unit)  ; clear TRACK FORMAT flag
+d849 1
+a849 2
+        move.b  de_DosType+1(fssm_Env),d0  ; get second byte of Dos Type
+        cmpi.b  #'D',d0                       ; check if second byte = 'D'
+@
+
+
+38.4
+log
+@Fixed small problem with branch from TD_GETGEOMETRY.  Fixed small problem
+with ignoring errors from SET_PHYSICAL_PARAMETERS function
+@
+text
+@a406 1
+ move.l RetD0,0
+a783 1
+NumTrks        equr    d1      ;= temp # of tracks
+d788 2
+d794 1
+a794 1
+MM_Set_Phys_Params     reg     d2/d3/d4/a2/a4/a5
+d808 3
+d813 1
+a813 1
+        bne.s   Calc_sec_len
+d816 30
+a845 2
+        move.l  mdu_MemEntL(Unit),a0        ; Load MemEntryList
+        move.l  mel_def_DosEnvec(a0),fssm_Env   ; load default Environment vector
+d847 3
+a870 5
+;**** Determine #tracks
+Calc_num_trks:
+        move.l  de_HighCyl(fssm_Env),NumTrks ; get high cylinder #
+        addq.l  #1,NumTrks                  ; inc cyl # since they start at 0
+
+d884 1
+a884 12
+        move.w  NumTrks,num_trks(TrkStrt)         ; put #tracks
+
+;**** Determine if tracks to be double-stepped
+Calc_dbl_step:
+        move.b  de_DosType+1(fssm_Env),d0  ; get second byte of Dos Type
+        cmpi.b  #'D',d0                       ; check if second byte = 'D'
+        bne.s   3$                          ; tracks not to be double-stepped
+
+        bset    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; set track double-stepped flag
+        bra.s   Calc_num_secs_trk
+
+3$:     bclr    #MDUB_DOUBLE_STEP,mdu_DFLAGS(Unit) ; reset track double-stepped flag
+d1073 4
+@
+
+
+38.3
+log
+@Added code to remove chip memory from track bufer when not in use.  Added
+to CMD_CLEAR function.
+@
+text
+@d159 2
+d162 1
+d388 1
+d395 3
+a398 2
+        movem.l (sp)+,MM_Check_Disk_Status
+
+d400 2
+a401 1
+        move.b  UNIT_FLAGS(Unit),RetD0      ; return UNIT_FLAGS
+d404 5
+d441 2
+d444 1
+a478 3
+too_few_sectors:
+;        move.b  #TDERR_TooFewSecs,IO_ERROR(IOReq)   ; return too few sectors
+;        bra.s   format_fini
+d502 2
+d505 1
+d551 2
+d554 1
+d581 2
+d584 1
+d1026 3
+a1028 2
+        move.l  IO_DATA(IOReq),DGeometry    ; pass DriveGeometry struct ptr
+        beq     Param_err                   ; go if DriveGeometry struct ptr not passed
+d1065 4
+@
+
+
+38.2
+log
+@Fixed naming of two variables
+@
+text
+@d89 3
+d95 1
+d101 19
+d233 1
+a233 1
+MM_Cmd_Flush    reg     d2/a2
+d932 1
+a932 1
+        beq.s   Set_Phys_Params_Err
+d975 1
+a975 1
+        moveq.l #-1,RetD0               ; return other than 0
+d977 3
+d1165 1
+d1168 1
+d1171 1
+a1171 1
+        lea.l   mdu_TDREQ(Unit),TDIOReq     ; store TD ioReq ptr in reg
+d1174 2
+a1175 2
+        move.l  IO_UNIT(TDIOReq),IO_UNIT(IOReq)
+        move.l  IO_DEVICE(TDIOReq),IO_DEVICE(IOReq)
+@
+
+
+38.1
+log
+@Original CrossDOS souce submitted to CBM
+@
+text
+@d10 1
+a10 1
+        include "libraries/filehandler.i"
+d879 1
+a879 1
+        move.l  #TRACKMIN_HD_MSZ,trk_write_size(TrkStrt)    ; store HD track write buffer size
+d885 1
+a885 1
+        move.l  #TRACKMIN_MSZ,trk_write_size(TrkStrt)    ; store LD track write buffer size
+d934 1
+a934 1
+        sub.l   trk_write_size(TrkStrt),d0    ; find if size needed exceeds maximum write size
+@

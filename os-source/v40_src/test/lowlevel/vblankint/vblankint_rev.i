@@ -1,0 +1,14 @@
+VERSION		EQU	1
+REVISION	EQU	2
+DATE	MACRO
+		dc.b	'5.3.93'
+	ENDM
+VERS	MACRO
+		dc.b	'VBlankInt 1.2'
+	ENDM
+VSTRING	MACRO
+		dc.b	'VBlankInt 1.2 (5.3.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: VBlankInt 1.2 (5.3.93)',0
+	ENDM

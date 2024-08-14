@@ -1,0 +1,14 @@
+VERSION		EQU	39
+REVISION	EQU	1
+DATE	MACRO
+		dc.b	'12.8.92'
+	ENDM
+VERS	MACRO
+		dc.b	'run_ecs 39.1'
+	ENDM
+VSTRING	MACRO
+		dc.b	'run_ecs 39.1 (12.8.92)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: run_ecs 39.1 (12.8.92)',0
+	ENDM

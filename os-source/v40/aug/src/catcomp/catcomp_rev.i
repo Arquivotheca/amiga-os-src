@@ -1,0 +1,14 @@
+VERSION		EQU	40
+REVISION	EQU	4
+DATE	MACRO
+		dc.b	'12.8.93'
+	ENDM
+VERS	MACRO
+		dc.b	'catcomp 40.4'
+	ENDM
+VSTRING	MACRO
+		dc.b	'catcomp 40.4 (12.8.93)',13,10,0
+	ENDM
+VERSTAG	MACRO
+		dc.b	0,'$VER: catcomp 40.4 (12.8.93)',0
+	ENDM

@@ -1,0 +1,4101 @@
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-1
+
+
+				       page    ,132
+				;-----------------------------Module-Header-----------------------------;
+				; Module Name:	MOUSE.ASM
+				;
+				; Windows mouse driver data and initialization routines.
+				;
+				; rsd	10-25-90	merging of microsoft win3 & c-a dos mouse drivers
+				;
+				; Copyright (c) 1987, 1988, 1989  Microsoft Corporation
+				; Copyright (c) 1987, 1988, 1989  Commodore-Amiga
+				;
+				; Exported Functions:
+				;
+				; Public Functions:
+				;
+				; Public Data:
+				;
+				; General Description:
+				;
+				;   This segment contains all static data used by the mouse routines.  The
+				;   hardware interrupt routine is included in the static data so that it
+				;   has addressability to the static data through the CS register.  Thus
+				;   the data segment of this module MUST be fixed in memory, while the
+				;   code segment can be moveable and/or discardable.
+				;
+				;-----------------------------------------------------------------------;
+				
+					title	Mouse - Main Mouse Module
+				
+					.list
+				
+ = 0000				TESTING	EQU	0
+ = 0000				PRINT	EQU	0
+				
+					ELSE
+				
+				DEB	MACRO	addr,data
+				ENDM
+				
+				DEBSET	MACRO	addr
+				ENDM
+				
+				DEBI	MACRO	data
+				ENDM
+					ENDIF
+				
+					externFP CreateSystemTimer	;these are ms private...
+					externFP KillSystemTimer	;...we have them cuz we need 'em.
+				
+					externFP AllocDStoCSAlias	;make a copy of a DS selector which
+									;will have CS access rights
+					externFP FreeSelector		;destroy a selector
+					externFP AllocSelector		;duplicate a selector
+					externFP SetSelectorBase	;change the base of a selector
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-2
+
+
+					externFP SetSelectorLimit	;change the limit of a selector
+				
+					externFP GetWinFlags		;get windows env flags
+				;	externFP DOS3Call		;int 21h substitute
+				
+					externW	__0000h
+					externW	__A000h
+					externW	__B000h
+					externW	__B800h
+					externW	__C000h
+					externW	__D000h
+					externW	__E000h
+					externW	__F000h
+				
+				;OS2	equ	10			;Version number for OS/2
+				
+				sBegin	Data
+ 0000                        2	_DATA segment 
+				
+ 0000  0010[			stupid		db	16 dup (0)
+	   00			
+			 ]	
+				
+				
+					even				;Want words on word boundary
+				
+				;--- double
+				
+				globalD 	event_proc,0		;Mouse event procedure when enabled
+ 0010  00000000              3	event_proc dd 0 
+				globalD		ms_sd_np,0		;mouse ServiceData native mode pointer
+ 0014  00000000              3	ms_sd_np dd 0 
+				globalD		ms_sd_rp,0		;mouse ServiceData real mode pointer
+ 0018  00000000              3	ms_sd_rp dd 0 
+				globalD		ms_rq_np,0		;mouse MouseServReq native mode pointer
+ 001C  00000000              3	ms_rq_np dd 0 
+				globalD		ms_rq_rp,0		;mouse MouseServReq real mode pointer
+ 0020  00000000              3	ms_rq_rp dd 0 
+				
+				;--- word
+				
+ 0024  0007[			DPCopyArea	dw	DPSize dup(0)	;copy of mouse related stuff
+	   0000			
+			 ]	
+				
+				globalW		timer_handle,0		;win CreateSystemTimer() handle
+ 0032  0000                  3	timer_handle dw 0 
+				globalW		interrupt_rate,19	;Maximum interrupt rate of mouse
+ 0034  0013                  3	interrupt_rate dw 19 
+				globalW		DSEG_device_int,0	;data segment used by int handler
+ 0036  0000                  3	DSEG_device_int dw 0 
+				globalW		CSEG_device_int,0	;code segment used by int handler
+ 0038  0000                  3	CSEG_device_int dw 0 
+				globalW		device_int_sel,0	;manufactured selector for CS
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-3
+
+
+ 003A  0000                  3	device_int_sel dw 0 
+				globalW		ms_sd_sel,0		;mouse ServiceData native selector
+ 003C  0000                  3	ms_sd_sel dw 0 
+				globalW		ms_rq_sel,0		;mouse MouseServReq native selector
+ 003E  0000                  3	ms_rq_sel dw 0 
+				globalW		mode,0			;86/286/386
+ 0040  0000                  3	mode dw 0 
+				
+				
+				;--- byte
+				
+				globalB 	vector,-1		;Vector # of mouse interrupt
+ 0042  FF                    3	vector db -1 
+				globalB 	mouse_flags,0		;Various flags
+ 0043  00                    3	mouse_flags db 0 
+				globalB 	mouse_type,0		;Type of mouse (inport/bus/serial/etc.)
+ 0044  00                    3	mouse_type db 0 
+				globalB		InTimer,0		;reentrancy flag for mouse "int"
+ 0045  00                    3	InTimer db 0 
+				globalB		old_count,0
+ 0046  00                    3	old_count db 0 
+				globalB		open_flags,0
+ 0047  00                    3	open_flags db 0 
+				
+				
+				
+				;masks for open_flags
+ = 0001				OF_AMIGA	EQU	1
+ = 0002				OF_WINDOWS	EQU	2
+				
+				;params for GetService() to get MouseServ
+ =				ms_app_id	equ	MOUSESERV_APPLICATION_ID
+ =				ms_local_id	equ	MOUSESERV_LOCAL_ID
+ = 0041				ms_flags	equ	GETS_WAIT+GETS_ALOAD_A
+				
+				
+				;DPMI "simulate real interrupt" stuff
+					even
+ = 0048				r_first	equ	this byte
+ 0048  00000000			r_edi	dd	0		;EDI		00
+ 004C  00000000			r_esi	dd	0		;ESI		04
+ 0050  00000000			r_ebp	dd	0		;EBP		08
+ 0054  00000000			r_rsvd	dd	0		;reserved	0C
+ 0058  00000000			r_ebx	dd	0		;EBX		10
+ 005C  00000000			r_edx	dd	0		;EDX		14
+ 0060  00000000			r_ecx	dd	0		;ECX		18
+ 0064  00000000			r_eax	dd	0		;EAX		1C
+ 0068  0000			r_flag	dw	0		;flags		20
+ 006A  0000			r_es	dw	0		;ES		22
+ 006C  0000			r_ds	dw	0		;DS		24
+ 006E  0000			r_fs	dw	0		;FS		26
+ 0070  0000			r_gs	dw	0		;GS		28
+ 0072  0000			r_ip	dw	0		;IP		2A
+ 0074  0000			r_cs	dw	0		;CS		2C
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-4
+
+
+ 0076  0000			r_sp	dw	0		;SP		2E
+ 0078  0000			r_ss	dw	0		;SS		30
+				;DPMI "simulate real interrupt" stuff
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-5
+
+
+				page
+				;--------------------------Interrupt-Routine----------------------------;
+				;
+				; device_int - Mouse Specific Interrupt Handler
+				;
+				; The mouse specific interrupt code will follow.  It will be copied
+				; into the reserved area as initialization time, and executed from
+				; here.
+				;
+				; Entry:
+				;	DS = Data
+				;	CS = Data
+				; Returns:
+				;	calls event_proc if there is one and something changed with:
+				;		AX = status
+				;		BX = delta X
+				;		CX = delta Y
+				;		DX = number of mouse buttons
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	All
+				; Registers Destroyed:
+				;	None
+				; Calls:
+				;	MouseRead
+				;	indirect through event_proc
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Data
+					assumes ds,Data
+					assumes es,nothing
+					assumes ss,nothing
+				
+					even
+				
+					public	device_int
+				
+ 007A				device_int	proc	far
+				
+ 007A  1E				push	ds			;save DS
+				
+ 007B  2E: FF 36 0036 R			push	cs:DSEG_device_int	;pfm.
+ 0080  1F				pop	ds
+				
+ 0081  F6 06 0045 R FF			test	InTimer,-1		;are we violating ourselves?
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-6
+
+
+ 0086  75 26				jnz	NextTimer		; yes.  still running since last int.
+				
+ 0088  FE 06 0045 R			inc	InTimer			;we're here!
+				
+ 008C  50				push	ax			;save regs
+ 008D  53				push	bx
+ 008E  51				push	cx
+ 008F  52				push	dx
+ 0090  56				push	si
+ 0091  57				push	di
+ 0092  06				push	es
+				
+ 0093  9A 0011 ---- R			call	FAR PTR MouseRead	; read Mouse info from DPRam
+ 0098  0B C0				or	ax,ax
+ 009A  74 07				jz	NoChange
+				
+ 009C  BA 0002				mov	dx,NUMBER_BUTTONS	;Return number of buttons
+ 009F  FF 1E 0010 R			call	dword ptr event_proc	;call user routine
+ 00A3				NoChange:
+					
+ 00A3  07				pop	es
+ 00A4  5F				pop	di
+ 00A5  5E				pop	si
+ 00A6  5A				pop	dx
+ 00A7  59				pop	cx
+ 00A8  5B				pop	bx
+ 00A9  58				pop	ax
+				
+ 00AA  FE 0E 0045 R			dec	InTimer
+ 00AE				NextTimer:
+ 00AE  1F				pop	ds
+				
+ 00AF  CB				ret
+				
+ 00B0				device_int	endp
+				
+				sEnd	Data
+ 00B0                        1	_DATA ends 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-7
+
+
+				page
+				
+				sBegin	Code
+ 0000                        2	_TEXT segment 
+				assumes cs,Code
+				
+				;----------------------------------------------------------------------------
+				;----------------------------------------------------------------------------
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-8
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; sim_int0b
+				;
+				; do simulated INT 0BH
+				;
+				; Entry:
+				;	None (well, *you* must fill in the r_??? stuff before calling)
+				; Returns:
+				;	None (examine r_??? stuff)
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	DS, CS, IP, SS, SP :)
+				; Registers Destroyed:
+				;	All others
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 0000				sim_int0b	PROC NEAR
+				
+ 0000  B8 0300				mov	ax,300h			;DPMI real mode int simulator
+				;	mov	bx,1*256+JFUNC_JINT	;put A20 normal, do int 0bh
+ 0003  BB 000B				mov	bx,0*256+JFUNC_JINT	;don't touch A20, do int 0bh
+ 0006  1E				push	ds			;es = seg of r_??? stuff
+ 0007  07				pop	es
+ 0008  BF 0048 R			mov	di,offset r_first	;first of the list
+ 000B  B9 0000				mov	cx,0			;copy nothing to real mode stack
+ 000E  CD 31				int	31h			;zoom.
+ 0010  C3				ret
+				
+ 0011				sim_int0b	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-9
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; MouseRead
+				;
+				; Information regarding the mouse is returned to the caller.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	AX = status
+				;	BX = delta X
+				;	CX = delta Y
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 0011				MouseRead	PROC FAR
+				
+ 0011  57				push	di
+ 0012  06				push	es
+				
+ 0013  C4 3E 001C R			les	di,dword ptr ms_rq_np	;find out if the counter changed
+ 0017  26: 8A 45 0F			mov	al,es:ChangeCount[di]
+ 001B  3A 06 0046 R			cmp	al,old_count		;did it?
+ 001F  75 05				jnz	change			;yes.
+				
+ 0021  33 C0				xor	ax,ax			;no, indicate no change
+ 0023  EB 65 90				jmp	MRNoMove		;get out
+				
+ 0026				change:
+ 0026  A2 0046 R			mov	old_count,al		;save new counter value
+				
+					; read out of D.P.RAM into local area
+				;	les	di,dword ptr ms_rq_np
+ 0029  33 DB				xor	bx,bx
+				
+				;	move data up to but excluding button status (not used by Windows)
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-10
+
+
+				;	into local copy area with lock on, release lock and then examine
+				;	data.
+								
+ 002B  B9 0006				mov	cx,(AmigaPCStatus/2)	; convert to words
+ 002E				MoveLoop:
+ 002E  33 C0				xor	ax,ax			; zero
+ 0030  26: 87 01			xchg	ax,es:0[di+bx]		; destructive read from D.P.RAM
+ 0033  89 87 0024 R			mov	DPCopyArea[bx],ax	; store in local area
+ 0037  43				inc	bx
+ 0038  43				inc	bx
+ 0039  E2 F3				loop	MoveLoop
+				
+				;	les	di,dword ptr ms_rq_np	;find out if the counter changed
+ 003B  26: 8A 45 0F			mov	al,es:ChangeCount[di]
+ 003F  3A 06 0046 R			cmp	al,old_count		;did it?
+ 0043  75 E1				jnz	change			;yes.
+				
+ 0045  8D 3E 0024 R			lea	di,DPCopyArea	;point to copy area
+ 0049  33 C0				xor	ax,ax		; initialise to no change
+				
+								; get X change
+ 004B  8B 1D				mov	bx,AmigaPCX[di]
+ 004D  0B DB				or	bx,bx
+ 004F  74 05				jz	GetY		; no change in X co-ord.
+ 0051  D1 FB				sar	bx,1
+ 0053  0D 0001				or	ax,1		; cursor position change
+ 0056				GetY:
+								; get Y change
+ 0056  8B 4D 02				mov	cx,AmigaPCY[di]
+ 0059  0B C9				or	cx,cx
+ 005B  74 05				jz	GetButtons	; no change in Y co-ord.
+ 005D  D1 F9				sar	cx,1
+ 005F  0D 0001				or	ax,1		; cursor position change
+ 0062				GetButtons:
+ 0062  F7 45 04 FFFF			test	word ptr AmigaPCLeftP[di],-1
+ 0067  74 03				jz	GetLRel
+ 0069  0D 0002				or	ax,2		; Left pressed
+ 006C				GetLRel:
+ 006C  F7 45 08 FFFF			test	word ptr AmigaPCLeftR[di],-1
+ 0071  74 03				jz	GetRPrs
+ 0073  0D 0004				or	ax,4		; Left released
+ 0076				GetRPrs:
+ 0076  F7 45 06 FFFF			test	word ptr AmigaPCRightP[di],-1
+ 007B  74 03				jz	GetRRel
+ 007D  0D 0008				or	ax,8		; Right pressed
+ 0080				GetRRel:
+ 0080  F7 45 0A FFFF			test	word ptr AmigaPCRightR[di],-1
+ 0085  74 03				jz	GetStatus
+ 0087  0D 0010				or	ax,16		; Right released
+ 008A				GetStatus:
+				
+ 008A				MRNoMove:
+ 008A  07				pop	es
+ 008B  5F				pop	di
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-11
+
+
+ 008C  CB				ret
+				
+ 008D				MouseRead	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-12
+
+
+					page
+				
+				;--------------------------Local-Routine-----------------------------;
+ 008D				determine_mode	PROC NEAR
+				
+					cCall	GetWinFlags
+ 008D  9A 0000 ---- E        1		call	GetWinFlags 
+ 0092  A9 0020				test	ax,WF_ENHANCED
+ 0095  75 17				jnz	win_386
+ 0097  A9 0010				test	ax,WF_STANDARD
+ 009A  75 09				jnz	win_286
+				
+ 009C  C7 06 0040 R 0056		mov	mode,86
+ 00A2  EB 10 90				jmp	win_done
+				
+ 00A5				win_286:
+ 00A5  C7 06 0040 R 011E		mov	mode,286
+ 00AB  EB 07 90				jmp	win_done
+				
+ 00AE				win_386:
+ 00AE  C7 06 0040 R 0182		mov	mode,386
+				
+ 00B4				win_done:
+ 00B4  C3				ret
+				
+ 00B5				determine_mode	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-13
+
+
+					page
+				;
+				; table of segments exported by windows for our convenience.
+				; we try to use one of these if possible when we need to make a
+				; selector:offset16 pair from a segment:offset16 pair, rather
+				; than actually creating a new descriptor.
+				;
+ 00B5				import_seg_table:
+ 00B5  0000 0000 E			dw	00000h, offset __0000h
+ 00B9  A000 0000 E			dw	0a000h, offset __A000h
+ 00BD  B000 0000 E			dw	0b000h, offset __B000h
+ 00C1  B800 0000 E			dw	0b800h, offset __B800h
+ 00C5  C000 0000 E			dw	0c000h, offset __C000h
+ 00C9  D000 0000 E			dw	0d000h, offset __D000h
+ 00CD  E000 0000 E			dw	0e000h, offset __E000h
+ 00D1  F000 0000 E			dw	0f000h, offset __F000h
+ 00D5  FFFF FFFF			dw	0ffffh, 0ffffh		;end marker
+				
+				;--------------------------Local-Routine-----------------------------;
+				; make_addressable
+				;
+				; adjust DX:AX so that DX fits one of the normal X000 segments
+				;
+				; Entry:
+				;	DX:AX = seg:offset of real address to make a sel for
+				;	CX = length of area
+				; Returns:
+				;	DX = new selector
+				;	AX = new offset
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP,BX
+				; Registers Destroyed:
+				;	AX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 00D9				make_addressable	PROC	NEAR
+				
+ 00D9  56				push	si
+ 00DA  53				push	bx
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-14
+
+
+				
+ 00DB  50				push	ax		;save offset
+				
+ 00DC  BE 00B5 R			mov	si,offset import_seg_table	;point to seg xlate table
+ 00DF  FC				cld				;forward.
+ 00E0				scan_xlate:
+ 00E0  2E: AD				lods	word ptr cs:[si]	;get real mode seg value
+ 00E2  8B D8				mov	bx,ax		;into bx
+ 00E4  2E: AD				lods	word ptr cs:[si]	;get prot mode descriptor value
+ 00E6  83 FB FF				cmp	bx,0ffffh	;was real seg FFFF? (end of table)
+ 00E9  74 0B				jz	create_a_seg	;yes, try dirty method
+ 00EB  3B DA				cmp	bx,dx		;got it?
+ 00ED  75 F1				jnz	scan_xlate	;no, keep looking.
+				
+ 00EF  8B D0				mov	dx,ax		;prot descriptor into dx
+ 00F1  58				pop	ax		;restore offset
+				
+ 00F2  F9				stc			;non-deleteable (borrowed) selector.
+				
+ 00F3  EB 37 90				jmp	seg_done	;finito.
+				
+ 00F6				create_a_seg:
+ 00F6  52				push	dx		;save seg
+				
+					;... use windows stuff to create descriptors ...
+ 00F7  1E				push	ds		;create a new DS type selector
+ 00F8  9A 0000 ---- E			call	AllocSelector
+				
+ 00FD  5A				pop	dx		;pop seg
+				
+ 00FE  50				push	ax		;save sel
+				
+ 00FF  D1 C2				rol	dx,1		;segment ABCD -> BCDA
+ 0101  D1 C2				rol	dx,1
+ 0103  D1 C2				rol	dx,1
+ 0105  D1 C2				rol	dx,1
+ 0107  8B C2				mov	ax,dx		;AX,DX = BCDA
+ 0109  25 000F				and	ax,0fh		;PHYSh = 000A
+ 010C  83 E2 F0				and	dx,0fff0h	;PHYSl = BCD0
+				
+ 010F  59				pop	cx		;get sel
+ 0110  51				push	cx		;save sel
+				
+ 0111  51				push	cx		;pass sel
+ 0112  50				push	ax		;pass PHYSh
+ 0113  52				push	dx		;pass PHYSl
+ 0114  9A 0000 ---- E			call	SetSelectorBase	;change base addr of selector
+				
+ 0119  59				pop	cx		;get sel
+ 011A  51				push	cx		;save sel
+				
+ 011B  51				push	cx		;pass sel
+ 011C  B8 0000				mov	ax,00000h	;LIMITh = 0000
+ 011F  50				push	ax
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-15
+
+
+ 0120  B8 FFFF				mov	ax,0ffffh	;LIMITl = FFFF
+ 0123  50				push	ax
+ 0124  9A 0000 ---- E			call	SetSelectorLimit	;change limit of selector
+				
+ 0129  5A				pop	dx		;return selector
+ 012A  58				pop	ax		;return offset
+ 012B  F8				clc			;deleteable selector.
+				
+ 012C				seg_done:
+ 012C  5B				pop	bx
+ 012D  5E				pop	si
+				
+ 012E  C3				ret
+				
+ 012F				make_addressable	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-16
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; get_service_real
+				;
+				; get the amiga service assuming real mode
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 012F				get_service_real	PROC	NEAR
+				
+ 012F  33 C0				xor	ax,ax			;no need for selectors.
+ 0131  A3 003C R			mov	ms_sd_sel,ax
+ 0134  A3 003E R			mov	ms_rq_sel,ax
+				
+ 0137  1E				push	ds
+ 0138  B8 0000				mov	ax,(ms_app_id SHR 16) AND 0FFFFH	;app id high
+ 013B  8E D8				mov	ds,ax
+ 013D  BE 0001				mov	si,ms_app_id AND 0FFFFH	;app id low
+ 0140  B9 0002				mov	cx,ms_local_id		;local id
+ 0143  33 C0				xor	ax,ax			;handler seg
+ 0145  8E C0				mov	es,ax
+ 0147  8B F8				mov	di,ax			;handler offs
+ 0149  B4 0B				mov	ah,JFUNC_GETSERVICE	;get a service
+ 014B  B0 41				mov	al,ms_flags		;flags
+ 014D  CD 0B				int	JFUNC_JINT
+ 014F  1F				pop	ds
+ 0150  3C 00				cmp	al,JSERV_OK
+ 0152  75 31				jnz	getr_failed		;(can't happen if GETS_WAIT)
+				
+					;es:di = mouseserv ServiceData pointer
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-17
+
+
+					;lock and unlock the servicedata structure (waits until fully initted)
+ 0154  B4 0F				mov	AH,JFUNC_LOCKSERVICEDATA
+				;	mov	DI,word ptr ms_sd_np
+ 0156  CD 0B				int	JFUNC_JINT
+ 0158  B4 10				mov	AH,JFUNC_UNLOCKSERVICEDATA
+				;	mov	DI,word ptr ms_sd_np
+ 015A  CD 0B				int	JFUNC_JINT
+				
+ 015C  89 3E 0014 R			mov	word ptr ms_sd_np,di	;save ptr to ServiceData struct
+ 0160  89 3E 0018 R			mov	word ptr ms_sd_rp,di
+ 0164  8C 06 0016 R			mov	word ptr ms_sd_np+2,es
+ 0168  8C 06 001A R			mov	word ptr ms_sd_rp+2,es
+					
+ 016C  26: 8B 45 16			mov	ax,word ptr es:sd_PCMemPtr[di]	;save ptr to MouseServReq struct
+ 0170  A3 001C R			mov	word ptr ms_rq_np,ax
+ 0173  A3 0020 R			mov	word ptr ms_rq_rp,ax
+ 0176  26: 8B 45 18			mov	ax,word ptr es:sd_PCMemPtr+2[di]
+ 017A  A3 001E R			mov	word ptr ms_rq_np+2,ax
+ 017D  A3 0022 R			mov	word ptr ms_rq_rp+2,ax
+				
+ 0180  33 C0				xor	ax,ax			;return 0 for success
+ 0182  EB 04 90				jmp	getr_done
+				
+ 0185				getr_failed:
+ 0185  B8 0001				mov	ax,1			;return 1 for failure
+				
+ 0188				getr_done:
+ 0188  C3				ret				;return 0 for success.
+				
+ 0189				get_service_real	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-18
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; get_service_prot
+				;
+				; get the amiga service assuming protected mode
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 0189				get_service_prot	PROC	NEAR
+				
+ 0189  33 C0				xor	ax,ax			;no selectors yet.
+ 018B  A3 003C R			mov	ms_sd_sel,ax
+ 018E  A3 003E R			mov	ms_rq_sel,ax
+				
+ 0191  C7 06 006C R 0000		mov	r_ds,(ms_app_id SHR 16) AND 0FFFFH	;app id high
+ 0197  C7 06 004C R 0001		mov	word ptr r_esi,ms_app_id AND 0FFFFH	;app id low
+ 019D  C7 06 0060 R 0002		mov	word ptr r_ecx,ms_local_id	;local id
+ 01A3  C7 06 006A R 0000		mov	r_es,0			;handler seg
+ 01A9  C7 06 0048 R 0000		mov	word ptr r_edi,0	;handler offs
+ 01AF  B4 0B				mov	ah,JFUNC_GETSERVICE	;get a service
+ 01B1  B0 41				mov	al,ms_flags		;flags
+ 01B3  A3 0064 R			mov	word ptr r_eax,ax
+ 01B6  E8 0000 R			call	sim_int0b
+				
+					;es:di = mouseserv ServiceData pointer
+ 01B9  A1 0064 R			mov	ax,word ptr r_eax
+ 01BC  3C 00				cmp	al,JSERV_OK
+ 01BE  75 46				jnz	getp_failed		;(can't happen if GETS_WAIT)
+				
+ 01C0  8B 16 006A R			mov	dx,r_es			;get ServiceData real mode ptr
+ 01C4  A1 0048 R			mov	ax,word ptr r_edi
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-19
+
+
+ 01C7  A3 0018 R			mov	word ptr ms_sd_rp,ax	;save sd real mode ptr
+ 01CA  89 16 001A R			mov	word ptr ms_sd_rp+2,dx
+ 01CE  E8 00D9 R			call	make_addressable
+ 01D1  A3 0014 R			mov	word ptr ms_sd_np,ax	;save native ptr to ServiceData struct
+ 01D4  89 16 0016 R			mov	word ptr ms_sd_np+2,dx
+ 01D8  72 04				jc	no_del_sd_sel
+ 01DA  89 16 003C R			mov	word ptr ms_sd_sel,dx	;save selector if not borrowed
+ 01DE				no_del_sd_sel:
+				
+ 01DE  8E C2				mov	es,dx			;use the native sd pointer
+ 01E0  8B F8				mov	di,ax
+				
+ 01E2  26: 8B 45 16			mov	ax,word ptr es:sd_PCMemPtr[di]	;get the real MouseServReq ptr
+ 01E6  26: 8B 55 18			mov	dx,word ptr es:sd_PCMemPtr+2[di]
+ 01EA  A3 0020 R			mov	word ptr ms_rq_rp,ax	;save sd real mode ptr
+ 01ED  89 16 0022 R			mov	word ptr ms_rq_rp+2,dx
+ 01F1  E8 00D9 R			call	make_addressable
+ 01F4  A3 001C R			mov	word ptr ms_rq_np,ax	;save native ptr to MouseServReq struct
+ 01F7  89 16 001E R			mov	word ptr ms_rq_np+2,dx
+ 01FB  72 04				jc	no_del_rq_sel
+ 01FD  89 16 003E R			mov	word ptr ms_rq_sel,dx	;save selector if not borrowed
+ 0201				no_del_rq_sel:
+				
+ 0201  33 C0				xor	ax,ax			;return 0 for success
+ 0203  EB 04 90				jmp	getp_done
+				
+ 0206				getp_failed:
+ 0206  B8 0001				mov	ax,1			;return 1 for failure
+				
+ 0209				getp_done:
+ 0209  C3				ret				;return 0 for success.
+				
+ 020A				get_service_prot	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-20
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; free_service
+				;
+				; release the amiga mouse service
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 020A				free_service	PROC	NEAR
+				
+ 020A  A1 0018 R			mov	ax,word ptr ms_sd_rp
+ 020D  0B C0				or	ax,ax
+ 020F  74 1A				jz	free_done
+				
+ 0211  8B F8				mov	di,ax
+ 0213  B4 0D				mov	ah,JFUNC_RELEASESERVICE
+				
+ 0215  83 3E 0040 R 56			cmp	mode,86
+ 021A  74 0D				jz	free_real
+				
+ 021C  A3 0064 R			mov	word ptr r_eax,ax	;pass ah value
+ 021F  89 3E 0048 R			mov	word ptr r_edi,di	;pass offset of servicedata
+ 0223  E8 0000 R			call	sim_int0b
+ 0226  EB 03 90				jmp	free_done
+				
+ 0229				free_real:
+ 0229  CD 0B				int	JFUNC_JINT		;do the int
+				
+ 022B				free_done:
+ 022B  C3				ret				;return 0 for success.
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-21
+
+
+ 022C				free_service	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-22
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; tickle_janus
+				;
+				; try to verify that INT 0BH is patched in to janus stuff by trying
+				; to do a GetBase function.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 022C				tickle_janus	PROC	NEAR
+				
+ 022C  B9 0003				mov	cx,3			;knock three times.
+				
+ 022F				tickle_loop:
+ 022F  51				push	cx
+					
+ 0230  B4 01				mov	ah,JFUNC_GETBASE	;try to get the base of pcdisk
+ 0232  B0 0E				mov	al,JSERV_AMIGASERVICE
+				
+ 0234  83 3E 0040 R 56			cmp	mode,86			;intel - ya gotta love 'em.
+ 0239  74 0C				jz	tickle_real
+				
+ 023B  A3 0064 R			mov	word ptr r_eax,ax
+ 023E  E8 0000 R			call	sim_int0b
+ 0241  A1 0064 R			mov	ax,word ptr r_eax
+				
+ 0244  EB 03 90				jmp	tickle_next
+				
+ 0247				tickle_real:
+ 0247  CD 0B				int	JFUNC_JINT		;real mode int 0b
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-23
+
+
+ 0249				tickle_next:
+ 0249  59				pop	cx
+ 024A  E2 E3				loop	tickle_loop
+				
+ 024C  3C 00				cmp	al,JSERV_OK
+ 024E  74 05				jz	tickle_ok
+				
+ 0250  33 C0				xor	ax,ax			;failed.
+ 0252  EB 04 90				jmp	tickle_done
+				
+ 0255				tickle_ok:
+ 0255  B8 0001				mov	ax,1			;succeeded.
+				
+ 0258				tickle_done:
+ 0258  C3				ret
+				
+ 0259				tickle_janus	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-24
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; get_service
+				;
+				; try to locate mouse service.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 0259				get_service	PROC	NEAR
+				
+ 0259  83 3E 0040 R 56			cmp	mode,86
+ 025E  74 06				jz	get_real
+				
+ 0260  E8 0189 R			call	get_service_prot
+ 0263  EB 04 90				jmp	get_done
+				
+ 0266				get_real:
+ 0266  E8 012F R			call	get_service_real
+				
+ 0269				get_done:
+				
+ 0269  C3				ret
+				
+ 026A				get_service	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-25
+
+
+					page
+				;---------------------------Private-Routine-----------------------------;
+				; tickle janus and find the mouse service.  AX=0=fail, <>0=ok.
+				;-----------------------------------------------------------------------;
+ 026A				open_amiga	PROC NEAR
+ 026A  E8 022C R			call	tickle_janus		;tickle janus
+ 026D  0B C0				or	ax,ax
+ 026F  74 07				jz	oa_fail			;nobody's home.
+				
+ 0271  E8 0259 R			call	get_service		;find dpram & param ram ptrs
+				
+ 0274  0B C0				or	ax,ax
+ 0276  74 05				jz	okay
+				
+ 0278				oa_fail:
+ 0278  33 C0				xor	ax,ax			;failure.
+ 027A  EB 04 90				jmp	init_done
+				
+ 027D				okay:
+ 027D  B8 0001				mov	ax,1			;Successful initialization
+				
+ 0280				init_done:
+ 0280  C3				ret
+				
+ 0281				open_amiga	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-26
+
+
+					page
+				;---------------------------Private-Routine-----------------------------;
+				; give take the DS and make a CS out of it
+				;-----------------------------------------------------------------------;
+ 0281				create_ds	PROC NEAR
+				
+					;now we convert DS to a CS for the interrupt routine
+ 0281  56				push	si
+ 0282  57				push	di
+ 0283  1E				push	ds
+				
+ 0284  83 3E 0040 R 56			cmp	mode,86
+ 0289  74 14				jz	create_real
+				
+ 028B  1E				push	ds
+ 028C  9A 0000 ---- E			call	AllocDStoCSAlias
+ 0291  A3 0038 R			mov	CSEG_device_int,ax
+ 0294  A3 003A R			mov	device_int_sel,ax
+ 0297  8C D8				mov	ax,ds
+ 0299  A3 0036 R			mov	DSEG_device_int,ax
+ 029C  EB 0E 90				jmp	create_done
+				
+ 029F				create_real:
+ 029F  33 C0				xor	ax,ax
+ 02A1  A3 003A R			mov	device_int_sel,ax
+ 02A4  8C D8				mov	ax,ds
+ 02A6  A3 0038 R			mov	CSEG_device_int,ax
+ 02A9  A3 0036 R			mov	DSEG_device_int,ax
+				
+ 02AC				create_done:
+ 02AC  1F				pop	ds
+ 02AD  5F				pop	di
+ 02AE  5E				pop	si
+				
+ 02AF  C3				ret
+				
+ 02B0				create_ds	ENDP
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-27
+
+
+					page
+				;---------------------------Private-Routine-----------------------------;
+				; do any special magic required to prepare for "enhanced" 386 mode
+				;-----------------------------------------------------------------------;
+ 02B0				init_enh386_windows	PROC NEAR
+				
+				;
+				;	If running under Windows/386 then tell the Win386 mouse driver what
+				;	type of mouse we found.
+				;
+ 02B0  50				push	ax
+ 02B1  53				push	bx
+ 02B2  57				push	di
+ 02B3  06				push	es
+				
+ 02B4  33 FF				xor	di, di
+ 02B6  8E C7				mov	es, di
+ 02B8  B8 1684				mov	ax, 1684h		;Get device API entry point
+ 02BB  BB 000C				mov	bx, VMD_DEVICE_ID	;for the Virtual Mouse Device
+ 02BE  CD 2F				int	2Fh
+ 02C0  8C C0				mov	ax, es
+ 02C2  0B C7				or	ax, di			;Q: Does VMD have API entry point?
+ 02C4  74 13				jz	vmd_call_done		;   N: Done
+				
+ 02C6  0E				push	cs			;Return to here after call to Win386
+ 02C7  BB 02D9 R			mov	bx, offset vmd_call_done;virtual mouse driver
+ 02CA  53				push	bx
+ 02CB  06				push	es			;Call this SEG:OFF by doing a far
+ 02CC  57				push	di			;return
+				
+ 02CD  B8 0100				mov	ax, 100h		;Set mouse type & int VECTOR API call
+ 02D0  8A 1E 0044 R			mov	bl, mouse_type
+ 02D4  8A 3E 0042 R			mov	bh, vector
+				
+ 02D8				BogusFarRetProc PROC FAR
+ 02D8  CB				ret				;"Return" to VMD's API entry point
+ 02D9				BogusFarRetProc ENDP
+				
+ 02D9				vmd_call_done:
+ 02D9  E8 0281 R			call	create_ds
+				
+ 02DC  07				pop	es
+ 02DD  5F				pop	di
+ 02DE  5B				pop	bx
+ 02DF  58				pop	ax
+				
+ 02E0  C3				ret
+				
+ 02E1				init_enh386_windows	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-28
+
+
+					page
+				;---------------------------Private-Routine-----------------------------;
+				; do any special magic required to prepare for real mode
+				;-----------------------------------------------------------------------;
+ 02E1				init_real_windows	PROC NEAR
+				
+ 02E1  E8 0281 R			call	create_ds
+ 02E4  C3				ret
+				
+ 02E5				init_real_windows	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-29
+
+
+					page
+				;---------------------------Private-Routine-----------------------------;
+				; do any special magic required to prepare for protected mode
+				;-----------------------------------------------------------------------;
+ 02E5				init_prot_windows	PROC NEAR
+				
+ 02E5  E8 0281 R			call	create_ds
+ 02E8  C3				ret
+				
+ 02E9				init_prot_windows	ENDP
+				
+				
+				;--------------------------Local-Routine-----------------------------;
+ 02E9				open_windows	PROC NEAR
+				
+ 02E9  83 3E 0040 R 56			cmp	mode,86
+ 02EE  75 06				jnz	not_86
+ 02F0  E8 02E1 R			call	init_real_windows	;8088!  ugh!
+ 02F3  EB 12 90				jmp	ow_done
+ 02F6				not_86:
+				
+ 02F6  81 3E 0040 R 011E		cmp	mode,286
+ 02FC  75 06				jnz	not_286
+ 02FE  E8 02E5 R			call	init_prot_windows	;80286!  double ugh!
+ 0301  EB 04 90				jmp	ow_done
+				
+ 0304				not_286:
+ 0304  E8 02B0 R			call	init_enh386_windows	;80386!  *almost* a nice cpu.
+				
+ 0307				ow_done:
+ 0307  C3				ret
+				
+ 0308				open_windows	ENDP
+				
+				;--------------------------Local-Routine-----------------------------;
+ 0308				close_amiga	PROC NEAR
+				
+ 0308  E8 020A R			call	free_service		;let the amiga go.
+ 030B  C3				ret
+				
+ 030C				close_amiga	ENDP
+				
+ 030C				close_windows	PROC NEAR
+ 030C  56				push	si
+ 030D  57				push	di
+				
+ 030E  83 3E 0040 R 56			cmp	mode,86
+ 0313  74 39				jz	wep_done
+				
+ 0315  A1 003A R			mov	ax,device_int_sel	;manufactured selector for CS
+ 0318  0B C0				or	ax,ax
+ 031A  74 0C				jz	skip_devint
+ 031C  50				push	ax
+ 031D  9A 0000 ---- E			call	FreeSelector
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-30
+
+
+ 0322  C7 06 003A R 0000		mov	device_int_sel,0
+ 0328				skip_devint:
+				
+ 0328  A1 003C R			mov	ax,word ptr ms_sd_sel	;manufactured selector for ServiceData
+ 032B  0B C0				or	ax,ax
+ 032D  74 0C				jz	skip_sd
+ 032F  50				push	ax
+ 0330  9A 0000 ---- E			call	FreeSelector
+ 0335  C7 06 003C R 0000		mov	ms_sd_sel,0
+ 033B				skip_sd:
+				
+ 033B  A1 003E R			mov	ax,word ptr ms_rq_sel	;manufactured selector for MouseServReq
+ 033E  0B C0				or	ax,ax
+ 0340  74 0C				jz	skip_rq
+ 0342  50				push	ax
+ 0343  9A 0000 ---- E			call	FreeSelector
+ 0348  C7 06 003E R 0000		mov	ms_rq_sel,0
+ 034E				skip_rq:
+				
+ 034E				wep_done:
+ 034E  B8 0001				mov	ax,1
+				
+ 0351  5F				pop	di
+ 0352  5E				pop	si
+				
+ 0353  C3				ret
+				
+ 0354				close_windows	ENDP
+				
+				;--------------------------Local-Routine-----------------------------;
+ 0354				close_stuff	PROC NEAR
+				
+ 0354  F6 06 0047 R 01			test	open_flags,OF_AMIGA
+ 0359  74 08				jz	amiga_closed
+ 035B  E8 0308 R			call	close_amiga
+ 035E  80 26 0047 R FE			and	open_flags,NOT OF_AMIGA
+ 0363				amiga_closed:
+				
+ 0363  F6 06 0047 R 02			test	open_flags,OF_WINDOWS
+ 0368  74 08				jz	windows_closed
+ 036A  E8 030C R			call	close_windows
+ 036D  80 26 0047 R FD			and	open_flags,NOT OF_WINDOWS
+ 0372				windows_closed:
+				
+ 0372  C3				ret
+				
+ 0373				close_stuff	ENDP
+				
+				;--------------------------Local-Routine-----------------------------;
+ 0373				open_stuff	PROC NEAR
+				
+ 0373  E8 008D R			call	determine_mode
+				
+ 0376  F6 06 0047 R 01			test	open_flags,OF_AMIGA
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-31
+
+
+ 037B  75 0C				jnz	amiga_open
+ 037D  E8 026A R			call	open_amiga
+ 0380  0B C0				or	ax,ax
+ 0382  74 17				jz	open_stuff_fail
+ 0384  80 0E 0047 R 01			or	open_flags,OF_AMIGA
+ 0389				amiga_open:
+				
+ 0389  F6 06 0047 R 02			test	open_flags,OF_WINDOWS
+ 038E  75 08				jnz	windows_open
+ 0390  E8 02E9 R			call	open_windows
+ 0393  80 0E 0047 R 02			or	open_flags,OF_WINDOWS
+ 0398				windows_open:
+				
+ 0398  EB 04 90				jmp	open_stuff_done
+				
+ 039B				open_stuff_fail:
+ 039B  E8 0354 R			call	close_stuff
+				
+ 039E				open_stuff_done:
+ 039E  33 C0				xor	ax,ax
+ 03A0  A0 0047 R			mov	al,open_flags
+ 03A3  F6 D0				not	al
+ 03A5  24 03				and	al,OF_WINDOWS OR OF_AMIGA
+				;zero means both are open
+ 03A7  C3				ret
+				
+ 03A8				open_stuff	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-32
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; enable_proc
+				;
+				; start the polling of the mouse
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 03A8				enable_proc	PROC NEAR
+				
+ 03A8  E8 0373 R			call	open_stuff
+ 03AB  0B C0				or	ax,ax
+ 03AD  75 14				jnz	ena_failed
+				;if AX<>0, we have an error.  but we can't do shit about it here.
+				
+ 03AF  B8 0036				mov	ax,54			;54 milliseconds (18.2Hz)
+ 03B2  50				push	ax
+				
+ 03B3  A1 0038 R			mov	ax,CSEG_device_int
+ 03B6  50				push	ax			;call the mouse poller
+ 03B7  B8 007A R			mov	ax,offset device_int
+ 03BA  50				push	ax
+				
+					cCall	CreateSystemTimer	;fwhap
+ 03BB  9A 0000 ---- E        1		call	CreateSystemTimer 
+				
+ 03C0  A3 0032 R			mov	timer_handle,ax		;save ref returned for killing it
+				
+ 03C3				ena_failed:
+ 03C3  C3				ret
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-33
+
+
+ 03C4				enable_proc	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-34
+
+
+					page
+				;--------------------------Local-Routine-----------------------------;
+				; disable_proc
+				;
+				; stop polling the mouse
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	ES,SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+ 03C4				disable_proc	PROC NEAR
+				
+ 03C4  A1 0032 R			mov	ax,timer_handle		;get saved timer ref
+ 03C7  50				push	ax
+				
+					cCall	KillSystemTimer		;fwhap
+ 03C8  9A 0000 ---- E        1		call	KillSystemTimer 
+				
+ 03CD  E8 0354 R			call	close_stuff
+				
+ 03D0  C3				ret
+				
+ 03D1				disable_proc	ENDP
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-35
+
+
+					page
+				;--------------------------Exported-Routine-----------------------------;
+				; int Inquire(lp_mouse_info);
+				;
+				; Information regarding the mouse is returned to the caller.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	AX = # bytes returned in lp_mouse_info
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,ES,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	Inquire,<FAR,PUBLIC,WIN,PASCAL>,<di>
+				
+					parmD	lp_mouse_info
+				
+				cBegin
+ 03D1                        1	Inquire proc far 
+ 03D1  8C D8                 1		mov	ax,ds 
+ 03D3  90                    1		nop 
+ 03D4  45                    1		inc	bp 
+ 03D5  55                    1		push	bp 
+ 03D6  8B EC                 1		mov	bp,sp 
+ 03D8  1E                    1		push	ds 
+ 03D9  8E D8                 1		mov	ds,ax 
+ 03DB  57                    3		push	di 
+ 03DC  C4 7E 06				les	di,lp_mouse_info	;Get far pointer of destination area
+					assumes es,nothing
+				
+ 03DF  FC				cld				;forward.
+				
+ 03E0  B0 FF				mov	al,0ffh			;AL = 0FFh if mouse exists, 00 if not
+ 03E2  B4 FF				mov	ah,0ffh 		;AH = 0FFh if relative coordinates
+ 03E4  AB				stosw				;  (but is currently ignored!)
+					.errnz	msExists
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-36
+
+
+					.errnz	msRelative-msExists-1
+				
+ 03E5  B8 0002				mov	ax,NUMBER_BUTTONS	;Return number of buttons
+ 03E8  AB				stosw
+					.errnz	msNumButtons-msRelative-1
+				
+ 03E9  A1 0034 R			mov	ax,interrupt_rate	;Return maximum interrupt rate
+ 03EC  AB				stosw
+					.errnz	msRate-msNumButtons-2
+				
+ 03ED  B8 0002				mov	ax,X_SPEED		;Return threshold before acceleration
+ 03F0  AB				stosw
+					.errnz	msXThresh-msRate-2
+				
+ 03F1  AB				stosw
+					.errnz	msYThresh-msXThresh-2
+				
+ 03F2  33 C0				xor	ax,ax			;Return useless x,y resolution info
+ 03F4  AB				stosw
+ 03F5  AB				stosw
+					.errnz	msXRes-msYThresh-2
+					.errnz	msYRes-msXRes-2
+					.errnz	msYRes+2 - size MOUSEINFO
+				
+ 03F6  B8 000E				mov	ax,size MOUSEINFO	;Return size of info
+				
+				cEnd
+ 03F9  5F                    3		pop	di 
+ 03FA  8D 66 FE              1		lea	sp,-2[bp] 
+ 03FD  1F                    1		pop	ds 
+ 03FE  5D                    1		pop	bp 
+ 03FF  4D                    1		dec	bp 
+ 0400  CA 0004               1		ret	4 
+ 0403                        1	Inquire endp 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-37
+
+
+					page
+				;--------------------------Exported-Routine-----------------------------;
+				; int MouseGetIntVect();
+				;
+				; The interrupt vector used by the mouse is returned to the caller.
+				; If no mouse is found, then -1 is returned.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	AX = interrupt vector
+				;	AX = -1 if no mouse was found
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,ES,FLAGS
+				; Calls:
+				;	None
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	MouseGetIntVect,<FAR,PUBLIC,WIN,PASCAL>
+				
+				cBegin
+ 0403                        1	MouseGetIntVect proc far 
+ 0403  8C D8                 1		mov	ax,ds 
+ 0405  90                    1		nop 
+ 0406  45                    1		inc	bp 
+ 0407  55                    1		push	bp 
+ 0408  8B EC                 1		mov	bp,sp 
+ 040A  1E                    1		push	ds 
+ 040B  8E D8                 1		mov	ds,ax 
+				
+				;	NOTE! vector must be less than 7Fh for the sign extension to work
+				
+				; um, also note: the VMD in the microsoft examples thinks that a vector
+				; of -1 means "there ain't no mouse."  we must teach it otherwise.
+				
+ 040D  A0 0042 R			mov	al,vector		;Will be -1 if mouse wasn't found
+ 0410  98				cbw				;AX = -1 if no mouse was found
+				cEnd
+ 0411  8D 66 FE              1		lea	sp,-2[bp] 
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-38
+
+
+ 0414  1F                    1		pop	ds 
+ 0415  5D                    1		pop	bp 
+ 0416  4D                    1		dec	bp 
+ 0417  CB                    1		ret	0 
+ 0418                        1	MouseGetIntVect endp 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-39
+
+
+					page
+				;--------------------------Exported-Routine-----------------------------;
+				; void Enable(lp_event_proc);
+				;
+				; Enable hardware mouse interrupts, with the passed procedure address
+				; being the target of all mouse events.
+				;
+				; This routine may be called while already enabled.  In this case the
+				; passed event procedure should be saved, and all other initialization
+				; skipped.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,ES,FLAGS
+				; Calls:
+				;	enable_proc
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	Enable,<FAR,PUBLIC,WIN,PASCAL>,<si,di>
+				
+					parmD	new_event_proc
+				
+				cBegin
+ 0418                        1	Enable proc far 
+ 0418  8C D8                 1		mov	ax,ds 
+ 041A  90                    1		nop 
+ 041B  45                    1		inc	bp 
+ 041C  55                    1		push	bp 
+ 041D  8B EC                 1		mov	bp,sp 
+ 041F  1E                    1		push	ds 
+ 0420  8E D8                 1		mov	ds,ax 
+ 0422  56                    3		push	si 
+ 0423  57                    3		push	di 
+				
+				;	The new event procedure is always saved regardless of the
+				;	mouse already being enabled.  This allows the event proc
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-40
+
+
+				;	to be changed as needed.
+				
+ 0424  FA				cli				;Protect against interrupt while
+ 0425  8B 46 06				mov	ax,off_new_event_proc	;  changing the vector
+ 0428  A3 0010 R			mov	wptr event_proc[0],ax
+ 042B  8B 46 08				mov	ax,seg_new_event_proc
+ 042E  A3 0012 R			mov	wptr event_proc[2],ax
+ 0431  FB				sti
+				
+				;	If the mouse is already enabled, or it doesn't exist, then
+				;	we're all done with the enable call.
+				
+ 0432  A0 0043 R			mov	al,mouse_flags		;If enabled or mouse doesn't exist,
+ 0435  A8 01				test	al,MMF_ENABLED
+ 0437  75 08				jnz	enable_done
+ 0439  E8 03A8 R			call	enable_proc		;Mouse specific initialization
+ 043C  80 0E 0043 R 01			or	mouse_flags,MMF_ENABLED	;Show enabled now
+				
+ 0441				enable_done:
+				
+				cEnd
+ 0441  5F                    3		pop	di 
+ 0442  5E                    3		pop	si 
+ 0443  8D 66 FE              1		lea	sp,-2[bp] 
+ 0446  1F                    1		pop	ds 
+ 0447  5D                    1		pop	bp 
+ 0448  4D                    1		dec	bp 
+ 0449  CA 0004               1		ret	4 
+ 044C                        1	Enable endp 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-41
+
+
+					page
+				;--------------------------Exported-Routine-----------------------------;
+				; void Disable();
+				;
+				; Disable hardware mouse interrupts, restoring the previous mouse
+				; interrupt handler and 8259 interrupt enable mask.
+				;
+				; This routine may be called while already disabled.  In this case the
+				; disabling should be ignored.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	None
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,ES,FLAGS
+				; Calls:
+				;	disable_proc
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	Disable,<FAR,PUBLIC,WIN,PASCAL>,<si,di>
+				
+				cBegin
+ 044C                        1	Disable proc far 
+ 044C  8C D8                 1		mov	ax,ds 
+ 044E  90                    1		nop 
+ 044F  45                    1		inc	bp 
+ 0450  55                    1		push	bp 
+ 0451  8B EC                 1		mov	bp,sp 
+ 0453  1E                    1		push	ds 
+ 0454  8E D8                 1		mov	ds,ax 
+ 0456  56                    3		push	si 
+ 0457  57                    3		push	di 
+ 0458  F6 06 0043 R 01			test	mouse_flags,MMF_ENABLED
+ 045D  74 08				jz	disable_done		;Mouse is already disabled
+ 045F  E8 03C4 R			call	disable_proc		;Disable as needed
+ 0462  80 26 0043 R FE			and	mouse_flags,not MMF_ENABLED
+				
+ 0467				disable_done:
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-42
+
+
+				
+				cEnd
+ 0467  5F                    3		pop	di 
+ 0468  5E                    3		pop	si 
+ 0469  8D 66 FE              1		lea	sp,-2[bp] 
+ 046C  1F                    1		pop	ds 
+ 046D  5D                    1		pop	bp 
+ 046E  4D                    1		dec	bp 
+ 046F  CB                    1		ret	0 
+ 0470                        1	Disable endp 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-43
+
+
+					page
+				;--------------------------Exported-Routine-----------------------------;
+				; WORD WEP();
+				;
+				; Generic WEP.
+				;
+				; Entry:
+				;	None
+				; Returns:
+				;	AX = 1
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	all
+				; Registers Destroyed:
+				;	none
+				; Calls:
+				;	nothing
+				; History:
+				;  Wed 18-Oct-1989 11:44:39  
+				; Wrote it!
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	WEP,<FAR,PUBLIC,WIN,PASCAL>
+				;	parmW	stuff
+				cBegin nogen
+ 0470                        1	WEP proc far 
+				
+ 0470  B8 0001				mov	ax,1
+ 0473  CA 0002				ret	2
+				
+				cEnd nogen
+ 0476                        1	WEP endp 
+				
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-44
+
+
+					page
+				;---------------------------Public-Routine-----------------------------;
+				; Initialize
+				;
+				; All boot time initialization will be performed.
+				;
+				; After a mouse handler has been found, the Data segment will be
+				; resized to the minimum needed to support the mouse in use.
+				;
+				; Entry:
+				;	CX = size of heap
+				;	DI = module handle
+				;	DS = automatic data segment
+				;	ES:SI = address of command line (not used)
+				; Returns:
+				;	AX <> 0 to show success
+				; Error Returns:
+				;	None
+				; Registers Preserved:
+				;	SI,DI,DS,BP
+				; Registers Destroyed:
+				;	AX,BX,CX,DX,ES,FLAGS
+				; Calls:
+				; History:
+				;	Fri 21-Aug-1987 11:43:42 
+				;	Initial version
+				;-----------------------------------------------------------------------;
+				
+				;------------------------------Pseudo-Code------------------------------;
+				; {
+				; }
+				;-----------------------------------------------------------------------;
+				
+					assumes cs,Code
+					assumes ds,Data
+				
+				cProc	Initialize,<FAR,PUBLIC,WIN,PASCAL>,<si,di>
+				
+				cBegin
+ 0476                        1	Initialize proc far 
+ 0476  8C D8                 1		mov	ax,ds 
+ 0478  90                    1		nop 
+ 0479  45                    1		inc	bp 
+ 047A  55                    1		push	bp 
+ 047B  8B EC                 1		mov	bp,sp 
+ 047D  1E                    1		push	ds 
+ 047E  8E D8                 1		mov	ds,ax 
+ 0480  56                    3		push	si 
+ 0481  57                    3		push	di 
+				
+ 0482  C6 06 0047 R 00			mov	open_flags,0
+				
+ 0487				proceed:
+					;we're initialized.
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Page     1-45
+
+
+ 0487  80 0E 0043 R 80			or	mouse_flags,MMF_MOUSE_EXISTS
+				
+ 048C  B8 0001				mov	ax,1			;Successful initialization
+				
+ 048F				winit_done:
+				
+				cEnd
+ 048F  5F                    3		pop	di 
+ 0490  5E                    3		pop	si 
+ 0491  8D 66 FE              1		lea	sp,-2[bp] 
+ 0494  1F                    1		pop	ds 
+ 0495  5D                    1		pop	bp 
+ 0496  4D                    1		dec	bp 
+ 0497  CB                    1		ret	0 
+ 0498                        1	Initialize endp 
+				
+				sEnd	Code
+ 0498                        1	_TEXT ends 
+				end	Initialize
+
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-1
+
+
+Macros:
+
+		N a m e			Lines
+
+DEB  . . . . . . . . . . . . . .  	   0
+DEBI . . . . . . . . . . . . . .  	   0
+DEBSET . . . . . . . . . . . . .  	   0
+EnterCrit  . . . . . . . . . . .  	   2
+LeaveCrit  . . . . . . . . . . .  	  16
+MAKEINTRESOURCE  . . . . . . . .  	   2
+POPFF  . . . . . . . . . . . . .  	   5
+display_int_size . . . . . . . .  	   3
+io_delay . . . . . . . . . . . .  	   3
+
+Structures and Records:
+
+                N a m e                 Width   # fields
+                                        Shift   Width   Mask    Initial
+
+BITMAP . . . . . . . . . . . . .  	000E	0007
+  bmType . . . . . . . . . . . .  	0000
+  bmWidth  . . . . . . . . . . .  	0002
+  bmHeight . . . . . . . . . . .  	0004
+  bmWidthBytes . . . . . . . . .  	0006
+  bmPlanes . . . . . . . . . . .  	0008
+  bmBitsPixel  . . . . . . . . .  	0009
+  bmBits . . . . . . . . . . . .  	000A
+BITMAPCOREHEADER . . . . . . . .  	000C	0005
+  bcSize . . . . . . . . . . . .  	0000
+  bcWidth  . . . . . . . . . . .  	0004
+  bcHeight . . . . . . . . . . .  	0006
+  bcPlanes . . . . . . . . . . .  	0008
+  bcBitCount . . . . . . . . . .  	000A
+BITMAPCOREINFO . . . . . . . . .  	000D	0002
+  bmciHeader . . . . . . . . . .  	0000
+  bmciColors . . . . . . . . . .  	000C
+BITMAPFILEHEADER . . . . . . . .  	000E	0005
+  bfType . . . . . . . . . . . .  	0000
+  bfSize . . . . . . . . . . . .  	0002
+  bfReserved1  . . . . . . . . .  	0006
+  bfReserved2  . . . . . . . . .  	0008
+  bfOffBits  . . . . . . . . . .  	000A
+BITMAPINFO . . . . . . . . . . .  	0029	0002
+  bmiHeader  . . . . . . . . . .  	0000
+  bmiColors  . . . . . . . . . .  	0028
+BITMAPINFOHEADER . . . . . . . .  	0028	000B
+  biSize . . . . . . . . . . . .  	0000
+  biWidth  . . . . . . . . . . .  	0004
+  biHeight . . . . . . . . . . .  	0008
+  biPlanes . . . . . . . . . . .  	000C
+  biBitCount . . . . . . . . . .  	000E
+  biCompression  . . . . . . . .  	0010
+  biSizeImage  . . . . . . . . .  	0014
+  biXPelsPerMeter  . . . . . . .  	0018
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-2
+
+
+  biYPelsPerMeter  . . . . . . .  	001C
+  biClrUsed  . . . . . . . . . .  	0020
+  biClrImportant . . . . . . . .  	0024
+CLIENTCREATESTRUCT . . . . . . .  	0004	0002
+  hWindowMenu  . . . . . . . . .  	0000
+  idFirstChild . . . . . . . . .  	0002
+COMPAREITEMSTRUCT  . . . . . . .  	0012	0007
+  coCtlType  . . . . . . . . . .  	0000
+  coCtlID  . . . . . . . . . . .  	0002
+  cohwndItem . . . . . . . . . .  	0004
+  coitemID1  . . . . . . . . . .  	0006
+  coitemData1  . . . . . . . . .  	0008
+  coitemID2  . . . . . . . . . .  	000C
+  coitemData2  . . . . . . . . .  	000E
+COMSTAT  . . . . . . . . . . . .  	0005	0003
+  COMS_BitMask1  . . . . . . . .  	0000
+  COMS_cbInQue . . . . . . . . .  	0001
+  COMS_cbOutQue  . . . . . . . .  	0003
+CREATESTRUCT . . . . . . . . . .  	0022	000C
+  cs_lpCreateParams  . . . . . .  	0000
+  cs_hInstance . . . . . . . . .  	0004
+  cs_hMenu . . . . . . . . . . .  	0006
+  cs_hwndParent  . . . . . . . .  	0008
+  cs_cy  . . . . . . . . . . . .  	000A
+  cs_cx  . . . . . . . . . . . .  	000C
+  cs_y . . . . . . . . . . . . .  	000E
+  cs_x . . . . . . . . . . . . .  	0010
+  cs_style . . . . . . . . . . .  	0012
+  cs_lpszName  . . . . . . . . .  	0016
+  cs_lpszClass . . . . . . . . .  	001A
+  cs_dwExStyle . . . . . . . . .  	001E
+CURSORINFO . . . . . . . . . . .  	0004	0002
+  dpXRate  . . . . . . . . . . .  	0000
+  dpYRate  . . . . . . . . . . .  	0002
+DCB  . . . . . . . . . . . . . .  	0019	0012
+  DCB_Id . . . . . . . . . . . .  	0000
+  DCB_BaudRate . . . . . . . . .  	0001
+  DCB_ByteSize . . . . . . . . .  	0003
+  DCB_Parity . . . . . . . . . .  	0004
+  DCB_StopBits . . . . . . . . .  	0005
+  DCB_RlsTimeout . . . . . . . .  	0006
+  DCB_CtsTimeout . . . . . . . .  	0008
+  DCB_DsrTimeout . . . . . . . .  	000A
+  DCB_BitMask1 . . . . . . . . .  	000C
+  DCB_BitMask2 . . . . . . . . .  	000D
+  DCB_XonChar  . . . . . . . . .  	000E
+  DCB_XoffChar . . . . . . . . .  	000F
+  DCB_XonLim . . . . . . . . . .  	0010
+  DCB_XoffLim  . . . . . . . . .  	0012
+  DCB_PeChar . . . . . . . . . .  	0014
+  DCB_EofChar  . . . . . . . . .  	0015
+  DCB_EvtChar  . . . . . . . . .  	0016
+  DCB_TxDelay  . . . . . . . . .  	0017
+DELETEITEMSTRUCT . . . . . . . .  	000C	0005
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-3
+
+
+  deCtlType  . . . . . . . . . .  	0000
+  deCtlID  . . . . . . . . . . .  	0002
+  deitemID . . . . . . . . . . .  	0004
+  dehwndItem . . . . . . . . . .  	0006
+  deitemData . . . . . . . . . .  	0008
+DRAWITEMSTRUCT . . . . . . . . .  	001A	0009
+  drCtlType  . . . . . . . . . .  	0000
+  drCtlID  . . . . . . . . . . .  	0002
+  dritemID . . . . . . . . . . .  	0004
+  dritemAction . . . . . . . . .  	0006
+  dritemState  . . . . . . . . .  	0008
+  drhwndItem . . . . . . . . . .  	000A
+  drhDC  . . . . . . . . . . . .  	000C
+  drrcItem . . . . . . . . . . .  	000E
+  dritemData . . . . . . . . . .  	0016
+ELTab  . . . . . . . . . . . . .  	0008	0005
+  EGA_Port . . . . . . . . . . .  	0000
+  EGA_Values . . . . . . . . . .  	0002
+  EGA_Defs . . . . . . . . . . .  	0004
+  EGA_Count  . . . . . . . . . .  	0006
+  EGA_Status . . . . . . . . . .  	0007
+EVENTMSG . . . . . . . . . . . .  	000A	0004
+  message  . . . . . . . . . . .  	0000
+  paramL . . . . . . . . . . . .  	0002
+  paramH . . . . . . . . . . . .  	0004
+  time . . . . . . . . . . . . .  	0006
+HANDLETABLE  . . . . . . . . . .  	0002	0001
+  ht_objectHandle  . . . . . . .  	0000
+JanusAmiga . . . . . . . . . . .  	0046	001F
+  ja_Lock  . . . . . . . . . . .  	0000
+  ja_8088Go  . . . . . . . . . .  	0001
+  jpm_Lock . . . . . . . . . . .  	0002
+  jpm_pad0 . . . . . . . . . . .  	0003
+  jpm_68000Base  . . . . . . . .  	0004
+  jpm_8088Segment  . . . . . . .  	0008
+  jpm_First  . . . . . . . . . .  	000A
+  jpm_Max  . . . . . . . . . . .  	000C
+  jpm_Free . . . . . . . . . . .  	000E
+  jbm_Lock . . . . . . . . . . .  	0010
+  jbm_pad0 . . . . . . . . . . .  	0011
+  jbm_68000Base  . . . . . . . .  	0012
+  jbm_8088Segment  . . . . . . .  	0016
+  jbm_First  . . . . . . . . . .  	0018
+  jbm_Max  . . . . . . . . . . .  	001A
+  jbm_Free . . . . . . . . . . .  	001C
+  ja_Interrupts  . . . . . . . .  	001E
+  ja_Parameters  . . . . . . . .  	0020
+  ja_NumInterrupts . . . . . . .  	0022
+  ja_AmigaState  . . . . . . . .  	0024
+  ja_PCState . . . . . . . . . .  	0026
+  ja_JLibRev . . . . . . . . . .  	0028
+  ja_JLibVer . . . . . . . . . .  	002A
+  ja_JHandlerRev . . . . . . . .  	002C
+  ja_JHandlerVer . . . . . . . .  	002E
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-4
+
+
+  ja_HandlerLoaded . . . . . . .  	0030
+  ja_PCFlag  . . . . . . . . . .  	0032
+  ja_AmigaFlag . . . . . . . . .  	0033
+  ja_Turn  . . . . . . . . . . .  	0034
+  ja_Pad . . . . . . . . . . . .  	0035
+  ja_Reserved  . . . . . . . . .  	0036
+KBINFO . . . . . . . . . . . . .  	0006	0002
+  kbRanges . . . . . . . . . . .  	0000
+  kbStateSize  . . . . . . . . .  	0004
+LOGBRUSH . . . . . . . . . . . .  	0008	0003
+  lbStyle  . . . . . . . . . . .  	0000
+  lbColor  . . . . . . . . . . .  	0002
+  lbHatch  . . . . . . . . . . .  	0006
+LOGFONT  . . . . . . . . . . . .  	0032	000E
+  lfHeight . . . . . . . . . . .  	0000
+  lfWidth  . . . . . . . . . . .  	0002
+  lfEscapement . . . . . . . . .  	0004
+  lfOrientation  . . . . . . . .  	0006
+  lfWeight . . . . . . . . . . .  	0008
+  lfItalic . . . . . . . . . . .  	000A
+  lfUnderline  . . . . . . . . .  	000B
+  lfStrikeOut  . . . . . . . . .  	000C
+  lfCharSet  . . . . . . . . . .  	000D
+  lfOutPrecision . . . . . . . .  	000E
+  lfClipPrecision  . . . . . . .  	000F
+  lfQuality  . . . . . . . . . .  	0010
+  lfPitchAndFamily . . . . . . .  	0011
+  lfFaceName . . . . . . . . . .  	0012
+LOGPALETTE . . . . . . . . . . .  	0005	0003
+  palVersion . . . . . . . . . .  	0000
+  palNumEntries  . . . . . . . .  	0002
+  palPalEntry  . . . . . . . . .  	0004
+LOGPEN . . . . . . . . . . . . .  	000A	0003
+  lopnStyle  . . . . . . . . . .  	0000
+  lopnWidth  . . . . . . . . . .  	0002
+  lopnColor  . . . . . . . . . .  	0006
+MDICREATESTRUCT  . . . . . . . .  	0016	0008
+  szClass  . . . . . . . . . . .  	0000
+  szTitle  . . . . . . . . . . .  	0004
+  hOwner . . . . . . . . . . . .  	0008
+  x  . . . . . . . . . . . . . .  	000A
+  y  . . . . . . . . . . . . . .  	000C
+  cxc  . . . . . . . . . . . . .  	000E
+  cyc  . . . . . . . . . . . . .  	0010
+  style  . . . . . . . . . . . .  	0012
+MEASUREITEMSTRUCT  . . . . . . .  	000E	0006
+  meCtlType  . . . . . . . . . .  	0000
+  meCtlID  . . . . . . . . . . .  	0002
+  meitemID . . . . . . . . . . .  	0004
+  meitemWidth  . . . . . . . . .  	0006
+  meitemHeight . . . . . . . . .  	0008
+  meitemData . . . . . . . . . .  	000A
+METAFILEPICT . . . . . . . . . .  	0008	0004
+  mfp_mm . . . . . . . . . . . .  	0000
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-5
+
+
+  mfp_xExt . . . . . . . . . . .  	0002
+  mfp_yExt . . . . . . . . . . .  	0004
+  mfp_hMF  . . . . . . . . . . .  	0006
+METAHEADER . . . . . . . . . . .  	0012	0007
+  mtType . . . . . . . . . . . .  	0000
+  mtHeaderSize . . . . . . . . .  	0002
+  mtVersion  . . . . . . . . . .  	0004
+  mtSize . . . . . . . . . . . .  	0006
+  mtNoObjects  . . . . . . . . .  	000A
+  mtMaxRecord  . . . . . . . . .  	000C
+  mtNoParameters . . . . . . . .  	0010
+METARECORD . . . . . . . . . . .  	0008	0003
+  mr_rdSize  . . . . . . . . . .  	0000
+  mr_rdFunction  . . . . . . . .  	0004
+  mr_rdParm  . . . . . . . . . .  	0006
+MOUSEINFO  . . . . . . . . . . .  	000E	0008
+  msExists . . . . . . . . . . .  	0000
+  msRelative . . . . . . . . . .  	0001
+  msNumButtons . . . . . . . . .  	0002
+  msRate . . . . . . . . . . . .  	0004
+  msXThresh  . . . . . . . . . .  	0006
+  msYThresh  . . . . . . . . . .  	0008
+  msXRes . . . . . . . . . . . .  	000A
+  msYRes . . . . . . . . . . . .  	000C
+MSGSTRUCT  . . . . . . . . . . .  	0012	0006
+  msHWND . . . . . . . . . . . .  	0000
+  msMESSAGE  . . . . . . . . . .  	0002
+  msWPARAM . . . . . . . . . . .  	0004
+  msLPARAM . . . . . . . . . . .  	0006
+  msTIME . . . . . . . . . . . .  	000A
+  msPT . . . . . . . . . . . . .  	000E
+MouseServReq . . . . . . . . . .  	0010	0009
+  AmigaPCX . . . . . . . . . . .  	0000
+  AmigaPCY . . . . . . . . . . .  	0002
+  AmigaPCLeftP . . . . . . . . .  	0004
+  AmigaPCRightP  . . . . . . . .  	0006
+  AmigaPCLeftR . . . . . . . . .  	0008
+  AmigaPCRightR  . . . . . . . .  	000A
+  AmigaPCStatus  . . . . . . . .  	000C
+  WriteLock  . . . . . . . . . .  	000E
+  ChangeCount  . . . . . . . . .  	000F
+NEWPARMS . . . . . . . . . . . .  	0003	0002
+  nprmHwnd . . . . . . . . . . .  	0000
+  nprmCmd  . . . . . . . . . . .  	0002
+OPENSTRUC  . . . . . . . . . . .  	0080	0006
+  opLen  . . . . . . . . . . . .  	0000
+  opDisk . . . . . . . . . . . .  	0001
+  opXtra . . . . . . . . . . . .  	0002
+  opDate . . . . . . . . . . . .  	0004
+  opTime . . . . . . . . . . . .  	0006
+  opFile . . . . . . . . . . . .  	0008
+PAINTSTRUCT  . . . . . . . . . .  	0020	0006
+  PShdc  . . . . . . . . . . . .  	0000
+  PSfErase . . . . . . . . . . .  	0002
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-6
+
+
+  PSrcPaint  . . . . . . . . . .  	0004
+  PSfRestore . . . . . . . . . .  	000C
+  PSfIncUpdate . . . . . . . . .  	000E
+  PSrgbReserved  . . . . . . . .  	0010
+PALETTEENTRY . . . . . . . . . .  	0004	0004
+  peRed  . . . . . . . . . . . .  	0000
+  peGreen  . . . . . . . . . . .  	0001
+  peBlue . . . . . . . . . . . .  	0002
+  peFlags  . . . . . . . . . . .  	0003
+POINT  . . . . . . . . . . . . .  	0004	0002
+  ptX  . . . . . . . . . . . . .  	0000
+  ptY  . . . . . . . . . . . . .  	0002
+RECT . . . . . . . . . . . . . .  	0008	0004
+  rcLeft . . . . . . . . . . . .  	0000
+  rcTop  . . . . . . . . . . . .  	0002
+  rcRight  . . . . . . . . . . .  	0004
+  rcBottom . . . . . . . . . . .  	0006
+RGBQUAD  . . . . . . . . . . . .  	0004	0004
+  rgbqBlue . . . . . . . . . . .  	0000
+  rgbqGreen  . . . . . . . . . .  	0001
+  rgbqRed  . . . . . . . . . . .  	0002
+  rgbqReserved . . . . . . . . .  	0003
+RGBTRIPLE  . . . . . . . . . . .  	0003	0003
+  rgbBlue  . . . . . . . . . . .  	0000
+  rgbGreen . . . . . . . . . . .  	0001
+  rgbRed . . . . . . . . . . . .  	0002
+ServiceCustomer  . . . . . . . .  	001E	0005
+  scs_NextCustomer . . . . . . .  	0000
+  scs_Flags  . . . . . . . . . .  	0004
+  scs_Task . . . . . . . . . . .  	0006
+  scs_SignalBit  . . . . . . . .  	000A
+  scs_JazzReserved . . . . . . .  	000E
+ServiceData  . . . . . . . . . .  	003A	0012
+  sd_ApplicationID . . . . . . .  	0000
+  sd_LocalID . . . . . . . . . .  	0004
+  sd_Flags . . . . . . . . . . .  	0006
+  sd_ServiceDataLock . . . . . .  	0008
+  sd_AmigaUserCount  . . . . . .  	0009
+  sd_PCUserCount . . . . . . . .  	000A
+  sd_ReservedByte  . . . . . . .  	000B
+  sd_MemSize . . . . . . . . . .  	000C
+  sd_MemType . . . . . . . . . .  	000E
+  sd_MemOffset . . . . . . . . .  	0010
+  sd_AmigaMemPtr . . . . . . . .  	0012
+  sd_PCMemPtr  . . . . . . . . .  	0016
+  sd_JRememberKey  . . . . . . .  	001A
+  sd_NextServiceData . . . . . .  	001C
+  sd_FirstPCCustomer . . . . . .  	001E
+  sd_FirstAmigaCustomer  . . . .  	0022
+  sd_Semaphore . . . . . . . . .  	0026
+  sd_ZaphodReserved  . . . . . .  	002A
+TEXTMETRIC . . . . . . . . . . .  	001F	0014
+  tmHeight . . . . . . . . . . .  	0000
+  tmAscent . . . . . . . . . . .  	0002
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-7
+
+
+  tmDescent  . . . . . . . . . .  	0004
+  tmIntLeading . . . . . . . . .  	0006
+  tmExtLeading . . . . . . . . .  	0008
+  tmAveCharWidth . . . . . . . .  	000A
+  tmMaxCharWidth . . . . . . . .  	000C
+  tmWeight . . . . . . . . . . .  	000E
+  tmItalic . . . . . . . . . . .  	0010
+  tmUnderlined . . . . . . . . .  	0011
+  tmStruckOut  . . . . . . . . .  	0012
+  tmFirstChar  . . . . . . . . .  	0013
+  tmLastChar . . . . . . . . . .  	0014
+  tmDefaultChar  . . . . . . . .  	0015
+  tmBreakChar  . . . . . . . . .  	0016
+  tmPitch  . . . . . . . . . . .  	0017
+  tmCharSet  . . . . . . . . . .  	0018
+  tmOverhang . . . . . . . . . .  	0019
+  tmAspectX  . . . . . . . . . .  	001B
+  tmAspectY  . . . . . . . . . .  	001D
+TIMERINFO  . . . . . . . . . . .  	0004	0001
+  tiResolution . . . . . . . . .  	0000
+WNDCLASS . . . . . . . . . . . .  	001A	000A
+  clsStyle . . . . . . . . . . .  	0000
+  clsLpfnWndProc . . . . . . . .  	0002
+  clsCbClsExtra  . . . . . . . .  	0006
+  clsCbWndExtra  . . . . . . . .  	0008
+  clsHInstance . . . . . . . . .  	000A
+  clsHIcon . . . . . . . . . . .  	000C
+  clsHCursor . . . . . . . . . .  	000E
+  clsHbrBackground . . . . . . .  	0010
+  clsLpszMenuName  . . . . . . .  	0012
+  clsLpszClassName . . . . . . .  	0016
+WNDSTRUC . . . . . . . . . . . .  	0010	0006
+  WSwndStyle . . . . . . . . . .  	0000
+  WSwndID  . . . . . . . . . . .  	0004
+  WSwndText  . . . . . . . . . .  	0006
+  WSwndParent  . . . . . . . . .  	0008
+  WSwndInstance  . . . . . . . .  	000A
+  WSwndClassProc . . . . . . . .  	000C
+cursorShape  . . . . . . . . . .  	000C	0006
+  csHotX . . . . . . . . . . . .  	0000
+  csHotY . . . . . . . . . . . .  	0002
+  csWidth  . . . . . . . . . . .  	0004
+  csHeight . . . . . . . . . . .  	0006
+  csWidthBytes . . . . . . . . .  	0008
+  csColor  . . . . . . . . . . .  	000A
+
+Segments and Groups:
+
+                N a m e         	Length	 Align	Combine Class
+
+BIOSDataSeg  . . . . . . . . . .  	006D	AT	0040	
+DGROUP . . . . . . . . . . . . .  	GROUP
+  _DATA  . . . . . . . . . . . .  	00B0	WORD	PUBLIC	'DATA'
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-8
+
+
+_TEXT  . . . . . . . . . . . . .  	0498	WORD	PUBLIC	'CODE'
+
+Symbols:            
+
+                N a m e         	Type	 Value	 Attr
+
+ABORT  . . . . . . . . . . . . .  	NUMBER	0002	
+ABORTDOC . . . . . . . . . . . .  	NUMBER	0002	
+ABSOLUTE . . . . . . . . . . . .  	NUMBER	0001	
+ACK_PORT . . . . . . . . . . . .  	NUMBER	0020	
+ACK_SLAVE_PORT . . . . . . . . .  	NUMBER	00A0	
+ADDS_EXCLUSIVE . . . . . . . . .  	NUMBER	0001	
+ADDS_EXCLUSIVEn  . . . . . . . .  	NUMBER	0000	
+ADDS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+ADDS_FROMAMIGA_ONLYn . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+ADDS_FROMPC_ONLYn  . . . . . . .  	NUMBER	0002	
+ADDS_LOCKDATA  . . . . . . . . .  	NUMBER	0020	
+ADDS_LOCKDATAn . . . . . . . . .  	NUMBER	0005	
+ADDS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+ADDS_TOAMIGA_ONLYn . . . . . . .  	NUMBER	0003	
+ADDS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+ADDS_TOPC_ONLYn  . . . . . . . .  	NUMBER	0001	
+ALTERNATE  . . . . . . . . . . .  	NUMBER	0001	
+AMIGASTATE_RESERVED  . . . . . .  	NUMBER	FFF8	
+AMIGA_EXCLUSIVE  . . . . . . . .  	NUMBER	0010	
+AMIGA_EXCLUSIVEn . . . . . . . .  	NUMBER	0004	
+AMIGA_NUMLOCK_RESET  . . . . . .  	NUMBER	0002	
+AMIGA_NUMLOCK_RESETn . . . . . .  	NUMBER	0001	
+AMIGA_NUMLOCK_SET  . . . . . . .  	NUMBER	0001	
+AMIGA_NUMLOCK_SETn . . . . . . .  	NUMBER	0000	
+AMIGA_PC_READY . . . . . . . . .  	NUMBER	0004	
+AMIGA_PC_READYn  . . . . . . . .  	NUMBER	0002	
+ANSI_CHARSET . . . . . . . . . .  	NUMBER	0000	
+ANSI_FIXED_FONT  . . . . . . . .  	NUMBER	000B	
+ANSI_VAR_FONT  . . . . . . . . .  	NUMBER	000C	
+ASPECTX  . . . . . . . . . . . .  	NUMBER	0028	
+ASPECTXY . . . . . . . . . . . .  	NUMBER	002C	
+ASPECTY  . . . . . . . . . . . .  	NUMBER	002A	
+ASPECT_FILTERING . . . . . . . .  	NUMBER	0001	
+AllocDStoCSAlias . . . . . . . .  	L FAR 	0000		External
+AllocSelector  . . . . . . . . .  	L FAR 	0000		External
+amiga_closed . . . . . . . . . .  	L NEAR	0363	_TEXT
+amiga_open . . . . . . . . . . .  	L NEAR	0389	_TEXT
+
+BANDINFO . . . . . . . . . . . .  	NUMBER	0018	
+BASH_INT_PROC  . . . . . . . . .  	NUMBER	000C	
+BITSPIXEL  . . . . . . . . . . .  	NUMBER	000C	
+BI_RGB . . . . . . . . . . . . .  	NUMBER	0000	
+BI_RLE4  . . . . . . . . . . . .  	NUMBER	0002	
+BI_RLE8  . . . . . . . . . . . .  	NUMBER	0001	
+BLACKNESS_H  . . . . . . . . . .  	NUMBER	0000	
+BLACKNESS_L  . . . . . . . . . .  	NUMBER	0042	
+BLACKONWHITE . . . . . . . . . .  	NUMBER	0001	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-9
+
+
+BLACK_BRUSH  . . . . . . . . . .  	NUMBER	0004	
+BLACK_PEN  . . . . . . . . . . .  	NUMBER	0007	
+BM_GETCHECK  . . . . . . . . . .  	NUMBER	0400	
+BM_GETSTATE  . . . . . . . . . .  	NUMBER	0402	
+BM_SETCHECK  . . . . . . . . . .  	NUMBER	0401	
+BM_SETSTATE  . . . . . . . . . .  	NUMBER	0403	
+BM_SETSTYLE  . . . . . . . . . .  	NUMBER	0404	
+BN_CLICKED . . . . . . . . . . .  	NUMBER	0000	
+BN_DISABLE . . . . . . . . . . .  	NUMBER	0004	
+BN_DOUBLECLICKED . . . . . . . .  	NUMBER	0005	
+BN_HILITE  . . . . . . . . . . .  	NUMBER	0002	
+BN_PAINT . . . . . . . . . . . .  	NUMBER	0001	
+BN_UNHILITE  . . . . . . . . . .  	NUMBER	0003	
+BS_3STATE  . . . . . . . . . . .  	NUMBER	0005	
+BS_AUTO3STATE  . . . . . . . . .  	NUMBER	0006	
+BS_AUTOCHECKBOX  . . . . . . . .  	NUMBER	0003	
+BS_AUTORADIOBUTTON . . . . . . .  	NUMBER	0009	
+BS_CHECKBOX  . . . . . . . . . .  	NUMBER	0002	
+BS_DEFPUSHBUTTON . . . . . . . .  	NUMBER	0001	
+BS_DIBPATTERN  . . . . . . . . .  	NUMBER	0005	
+BS_GROUPBOX  . . . . . . . . . .  	NUMBER	0007	
+BS_HATCHED . . . . . . . . . . .  	NUMBER	0002	
+BS_HOLLOW  . . . . . . . . . . .  	NUMBER	0001	
+BS_INDEXED . . . . . . . . . . .  	NUMBER	0004	
+BS_LEFTTEXT  . . . . . . . . . .  	NUMBER	0020	
+BS_NULL  . . . . . . . . . . . .  	NUMBER	0001	
+BS_OWNERDRAW . . . . . . . . . .  	NUMBER	000B	
+BS_PATTERN . . . . . . . . . . .  	NUMBER	0003	
+BS_PUSHBOX . . . . . . . . . . .  	NUMBER	000A	
+BS_PUSHBUTTON  . . . . . . . . .  	NUMBER	0000	
+BS_RADIOBUTTON . . . . . . . . .  	NUMBER	0004	
+BS_SOLID . . . . . . . . . . . .  	NUMBER	0000	
+BS_USERBUTTON  . . . . . . . . .  	NUMBER	0008	
+BogusFarRetProc  . . . . . . . .  	F PROC	02D8	_TEXT	Length = 0001
+bios_time  . . . . . . . . . . .  	L BYTE	006C	BIOSDataSeg
+bptr . . . . . . . . . . . . . .  	TEXT  byte ptr		
+
+CALL_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0800	
+CALL_FROMAMIGA_ONLYn . . . . . .  	NUMBER	000B	
+CALL_FROMPC_ONLY . . . . . . . .  	NUMBER	0200	
+CALL_FROMPC_ONLYn  . . . . . . .  	NUMBER	0009	
+CALL_ON_ANY_INT  . . . . . . . .  	NUMBER	001F	
+CALL_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0400	
+CALL_TOAMIGA_ONLYn . . . . . . .  	NUMBER	000A	
+CALL_TOPC_ONLY . . . . . . . . .  	NUMBER	0100	
+CALL_TOPC_ONLYn  . . . . . . . .  	NUMBER	0008	
+CBM_INIT . . . . . . . . . . . .  	NUMBER	0004	
+CBN_DBLCLK . . . . . . . . . . .  	NUMBER	0002	
+CBN_DROPDOWN . . . . . . . . . .  	NUMBER	0007	
+CBN_EDITCHANGE . . . . . . . . .  	NUMBER	0005	
+CBN_EDITUPDATE . . . . . . . . .  	NUMBER	0006	
+CBN_ERRSPACE . . . . . . . . . .  	NUMBER	-0001	
+CBN_KILLFOCUS  . . . . . . . . .  	NUMBER	0004	
+CBN_SELCHANGE  . . . . . . . . .  	NUMBER	0001	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-10
+
+
+CBN_SETFOCUS . . . . . . . . . .  	NUMBER	0003	
+CBS_AUTOHSCROLL  . . . . . . . .  	NUMBER	0040	
+CBS_DROPDOWN . . . . . . . . . .  	NUMBER	0002	
+CBS_DROPDOWNLIST . . . . . . . .  	NUMBER	0003	
+CBS_HASSTRINGS . . . . . . . . .  	NUMBER	0200	
+CBS_NOINTEGRALHEIGHT . . . . . .  	NUMBER	0400	
+CBS_OEMCONVERT . . . . . . . . .  	NUMBER	0080	
+CBS_OWNERDRAWFIXED . . . . . . .  	NUMBER	0010	
+CBS_OWNERDRAWVARIABLE  . . . . .  	NUMBER	0020	
+CBS_SIMPLE . . . . . . . . . . .  	NUMBER	0001	
+CBS_SORT . . . . . . . . . . . .  	NUMBER	0100	
+CB_ADDSTRING . . . . . . . . . .  	NUMBER	0403	
+CB_DELETESTRING  . . . . . . . .  	NUMBER	0404	
+CB_DIR . . . . . . . . . . . . .  	NUMBER	0405	
+CB_ERR . . . . . . . . . . . . .  	NUMBER	-0001	
+CB_ERRSPACE  . . . . . . . . . .  	NUMBER	-0002	
+CB_FINDSTRING  . . . . . . . . .  	NUMBER	040C	
+CB_GETCOUNT  . . . . . . . . . .  	NUMBER	0406	
+CB_GETCURSEL . . . . . . . . . .  	NUMBER	0407	
+CB_GETDROPPEDCONTROLRECT . . . .  	NUMBER	0412	
+CB_GETEDITSEL  . . . . . . . . .  	NUMBER	0400	
+CB_GETITEMDATA . . . . . . . . .  	NUMBER	0410	
+CB_GETLBTEXT . . . . . . . . . .  	NUMBER	0408	
+CB_GETLBTEXTLEN  . . . . . . . .  	NUMBER	0409	
+CB_INSERTSTRING  . . . . . . . .  	NUMBER	040A	
+CB_LIMITTEXT . . . . . . . . . .  	NUMBER	0401	
+CB_MSGMAX  . . . . . . . . . . .  	NUMBER	0413	
+CB_OKAY  . . . . . . . . . . . .  	NUMBER	0000	
+CB_RESETCONTENT  . . . . . . . .  	NUMBER	040B	
+CB_SELECTSTRING  . . . . . . . .  	NUMBER	040D	
+CB_SETCURSEL . . . . . . . . . .  	NUMBER	040E	
+CB_SETEDITSEL  . . . . . . . . .  	NUMBER	0402	
+CB_SETITEMDATA . . . . . . . . .  	NUMBER	0411	
+CB_SHOWDROPDOWN  . . . . . . . .  	NUMBER	040F	
+CC_CHORD . . . . . . . . . . . .  	NUMBER	0004	
+CC_CIRCLES . . . . . . . . . . .  	NUMBER	0001	
+CC_ELLIPSES  . . . . . . . . . .  	NUMBER	0008	
+CC_INTERIORS . . . . . . . . . .  	NUMBER	0080	
+CC_NONE  . . . . . . . . . . . .  	NUMBER	0000	
+CC_PIE . . . . . . . . . . . . .  	NUMBER	0002	
+CC_STYLED  . . . . . . . . . . .  	NUMBER	0020	
+CC_WIDE  . . . . . . . . . . . .  	NUMBER	0010	
+CC_WIDESTYLED  . . . . . . . . .  	NUMBER	0040	
+CE_BREAK . . . . . . . . . . . .  	NUMBER	0010	
+CE_CTSTO . . . . . . . . . . . .  	NUMBER	0020	
+CE_DNS . . . . . . . . . . . . .  	NUMBER	0800	
+CE_DSRTO . . . . . . . . . . . .  	NUMBER	0040	
+CE_FRAME . . . . . . . . . . . .  	NUMBER	0008	
+CE_IOE . . . . . . . . . . . . .  	NUMBER	0400	
+CE_MODE  . . . . . . . . . . . .  	NUMBER	8000	
+CE_OOP . . . . . . . . . . . . .  	NUMBER	1000	
+CE_OVERRUN . . . . . . . . . . .  	NUMBER	0002	
+CE_PTO . . . . . . . . . . . . .  	NUMBER	0200	
+CE_RLSDTO  . . . . . . . . . . .  	NUMBER	0080	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-11
+
+
+CE_RXOVER  . . . . . . . . . . .  	NUMBER	0001	
+CE_RXPARITY  . . . . . . . . . .  	NUMBER	0004	
+CE_TXFULL  . . . . . . . . . . .  	NUMBER	0100	
+CF_BITMAP  . . . . . . . . . . .  	NUMBER	0002	
+CF_DIB . . . . . . . . . . . . .  	NUMBER	0008	
+CF_DIF . . . . . . . . . . . . .  	NUMBER	0005	
+CF_DSPBITMAP . . . . . . . . . .  	NUMBER	0082	
+CF_DSPMETAFILEPICT . . . . . . .  	NUMBER	0083	
+CF_DSPTEXT . . . . . . . . . . .  	NUMBER	0081	
+CF_GDIOBJFIRST . . . . . . . . .  	NUMBER	0300	
+CF_GDIOBJLAST  . . . . . . . . .  	NUMBER	03FF	
+CF_METAFILEPICT  . . . . . . . .  	NUMBER	0003	
+CF_OEMTEXT . . . . . . . . . . .  	NUMBER	0007	
+CF_OWNERDISPLAY  . . . . . . . .  	NUMBER	0080	
+CF_PALETTE . . . . . . . . . . .  	NUMBER	0009	
+CF_PRIVATEFIRST  . . . . . . . .  	NUMBER	0200	
+CF_PRIVATELAST . . . . . . . . .  	NUMBER	02FF	
+CF_SYLK  . . . . . . . . . . . .  	NUMBER	0004	
+CF_TEXT  . . . . . . . . . . . .  	NUMBER	0001	
+CF_TIFF  . . . . . . . . . . . .  	NUMBER	0006	
+CGAType  . . . . . . . . . . . .  	NUMBER	0004	
+CLEAR_COUNTERS . . . . . . . . .  	NUMBER	000B	
+CLIPCAPS . . . . . . . . . . . .  	NUMBER	0024	
+CLRDTR . . . . . . . . . . . . .  	NUMBER	0006	
+CLRRTS . . . . . . . . . . . . .  	NUMBER	0004	
+COLORONCOLOR . . . . . . . . . .  	NUMBER	0003	
+COLORRES . . . . . . . . . . . .  	NUMBER	006C	
+COLOR_ACTIVEBORDER . . . . . . .  	NUMBER	000A	
+COLOR_ACTIVECAPTION  . . . . . .  	NUMBER	0002	
+COLOR_APPWORKSPACE . . . . . . .  	NUMBER	000C	
+COLOR_BACKGROUND . . . . . . . .  	NUMBER	0001	
+COLOR_BTNFACE  . . . . . . . . .  	NUMBER	000F	
+COLOR_BTNSHADOW  . . . . . . . .  	NUMBER	0010	
+COLOR_BTNTEXT  . . . . . . . . .  	NUMBER	0012	
+COLOR_CAPTIONTEXT  . . . . . . .  	NUMBER	0009	
+COLOR_GRAYTEXT . . . . . . . . .  	NUMBER	0011	
+COLOR_HIGHLIGHT  . . . . . . . .  	NUMBER	000D	
+COLOR_HIGHLIGHTTEXT  . . . . . .  	NUMBER	000E	
+COLOR_INACTIVEBORDER . . . . . .  	NUMBER	000B	
+COLOR_INACTIVECAPTION  . . . . .  	NUMBER	0003	
+COLOR_MENU . . . . . . . . . . .  	NUMBER	0004	
+COLOR_MENUTEXT . . . . . . . . .  	NUMBER	0007	
+COLOR_SCROLLBAR  . . . . . . . .  	NUMBER	0000	
+COLOR_WINDOW . . . . . . . . . .  	NUMBER	0005	
+COLOR_WINDOWFRAME  . . . . . . .  	NUMBER	0006	
+COLOR_WINDOWTEXT . . . . . . . .  	NUMBER	0008	
+COMPLEXREGION  . . . . . . . . .  	NUMBER	0003	
+CP_NONE  . . . . . . . . . . . .  	NUMBER	0000	
+CP_RECTANGLE . . . . . . . . . .  	NUMBER	0001	
+CSEG_device_int  . . . . . . . .  	L WORD	0038	_DATA	Global
+CS_BYTEALIGNCLIENT . . . . . . .  	NUMBER	1000	
+CS_BYTEALIGNWINDOW . . . . . . .  	NUMBER	2000	
+CS_CLASSDC . . . . . . . . . . .  	NUMBER	0040	
+CS_DBLCLKS . . . . . . . . . . .  	NUMBER	0008	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-12
+
+
+CS_GLOBALCLASS . . . . . . . . .  	NUMBER	4000	
+CS_HREDRAW . . . . . . . . . . .  	NUMBER	0002	
+CS_KEYCVTWINDOW  . . . . . . . .  	NUMBER	0004	
+CS_NOCLOSE . . . . . . . . . . .  	NUMBER	0200	
+CS_NOKEYCVT  . . . . . . . . . .  	NUMBER	0100	
+CS_OWNDC . . . . . . . . . . . .  	NUMBER	0020	
+CS_PARENTDC  . . . . . . . . . .  	NUMBER	0080	
+CS_SAVEBITS  . . . . . . . . . .  	NUMBER	0800	
+CS_VREDRAW . . . . . . . . . . .  	NUMBER	0001	
+CURVECAPS  . . . . . . . . . . .  	NUMBER	001C	
+CW_USEDEFAULT  . . . . . . . . .  	NUMBER	8000	
+CodeBASE . . . . . . . . . . . .  	ALIAS	 _TEXT		
+CodeOFFSET . . . . . . . . . . .  	TEXT  offset _TEXT:		
+CreateSystemTimer  . . . . . . .  	L FAR 	0000		External
+change . . . . . . . . . . . . .  	L NEAR	0026	_TEXT
+close_amiga  . . . . . . . . . .  	N PROC	0308	_TEXT	Length = 0004
+close_stuff  . . . . . . . . . .  	N PROC	0354	_TEXT	Length = 001F
+close_windows  . . . . . . . . .  	N PROC	030C	_TEXT	Length = 0048
+create_a_seg . . . . . . . . . .  	L NEAR	00F6	_TEXT
+create_done  . . . . . . . . . .  	L NEAR	02AC	_TEXT
+create_ds  . . . . . . . . . . .  	N PROC	0281	_TEXT	Length = 002F
+create_real  . . . . . . . . . .  	L NEAR	029F	_TEXT
+
+DEFAULT_PALETTE  . . . . . . . .  	NUMBER	000F	
+DEVICEDATA . . . . . . . . . . .  	NUMBER	0013	
+DEVICE_DEFAULT_FONT  . . . . . .  	NUMBER	000E	
+DIB_PAL_COLORS . . . . . . . . .  	NUMBER	0001	
+DIB_RGB_COLORS . . . . . . . . .  	NUMBER	0000	
+DKGRAY_BRUSH . . . . . . . . . .  	NUMBER	0003	
+DLGC_BUTTON  . . . . . . . . . .  	NUMBER	2000	
+DLGC_DEFPUSHBUTTON . . . . . . .  	NUMBER	0010	
+DLGC_HASSETSEL . . . . . . . . .  	NUMBER	0008	
+DLGC_RADIOBUTTON . . . . . . . .  	NUMBER	0040	
+DLGC_STATIC  . . . . . . . . . .  	NUMBER	0100	
+DLGC_UNDEFPUSHBUTTON . . . . . .  	NUMBER	0020	
+DLGC_WANTALLKEYS . . . . . . . .  	NUMBER	0004	
+DLGC_WANTARROWS  . . . . . . . .  	NUMBER	0001	
+DLGC_WANTCHARS . . . . . . . . .  	NUMBER	0080	
+DLGC_WANTMESSAGE . . . . . . . .  	NUMBER	0004	
+DLGC_WANTTAB . . . . . . . . . .  	NUMBER	0002	
+DM_GETDEFID  . . . . . . . . . .  	NUMBER	0400	
+DM_SETDEFID  . . . . . . . . . .  	NUMBER	0401	
+DOT_MARKER . . . . . . . . . . .  	NUMBER	0009	
+DPCopyArea . . . . . . . . . . .  	L WORD	0024	_DATA	Length = 0007
+DPSize . . . . . . . . . . . . .  	NUMBER	0007	
+DRAFTMODE  . . . . . . . . . . .  	NUMBER	0007	
+DRAWPATTERNRECT  . . . . . . . .  	NUMBER	0019	
+DRIVERVERSION  . . . . . . . . .  	NUMBER	0000	
+DSEG_device_int  . . . . . . . .  	L WORD	0036	_DATA	Global
+DSTINVERT_H  . . . . . . . . . .  	NUMBER	0055	
+DSTINVERT_L  . . . . . . . . . .  	NUMBER	0009	
+DS_ABSALIGN  . . . . . . . . . .  	NUMBER	0001	
+DS_LOCALEDIT . . . . . . . . . .  	NUMBER	0020	
+DS_MODALFRAME  . . . . . . . . .  	NUMBER	0080	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-13
+
+
+DS_NOIDLEMSG . . . . . . . . . .  	NUMBER	0100	
+DS_SETFONT . . . . . . . . . . .  	NUMBER	0040	
+DS_SYSMODAL  . . . . . . . . . .  	NUMBER	0002	
+DT_BOTTOM  . . . . . . . . . . .  	NUMBER	0008	
+DT_CALCRECT  . . . . . . . . . .  	NUMBER	0400	
+DT_CENTER  . . . . . . . . . . .  	NUMBER	0001	
+DT_CHARSTREAM  . . . . . . . . .  	NUMBER	0004	
+DT_DISPFILE  . . . . . . . . . .  	NUMBER	0006	
+DT_EXPANDTABS  . . . . . . . . .  	NUMBER	0040	
+DT_EXTERNALLEADING . . . . . . .  	NUMBER	0200	
+DT_INTERNAL  . . . . . . . . . .  	NUMBER	1000	
+DT_LEFT  . . . . . . . . . . . .  	NUMBER	0000	
+DT_METAFILE  . . . . . . . . . .  	NUMBER	0005	
+DT_NOCLIP  . . . . . . . . . . .  	NUMBER	0100	
+DT_NOPREFIX  . . . . . . . . . .  	NUMBER	0800	
+DT_PLOTTER . . . . . . . . . . .  	NUMBER	0000	
+DT_RASCAMERA . . . . . . . . . .  	NUMBER	0003	
+DT_RASDISPLAY  . . . . . . . . .  	NUMBER	0001	
+DT_RASPRINTER  . . . . . . . . .  	NUMBER	0002	
+DT_RIGHT . . . . . . . . . . . .  	NUMBER	0002	
+DT_SINGLELINE  . . . . . . . . .  	NUMBER	0020	
+DT_TABSTOP . . . . . . . . . . .  	NUMBER	0080	
+DT_TOP . . . . . . . . . . . . .  	NUMBER	0000	
+DT_VCENTER . . . . . . . . . . .  	NUMBER	0004	
+DT_WORDBREAK . . . . . . . . . .  	NUMBER	0010	
+DataBASE . . . . . . . . . . . .  	ALIAS	 DGROUP		
+DataOFFSET . . . . . . . . . . .  	TEXT  offset DGROUP:		
+Disable  . . . . . . . . . . . .  	F PROC	044C	_TEXT	Global	Length = 0024
+determine_mode . . . . . . . . .  	N PROC	008D	_TEXT	Length = 0028
+device_int . . . . . . . . . . .  	F PROC	007A	_DATA	Global	Length = 0036
+device_int_sel . . . . . . . . .  	L WORD	003A	_DATA	Global
+disable_done . . . . . . . . . .  	L NEAR	0467	_TEXT
+disable_proc . . . . . . . . . .  	N PROC	03C4	_TEXT	Length = 000D
+dptr . . . . . . . . . . . . . .  	TEXT  dword ptr		
+
+EGAType  . . . . . . . . . . . .  	NUMBER	0002	
+EM_CANUNDO . . . . . . . . . . .  	NUMBER	0416	
+EM_EMPTYUNDOBUFFER . . . . . . .  	NUMBER	041D	
+EM_FMTLINES  . . . . . . . . . .  	NUMBER	0418	
+EM_GETHANDLE . . . . . . . . . .  	NUMBER	040D	
+EM_GETLINE . . . . . . . . . . .  	NUMBER	0414	
+EM_GETLINECOUNT  . . . . . . . .  	NUMBER	040A	
+EM_GETMODIFY . . . . . . . . . .  	NUMBER	0408	
+EM_GETRECT . . . . . . . . . . .  	NUMBER	0402	
+EM_GETSEL  . . . . . . . . . . .  	NUMBER	0400	
+EM_GETTHUMB  . . . . . . . . . .  	NUMBER	040E	
+EM_LIMITTEXT . . . . . . . . . .  	NUMBER	0415	
+EM_LINEFROMCHAR  . . . . . . . .  	NUMBER	0419	
+EM_LINEINDEX . . . . . . . . . .  	NUMBER	040B	
+EM_LINELENGTH  . . . . . . . . .  	NUMBER	0411	
+EM_LINESCROLL  . . . . . . . . .  	NUMBER	0406	
+EM_MSGMAX  . . . . . . . . . . .  	NUMBER	041E	
+EM_REPLACESEL  . . . . . . . . .  	NUMBER	0412	
+EM_SCROLL  . . . . . . . . . . .  	NUMBER	0405	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-14
+
+
+EM_SETFONT . . . . . . . . . . .  	NUMBER	0413	
+EM_SETHANDLE . . . . . . . . . .  	NUMBER	040C	
+EM_SETMODIFY . . . . . . . . . .  	NUMBER	0409	
+EM_SETPASSWORDCHAR . . . . . . .  	NUMBER	041C	
+EM_SETRECT . . . . . . . . . . .  	NUMBER	0403	
+EM_SETRECTNP . . . . . . . . . .  	NUMBER	0404	
+EM_SETSEL  . . . . . . . . . . .  	NUMBER	0401	
+EM_SETTABSTOPS . . . . . . . . .  	NUMBER	041B	
+EM_SETWORDBREAK  . . . . . . . .  	NUMBER	041A	
+EM_UNDO  . . . . . . . . . . . .  	NUMBER	0417	
+ENABLEDUPLEX . . . . . . . . . .  	NUMBER	001C	
+ENABLEMANUALFEED . . . . . . . .  	NUMBER	001D	
+ENABLEPAIRKERNING  . . . . . . .  	NUMBER	0301	
+ENABLERELATIVEWIDTHS . . . . . .  	NUMBER	0300	
+ENUMPAPERBINS  . . . . . . . . .  	NUMBER	001F	
+EN_CHANGE  . . . . . . . . . . .  	NUMBER	012C	
+EN_ERRSPACE  . . . . . . . . . .  	NUMBER	01F4	
+EN_HSCROLL . . . . . . . . . . .  	NUMBER	0259	
+EN_KILLFOCUS . . . . . . . . . .  	NUMBER	00C8	
+EN_MAXTEXT . . . . . . . . . . .  	NUMBER	01F5	
+EN_SETFOCUS  . . . . . . . . . .  	NUMBER	0064	
+EN_UPDATE  . . . . . . . . . . .  	NUMBER	0190	
+EN_VSCROLL . . . . . . . . . . .  	NUMBER	025A	
+EOI  . . . . . . . . . . . . . .  	NUMBER	0020	
+ERRORREGION  . . . . . . . . . .  	NUMBER	0000	
+ES_AUTOHSCROLL . . . . . . . . .  	NUMBER	0080	
+ES_AUTOVSCROLL . . . . . . . . .  	NUMBER	0040	
+ES_CENTER  . . . . . . . . . . .  	NUMBER	0001	
+ES_LEFT  . . . . . . . . . . . .  	NUMBER	0000	
+ES_LOWERCASE . . . . . . . . . .  	NUMBER	0010	
+ES_MULTILINE . . . . . . . . . .  	NUMBER	0004	
+ES_NOHIDESEL . . . . . . . . . .  	NUMBER	0100	
+ES_OEMCONVERT  . . . . . . . . .  	NUMBER	0400	
+ES_PASSWORD  . . . . . . . . . .  	NUMBER	0020	
+ES_RIGHT . . . . . . . . . . . .  	NUMBER	0002	
+ES_UPPERCASE . . . . . . . . . .  	NUMBER	0008	
+ETO_CLIPPED  . . . . . . . . . .  	NUMBER	0004	
+ETO_GRAYED . . . . . . . . . . .  	NUMBER	0001	
+ETO_OPAQUE . . . . . . . . . . .  	NUMBER	0002	
+EVENPARITY . . . . . . . . . . .  	NUMBER	0002	
+EV_BREAK . . . . . . . . . . . .  	NUMBER	0040	
+EV_CTS . . . . . . . . . . . . .  	NUMBER	0008	
+EV_DSR . . . . . . . . . . . . .  	NUMBER	0010	
+EV_ERR . . . . . . . . . . . . .  	NUMBER	0080	
+EV_PERR  . . . . . . . . . . . .  	NUMBER	0200	
+EV_RING  . . . . . . . . . . . .  	NUMBER	0100	
+EV_RLSD  . . . . . . . . . . . .  	NUMBER	0020	
+EV_RXCHAR  . . . . . . . . . . .  	NUMBER	0001	
+EV_RXFLAG  . . . . . . . . . . .  	NUMBER	0002	
+EV_TXEMPTY . . . . . . . . . . .  	NUMBER	0004	
+EXPUNGE_SERVICE  . . . . . . . .  	NUMBER	0002	
+EXPUNGE_SERVICEn . . . . . . . .  	NUMBER	0001	
+EXTTEXTOUT . . . . . . . . . . .  	NUMBER	0200	
+Enable . . . . . . . . . . . . .  	F PROC	0418	_TEXT	Global	Length = 0034
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-15
+
+
+ena_failed . . . . . . . . . . .  	L NEAR	03C3	_TEXT
+enable_done  . . . . . . . . . .  	L NEAR	0441	_TEXT
+enable_proc  . . . . . . . . . .  	N PROC	03A8	_TEXT	Length = 001C
+event_proc . . . . . . . . . . .  	L DWORD	0010	_DATA	Global
+
+FALSE  . . . . . . . . . . . . .  	NUMBER	0000	
+FATAL_ERROR  . . . . . . . . . .  	NUMBER	0002	
+FLOODFILLBORDER  . . . . . . . .  	NUMBER	0000	
+FLOODFILLSURFACE . . . . . . . .  	NUMBER	0001	
+FLUSHOUTPUT  . . . . . . . . . .  	NUMBER	0006	
+FreeSelector . . . . . . . . . .  	L FAR 	0000		External
+free_done  . . . . . . . . . . .  	L NEAR	022B	_TEXT
+free_real  . . . . . . . . . . .  	L NEAR	0229	_TEXT
+free_service . . . . . . . . . .  	N PROC	020A	_TEXT	Length = 0022
+
+GCL_MENUNAME . . . . . . . . . .  	NUMBER	-0008	
+GCL_WNDPROC  . . . . . . . . . .  	NUMBER	-0018	
+GCW_CBCLSEXTRA . . . . . . . . .  	NUMBER	-0014	
+GCW_CBWNDEXTRA . . . . . . . . .  	NUMBER	-0012	
+GCW_HBRBACKGROUND  . . . . . . .  	NUMBER	-000A	
+GCW_HCURSOR  . . . . . . . . . .  	NUMBER	-000C	
+GCW_HICON  . . . . . . . . . . .  	NUMBER	-000E	
+GCW_HMODULE  . . . . . . . . . .  	NUMBER	-0010	
+GCW_STYLE  . . . . . . . . . . .  	NUMBER	-001A	
+GETCOLORTABLE  . . . . . . . . .  	NUMBER	0005	
+GETEXTENDEDTEXTMETRICS . . . . .  	NUMBER	0100	
+GETEXTENTTABLE . . . . . . . . .  	NUMBER	0101	
+GETPAIRKERNTABLE . . . . . . . .  	NUMBER	0102	
+GETPENWIDTH  . . . . . . . . . .  	NUMBER	0010	
+GETPHYSPAGESIZE  . . . . . . . .  	NUMBER	000C	
+GETPRINTINGOFFSET  . . . . . . .  	NUMBER	000D	
+GETSCALINGFACTOR . . . . . . . .  	NUMBER	000E	
+GETSETPAPERBINS  . . . . . . . .  	NUMBER	001D	
+GETSETPRINTORIENT  . . . . . . .  	NUMBER	001E	
+GETS_ALOAD_A . . . . . . . . . .  	NUMBER	0040	
+GETS_ALOAD_An  . . . . . . . . .  	NUMBER	0006	
+GETS_ALOAD_PC  . . . . . . . . .  	NUMBER	0080	
+GETS_ALOAD_PCn . . . . . . . . .  	NUMBER	0007	
+GETS_EXCLUSIVE . . . . . . . . .  	NUMBER	0020	
+GETS_EXCLUSIVEn  . . . . . . . .  	NUMBER	0005	
+GETS_FROMAMIGA_ONLY  . . . . . .  	NUMBER	0010	
+GETS_FROMAMIGA_ONLYn . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLY . . . . . . . .  	NUMBER	0004	
+GETS_FROMPC_ONLYn  . . . . . . .  	NUMBER	0002	
+GETS_TOAMIGA_ONLY  . . . . . . .  	NUMBER	0008	
+GETS_TOAMIGA_ONLYn . . . . . . .  	NUMBER	0003	
+GETS_TOPC_ONLY . . . . . . . . .  	NUMBER	0002	
+GETS_TOPC_ONLYn  . . . . . . . .  	NUMBER	0001	
+GETS_WAIT  . . . . . . . . . . .  	NUMBER	0001	
+GETS_WAIT_120  . . . . . . . . .  	NUMBER	0300	
+GETS_WAIT_15 . . . . . . . . . .  	NUMBER	0100	
+GETS_WAIT_30 . . . . . . . . . .  	NUMBER	0200	
+GETS_WAITmask  . . . . . . . . .  	NUMBER	0300	
+GETS_WAITn . . . . . . . . . . .  	NUMBER	0000	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-16
+
+
+GETTECHNOLGY . . . . . . . . . .  	NUMBER	0014	
+GETTECHNOLOGY  . . . . . . . . .  	NUMBER	0014	
+GETTRACKKERNTABLE  . . . . . . .  	NUMBER	0103	
+GETVECTORBRUSHSIZE . . . . . . .  	NUMBER	001B	
+GETVECTORPENSIZE . . . . . . . .  	NUMBER	001A	
+GHND . . . . . . . . . . . . . .  	NUMBER	0042	
+GMEM_DDESHARE  . . . . . . . . .  	NUMBER	2000	
+GMEM_DISCARDABLE . . . . . . . .  	NUMBER	0100	
+GMEM_DISCARDED . . . . . . . . .  	NUMBER	4000	
+GMEM_FIXED . . . . . . . . . . .  	NUMBER	0000	
+GMEM_LOCKCOUNT . . . . . . . . .  	NUMBER	00FF	
+GMEM_LOWER . . . . . . . . . . .  	NUMBER	1000	
+GMEM_MODIFY  . . . . . . . . . .  	NUMBER	0080	
+GMEM_MOVEABLE  . . . . . . . . .  	NUMBER	0002	
+GMEM_NOCOMPACT . . . . . . . . .  	NUMBER	0010	
+GMEM_NODISCARD . . . . . . . . .  	NUMBER	0020	
+GMEM_NOTIFY  . . . . . . . . . .  	NUMBER	4000	
+GMEM_NOT_BANKED  . . . . . . . .  	NUMBER	1000	
+GMEM_SHARE . . . . . . . . . . .  	NUMBER	2000	
+GMEM_ZEROINIT  . . . . . . . . .  	NUMBER	0040	
+GPTR . . . . . . . . . . . . . .  	NUMBER	0040	
+GRAY_BRUSH . . . . . . . . . . .  	NUMBER	0002	
+GWL_EXSTYLE  . . . . . . . . . .  	NUMBER	-0014	
+GWL_STYLE  . . . . . . . . . . .  	NUMBER	-0010	
+GWL_WNDPROC  . . . . . . . . . .  	NUMBER	-0004	
+GWW_HINSTANCE  . . . . . . . . .  	NUMBER	-0006	
+GWW_HWNDPARENT . . . . . . . . .  	NUMBER	-0008	
+GWW_ID . . . . . . . . . . . . .  	NUMBER	-000C	
+GW_CHILD . . . . . . . . . . . .  	NUMBER	0005	
+GW_HWNDFIRST . . . . . . . . . .  	NUMBER	0000	
+GW_HWNDLAST  . . . . . . . . . .  	NUMBER	0001	
+GW_HWNDNEXT  . . . . . . . . . .  	NUMBER	0002	
+GW_HWNDPREV  . . . . . . . . . .  	NUMBER	0003	
+GW_OWNER . . . . . . . . . . . .  	NUMBER	0004	
+GetButtons . . . . . . . . . . .  	L NEAR	0062	_TEXT
+GetLRel  . . . . . . . . . . . .  	L NEAR	006C	_TEXT
+GetRPrs  . . . . . . . . . . . .  	L NEAR	0076	_TEXT
+GetRRel  . . . . . . . . . . . .  	L NEAR	0080	_TEXT
+GetStatus  . . . . . . . . . . .  	L NEAR	008A	_TEXT
+GetWinFlags  . . . . . . . . . .  	L FAR 	0000		External
+GetY . . . . . . . . . . . . . .  	L NEAR	0056	_TEXT
+get_done . . . . . . . . . . . .  	L NEAR	0269	_TEXT
+get_real . . . . . . . . . . . .  	L NEAR	0266	_TEXT
+get_service  . . . . . . . . . .  	N PROC	0259	_TEXT	Length = 0011
+get_service_prot . . . . . . . .  	N PROC	0189	_TEXT	Length = 0081
+get_service_real . . . . . . . .  	N PROC	012F	_TEXT	Length = 005A
+getp_done  . . . . . . . . . . .  	L NEAR	0209	_TEXT
+getp_failed  . . . . . . . . . .  	L NEAR	0206	_TEXT
+getr_done  . . . . . . . . . . .  	L NEAR	0188	_TEXT
+getr_failed  . . . . . . . . . .  	L NEAR	0185	_TEXT
+
+HCBT_MINMAX  . . . . . . . . . .  	NUMBER	0001	
+HCBT_MOVESIZE  . . . . . . . . .  	NUMBER	0000	
+HCBT_QS  . . . . . . . . . . . .  	NUMBER	0002	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-17
+
+
+HC_ACTION  . . . . . . . . . . .  	NUMBER	0000	
+HC_GETNEXT . . . . . . . . . . .  	NUMBER	0001	
+HC_LPFNNEXT  . . . . . . . . . .  	NUMBER	-0001	
+HC_LPLPFNNEXT  . . . . . . . . .  	NUMBER	-0002	
+HC_NOREM . . . . . . . . . . . .  	NUMBER	0003	
+HC_NOREMOVE  . . . . . . . . . .  	NUMBER	0003	
+HC_SKIP  . . . . . . . . . . . .  	NUMBER	0002	
+HC_SYSMODALOFF . . . . . . . . .  	NUMBER	0005	
+HC_SYSMODALON  . . . . . . . . .  	NUMBER	0004	
+HELP_CONTEXT . . . . . . . . . .  	NUMBER	0001	
+HELP_HELPONHELP  . . . . . . . .  	NUMBER	0004	
+HELP_INDEX . . . . . . . . . . .  	NUMBER	0003	
+HELP_KEY . . . . . . . . . . . .  	NUMBER	0101	
+HELP_QUIT  . . . . . . . . . . .  	NUMBER	0002	
+HELP_SETINDEX  . . . . . . . . .  	NUMBER	0005	
+HIDE_WINDOW  . . . . . . . . . .  	NUMBER	0000	
+HOLLOW_BRUSH . . . . . . . . . .  	NUMBER	0005	
+HORZRES  . . . . . . . . . . . .  	NUMBER	0008	
+HORZSIZE . . . . . . . . . . . .  	NUMBER	0004	
+HS_BDIAGONAL . . . . . . . . . .  	NUMBER	0003	
+HS_CROSS . . . . . . . . . . . .  	NUMBER	0004	
+HS_DIAGCROSS . . . . . . . . . .  	NUMBER	0005	
+HS_FDIAGONAL . . . . . . . . . .  	NUMBER	0002	
+HS_HORIZONTAL  . . . . . . . . .  	NUMBER	0000	
+HS_VERTICAL  . . . . . . . . . .  	NUMBER	0001	
+HTBOTTOM . . . . . . . . . . . .  	NUMBER	000F	
+HTBOTTOMLEFT . . . . . . . . . .  	NUMBER	0010	
+HTBOTTOMRIGHT  . . . . . . . . .  	NUMBER	0011	
+HTCAPTION  . . . . . . . . . . .  	NUMBER	0002	
+HTCLIENT . . . . . . . . . . . .  	NUMBER	0001	
+HTERROR  . . . . . . . . . . . .  	NUMBER	-0002	
+HTGROWBOX  . . . . . . . . . . .  	NUMBER	0004	
+HTHSCROLL  . . . . . . . . . . .  	NUMBER	0006	
+HTLEFT . . . . . . . . . . . . .  	NUMBER	000A	
+HTMENU . . . . . . . . . . . . .  	NUMBER	0005	
+HTNOWHERE  . . . . . . . . . . .  	NUMBER	0000	
+HTREDUCE . . . . . . . . . . . .  	NUMBER	0008	
+HTRIGHT  . . . . . . . . . . . .  	NUMBER	000B	
+HTSIZE . . . . . . . . . . . . .  	NUMBER	0004	
+HTSIZEFIRST  . . . . . . . . . .  	NUMBER	000A	
+HTSIZELAST . . . . . . . . . . .  	NUMBER	0011	
+HTSYSMENU  . . . . . . . . . . .  	NUMBER	0003	
+HTTOP  . . . . . . . . . . . . .  	NUMBER	000C	
+HTTOPLEFT  . . . . . . . . . . .  	NUMBER	000D	
+HTTOPRIGHT . . . . . . . . . . .  	NUMBER	000E	
+HTTRANSPARENT  . . . . . . . . .  	NUMBER	-0001	
+HTVSCROLL  . . . . . . . . . . .  	NUMBER	0007	
+HTZOOM . . . . . . . . . . . . .  	NUMBER	0009	
+HerType  . . . . . . . . . . . .  	NUMBER	0010	
+
+IDABORT  . . . . . . . . . . . .  	NUMBER	0003	
+IDCANCEL . . . . . . . . . . . .  	NUMBER	0002	
+IDC_ARROW  . . . . . . . . . . .  	NUMBER	7F00	
+IDC_CROSS  . . . . . . . . . . .  	NUMBER	7F03	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-18
+
+
+IDC_IBEAM  . . . . . . . . . . .  	NUMBER	7F01	
+IDC_ICON . . . . . . . . . . . .  	NUMBER	7F81	
+IDC_SIZE . . . . . . . . . . . .  	NUMBER	7F80	
+IDC_SIZENESW . . . . . . . . . .  	NUMBER	7F83	
+IDC_SIZENS . . . . . . . . . . .  	NUMBER	7F85	
+IDC_SIZENWSE . . . . . . . . . .  	NUMBER	7F82	
+IDC_SIZEWE . . . . . . . . . . .  	NUMBER	7F84	
+IDC_UPARROW  . . . . . . . . . .  	NUMBER	7F04	
+IDC_WAIT . . . . . . . . . . . .  	NUMBER	7F02	
+IDIGNORE . . . . . . . . . . . .  	NUMBER	0005	
+IDI_APPLICATION  . . . . . . . .  	NUMBER	7F00	
+IDI_ASTERISK . . . . . . . . . .  	NUMBER	7F04	
+IDI_EXCLAMATION  . . . . . . . .  	NUMBER	7F03	
+IDI_HAND . . . . . . . . . . . .  	NUMBER	7F01	
+IDI_QUESTION . . . . . . . . . .  	NUMBER	7F02	
+IDNO . . . . . . . . . . . . . .  	NUMBER	0007	
+IDOK . . . . . . . . . . . . . .  	NUMBER	0001	
+IDRETRY  . . . . . . . . . . . .  	NUMBER	0004	
+IDYES  . . . . . . . . . . . . .  	NUMBER	0006	
+IE_BADID . . . . . . . . . . . .  	NUMBER	-0001	
+IE_BAUDRATE  . . . . . . . . . .  	NUMBER	-000C	
+IE_BYTESIZE  . . . . . . . . . .  	NUMBER	-000B	
+IE_DEFAULT . . . . . . . . . . .  	NUMBER	-0005	
+IE_HARDWARE  . . . . . . . . . .  	NUMBER	-000A	
+IE_MEMORY  . . . . . . . . . . .  	NUMBER	-0004	
+IE_NOPEN . . . . . . . . . . . .  	NUMBER	-0003	
+IE_OPEN  . . . . . . . . . . . .  	NUMBER	-0002	
+IGNORE . . . . . . . . . . . . .  	NUMBER	0000	
+INFINITE . . . . . . . . . . . .  	NUMBER	FFFF	
+INT33H_BUS . . . . . . . . . . .  	NUMBER	0001	
+INT33H_ENABLE  . . . . . . . . .  	NUMBER	0020	
+INT33H_GETINFO . . . . . . . . .  	NUMBER	0024	
+INT33H_HP  . . . . . . . . . . .  	NUMBER	0005	
+INT33H_INPORT  . . . . . . . . .  	NUMBER	0003	
+INT33H_PS_2  . . . . . . . . . .  	NUMBER	0004	
+INT33H_RESET . . . . . . . . . .  	NUMBER	0000	
+INT33H_SERIAL  . . . . . . . . .  	NUMBER	0002	
+INT_REQUEST  . . . . . . . . . .  	NUMBER	000A	
+IN_SERVICE . . . . . . . . . . .  	NUMBER	000B	
+InTimer  . . . . . . . . . . . .  	L BYTE	0045	_DATA	Global
+Initialize . . . . . . . . . . .  	F PROC	0476	_TEXT	Global	Length = 0022
+Inquire  . . . . . . . . . . . .  	F PROC	03D1	_TEXT	Global	Length = 0032
+import_seg_table . . . . . . . .  	L NEAR	00B5	_TEXT
+init_done  . . . . . . . . . . .  	L NEAR	0280	_TEXT
+init_enh386_windows  . . . . . .  	N PROC	02B0	_TEXT	Length = 0031
+init_prot_windows  . . . . . . .  	N PROC	02E5	_TEXT	Length = 0004
+init_real_windows  . . . . . . .  	N PROC	02E1	_TEXT	Length = 0004
+interrupt_rate . . . . . . . . .  	L WORD	0034	_DATA	Global
+
+JFUNC_ADDSERVICE . . . . . . . .  	NUMBER	000A	
+JFUNC_ALLOCJREMEMBER . . . . . .  	NUMBER	0015	
+JFUNC_ALLOCMEM . . . . . . . . .  	NUMBER	0002	
+JFUNC_ALLOCSERVICEMEM  . . . . .  	NUMBER	0018	
+JFUNC_ATTACHJREMEMBER  . . . . .  	NUMBER	0016	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-19
+
+
+JFUNC_CALLAMIGA  . . . . . . . .  	NUMBER	0007	
+JFUNC_CALLSERVICE  . . . . . . .  	NUMBER	000C	
+JFUNC_CHECKAMIGA . . . . . . . .  	NUMBER	0009	
+JFUNC_DELETESERVICE  . . . . . .  	NUMBER	000E	
+JFUNC_FREEJREMEMBER  . . . . . .  	NUMBER	0017	
+JFUNC_FREEMEM  . . . . . . . . .  	NUMBER	0003	
+JFUNC_FREESERVICEMEM . . . . . .  	NUMBER	0019	
+JFUNC_GETBASE  . . . . . . . . .  	NUMBER	0001	
+JFUNC_GETSERVICE . . . . . . . .  	NUMBER	000B	
+JFUNC_GETSERVICE1  . . . . . . .  	NUMBER	0000	
+JFUNC_INITLOCK . . . . . . . . .  	NUMBER	0011	
+JFUNC_JINT . . . . . . . . . . .  	NUMBER	000B	
+JFUNC_LOCK . . . . . . . . . . .  	NUMBER	0013	
+JFUNC_LOCKATTEMPT  . . . . . . .  	NUMBER	0012	
+JFUNC_LOCKSERVICEDATA  . . . . .  	NUMBER	000F	
+JFUNC_MAX  . . . . . . . . . . .  	NUMBER	0019	
+JFUNC_RELEASESERVICE . . . . . .  	NUMBER	000D	
+JFUNC_SETPARAM . . . . . . . . .  	NUMBER	0004	
+JFUNC_SETSERVICE . . . . . . . .  	NUMBER	0005	
+JFUNC_STOPSERVICE  . . . . . . .  	NUMBER	0006	
+JFUNC_UNLOCK . . . . . . . . . .  	NUMBER	0014	
+JFUNC_UNLOCKSERVICEDATA  . . . .  	NUMBER	0010	
+JFUNC_WAITAMIGA  . . . . . . . .  	NUMBER	0008	
+JSERV_AMIGACALL  . . . . . . . .  	NUMBER	000C	
+JSERV_AMIGASERVICE . . . . . . .  	NUMBER	000E	
+JSERV_AMOUSE . . . . . . . . . .  	NUMBER	0011	
+JSERV_BADAUTOLOAD  . . . . . . .  	NUMBER	000A	
+JSERV_COM2INT  . . . . . . . . .  	NUMBER	0006	
+JSERV_CRT1INT  . . . . . . . . .  	NUMBER	0002	
+JSERV_CRT2INT  . . . . . . . . .  	NUMBER	0003	
+JSERV_DUPSERVICE . . . . . . . .  	NUMBER	0007	
+JSERV_ENBKB  . . . . . . . . . .  	NUMBER	0004	
+JSERV_FINISHED . . . . . . . . .  	NUMBER	0001	
+JSERV_GINT . . . . . . . . . . .  	NUMBER	0001	
+JSERV_HARDDISK . . . . . . . . .  	NUMBER	0009	
+JSERV_ILLFUNCTION  . . . . . . .  	NUMBER	0008	
+JSERV_LPT1INT  . . . . . . . . .  	NUMBER	0005	
+JSERV_MINT . . . . . . . . . . .  	NUMBER	0000	
+JSERV_NOAMIGAMEM . . . . . . . .  	NUMBER	0004	
+JSERV_NOFUNCTION . . . . . . . .  	NUMBER	-0001	
+JSERV_NOJANUSBASE  . . . . . . .  	NUMBER	0002	
+JSERV_NOJANUSMEM . . . . . . . .  	NUMBER	0003	
+JSERV_NOPCMEM  . . . . . . . . .  	NUMBER	0005	
+JSERV_NOSERVICE  . . . . . . . .  	NUMBER	0006	
+JSERV_NOTEXCLUSIVE . . . . . . .  	NUMBER	0009	
+JSERV_OK . . . . . . . . . . . .  	NUMBER	0000	
+JSERV_PCBOOTED . . . . . . . . .  	NUMBER	0007	
+JSERV_PCCALL . . . . . . . . . .  	NUMBER	000D	
+JSERV_PCDISK . . . . . . . . . .  	NUMBER	0010	
+JSERV_PCSERVICE  . . . . . . . .  	NUMBER	000F	
+JSERV_PENDING  . . . . . . . . .  	NUMBER	0000	
+JSERV_READAMIGA  . . . . . . . .  	NUMBER	000A	
+JSERV_READPC . . . . . . . . . .  	NUMBER	000B	
+JSERV_SCROLL . . . . . . . . . .  	NUMBER	0008	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-20
+
+
+JSETINT  . . . . . . . . . . . .  	NUMBER	007F	
+
+KillSystemTimer  . . . . . . . .  	L FAR 	0000		External
+
+LBN_DBLCLK . . . . . . . . . . .  	NUMBER	0002	
+LBN_ERRSPACE . . . . . . . . . .  	NUMBER	-0002	
+LBN_KILLFOCUS  . . . . . . . . .  	NUMBER	0005	
+LBN_SELCANCEL  . . . . . . . . .  	NUMBER	0003	
+LBN_SELCHANGE  . . . . . . . . .  	NUMBER	0001	
+LBN_SETFOCUS . . . . . . . . . .  	NUMBER	0004	
+LBS_EXTENDEDSEL  . . . . . . . .  	NUMBER	0800	
+LBS_HASSTRINGS . . . . . . . . .  	NUMBER	0040	
+LBS_MULTICOLUMN  . . . . . . . .  	NUMBER	0200	
+LBS_MULTIPLESEL  . . . . . . . .  	NUMBER	0008	
+LBS_NOINTEGRALHEIGHT . . . . . .  	NUMBER	0100	
+LBS_NOREDRAW . . . . . . . . . .  	NUMBER	0004	
+LBS_NOTIFY . . . . . . . . . . .  	NUMBER	0001	
+LBS_OWNERDRAWFIXED . . . . . . .  	NUMBER	0010	
+LBS_OWNERDRAWVARIABLE  . . . . .  	NUMBER	0020	
+LBS_SORT . . . . . . . . . . . .  	NUMBER	0002	
+LBS_STANDARD . . . . . . . . . .  	NUMBER	00A3	
+LBS_USETABSTOPS  . . . . . . . .  	NUMBER	0080	
+LBS_WANTKEYBOARDINPUT  . . . . .  	NUMBER	0400	
+LB_ADDSTRING . . . . . . . . . .  	NUMBER	0401	
+LB_DELETESTRING  . . . . . . . .  	NUMBER	0403	
+LB_DIR . . . . . . . . . . . . .  	NUMBER	040E	
+LB_FINDSTRING  . . . . . . . . .  	NUMBER	0410	
+LB_GETCOUNT  . . . . . . . . . .  	NUMBER	040C	
+LB_GETCURSEL . . . . . . . . . .  	NUMBER	0409	
+LB_GETHORIZONTALEXTENT . . . . .  	NUMBER	0414	
+LB_GETITEMDATA . . . . . . . . .  	NUMBER	041A	
+LB_GETITEMRECT . . . . . . . . .  	NUMBER	0419	
+LB_GETSEL  . . . . . . . . . . .  	NUMBER	0408	
+LB_GETSELCOUNT . . . . . . . . .  	NUMBER	0411	
+LB_GETSELITEMS . . . . . . . . .  	NUMBER	0412	
+LB_GETTEXT . . . . . . . . . . .  	NUMBER	040A	
+LB_GETTEXTLEN  . . . . . . . . .  	NUMBER	040B	
+LB_GETTOPINDEX . . . . . . . . .  	NUMBER	040F	
+LB_INSERTSTRING  . . . . . . . .  	NUMBER	0402	
+LB_MSGMAX  . . . . . . . . . . .  	NUMBER	0421	
+LB_RESETCONTENT  . . . . . . . .  	NUMBER	0405	
+LB_SELECTSTRING  . . . . . . . .  	NUMBER	040D	
+LB_SELITEMRANGE  . . . . . . . .  	NUMBER	041C	
+LB_SETCURSEL . . . . . . . . . .  	NUMBER	0407	
+LB_SETHORIZONTALEXTENT . . . . .  	NUMBER	0415	
+LB_SETITEMDATA . . . . . . . . .  	NUMBER	041B	
+LB_SETSEL  . . . . . . . . . . .  	NUMBER	0406	
+LB_SETTABSTOPS . . . . . . . . .  	NUMBER	0413	
+LB_SETTOPINDEX . . . . . . . . .  	NUMBER	0418	
+LC_INTERIORS . . . . . . . . . .  	NUMBER	0080	
+LC_MARKER  . . . . . . . . . . .  	NUMBER	0004	
+LC_NONE  . . . . . . . . . . . .  	NUMBER	0000	
+LC_POLYLINE  . . . . . . . . . .  	NUMBER	0002	
+LC_POLYMARKER  . . . . . . . . .  	NUMBER	0008	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-21
+
+
+LC_STYLED  . . . . . . . . . . .  	NUMBER	0020	
+LC_WIDE  . . . . . . . . . . . .  	NUMBER	0010	
+LC_WIDESTYLED  . . . . . . . . .  	NUMBER	0040	
+LF_FACESIZE  . . . . . . . . . .  	NUMBER	0020	
+LHND . . . . . . . . . . . . . .  	NUMBER	0042	
+LINECAPS . . . . . . . . . . . .  	NUMBER	001E	
+LMEM_DISCARDABLE . . . . . . . .  	NUMBER	0F00	
+LMEM_DISCARDED . . . . . . . . .  	NUMBER	4000	
+LMEM_FIXED . . . . . . . . . . .  	NUMBER	0000	
+LMEM_LOCKCOUNT . . . . . . . . .  	NUMBER	00FF	
+LMEM_MODIFY  . . . . . . . . . .  	NUMBER	0080	
+LMEM_MOVEABLE  . . . . . . . . .  	NUMBER	0002	
+LMEM_NOCOMPACT . . . . . . . . .  	NUMBER	0010	
+LMEM_NODISCARD . . . . . . . . .  	NUMBER	0020	
+LMEM_ZEROINIT  . . . . . . . . .  	NUMBER	0040	
+LNOTIFY_DISCARD  . . . . . . . .  	NUMBER	0002	
+LNOTIFY_MOVE . . . . . . . . . .  	NUMBER	0001	
+LNOTIFY_OUTOFMEM . . . . . . . .  	NUMBER	0000	
+LOGPIXELSX . . . . . . . . . . .  	NUMBER	0058	
+LOGPIXELSY . . . . . . . . . . .  	NUMBER	005A	
+LPTR . . . . . . . . . . . . . .  	NUMBER	0040	
+LPTx . . . . . . . . . . . . . .  	NUMBER	0080	
+LTGRAY_BRUSH . . . . . . . . . .  	NUMBER	0001	
+lp_mouse_info  . . . . . . . . .  	TEXT  (dword ptr [bp+6])		
+
+MARKPARITY . . . . . . . . . . .  	NUMBER	0003	
+MASK_PORT  . . . . . . . . . . .  	NUMBER	0021	
+MASK_SLAVE_PORT  . . . . . . . .  	NUMBER	00A1	
+MAXHANDLER . . . . . . . . . . .  	NUMBER	0020	
+MAX_INT_SIZE . . . . . . . . . .  	NUMBER	00D2	
+MA_ACTIVATE  . . . . . . . . . .  	NUMBER	0001	
+MA_ACTIVATEANDEAT  . . . . . . .  	NUMBER	0002	
+MA_NOACTIVATE  . . . . . . . . .  	NUMBER	0003	
+MB_ABORTRETRYIGNORE  . . . . . .  	NUMBER	0002	
+MB_APPLMODAL . . . . . . . . . .  	NUMBER	0000	
+MB_DEFBUTTON1  . . . . . . . . .  	NUMBER	0000	
+MB_DEFBUTTON2  . . . . . . . . .  	NUMBER	0100	
+MB_DEFBUTTON3  . . . . . . . . .  	NUMBER	0200	
+MB_ICONASTERISK  . . . . . . . .  	NUMBER	0040	
+MB_ICONEXCLAMATION . . . . . . .  	NUMBER	0030	
+MB_ICONHAND  . . . . . . . . . .  	NUMBER	0010	
+MB_ICONQUESTION  . . . . . . . .  	NUMBER	0020	
+MB_NOFOCUS . . . . . . . . . . .  	NUMBER	8000	
+MB_OK  . . . . . . . . . . . . .  	NUMBER	0000	
+MB_OKCANCEL  . . . . . . . . . .  	NUMBER	0001	
+MB_RETRYCANCEL . . . . . . . . .  	NUMBER	0005	
+MB_SYSTEMMODAL . . . . . . . . .  	NUMBER	1000	
+MB_TASKMODAL . . . . . . . . . .  	NUMBER	2000	
+MB_YESNO . . . . . . . . . . . .  	NUMBER	0004	
+MB_YESNOCANCEL . . . . . . . . .  	NUMBER	0003	
+MDAType  . . . . . . . . . . . .  	NUMBER	0008	
+MERGECOPY_H  . . . . . . . . . .  	NUMBER	00C0	
+MERGECOPY_L  . . . . . . . . . .  	NUMBER	00CA	
+MERGEPAINT_H . . . . . . . . . .  	NUMBER	00BB	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-22
+
+
+MERGEPAINT_L . . . . . . . . . .  	NUMBER	0226	
+META_ANIMATEPALETTE  . . . . . .  	NUMBER	0436	
+META_ARC . . . . . . . . . . . .  	NUMBER	0817	
+META_BITBLT  . . . . . . . . . .  	NUMBER	0922	
+META_CHORD . . . . . . . . . . .  	NUMBER	0830	
+META_CREATEBITMAP  . . . . . . .  	NUMBER	06FE	
+META_CREATEBITMAPINDIRECT  . . .  	NUMBER	02FD	
+META_CREATEBRUSH . . . . . . . .  	NUMBER	00F8	
+META_CREATEBRUSHINDIRECT . . . .  	NUMBER	02FC	
+META_CREATEFONTINDIRECT  . . . .  	NUMBER	02FB	
+META_CREATEPALETTE . . . . . . .  	NUMBER	00F7	
+META_CREATEPATTERNBRUSH  . . . .  	NUMBER	01F9	
+META_CREATEPENINDIRECT . . . . .  	NUMBER	02FA	
+META_CREATEREGION  . . . . . . .  	NUMBER	06FF	
+META_DELETEOBJECT  . . . . . . .  	NUMBER	01F0	
+META_DIBBITBLT . . . . . . . . .  	NUMBER	0940	
+META_DIBCREATEPATTERNBRUSH . . .  	NUMBER	0142	
+META_DIBSTRETCHBLT . . . . . . .  	NUMBER	0B41	
+META_DRAWTEXT  . . . . . . . . .  	NUMBER	062F	
+META_ELLIPSE . . . . . . . . . .  	NUMBER	0418	
+META_ESCAPE  . . . . . . . . . .  	NUMBER	0626	
+META_EXCLUDECLIPRECT . . . . . .  	NUMBER	0415	
+META_EXTTEXTOUT  . . . . . . . .  	NUMBER	0A32	
+META_FILLREGION  . . . . . . . .  	NUMBER	0228	
+META_FLOODFILL . . . . . . . . .  	NUMBER	0419	
+META_FRAMEREGION . . . . . . . .  	NUMBER	0429	
+META_INTERSECTCLIPRECT . . . . .  	NUMBER	0416	
+META_INVERTREGION  . . . . . . .  	NUMBER	012A	
+META_LINETO  . . . . . . . . . .  	NUMBER	0213	
+META_MOVETO  . . . . . . . . . .  	NUMBER	0214	
+META_OFFSETCLIPRGN . . . . . . .  	NUMBER	0220	
+META_OFFSETVIEWPORTORG . . . . .  	NUMBER	0211	
+META_OFFSETWINDOWORG . . . . . .  	NUMBER	020F	
+META_PAINTREGION . . . . . . . .  	NUMBER	012B	
+META_PATBLT  . . . . . . . . . .  	NUMBER	061D	
+META_PIE . . . . . . . . . . . .  	NUMBER	081A	
+META_POLYGON . . . . . . . . . .  	NUMBER	0324	
+META_POLYLINE  . . . . . . . . .  	NUMBER	0325	
+META_POLYPOLYGON . . . . . . . .  	NUMBER	0538	
+META_REALIZEPALETTE  . . . . . .  	NUMBER	0035	
+META_RECTANGLE . . . . . . . . .  	NUMBER	041B	
+META_RESIZEPALETTE . . . . . . .  	NUMBER	0139	
+META_RESTOREDC . . . . . . . . .  	NUMBER	0127	
+META_ROUNDRECT . . . . . . . . .  	NUMBER	061C	
+META_SAVEDC  . . . . . . . . . .  	NUMBER	001E	
+META_SCALEVIEWPORTEXT  . . . . .  	NUMBER	0412	
+META_SCALEWINDOWEXT  . . . . . .  	NUMBER	0400	
+META_SELECTCLIPREGION  . . . . .  	NUMBER	012C	
+META_SELECTOBJECT  . . . . . . .  	NUMBER	012D	
+META_SELECTPALETTE . . . . . . .  	NUMBER	0234	
+META_SETBKCOLOR  . . . . . . . .  	NUMBER	0201	
+META_SETBKMODE . . . . . . . . .  	NUMBER	0102	
+META_SETDIBTODEV . . . . . . . .  	NUMBER	0D33	
+META_SETMAPMODE  . . . . . . . .  	NUMBER	0103	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-23
+
+
+META_SETMAPPERFLAGS  . . . . . .  	NUMBER	0231	
+META_SETPALENTRIES . . . . . . .  	NUMBER	0037	
+META_SETPIXEL  . . . . . . . . .  	NUMBER	041F	
+META_SETPOLYFILLMODE . . . . . .  	NUMBER	0106	
+META_SETRELABS . . . . . . . . .  	NUMBER	0105	
+META_SETROP2 . . . . . . . . . .  	NUMBER	0104	
+META_SETSTRETCHBLTMODE . . . . .  	NUMBER	0107	
+META_SETTEXTALIGN  . . . . . . .  	NUMBER	012E	
+META_SETTEXTCHAREXTRA  . . . . .  	NUMBER	0108	
+META_SETTEXTCOLOR  . . . . . . .  	NUMBER	0209	
+META_SETTEXTJUSTIFICATION  . . .  	NUMBER	020A	
+META_SETVIEWPORTEXT  . . . . . .  	NUMBER	020E	
+META_SETVIEWPORTORG  . . . . . .  	NUMBER	020D	
+META_SETWINDOWEXT  . . . . . . .  	NUMBER	020C	
+META_SETWINDOWORG  . . . . . . .  	NUMBER	020B	
+META_STRETCHBLT  . . . . . . . .  	NUMBER	0B23	
+META_STRETCHDIB  . . . . . . . .  	NUMBER	0F43	
+META_TEXTOUT . . . . . . . . . .  	NUMBER	0521	
+MFCOMMENT  . . . . . . . . . . .  	NUMBER	000F	
+MF_APPEND  . . . . . . . . . . .  	NUMBER	0100	
+MF_BITMAP  . . . . . . . . . . .  	NUMBER	0004	
+MF_BYCOMMAND . . . . . . . . . .  	NUMBER	0000	
+MF_BYPOSITION  . . . . . . . . .  	NUMBER	0400	
+MF_CHANGE  . . . . . . . . . . .  	NUMBER	0080	
+MF_CHECKED . . . . . . . . . . .  	NUMBER	0008	
+MF_DELETE  . . . . . . . . . . .  	NUMBER	0200	
+MF_DISABLED  . . . . . . . . . .  	NUMBER	0002	
+MF_ENABLED . . . . . . . . . . .  	NUMBER	0000	
+MF_GRAYED  . . . . . . . . . . .  	NUMBER	0001	
+MF_HELP  . . . . . . . . . . . .  	NUMBER	4000	
+MF_HILITE  . . . . . . . . . . .  	NUMBER	0080	
+MF_INSERT  . . . . . . . . . . .  	NUMBER	0000	
+MF_MENUBARBREAK  . . . . . . . .  	NUMBER	0020	
+MF_MENUBREAK . . . . . . . . . .  	NUMBER	0040	
+MF_MOUSESELECT . . . . . . . . .  	NUMBER	8000	
+MF_OWNERDRAW . . . . . . . . . .  	NUMBER	0100	
+MF_POPUP . . . . . . . . . . . .  	NUMBER	0010	
+MF_REMOVE  . . . . . . . . . . .  	NUMBER	1000	
+MF_SEPARATOR . . . . . . . . . .  	NUMBER	0800	
+MF_STRING  . . . . . . . . . . .  	NUMBER	0000	
+MF_SYSMENU . . . . . . . . . . .  	NUMBER	2000	
+MF_UNCHECKED . . . . . . . . . .  	NUMBER	0000	
+MF_UNHILITE  . . . . . . . . . .  	NUMBER	0000	
+MF_USECHECKBITMAPS . . . . . . .  	NUMBER	0200	
+MINOR_ERROR  . . . . . . . . . .  	NUMBER	0001	
+MK_CONTROL . . . . . . . . . . .  	NUMBER	0008	
+MK_LBUTTON . . . . . . . . . . .  	NUMBER	0001	
+MK_MBUTTON . . . . . . . . . . .  	NUMBER	0010	
+MK_RBUTTON . . . . . . . . . . .  	NUMBER	0002	
+MK_SHIFT . . . . . . . . . . . .  	NUMBER	0004	
+MMF_ENABLED  . . . . . . . . . .  	NUMBER	0001	
+MMF_INT33H . . . . . . . . . . .  	NUMBER	0002	
+MMF_MOUSE_EXISTS . . . . . . . .  	NUMBER	0080	
+MMF_ON_SLAVEPIC  . . . . . . . .  	NUMBER	0040	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-24
+
+
+MM_ANISOTROPIC . . . . . . . . .  	NUMBER	0008	
+MM_HIENGLISH . . . . . . . . . .  	NUMBER	0005	
+MM_HIMETRIC  . . . . . . . . . .  	NUMBER	0003	
+MM_ISOTROPIC . . . . . . . . . .  	NUMBER	0007	
+MM_LOENGLISH . . . . . . . . . .  	NUMBER	0004	
+MM_LOMETRIC  . . . . . . . . . .  	NUMBER	0002	
+MM_TEXT  . . . . . . . . . . . .  	NUMBER	0001	
+MM_TWIPS . . . . . . . . . . . .  	NUMBER	0006	
+MOUSESERV_APPLICATION_ID . . . .  	NUMBER	0001	
+MOUSESERV_LOCAL_ID . . . . . . .  	NUMBER	0002	
+MOUSE_SYS_VEC  . . . . . . . . .  	NUMBER	0033	
+MRNoMove . . . . . . . . . . . .  	L NEAR	008A	_TEXT
+MSGF_DIALOGBOX . . . . . . . . .  	NUMBER	0000	
+MSGF_MENU  . . . . . . . . . . .  	NUMBER	0002	
+MSGF_MESSAGEBOX  . . . . . . . .  	NUMBER	0001	
+MSGF_MOVE  . . . . . . . . . . .  	NUMBER	0003	
+MSGF_NEXTWINDOW  . . . . . . . .  	NUMBER	0006	
+MSGF_SCROLLBAR . . . . . . . . .  	NUMBER	0005	
+MSGF_SIZE  . . . . . . . . . . .  	NUMBER	0004	
+MT_BUS . . . . . . . . . . . . .  	NUMBER	0001	
+MT_HP  . . . . . . . . . . . . .  	NUMBER	0005	
+MT_INPORT  . . . . . . . . . . .  	NUMBER	0003	
+MT_NO_MOUSE  . . . . . . . . . .  	NUMBER	0000	
+MT_PS2 . . . . . . . . . . . . .  	NUMBER	0004	
+MT_SERIAL  . . . . . . . . . . .  	NUMBER	0002	
+MouseGetIntVect  . . . . . . . .  	F PROC	0403	_TEXT	Global	Length = 0015
+MouseRead  . . . . . . . . . . .  	F PROC	0011	_TEXT	Length = 007C
+MoveLoop . . . . . . . . . . . .  	L NEAR	002E	_TEXT
+make_addressable . . . . . . . .  	N PROC	00D9	_TEXT	Length = 0056
+mode . . . . . . . . . . . . . .  	L WORD	0040	_DATA	Global
+mouse_flags  . . . . . . . . . .  	L BYTE	0043	_DATA	Global
+mouse_type . . . . . . . . . . .  	L BYTE	0044	_DATA	Global
+ms_app_id  . . . . . . . . . . .  	ALIAS	 MOUSESERV_APPLICATION_ID		
+ms_flags . . . . . . . . . . . .  	NUMBER	0041	
+ms_local_id  . . . . . . . . . .  	ALIAS	 MOUSESERV_LOCAL_ID		
+ms_rq_np . . . . . . . . . . . .  	L DWORD	001C	_DATA	Global
+ms_rq_rp . . . . . . . . . . . .  	L DWORD	0020	_DATA	Global
+ms_rq_sel  . . . . . . . . . . .  	L WORD	003E	_DATA	Global
+ms_sd_np . . . . . . . . . . . .  	L DWORD	0014	_DATA	Global
+ms_sd_rp . . . . . . . . . . . .  	L DWORD	0018	_DATA	Global
+ms_sd_sel  . . . . . . . . . . .  	L WORD	003C	_DATA	Global
+
+NEWFRAME . . . . . . . . . . . .  	NUMBER	0001	
+NEXTBAND . . . . . . . . . . . .  	NUMBER	0003	
+NONZEROLHND  . . . . . . . . . .  	NUMBER	0002	
+NONZEROLPTR  . . . . . . . . . .  	NUMBER	0000	
+NOPARITY . . . . . . . . . . . .  	NUMBER	0000	
+NOTSRCCOPY_H . . . . . . . . . .  	NUMBER	0033	
+NOTSRCCOPY_L . . . . . . . . . .  	NUMBER	0008	
+NOTSRCERASE_H  . . . . . . . . .  	NUMBER	0011	
+NOTSRCERASE_L  . . . . . . . . .  	NUMBER	00A6	
+NULL . . . . . . . . . . . . . .  	NUMBER	0000	
+NULLREGION . . . . . . . . . . .  	NUMBER	0001	
+NULL_BRUSH . . . . . . . . . . .  	NUMBER	0005	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-25
+
+
+NULL_PEN . . . . . . . . . . . .  	NUMBER	0008	
+NUMBER_BUTTONS . . . . . . . . .  	NUMBER	0002	
+NUMBRUSHES . . . . . . . . . . .  	NUMBER	0010	
+NUMCOLORS  . . . . . . . . . . .  	NUMBER	0018	
+NUMFONTS . . . . . . . . . . . .  	NUMBER	0016	
+NUMMARKERS . . . . . . . . . . .  	NUMBER	0014	
+NUMPENS  . . . . . . . . . . . .  	NUMBER	0012	
+NUMRESERVED  . . . . . . . . . .  	NUMBER	006A	
+NextTimer  . . . . . . . . . . .  	L NEAR	00AE	_DATA
+NoChange . . . . . . . . . . . .  	L NEAR	00A3	_DATA
+new_event_proc . . . . . . . . .  	TEXT  (dword ptr [bp+6])		
+no_del_rq_sel  . . . . . . . . .  	L NEAR	0201	_TEXT
+no_del_sd_sel  . . . . . . . . .  	L NEAR	01DE	_TEXT
+not_286  . . . . . . . . . . . .  	L NEAR	0304	_TEXT
+not_86 . . . . . . . . . . . . .  	L NEAR	02F6	_TEXT
+
+OBJ_BRUSH  . . . . . . . . . . .  	NUMBER	0002	
+OBJ_PEN  . . . . . . . . . . . .  	NUMBER	0001	
+OBM_BTNCORNERS . . . . . . . . .  	NUMBER	7FF6	
+OBM_BTSIZE . . . . . . . . . . .  	NUMBER	7FF9	
+OBM_CHECK  . . . . . . . . . . .  	NUMBER	7FF8	
+OBM_CHECKBOXES . . . . . . . . .  	NUMBER	7FF7	
+OBM_CLOSE  . . . . . . . . . . .  	NUMBER	7FF2	
+OBM_COMBO  . . . . . . . . . . .  	NUMBER	7FE2	
+OBM_DNARROW  . . . . . . . . . .  	NUMBER	7FF0	
+OBM_DNARROWD . . . . . . . . . .  	NUMBER	7FE6	
+OBM_LFARROW  . . . . . . . . . .  	NUMBER	7FEE	
+OBM_LFARROWD . . . . . . . . . .  	NUMBER	7FE4	
+OBM_MNARROW  . . . . . . . . . .  	NUMBER	7FE3	
+OBM_OLD_CLOSE  . . . . . . . . .  	NUMBER	7FFF	
+OBM_OLD_DNARROW  . . . . . . . .  	NUMBER	7FFC	
+OBM_OLD_LFARROW  . . . . . . . .  	NUMBER	7FFA	
+OBM_OLD_REDUCE . . . . . . . . .  	NUMBER	7FF5	
+OBM_OLD_RESTORE  . . . . . . . .  	NUMBER	7FF3	
+OBM_OLD_RGARROW  . . . . . . . .  	NUMBER	7FFB	
+OBM_OLD_UPARROW  . . . . . . . .  	NUMBER	7FFD	
+OBM_OLD_ZOOM . . . . . . . . . .  	NUMBER	7FF4	
+OBM_REDUCE . . . . . . . . . . .  	NUMBER	7FED	
+OBM_REDUCED  . . . . . . . . . .  	NUMBER	7FEA	
+OBM_RESTORE  . . . . . . . . . .  	NUMBER	7FEB	
+OBM_RESTORED . . . . . . . . . .  	NUMBER	7FE8	
+OBM_RGARROW  . . . . . . . . . .  	NUMBER	7FEF	
+OBM_RGARROWD . . . . . . . . . .  	NUMBER	7FE5	
+OBM_SIZE . . . . . . . . . . . .  	NUMBER	7FFE	
+OBM_UPARROW  . . . . . . . . . .  	NUMBER	7FF1	
+OBM_UPARROWD . . . . . . . . . .  	NUMBER	7FE7	
+OBM_ZOOM . . . . . . . . . . . .  	NUMBER	7FEC	
+OBM_ZOOMD  . . . . . . . . . . .  	NUMBER	7FE9	
+OCR_CROSS  . . . . . . . . . . .  	NUMBER	7F03	
+OCR_IBEAM  . . . . . . . . . . .  	NUMBER	7F01	
+OCR_ICOCUR . . . . . . . . . . .  	NUMBER	7F87	
+OCR_ICON . . . . . . . . . . . .  	NUMBER	7F81	
+OCR_NORMAL . . . . . . . . . . .  	NUMBER	7F00	
+OCR_SIZE . . . . . . . . . . . .  	NUMBER	7F80	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-26
+
+
+OCR_SIZEALL  . . . . . . . . . .  	NUMBER	7F86	
+OCR_SIZENESW . . . . . . . . . .  	NUMBER	7F83	
+OCR_SIZENS . . . . . . . . . . .  	NUMBER	7F85	
+OCR_SIZENWSE . . . . . . . . . .  	NUMBER	7F82	
+OCR_SIZEWE . . . . . . . . . . .  	NUMBER	7F84	
+OCR_UP . . . . . . . . . . . . .  	NUMBER	7F04	
+OCR_WAIT . . . . . . . . . . . .  	NUMBER	7F02	
+ODA_DRAWENTIRE . . . . . . . . .  	NUMBER	0001	
+ODA_FOCUS  . . . . . . . . . . .  	NUMBER	0004	
+ODA_SELECT . . . . . . . . . . .  	NUMBER	0002	
+ODDPARITY  . . . . . . . . . . .  	NUMBER	0001	
+ODS_CHECKED  . . . . . . . . . .  	NUMBER	0008	
+ODS_DISABLED . . . . . . . . . .  	NUMBER	0004	
+ODS_FOCUS  . . . . . . . . . . .  	NUMBER	0010	
+ODS_GRAYED . . . . . . . . . . .  	NUMBER	0002	
+ODS_SELECTED . . . . . . . . . .  	NUMBER	0001	
+ODT_BUTTON . . . . . . . . . . .  	NUMBER	0004	
+ODT_COMBOBOX . . . . . . . . . .  	NUMBER	0003	
+ODT_LISTBOX  . . . . . . . . . .  	NUMBER	0002	
+ODT_MENU . . . . . . . . . . . .  	NUMBER	0001	
+OEM_CHARSET  . . . . . . . . . .  	NUMBER	00FF	
+OEM_FIXED_FONT . . . . . . . . .  	NUMBER	000A	
+OF_AMIGA . . . . . . . . . . . .  	NUMBER	0001	
+OF_CANCEL  . . . . . . . . . . .  	NUMBER	0800	
+OF_CREATE  . . . . . . . . . . .  	NUMBER	1000	
+OF_DELETE  . . . . . . . . . . .  	NUMBER	0200	
+OF_EXIST . . . . . . . . . . . .  	NUMBER	4000	
+OF_PARSE . . . . . . . . . . . .  	NUMBER	0100	
+OF_PROMPT  . . . . . . . . . . .  	NUMBER	2000	
+OF_READ  . . . . . . . . . . . .  	NUMBER	0000	
+OF_READWRITE . . . . . . . . . .  	NUMBER	0002	
+OF_REOPEN  . . . . . . . . . . .  	NUMBER	8000	
+OF_SHARE_COMPAT  . . . . . . . .  	NUMBER	0000	
+OF_SHARE_DENY_NONE . . . . . . .  	NUMBER	0040	
+OF_SHARE_DENY_READ . . . . . . .  	NUMBER	0030	
+OF_SHARE_DENY_WRITE  . . . . . .  	NUMBER	0020	
+OF_SHARE_EXCLUSIVE . . . . . . .  	NUMBER	0010	
+OF_VERIFY  . . . . . . . . . . .  	NUMBER	0400	
+OF_WINDOWS . . . . . . . . . . .  	NUMBER	0002	
+OF_WRITE . . . . . . . . . . . .  	NUMBER	0001	
+OIC_BANG . . . . . . . . . . . .  	NUMBER	7F03	
+OIC_HAND . . . . . . . . . . . .  	NUMBER	7F01	
+OIC_NOTE . . . . . . . . . . . .  	NUMBER	7F04	
+OIC_QUES . . . . . . . . . . . .  	NUMBER	7F02	
+OIC_SAMPLE . . . . . . . . . . .  	NUMBER	7F00	
+ONE5STOPBITS . . . . . . . . . .  	NUMBER	0001	
+ONESTOPBIT . . . . . . . . . . .  	NUMBER	0000	
+OPAQUE . . . . . . . . . . . . .  	NUMBER	0002	
+oa_fail  . . . . . . . . . . . .  	L NEAR	0278	_TEXT
+off_event_proc . . . . . . . . .  	ALIAS	 event_proc		
+off_lp_mouse_info  . . . . . . .  	TEXT  (word ptr [bp+6])		
+off_ms_rq_np . . . . . . . . . .  	ALIAS	 ms_rq_np		
+off_ms_rq_rp . . . . . . . . . .  	ALIAS	 ms_rq_rp		
+off_ms_sd_np . . . . . . . . . .  	ALIAS	 ms_sd_np		
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-27
+
+
+off_ms_sd_rp . . . . . . . . . .  	ALIAS	 ms_sd_rp		
+off_new_event_proc . . . . . . .  	TEXT  (word ptr [bp+6])		
+okay . . . . . . . . . . . . . .  	L NEAR	027D	_TEXT
+old_count  . . . . . . . . . . .  	L BYTE	0046	_DATA	Global
+open_amiga . . . . . . . . . . .  	N PROC	026A	_TEXT	Length = 0017
+open_flags . . . . . . . . . . .  	L BYTE	0047	_DATA	Global
+open_stuff . . . . . . . . . . .  	N PROC	0373	_TEXT	Length = 0035
+open_stuff_done  . . . . . . . .  	L NEAR	039E	_TEXT
+open_stuff_fail  . . . . . . . .  	L NEAR	039B	_TEXT
+open_windows . . . . . . . . . .  	N PROC	02E9	_TEXT	Length = 001F
+ow_done  . . . . . . . . . . . .  	L NEAR	0307	_TEXT
+
+PASSTHROUGH  . . . . . . . . . .  	NUMBER	0013	
+PATCOPY_H  . . . . . . . . . . .  	NUMBER	00F0	
+PATCOPY_L  . . . . . . . . . . .  	NUMBER	0021	
+PATINVERT_H  . . . . . . . . . .  	NUMBER	005A	
+PATINVERT_L  . . . . . . . . . .  	NUMBER	0049	
+PATPAINT_H . . . . . . . . . . .  	NUMBER	00FB	
+PATPAINT_L . . . . . . . . . . .  	NUMBER	0A09	
+PCSTATE_RESERVED . . . . . . . .  	NUMBER	FFFF	
+PC_EXCLUSIVE . . . . . . . . . .  	NUMBER	0020	
+PC_EXCLUSIVEn  . . . . . . . . .  	NUMBER	0005	
+PC_EXPLICIT  . . . . . . . . . .  	NUMBER	0002	
+PC_INTERIORS . . . . . . . . . .  	NUMBER	0080	
+PC_NOCOLLAPSE  . . . . . . . . .  	NUMBER	0004	
+PC_NONE  . . . . . . . . . . . .  	NUMBER	0000	
+PC_POLYGON . . . . . . . . . . .  	NUMBER	0001	
+PC_RECTANGLE . . . . . . . . . .  	NUMBER	0002	
+PC_RESERVED  . . . . . . . . . .  	NUMBER	0001	
+PC_SCANLINE  . . . . . . . . . .  	NUMBER	0008	
+PC_STYLED  . . . . . . . . . . .  	NUMBER	0020	
+PC_TRAPEZOID . . . . . . . . . .  	NUMBER	0004	
+PC_WIDE  . . . . . . . . . . . .  	NUMBER	0010	
+PC_WIDESTYLED  . . . . . . . . .  	NUMBER	0040	
+PC_WINDPOLYGON . . . . . . . . .  	NUMBER	0004	
+PDEVICESIZE  . . . . . . . . . .  	NUMBER	001A	
+PLANES . . . . . . . . . . . . .  	NUMBER	000E	
+PM_NOREMOVE  . . . . . . . . . .  	NUMBER	0000	
+PM_NOYIELD . . . . . . . . . . .  	NUMBER	0002	
+PM_REMOVE  . . . . . . . . . . .  	NUMBER	0001	
+POLYGONALCAPS  . . . . . . . . .  	NUMBER	0020	
+PRINT  . . . . . . . . . . . . .  	NUMBER	0000	
+PR_JOBSTATUS . . . . . . . . . .  	NUMBER	0000	
+PS_DASH  . . . . . . . . . . . .  	NUMBER	0001	
+PS_DASHDOT . . . . . . . . . . .  	NUMBER	0003	
+PS_DASHDOTDOT  . . . . . . . . .  	NUMBER	0004	
+PS_DOT . . . . . . . . . . . . .  	NUMBER	0002	
+PS_INSIDEFRAME . . . . . . . . .  	NUMBER	0006	
+PS_NULL  . . . . . . . . . . . .  	NUMBER	0005	
+PS_SOLID . . . . . . . . . . . .  	NUMBER	0000	
+proceed  . . . . . . . . . . . .  	L NEAR	0487	_TEXT
+
+QUERYESCSUPPORT  . . . . . . . .  	NUMBER	0008	
+
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-28
+
+
+R2_BLACK . . . . . . . . . . . .  	NUMBER	0001	
+R2_COPYPEN . . . . . . . . . . .  	NUMBER	000D	
+R2_MASKNOTPEN  . . . . . . . . .  	NUMBER	0003	
+R2_MASKPEN . . . . . . . . . . .  	NUMBER	0009	
+R2_MASKPENNOT  . . . . . . . . .  	NUMBER	0005	
+R2_MERGENOTPEN . . . . . . . . .  	NUMBER	000C	
+R2_MERGEPEN  . . . . . . . . . .  	NUMBER	000F	
+R2_MERGEPENNOT . . . . . . . . .  	NUMBER	000E	
+R2_NOP . . . . . . . . . . . . .  	NUMBER	000B	
+R2_NOT . . . . . . . . . . . . .  	NUMBER	0006	
+R2_NOTCOPYPEN  . . . . . . . . .  	NUMBER	0004	
+R2_NOTMASKPEN  . . . . . . . . .  	NUMBER	0008	
+R2_NOTMERGEPEN . . . . . . . . .  	NUMBER	0002	
+R2_NOTXORPEN . . . . . . . . . .  	NUMBER	000A	
+R2_WHITE . . . . . . . . . . . .  	NUMBER	0010	
+R2_XORPEN  . . . . . . . . . . .  	NUMBER	0007	
+RASTERCAPS . . . . . . . . . . .  	NUMBER	0026	
+RC_BANDING . . . . . . . . . . .  	NUMBER	0002	
+RC_BIGFONT . . . . . . . . . . .  	NUMBER	0400	
+RC_BITBLT  . . . . . . . . . . .  	NUMBER	0001	
+RC_BITMAP64  . . . . . . . . . .  	NUMBER	0008	
+RC_DIBTODEV  . . . . . . . . . .  	NUMBER	0200	
+RC_DI_BITMAP . . . . . . . . . .  	NUMBER	0080	
+RC_FLOODFILL . . . . . . . . . .  	NUMBER	1000	
+RC_GDI20_OUTPUT  . . . . . . . .  	NUMBER	0010	
+RC_PALETTE . . . . . . . . . . .  	NUMBER	0100	
+RC_SCALING . . . . . . . . . . .  	NUMBER	0004	
+RC_STRETCHBLT  . . . . . . . . .  	NUMBER	0800	
+RC_STRETCHDIB  . . . . . . . . .  	NUMBER	2000	
+RELATIVE . . . . . . . . . . . .  	NUMBER	0002	
+RESETDEV . . . . . . . . . . . .  	NUMBER	0007	
+RETRY  . . . . . . . . . . . . .  	NUMBER	0001	
+RGN_AND  . . . . . . . . . . . .  	NUMBER	0001	
+RGN_COPY . . . . . . . . . . . .  	NUMBER	0005	
+RGN_DIFF . . . . . . . . . . . .  	NUMBER	0004	
+RGN_OR . . . . . . . . . . . . .  	NUMBER	0002	
+RGN_XOR  . . . . . . . . . . . .  	NUMBER	0003	
+RT_ACCELERATOR . . . . . . . . .  	NUMBER	0009	
+RT_BITMAP  . . . . . . . . . . .  	NUMBER	0002	
+RT_CURSOR  . . . . . . . . . . .  	NUMBER	0001	
+RT_DIALOG  . . . . . . . . . . .  	NUMBER	0005	
+RT_FONT  . . . . . . . . . . . .  	NUMBER	0008	
+RT_FONTDIR . . . . . . . . . . .  	NUMBER	0007	
+RT_ICON  . . . . . . . . . . . .  	NUMBER	0003	
+RT_MENU  . . . . . . . . . . . .  	NUMBER	0004	
+RT_RCDATA  . . . . . . . . . . .  	NUMBER	000A	
+RT_STRING  . . . . . . . . . . .  	NUMBER	0006	
+r_cs . . . . . . . . . . . . . .  	L WORD	0074	_DATA
+r_ds . . . . . . . . . . . . . .  	L WORD	006C	_DATA
+r_eax  . . . . . . . . . . . . .  	L DWORD	0064	_DATA
+r_ebp  . . . . . . . . . . . . .  	L DWORD	0050	_DATA
+r_ebx  . . . . . . . . . . . . .  	L DWORD	0058	_DATA
+r_ecx  . . . . . . . . . . . . .  	L DWORD	0060	_DATA
+r_edi  . . . . . . . . . . . . .  	L DWORD	0048	_DATA
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-29
+
+
+r_edx  . . . . . . . . . . . . .  	L DWORD	005C	_DATA
+r_es . . . . . . . . . . . . . .  	L WORD	006A	_DATA
+r_esi  . . . . . . . . . . . . .  	L DWORD	004C	_DATA
+r_first  . . . . . . . . . . . .  	BYTE	0048	_DATA
+r_flag . . . . . . . . . . . . .  	L WORD	0068	_DATA
+r_fs . . . . . . . . . . . . . .  	L WORD	006E	_DATA
+r_gs . . . . . . . . . . . . . .  	L WORD	0070	_DATA
+r_ip . . . . . . . . . . . . . .  	L WORD	0072	_DATA
+r_rsvd . . . . . . . . . . . . .  	L DWORD	0054	_DATA
+r_sp . . . . . . . . . . . . . .  	L WORD	0076	_DATA
+r_ss . . . . . . . . . . . . . .  	L WORD	0078	_DATA
+rs232_data . . . . . . . . . . .  	L WORD	0000	BIOSDataSeg	Length = 0004
+
+SBS_BOTTOMALIGN  . . . . . . . .  	NUMBER	0004	
+SBS_HORZ . . . . . . . . . . . .  	NUMBER	0000	
+SBS_LEFTALIGN  . . . . . . . . .  	NUMBER	0002	
+SBS_RIGHTALIGN . . . . . . . . .  	NUMBER	0004	
+SBS_SIZEBOX  . . . . . . . . . .  	NUMBER	0008	
+SBS_SIZEBOXBOTTOMRIGHTALIGN  . .  	NUMBER	0004	
+SBS_SIZEBOXTOPLEFTALIGN  . . . .  	NUMBER	0002	
+SBS_TOPALIGN . . . . . . . . . .  	NUMBER	0002	
+SBS_VERT . . . . . . . . . . . .  	NUMBER	0001	
+SB_BOTH  . . . . . . . . . . . .  	NUMBER	0003	
+SB_BOTTOM  . . . . . . . . . . .  	NUMBER	0007	
+SB_CTL . . . . . . . . . . . . .  	NUMBER	0002	
+SB_ENDSCROLL . . . . . . . . . .  	NUMBER	0008	
+SB_HORZ  . . . . . . . . . . . .  	NUMBER	0000	
+SB_LINEDOWN  . . . . . . . . . .  	NUMBER	0001	
+SB_LINEUP  . . . . . . . . . . .  	NUMBER	0000	
+SB_PAGEDOWN  . . . . . . . . . .  	NUMBER	0003	
+SB_PAGEUP  . . . . . . . . . . .  	NUMBER	0002	
+SB_THUMBPOSITION . . . . . . . .  	NUMBER	0004	
+SB_THUMBTRACK  . . . . . . . . .  	NUMBER	0005	
+SB_TOP . . . . . . . . . . . . .  	NUMBER	0006	
+SB_VERT  . . . . . . . . . . . .  	NUMBER	0001	
+SC_ARRANGE . . . . . . . . . . .  	NUMBER	F110	
+SC_CLOSE . . . . . . . . . . . .  	NUMBER	F060	
+SC_HSCROLL . . . . . . . . . . .  	NUMBER	F080	
+SC_ICON  . . . . . . . . . . . .  	NUMBER	F020	
+SC_KEYMENU . . . . . . . . . . .  	NUMBER	F100	
+SC_MAXIMIZE  . . . . . . . . . .  	NUMBER	F030	
+SC_MINIMIZE  . . . . . . . . . .  	NUMBER	F020	
+SC_MOUSEMENU . . . . . . . . . .  	NUMBER	F090	
+SC_MOVE  . . . . . . . . . . . .  	NUMBER	F010	
+SC_NEXTWINDOW  . . . . . . . . .  	NUMBER	F040	
+SC_PREVWINDOW  . . . . . . . . .  	NUMBER	F050	
+SC_RESTORE . . . . . . . . . . .  	NUMBER	F120	
+SC_SIZE  . . . . . . . . . . . .  	NUMBER	F000	
+SC_TASKLIST  . . . . . . . . . .  	NUMBER	F130	
+SC_VSCROLL . . . . . . . . . . .  	NUMBER	F070	
+SC_ZOOM  . . . . . . . . . . . .  	NUMBER	F030	
+SD_CREATED . . . . . . . . . . .  	NUMBER	0100	
+SD_CREATEDn  . . . . . . . . . .  	NUMBER	0008	
+SELECTPAPERSOURCE  . . . . . . .  	NUMBER	0012	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-30
+
+
+SERVICE_ADDED  . . . . . . . . .  	NUMBER	0040	
+SERVICE_ADDEDn . . . . . . . . .  	NUMBER	0006	
+SERVICE_AMIGASIDE  . . . . . . .  	NUMBER	0004	
+SERVICE_AMIGASIDEn . . . . . . .  	NUMBER	0002	
+SERVICE_DELETED  . . . . . . . .  	NUMBER	0001	
+SERVICE_DELETEDn . . . . . . . .  	NUMBER	0000	
+SERVICE_PCWAIT . . . . . . . . .  	NUMBER	0008	
+SERVICE_PCWAITn  . . . . . . . .  	NUMBER	0003	
+SETABORTPROC . . . . . . . . . .  	NUMBER	0009	
+SETALLJUSTVALUES . . . . . . . .  	NUMBER	0303	
+SETCHARSET . . . . . . . . . . .  	NUMBER	0304	
+SETCOLORTABLE  . . . . . . . . .  	NUMBER	0004	
+SETCOPYCOUNT . . . . . . . . . .  	NUMBER	0011	
+SETDTR . . . . . . . . . . . . .  	NUMBER	0005	
+SETENDCAP  . . . . . . . . . . .  	NUMBER	0015	
+SETKERNTRACK . . . . . . . . . .  	NUMBER	0302	
+SETLINEJOIN  . . . . . . . . . .  	NUMBER	0016	
+SETMITERLIMIT  . . . . . . . . .  	NUMBER	0017	
+SETRTS . . . . . . . . . . . . .  	NUMBER	0003	
+SETXOFF  . . . . . . . . . . . .  	NUMBER	0001	
+SETXON . . . . . . . . . . . . .  	NUMBER	0002	
+SF_ABSOLUTE  . . . . . . . . . .  	NUMBER	8000	
+SF_B1_DOWN . . . . . . . . . . .  	NUMBER	0002	
+SF_B1_UP . . . . . . . . . . . .  	NUMBER	0004	
+SF_B2_DOWN . . . . . . . . . . .  	NUMBER	0008	
+SF_B2_UP . . . . . . . . . . . .  	NUMBER	0010	
+SF_MOVEMENT  . . . . . . . . . .  	NUMBER	0001	
+SHOW_FULLSCREEN  . . . . . . . .  	NUMBER	0003	
+SHOW_ICONWINDOW  . . . . . . . .  	NUMBER	0002	
+SHOW_OPENNOACTIVATE  . . . . . .  	NUMBER	0004	
+SHOW_OPENWINDOW  . . . . . . . .  	NUMBER	0001	
+SIMPLEREGION . . . . . . . . . .  	NUMBER	0002	
+SIZEFULLSCREEN . . . . . . . . .  	NUMBER	0002	
+SIZEICONIC . . . . . . . . . . .  	NUMBER	0001	
+SIZENORMAL . . . . . . . . . . .  	NUMBER	0000	
+SIZEPALETTE  . . . . . . . . . .  	NUMBER	0068	
+SIZEZOOMHIDE . . . . . . . . . .  	NUMBER	0004	
+SIZEZOOMSHOW . . . . . . . . . .  	NUMBER	0003	
+SM_CMETRICS  . . . . . . . . . .  	NUMBER	0024	
+SM_CXBORDER  . . . . . . . . . .  	NUMBER	0005	
+SM_CXCURSOR  . . . . . . . . . .  	NUMBER	000D	
+SM_CXDLGFRAME  . . . . . . . . .  	NUMBER	0007	
+SM_CXFRAME . . . . . . . . . . .  	NUMBER	0020	
+SM_CXFULLSCREEN  . . . . . . . .  	NUMBER	0010	
+SM_CXHSCROLL . . . . . . . . . .  	NUMBER	0015	
+SM_CXHTHUMB  . . . . . . . . . .  	NUMBER	000A	
+SM_CXICON  . . . . . . . . . . .  	NUMBER	000B	
+SM_CXMIN . . . . . . . . . . . .  	NUMBER	001C	
+SM_CXMINTRACK  . . . . . . . . .  	NUMBER	0022	
+SM_CXSCREEN  . . . . . . . . . .  	NUMBER	0000	
+SM_CXSIZE  . . . . . . . . . . .  	NUMBER	001E	
+SM_CXVSCROLL . . . . . . . . . .  	NUMBER	0002	
+SM_CYBORDER  . . . . . . . . . .  	NUMBER	0006	
+SM_CYCAPTION . . . . . . . . . .  	NUMBER	0004	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-31
+
+
+SM_CYCURSOR  . . . . . . . . . .  	NUMBER	000E	
+SM_CYDLGFRAME  . . . . . . . . .  	NUMBER	0008	
+SM_CYFRAME . . . . . . . . . . .  	NUMBER	0021	
+SM_CYFULLSCREEN  . . . . . . . .  	NUMBER	0011	
+SM_CYHSCROLL . . . . . . . . . .  	NUMBER	0003	
+SM_CYICON  . . . . . . . . . . .  	NUMBER	000C	
+SM_CYKANJIWINDOW . . . . . . . .  	NUMBER	0012	
+SM_CYMENU  . . . . . . . . . . .  	NUMBER	000F	
+SM_CYMIN . . . . . . . . . . . .  	NUMBER	001D	
+SM_CYMINTRACK  . . . . . . . . .  	NUMBER	0023	
+SM_CYSCREEN  . . . . . . . . . .  	NUMBER	0001	
+SM_CYSIZE  . . . . . . . . . . .  	NUMBER	001F	
+SM_CYVSCROLL . . . . . . . . . .  	NUMBER	0014	
+SM_CYVTHUMB  . . . . . . . . . .  	NUMBER	0009	
+SM_DEBUG . . . . . . . . . . . .  	NUMBER	0016	
+SM_MOUSEPRESENT  . . . . . . . .  	NUMBER	0013	
+SM_RESERVED1 . . . . . . . . . .  	NUMBER	0018	
+SM_RESERVED2 . . . . . . . . . .  	NUMBER	0019	
+SM_RESERVED3 . . . . . . . . . .  	NUMBER	001A	
+SM_RESERVED4 . . . . . . . . . .  	NUMBER	001B	
+SM_SWAPBUTTON  . . . . . . . . .  	NUMBER	0017	
+SPACEPARITY  . . . . . . . . . .  	NUMBER	0004	
+SP_APPABORT  . . . . . . . . . .  	NUMBER	-0002	
+SP_ERROR . . . . . . . . . . . .  	NUMBER	-0001	
+SP_NOTREPORTED . . . . . . . . .  	NUMBER	4000	
+SP_OUTOFDISK . . . . . . . . . .  	NUMBER	-0004	
+SP_OUTOFMEMORY . . . . . . . . .  	NUMBER	-0005	
+SP_USERABORT . . . . . . . . . .  	NUMBER	-0003	
+SRCAND_H . . . . . . . . . . . .  	NUMBER	0088	
+SRCAND_L . . . . . . . . . . . .  	NUMBER	00C6	
+SRCCOPY_H  . . . . . . . . . . .  	NUMBER	00CC	
+SRCCOPY_L  . . . . . . . . . . .  	NUMBER	0020	
+SRCERASE_H . . . . . . . . . . .  	NUMBER	0044	
+SRCERASE_L . . . . . . . . . . .  	NUMBER	0328	
+SRCINVERT_H  . . . . . . . . . .  	NUMBER	0066	
+SRCINVERT_L  . . . . . . . . . .  	NUMBER	0046	
+SRCPAINT_H . . . . . . . . . . .  	NUMBER	00EE	
+SRCPAINT_L . . . . . . . . . . .  	NUMBER	0086	
+SS_BLACKFRAME  . . . . . . . . .  	NUMBER	0007	
+SS_BLACKRECT . . . . . . . . . .  	NUMBER	0004	
+SS_CENTER  . . . . . . . . . . .  	NUMBER	0001	
+SS_GRAYFRAME . . . . . . . . . .  	NUMBER	0008	
+SS_GRAYRECT  . . . . . . . . . .  	NUMBER	0005	
+SS_ICON  . . . . . . . . . . . .  	NUMBER	0003	
+SS_LEFT  . . . . . . . . . . . .  	NUMBER	0000	
+SS_LEFTNOWORDWRAP  . . . . . . .  	NUMBER	000C	
+SS_NOPREFIX  . . . . . . . . . .  	NUMBER	0080	
+SS_RIGHT . . . . . . . . . . . .  	NUMBER	0002	
+SS_SIMPLE  . . . . . . . . . . .  	NUMBER	000B	
+SS_USERITEM  . . . . . . . . . .  	NUMBER	000A	
+SS_WHITEFRAME  . . . . . . . . .  	NUMBER	0009	
+SS_WHITERECT . . . . . . . . . .  	NUMBER	0006	
+STARTDOC . . . . . . . . . . . .  	NUMBER	000A	
+STRETCHBLT . . . . . . . . . . .  	NUMBER	0800	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-32
+
+
+SWAP_INT_PROC  . . . . . . . . .  	NUMBER	0014	
+SWP_DRAWFRAME  . . . . . . . . .  	NUMBER	0020	
+SWP_HIDEWINDOW . . . . . . . . .  	NUMBER	0080	
+SWP_NOACTIVATE . . . . . . . . .  	NUMBER	0010	
+SWP_NOCOPYBITS . . . . . . . . .  	NUMBER	0100	
+SWP_NOMOVE . . . . . . . . . . .  	NUMBER	0002	
+SWP_NOREDRAW . . . . . . . . . .  	NUMBER	0008	
+SWP_NOREPOSITION . . . . . . . .  	NUMBER	0200	
+SWP_NOSIZE . . . . . . . . . . .  	NUMBER	0001	
+SWP_NOZORDER . . . . . . . . . .  	NUMBER	0004	
+SWP_SHOWWINDOW . . . . . . . . .  	NUMBER	0040	
+SW_HIDE  . . . . . . . . . . . .  	NUMBER	0000	
+SW_MAXIMIZE  . . . . . . . . . .  	NUMBER	0003	
+SW_MINIMIZE  . . . . . . . . . .  	NUMBER	0006	
+SW_NORMAL  . . . . . . . . . . .  	NUMBER	0001	
+SW_OTHERUNZOOM . . . . . . . . .  	NUMBER	0004	
+SW_OTHERZOOM . . . . . . . . . .  	NUMBER	0002	
+SW_PARENTCLOSING . . . . . . . .  	NUMBER	0001	
+SW_PARENTOPENING . . . . . . . .  	NUMBER	0003	
+SW_RESTORE . . . . . . . . . . .  	NUMBER	0009	
+SW_SHOW  . . . . . . . . . . . .  	NUMBER	0005	
+SW_SHOWMAXIMIZED . . . . . . . .  	NUMBER	0003	
+SW_SHOWMINIMIZED . . . . . . . .  	NUMBER	0002	
+SW_SHOWMINNOACTIVE . . . . . . .  	NUMBER	0007	
+SW_SHOWNA  . . . . . . . . . . .  	NUMBER	0008	
+SW_SHOWNOACTIVATE  . . . . . . .  	NUMBER	0004	
+SW_SHOWNORMAL  . . . . . . . . .  	NUMBER	0001	
+SYMBOL_CHARSET . . . . . . . . .  	NUMBER	0002	
+SYSPAL_NOSTATIC  . . . . . . . .  	NUMBER	0002	
+SYSPAL_STATIC  . . . . . . . . .  	NUMBER	0001	
+SYSTEM_FIXED_FONT  . . . . . . .  	NUMBER	0010	
+SYSTEM_FONT  . . . . . . . . . .  	NUMBER	000D	
+SetSelectorBase  . . . . . . . .  	L FAR 	0000		External
+SetSelectorLimit . . . . . . . .  	L FAR 	0000		External
+scan_xlate . . . . . . . . . . .  	L NEAR	00E0	_TEXT
+seg_done . . . . . . . . . . . .  	L NEAR	012C	_TEXT
+seg_event_proc . . . . . . . . .  	DWORD	0012	_DATA
+seg_lp_mouse_info  . . . . . . .  	TEXT  (word ptr [bp+8])		
+seg_ms_rq_np . . . . . . . . . .  	DWORD	001E	_DATA
+seg_ms_rq_rp . . . . . . . . . .  	DWORD	0022	_DATA
+seg_ms_sd_np . . . . . . . . . .  	DWORD	0016	_DATA
+seg_ms_sd_rp . . . . . . . . . .  	DWORD	001A	_DATA
+seg_new_event_proc . . . . . . .  	TEXT  (word ptr [bp+8])		
+sim_int0b  . . . . . . . . . . .  	N PROC	0000	_TEXT	Length = 0011
+skip_devint  . . . . . . . . . .  	L NEAR	0328	_TEXT
+skip_rq  . . . . . . . . . . . .  	L NEAR	034E	_TEXT
+skip_sd  . . . . . . . . . . . .  	L NEAR	033B	_TEXT
+stupid . . . . . . . . . . . . .  	L BYTE	0000	_DATA	Length = 0010
+
+TA_BASELINE  . . . . . . . . . .  	NUMBER	0018	
+TA_BOTTOM  . . . . . . . . . . .  	NUMBER	0008	
+TA_CENTER  . . . . . . . . . . .  	NUMBER	0006	
+TA_LEFT  . . . . . . . . . . . .  	NUMBER	0000	
+TA_NOUPDATECP  . . . . . . . . .  	NUMBER	0000	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-33
+
+
+TA_RIGHT . . . . . . . . . . . .  	NUMBER	0002	
+TA_TOP . . . . . . . . . . . . .  	NUMBER	0000	
+TA_UPDATECP  . . . . . . . . . .  	NUMBER	0001	
+TC_CP_STROKE . . . . . . . . . .  	NUMBER	0004	
+TC_CR_90 . . . . . . . . . . . .  	NUMBER	0008	
+TC_CR_ANY  . . . . . . . . . . .  	NUMBER	0010	
+TC_EA_DOUBLE . . . . . . . . . .  	NUMBER	0200	
+TC_IA_ABLE . . . . . . . . . . .  	NUMBER	0400	
+TC_OP_CHARACTER  . . . . . . . .  	NUMBER	0001	
+TC_OP_STROKE . . . . . . . . . .  	NUMBER	0002	
+TC_RA_ABLE . . . . . . . . . . .  	NUMBER	2000	
+TC_RESERVED  . . . . . . . . . .  	NUMBER	8000	
+TC_SA_CONTIN . . . . . . . . . .  	NUMBER	0100	
+TC_SA_DOUBLE . . . . . . . . . .  	NUMBER	0040	
+TC_SA_INTEGER  . . . . . . . . .  	NUMBER	0080	
+TC_SF_X_YINDEP . . . . . . . . .  	NUMBER	0020	
+TC_SO_ABLE . . . . . . . . . . .  	NUMBER	1000	
+TC_UA_ABLE . . . . . . . . . . .  	NUMBER	0800	
+TC_VA_ABLE . . . . . . . . . . .  	NUMBER	4000	
+TECHNOLOGY . . . . . . . . . . .  	NUMBER	0002	
+TESTING  . . . . . . . . . . . .  	NUMBER	0000	
+TEXTCAPS . . . . . . . . . . . .  	NUMBER	0022	
+TF_FORCEDRIVE  . . . . . . . . .  	NUMBER	0080	
+TRANSPARENT  . . . . . . . . . .  	NUMBER	0001	
+TRUE . . . . . . . . . . . . . .  	NUMBER	0001	
+TWOSTOPBITS  . . . . . . . . . .  	NUMBER	0002	
+tickle_done  . . . . . . . . . .  	L NEAR	0258	_TEXT
+tickle_janus . . . . . . . . . .  	N PROC	022C	_TEXT	Length = 002D
+tickle_loop  . . . . . . . . . .  	L NEAR	022F	_TEXT
+tickle_next  . . . . . . . . . .  	L NEAR	0249	_TEXT
+tickle_ok  . . . . . . . . . . .  	L NEAR	0255	_TEXT
+tickle_real  . . . . . . . . . .  	L NEAR	0247	_TEXT
+timer_handle . . . . . . . . . .  	L WORD	0032	_DATA	Global
+
+VERTRES  . . . . . . . . . . . .  	NUMBER	000A	
+VERTSIZE . . . . . . . . . . . .  	NUMBER	0006	
+VGAType  . . . . . . . . . . . .  	NUMBER	0001	
+VK_ADD . . . . . . . . . . . . .  	NUMBER	006B	
+VK_BACK  . . . . . . . . . . . .  	NUMBER	0008	
+VK_CANCEL  . . . . . . . . . . .  	NUMBER	0003	
+VK_CAPITAL . . . . . . . . . . .  	NUMBER	0014	
+VK_CLEAR . . . . . . . . . . . .  	NUMBER	000C	
+VK_CONTROL . . . . . . . . . . .  	NUMBER	0011	
+VK_DECIMAL . . . . . . . . . . .  	NUMBER	006E	
+VK_DELETE  . . . . . . . . . . .  	NUMBER	002E	
+VK_DIVIDE  . . . . . . . . . . .  	NUMBER	006F	
+VK_DOWN  . . . . . . . . . . . .  	NUMBER	0028	
+VK_END . . . . . . . . . . . . .  	NUMBER	0023	
+VK_ESCAPE  . . . . . . . . . . .  	NUMBER	001B	
+VK_EXECUTE . . . . . . . . . . .  	NUMBER	002B	
+VK_F1  . . . . . . . . . . . . .  	NUMBER	0070	
+VK_F10 . . . . . . . . . . . . .  	NUMBER	0079	
+VK_F11 . . . . . . . . . . . . .  	NUMBER	007A	
+VK_F12 . . . . . . . . . . . . .  	NUMBER	007B	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-34
+
+
+VK_F13 . . . . . . . . . . . . .  	NUMBER	007C	
+VK_F14 . . . . . . . . . . . . .  	NUMBER	007D	
+VK_F15 . . . . . . . . . . . . .  	NUMBER	007E	
+VK_F16 . . . . . . . . . . . . .  	NUMBER	007F	
+VK_F2  . . . . . . . . . . . . .  	NUMBER	0071	
+VK_F3  . . . . . . . . . . . . .  	NUMBER	0072	
+VK_F4  . . . . . . . . . . . . .  	NUMBER	0073	
+VK_F5  . . . . . . . . . . . . .  	NUMBER	0074	
+VK_F6  . . . . . . . . . . . . .  	NUMBER	0075	
+VK_F7  . . . . . . . . . . . . .  	NUMBER	0076	
+VK_F8  . . . . . . . . . . . . .  	NUMBER	0077	
+VK_F9  . . . . . . . . . . . . .  	NUMBER	0078	
+VK_HELP  . . . . . . . . . . . .  	NUMBER	002F	
+VK_HOME  . . . . . . . . . . . .  	NUMBER	0024	
+VK_INSERT  . . . . . . . . . . .  	NUMBER	002D	
+VK_LBUTTON . . . . . . . . . . .  	NUMBER	0001	
+VK_LEFT  . . . . . . . . . . . .  	NUMBER	0025	
+VK_MENU  . . . . . . . . . . . .  	NUMBER	0012	
+VK_MULTIPLY  . . . . . . . . . .  	NUMBER	006A	
+VK_NEXT  . . . . . . . . . . . .  	NUMBER	0022	
+VK_NUMPAD0 . . . . . . . . . . .  	NUMBER	0060	
+VK_NUMPAD1 . . . . . . . . . . .  	NUMBER	0061	
+VK_NUMPAD2 . . . . . . . . . . .  	NUMBER	0062	
+VK_NUMPAD3 . . . . . . . . . . .  	NUMBER	0063	
+VK_NUMPAD4 . . . . . . . . . . .  	NUMBER	0064	
+VK_NUMPAD5 . . . . . . . . . . .  	NUMBER	0065	
+VK_NUMPAD6 . . . . . . . . . . .  	NUMBER	0066	
+VK_NUMPAD7 . . . . . . . . . . .  	NUMBER	0067	
+VK_NUMPAD8 . . . . . . . . . . .  	NUMBER	0068	
+VK_NUMPAD9 . . . . . . . . . . .  	NUMBER	0069	
+VK_PAUSE . . . . . . . . . . . .  	NUMBER	0013	
+VK_PRINT . . . . . . . . . . . .  	NUMBER	002A	
+VK_PRIOR . . . . . . . . . . . .  	NUMBER	0021	
+VK_RBUTTON . . . . . . . . . . .  	NUMBER	0002	
+VK_RETURN  . . . . . . . . . . .  	NUMBER	000D	
+VK_RIGHT . . . . . . . . . . . .  	NUMBER	0027	
+VK_SEPARATER . . . . . . . . . .  	NUMBER	006C	
+VK_SHIFT . . . . . . . . . . . .  	NUMBER	0010	
+VK_SNAPSHOT  . . . . . . . . . .  	NUMBER	002C	
+VK_SPACE . . . . . . . . . . . .  	NUMBER	0020	
+VK_SUBTRACT  . . . . . . . . . .  	NUMBER	006D	
+VK_TAB . . . . . . . . . . . . .  	NUMBER	0009	
+VK_UP  . . . . . . . . . . . . .  	NUMBER	0026	
+VMD_DEVICE_ID  . . . . . . . . .  	NUMBER	000C	
+vector . . . . . . . . . . . . .  	L BYTE	0042	_DATA	Global
+vmd_call_done  . . . . . . . . .  	L NEAR	02D9	_TEXT
+
+WARNING  . . . . . . . . . . . .  	NUMBER	0000	
+WC_DEFWINDOWPROC . . . . . . . .  	NUMBER	0003	
+WC_DRAWCAPTION . . . . . . . . .  	NUMBER	0007	
+WC_INIT  . . . . . . . . . . . .  	NUMBER	0001	
+WC_MINMAX  . . . . . . . . . . .  	NUMBER	0004	
+WC_MOVE  . . . . . . . . . . . .  	NUMBER	0005	
+WC_SIZE  . . . . . . . . . . . .  	NUMBER	0006	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-35
+
+
+WC_SWP . . . . . . . . . . . . .  	NUMBER	0002	
+WEP  . . . . . . . . . . . . . .  	F PROC	0470	_TEXT	Global	Length = 0006
+WEP_FREE_DLL . . . . . . . . . .  	NUMBER	0000	
+WEP_SYSTEM_EXIT  . . . . . . . .  	NUMBER	0001	
+WF_80x87 . . . . . . . . . . . .  	NUMBER	0400	
+WF_CPU086  . . . . . . . . . . .  	NUMBER	0040	
+WF_CPU186  . . . . . . . . . . .  	NUMBER	0080	
+WF_CPU286  . . . . . . . . . . .  	NUMBER	0002	
+WF_CPU386  . . . . . . . . . . .  	NUMBER	0004	
+WF_CPU486  . . . . . . . . . . .  	NUMBER	0008	
+WF_ENHANCED  . . . . . . . . . .  	NUMBER	0020	
+WF_LARGEFRAME  . . . . . . . . .  	NUMBER	0100	
+WF_PMODE . . . . . . . . . . . .  	NUMBER	0001	
+WF_SMALLFRAME  . . . . . . . . .  	NUMBER	0200	
+WF_STANDARD  . . . . . . . . . .  	NUMBER	0010	
+WF_WIN286  . . . . . . . . . . .  	NUMBER	0010	
+WF_WIN386  . . . . . . . . . . .  	NUMBER	0020	
+WHITENESS_H  . . . . . . . . . .  	NUMBER	00FF	
+WHITENESS_L  . . . . . . . . . .  	NUMBER	0062	
+WHITEONBLACK . . . . . . . . . .  	NUMBER	0002	
+WHITE_BRUSH  . . . . . . . . . .  	NUMBER	0000	
+WHITE_PEN  . . . . . . . . . . .  	NUMBER	0006	
+WH_CALLWNDPROC . . . . . . . . .  	NUMBER	0004	
+WH_CBT . . . . . . . . . . . . .  	NUMBER	0005	
+WH_GETMESSAGE  . . . . . . . . .  	NUMBER	0003	
+WH_JOURNALPLAYBACK . . . . . . .  	NUMBER	0001	
+WH_JOURNALRECORD . . . . . . . .  	NUMBER	0000	
+WH_KEYBOARD  . . . . . . . . . .  	NUMBER	0002	
+WH_MSGFILTER . . . . . . . . . .  	NUMBER	-0001	
+WH_SYSMSGFILTER  . . . . . . . .  	NUMBER	0006	
+WH_WINDOWMGR . . . . . . . . . .  	NUMBER	0007	
+WINDING  . . . . . . . . . . . .  	NUMBER	0002	
+WM_ACTIVATE  . . . . . . . . . .  	NUMBER	0006	
+WM_ACTIVATEAPP . . . . . . . . .  	NUMBER	001C	
+WM_ASKCBFORMATNAME . . . . . . .  	NUMBER	030C	
+WM_CANCELMODE  . . . . . . . . .  	NUMBER	001F	
+WM_CHANGECBCHAIN . . . . . . . .  	NUMBER	030D	
+WM_CHAR  . . . . . . . . . . . .  	NUMBER	0102	
+WM_CHARTOITEM  . . . . . . . . .  	NUMBER	002F	
+WM_CHILDACTIVATE . . . . . . . .  	NUMBER	0022	
+WM_CLEAR . . . . . . . . . . . .  	NUMBER	0303	
+WM_CLOSE . . . . . . . . . . . .  	NUMBER	0010	
+WM_COMMAND . . . . . . . . . . .  	NUMBER	0111	
+WM_COMPACTING  . . . . . . . . .  	NUMBER	0041	
+WM_COMPAREITEM . . . . . . . . .  	NUMBER	0039	
+WM_COPY  . . . . . . . . . . . .  	NUMBER	0301	
+WM_CREATE  . . . . . . . . . . .  	NUMBER	0001	
+WM_CTLCOLOR  . . . . . . . . . .  	NUMBER	0019	
+WM_CUT . . . . . . . . . . . . .  	NUMBER	0300	
+WM_DEADCHAR  . . . . . . . . . .  	NUMBER	0103	
+WM_DELETEITEM  . . . . . . . . .  	NUMBER	002D	
+WM_DESTROY . . . . . . . . . . .  	NUMBER	0002	
+WM_DESTROYCLIPBOARD  . . . . . .  	NUMBER	0307	
+WM_DEVMODECHANGE . . . . . . . .  	NUMBER	001B	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-36
+
+
+WM_DRAWCLIPBOARD . . . . . . . .  	NUMBER	0308	
+WM_DRAWITEM  . . . . . . . . . .  	NUMBER	002B	
+WM_ENABLE  . . . . . . . . . . .  	NUMBER	000A	
+WM_ENDSESSION  . . . . . . . . .  	NUMBER	0016	
+WM_ENTERIDLE . . . . . . . . . .  	NUMBER	0121	
+WM_ERASEBKGND  . . . . . . . . .  	NUMBER	0014	
+WM_FONTCHANGE  . . . . . . . . .  	NUMBER	001D	
+WM_GETDLGCODE  . . . . . . . . .  	NUMBER	0087	
+WM_GETFONT . . . . . . . . . . .  	NUMBER	0031	
+WM_GETMINMAXINFO . . . . . . . .  	NUMBER	0024	
+WM_GETTEXT . . . . . . . . . . .  	NUMBER	000D	
+WM_GETTEXTLENGTH . . . . . . . .  	NUMBER	000E	
+WM_HSCROLL . . . . . . . . . . .  	NUMBER	0114	
+WM_HSCROLLCLIPBOARD  . . . . . .  	NUMBER	030E	
+WM_ICONERASEBKGND  . . . . . . .  	NUMBER	0027	
+WM_INITDIALOG  . . . . . . . . .  	NUMBER	0110	
+WM_INITMENU  . . . . . . . . . .  	NUMBER	0116	
+WM_INITMENUPOPUP . . . . . . . .  	NUMBER	0117	
+WM_KEYDOWN . . . . . . . . . . .  	NUMBER	0100	
+WM_KEYFIRST  . . . . . . . . . .  	NUMBER	0100	
+WM_KEYLAST . . . . . . . . . . .  	NUMBER	0108	
+WM_KEYUP . . . . . . . . . . . .  	NUMBER	0101	
+WM_KILLFOCUS . . . . . . . . . .  	NUMBER	0008	
+WM_LBUTTONDBLCLK . . . . . . . .  	NUMBER	0203	
+WM_LBUTTONDOWN . . . . . . . . .  	NUMBER	0201	
+WM_LBUTTONUP . . . . . . . . . .  	NUMBER	0202	
+WM_MBUTTONDBLCLK . . . . . . . .  	NUMBER	0209	
+WM_MBUTTONDOWN . . . . . . . . .  	NUMBER	0207	
+WM_MBUTTONUP . . . . . . . . . .  	NUMBER	0208	
+WM_MDIACTIVATE . . . . . . . . .  	NUMBER	0222	
+WM_MDICASCADE  . . . . . . . . .  	NUMBER	0227	
+WM_MDICREATE . . . . . . . . . .  	NUMBER	0220	
+WM_MDIDESTROY  . . . . . . . . .  	NUMBER	0221	
+WM_MDIGETACTIVE  . . . . . . . .  	NUMBER	0229	
+WM_MDIICONARRANGE  . . . . . . .  	NUMBER	0228	
+WM_MDIMAXIMIZE . . . . . . . . .  	NUMBER	0225	
+WM_MDINEXT . . . . . . . . . . .  	NUMBER	0224	
+WM_MDIRESTORE  . . . . . . . . .  	NUMBER	0223	
+WM_MDISETMENU  . . . . . . . . .  	NUMBER	0230	
+WM_MDITILE . . . . . . . . . . .  	NUMBER	0226	
+WM_MEASUREITEM . . . . . . . . .  	NUMBER	002C	
+WM_MENUCHAR  . . . . . . . . . .  	NUMBER	0120	
+WM_MENUSELECT  . . . . . . . . .  	NUMBER	011F	
+WM_MOUSEACTIVATE . . . . . . . .  	NUMBER	0021	
+WM_MOUSEFIRST  . . . . . . . . .  	NUMBER	0200	
+WM_MOUSELAST . . . . . . . . . .  	NUMBER	0209	
+WM_MOUSEMOVE . . . . . . . . . .  	NUMBER	0200	
+WM_MOVE  . . . . . . . . . . . .  	NUMBER	0003	
+WM_NCACTIVATE  . . . . . . . . .  	NUMBER	0086	
+WM_NCCALCSIZE  . . . . . . . . .  	NUMBER	0083	
+WM_NCCREATE  . . . . . . . . . .  	NUMBER	0081	
+WM_NCDESTROY . . . . . . . . . .  	NUMBER	0082	
+WM_NCHITTEST . . . . . . . . . .  	NUMBER	0084	
+WM_NCLBUTTONDBLCLK . . . . . . .  	NUMBER	00A3	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-37
+
+
+WM_NCLBUTTONDOWN . . . . . . . .  	NUMBER	00A1	
+WM_NCLBUTTONUP . . . . . . . . .  	NUMBER	00A2	
+WM_NCMBUTTONDBLCLK . . . . . . .  	NUMBER	00A9	
+WM_NCMBUTTONDOWN . . . . . . . .  	NUMBER	00A7	
+WM_NCMBUTTONUP . . . . . . . . .  	NUMBER	00A8	
+WM_NCMOUSEMOVE . . . . . . . . .  	NUMBER	00A0	
+WM_NCPAINT . . . . . . . . . . .  	NUMBER	0085	
+WM_NCRBUTTONDBLCLK . . . . . . .  	NUMBER	00A6	
+WM_NCRBUTTONDOWN . . . . . . . .  	NUMBER	00A4	
+WM_NCRBUTTONUP . . . . . . . . .  	NUMBER	00A5	
+WM_NEXTDLGCTL  . . . . . . . . .  	NUMBER	0028	
+WM_NULL  . . . . . . . . . . . .  	NUMBER	0000	
+WM_PAINT . . . . . . . . . . . .  	NUMBER	000F	
+WM_PAINTCLIPBOARD  . . . . . . .  	NUMBER	0309	
+WM_PAINTICON . . . . . . . . . .  	NUMBER	0026	
+WM_PALETTECHANGED  . . . . . . .  	NUMBER	0311	
+WM_PALETTEISCHANGING . . . . . .  	NUMBER	0310	
+WM_PARENTNOTIFY  . . . . . . . .  	NUMBER	0210	
+WM_PASTE . . . . . . . . . . . .  	NUMBER	0302	
+WM_QUERYDRAGICON . . . . . . . .  	NUMBER	0037	
+WM_QUERYENDSESSION . . . . . . .  	NUMBER	0011	
+WM_QUERYNEWPALETTE . . . . . . .  	NUMBER	030F	
+WM_QUERYOPEN . . . . . . . . . .  	NUMBER	0013	
+WM_QUEUESYNC . . . . . . . . . .  	NUMBER	0023	
+WM_QUIT  . . . . . . . . . . . .  	NUMBER	0012	
+WM_RBUTTONDBLCLK . . . . . . . .  	NUMBER	0206	
+WM_RBUTTONDOWN . . . . . . . . .  	NUMBER	0204	
+WM_RBUTTONUP . . . . . . . . . .  	NUMBER	0205	
+WM_RENDERALLFORMATS  . . . . . .  	NUMBER	0306	
+WM_RENDERFORMAT  . . . . . . . .  	NUMBER	0305	
+WM_SETCURSOR . . . . . . . . . .  	NUMBER	0020	
+WM_SETFOCUS  . . . . . . . . . .  	NUMBER	0007	
+WM_SETFONT . . . . . . . . . . .  	NUMBER	0030	
+WM_SETREDRAW . . . . . . . . . .  	NUMBER	000B	
+WM_SETTEXT . . . . . . . . . . .  	NUMBER	000C	
+WM_SHOWWINDOW  . . . . . . . . .  	NUMBER	0018	
+WM_SIZE  . . . . . . . . . . . .  	NUMBER	0005	
+WM_SIZECLIPBOARD . . . . . . . .  	NUMBER	030B	
+WM_SPOOLERSTATUS . . . . . . . .  	NUMBER	002A	
+WM_STATE . . . . . . . . . . . .  	NUMBER	0000	
+WM_SYSCHAR . . . . . . . . . . .  	NUMBER	0106	
+WM_SYSCOLORCHANGE  . . . . . . .  	NUMBER	0015	
+WM_SYSCOMMAND  . . . . . . . . .  	NUMBER	0112	
+WM_SYSDEADCHAR . . . . . . . . .  	NUMBER	0107	
+WM_SYSKEYDOWN  . . . . . . . . .  	NUMBER	0104	
+WM_SYSKEYUP  . . . . . . . . . .  	NUMBER	0105	
+WM_TIMECHANGE  . . . . . . . . .  	NUMBER	001E	
+WM_TIMER . . . . . . . . . . . .  	NUMBER	0113	
+WM_UNDO  . . . . . . . . . . . .  	NUMBER	0304	
+WM_USER  . . . . . . . . . . . .  	NUMBER	0400	
+WM_VKEYTOITEM  . . . . . . . . .  	NUMBER	002E	
+WM_VSCROLL . . . . . . . . . . .  	NUMBER	0115	
+WM_VSCROLLCLIPBOARD  . . . . . .  	NUMBER	030A	
+WM_WININICHANGE  . . . . . . . .  	NUMBER	001A	
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-38
+
+
+WS_BORDER  . . . . . . . . . . .  	NUMBER	0080	
+WS_CAPTION . . . . . . . . . . .  	NUMBER	00C0	
+WS_CHILD . . . . . . . . . . . .  	NUMBER	4000	
+WS_CHILDWINDOW . . . . . . . . .  	NUMBER	4000	
+WS_CLIPCHILDREN  . . . . . . . .  	NUMBER	0200	
+WS_CLIPSIBLINGS  . . . . . . . .  	NUMBER	0400	
+WS_DISABLED  . . . . . . . . . .  	NUMBER	0800	
+WS_DLGFRAME  . . . . . . . . . .  	NUMBER	0040	
+WS_EX_DLGMODALFRAME  . . . . . .  	NUMBER	0001	
+WS_EX_DRAGOBJECT . . . . . . . .  	NUMBER	0002	
+WS_EX_NOPARENTNOTIFY . . . . . .  	NUMBER	0004	
+WS_GROUP . . . . . . . . . . . .  	NUMBER	0002	
+WS_HREDRAW . . . . . . . . . . .  	NUMBER	0002	
+WS_HSCROLL . . . . . . . . . . .  	NUMBER	0010	
+WS_ICONIC  . . . . . . . . . . .  	NUMBER	2000	
+WS_ICONICPOPUP . . . . . . . . .  	NUMBER	C000	
+WS_MAXIMIZE  . . . . . . . . . .  	NUMBER	0100	
+WS_MAXIMIZEBOX . . . . . . . . .  	NUMBER	0001	
+WS_MINIMIZE  . . . . . . . . . .  	NUMBER	2000	
+WS_MINIMIZEBOX . . . . . . . . .  	NUMBER	0002	
+WS_OVERLAPPED  . . . . . . . . .  	NUMBER	0000	
+WS_OVERLAPPEDWINDOW  . . . . . .  	NUMBER	00CF	
+WS_POPUP . . . . . . . . . . . .  	NUMBER	8000	
+WS_POPUPWINDOW . . . . . . . . .  	NUMBER	8088	
+WS_SIZEBOX . . . . . . . . . . .  	NUMBER	0004	
+WS_SYSMENU . . . . . . . . . . .  	NUMBER	0008	
+WS_TABSTOP . . . . . . . . . . .  	NUMBER	0001	
+WS_THICKFRAME  . . . . . . . . .  	NUMBER	0004	
+WS_TILED . . . . . . . . . . . .  	NUMBER	0000	
+WS_TILEDWINDOW . . . . . . . . .  	NUMBER	00CF	
+WS_VISIBLE . . . . . . . . . . .  	NUMBER	1000	
+WS_VREDRAW . . . . . . . . . . .  	NUMBER	0001	
+WS_VSCROLL . . . . . . . . . . .  	NUMBER	0020	
+wep_done . . . . . . . . . . . .  	L NEAR	034E	_TEXT
+win_286  . . . . . . . . . . . .  	L NEAR	00A5	_TEXT
+win_386  . . . . . . . . . . . .  	L NEAR	00AE	_TEXT
+win_done . . . . . . . . . . . .  	L NEAR	00B4	_TEXT
+windows_closed . . . . . . . . .  	L NEAR	0372	_TEXT
+windows_open . . . . . . . . . .  	L NEAR	0398	_TEXT
+winit_done . . . . . . . . . . .  	L NEAR	048F	_TEXT
+wptr . . . . . . . . . . . . . .  	TEXT  word ptr		
+
+X_SPEED  . . . . . . . . . . . .  	NUMBER	0002	
+
+Y_SPEED  . . . . . . . . . . . .  	NUMBER	0002	
+
+@Cpu . . . . . . . . . . . . . .  	TEXT  0101h		
+@FileName  . . . . . . . . . . .  	TEXT  amouse3		
+@Version . . . . . . . . . . . .  	TEXT  510		
+__0000h  . . . . . . . . . . . .  	V WORD	0000		External
+__A000h  . . . . . . . . . . . .  	V WORD	0000		External
+__B000h  . . . . . . . . . . . .  	V WORD	0000		External
+__B800h  . . . . . . . . . . . .  	V WORD	0000		External
+__C000h  . . . . . . . . . . . .  	V WORD	0000		External
+Microsoft (R) Macro Assembler Version 5.10                  6/18/91 21:57:27
+Mouse - Main Mouse Module                                   Symbols-39
+
+
+__D000h  . . . . . . . . . . . .  	V WORD	0000		External
+__E000h  . . . . . . . . . . . .  	V WORD	0000		External
+__F000h  . . . . . . . . . . . .  	V WORD	0000		External
+__ROMBIOS  . . . . . . . . . . .  	NUMBER	0000		Communal
+
+
+   5806 Source  Lines
+  12287 Total   Lines
+   2247 Symbols
+
+  45578 + 36509 Bytes symbol space free
+
+      0 Warning Errors
+      0 Severe  Errors

@@ -1,0 +1,270 @@
+head     1.2;
+branch   ;
+access   ;
+symbols  ;
+locks    dlarson:1.2; strict;
+comment  @ * @;
+
+
+1.2
+date     91.08.02.09.13.03;  author dlarson;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     91.07.25.19.22.32;  author dlarson;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@working!
+@
+
+
+1.2
+log
+@First Alpha?
+@
+text
+@/*
+**  Bolt NET-UDP.library:
+**  net-udp.h -- common header for all NET-UDP.library source files.
+**
+**      $Log:	bolt-udp.h,v $
+ * Revision 1.1  91/07/25  19:22:32  dlarson
+ * Initial revision
+ *
+ * Revision 1.1  91/06/05  12:50:32  dlarson
+ * Initial revision
+ *
+*/
+
+#ifndef D_UDP_H
+#define D_UDP_H
+
+#if BUGMSG > 0
+void __stdargs KPrintF(char *, ...);
+#define BUG(x) Forbid(); KPrintF x; Permit();
+#else
+#define BUG(x)
+#endif
+
+#if PARANOID > 0
+#define BUGP(x) BUG(x)
+#else
+#define BUGP(x)
+#endif
+
+/*#define BUG2(x) Forbid(); KPrintF x; Permit();
+if DEBUG=0
+#undef BUG1
+#undef BUG2
+#endif
+if DEBUG=1
+#undef BUG2
+#endif
+if DEBUG>5
+#define OBUG(x) KPrintF x;
+#endif
+*/
+
+#define NETBUFSIZE  8192
+#define MAXPORT       32
+#define MAXNAME       40
+
+#include "bolt.h"
+#include <exec/exec.h>
+#include <intuition/intuition.h>
+#include <devices/console.h>
+#include <devices/timer.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <dos/dostags.h>
+#include <libraries/filehandler.h>
+#include <string.h>
+#define U_ARGS(a) a     /* prototype checking to ensure all is well */
+/***
+#include <proto/all.h>
+****
+#include <sas/proto/exec.h>
+#include <sas/proto/dos.h>
+#include <sas/proto/timer.h>
+#include <sas/proto/intuition.h>
+****/
+
+#define ABSEXECBASE (*(struct Library **)4L)
+#define SysBase ABSEXECBASE
+#include <clib/exec_protos.h>
+#include <pragmas/exec_pragmas.h>
+#include <clib/dos_protos.h>
+#include <pragmas/dos_pragmas.h>
+#include <clib/timer_protos.h>
+#include <pragmas/timer_pragmas.h>
+#include <clib/intuition_protos.h>
+#include <pragmas/intuition_pragmas.h>
+
+#include "sdn_pragmas.h"
+#include "bolt.h"
+
+/*  Stuff we don't like about the socket library includes:  */
+#ifdef DOS_TRUE
+#undef DOS_TRUE
+#undef DOS_FALSE
+#endif
+#ifdef min
+#undef min
+#endif
+
+/*  Socket library includes:  */
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <ss/socket.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+
+#define MAXSOCKS 10
+
+/*
+**  DEFPACKETS are allocated when the driver is initialized and are
+**  continually re-used.  If one of these packets is in use, it is
+**  PACKET_PERM, else it is PACKET_FREE.  If more than DEFPACKETS are
+**  needed, one is allocated as PACKET_TEMP and is actually freed rather
+**  than re-used when SDNFreeRPacket() is called.
+*/
+#define DEFPACKETS  10
+#define PACKET_PERM 0
+#define PACKET_FREE 1
+#define PACKET_TEMP 2
+
+
+/*
+**  A UDPRPacket is an RPacket along with the extra information needed
+**  by the driver to keep track of Rpackets and where they are going.
+**
+**  When we allocate these, we allocate enough room for a buffer for DataP/
+**  AllocP at the end...
+*/
+struct UDPRPacket {
+	struct RPacket rp;
+	unsigned short sequence;  /* needed for the Reliable Message System */
+/*  These things should not be sent across the wire:  */
+	struct UDPRPacket *next;  /* next rpacket in list */
+	struct UDPCon *con;  /*  con to send to or to reply to */
+	short class;  /* PACKET_PERM, _FREE or _TEMP (see above) */
+};
+
+
+/*
+**  Connection structure.  For datagram (as opposed to connection-oriented)
+**  drivers, this isn't really information about a connection but about
+**  a machine (node).
+**
+**  We need to keep a packet sequence number for each node for use by the
+**  reliable message service.
+**
+**  When SDNSetConData() is called, we need to add a pointer the caller
+**  understands.  When SDNGetConData() is called, we'll search the list of
+**  connections for the address in the RPacket and we'll return the caller
+**  understood pointer (if any) which corresponds to the address.
+**
+**  An Exec (doubly-linked) list seemed like overkill, so we just use a
+**  singly-linked list.  It might be a good optimization to add a priority
+**  variable and change to an Exec list with Enqueue() to keep the list
+**  sorted by frequency of use (nodes are currently always added to the
+**  head).
+*/
+typedef struct UDPCon
+{
+	struct sockaddr_in address;	/* address "connected" to */
+	unsigned short recv_sequence;	/* packet sequence number for recv */
+	unsigned short send_sequence;	/* packet sequence number for send */
+	void   *data;		/* generic data pointer for driver users */
+	struct UDPCon *next;	/* next "connection" in the list  */
+} UDPCon;
+
+
+/*
+**  We fill in this struct when SDNSerInit() or SDNHanInit() is called.
+**  We use it to keep things straight between the handler and server.
+*/
+typedef struct
+{
+	int sock_recv;	/*  socket to listen to */
+	int sock_send;	/*  socket to send on (and to get ACKs on) */
+	fd_set send_mask;  /*  select() mask for sock_send  */
+	int serverport; /*  well-known port number for server (+1=handler) */
+	int tg_errno;	/*  the socket library insists on having one  */
+	struct MsgPort *rmsport;	/* port for packets from RMS */
+	struct UDPCon *con;	  /*  list of connection/node identifiers  */
+	struct UDPRPacket *tpack;	/*  Temporary Rpackets  */
+	struct UDPRPacket *ppack;	/*  Permanent Rpackets  */
+	struct Library *tg_SockBase;
+	struct DrLibrary *DriverBase;
+} *UDPGLOBAL;
+
+
+/*
+**  An RMS process sends and RMSMsg to the Exec port of the process
+**  invoker for each packet which is accepted.
+*/
+struct RMSMsg
+{
+	struct Message rms_Msg;
+	struct UDPRPacket *rp;
+};
+
+
+/*
+**  A standard library structure for our driver:
+*/
+struct DrLibrary
+{
+        struct       Library ml_Lib;
+        ULONG        ml_SegList;
+        ULONG        ml_Flags;
+        APTR         ml_ExecBase;	/* pointer to exec base */
+        LONG         ml_Data;		/* Global data */
+};
+
+
+#define errno   (tg->tg_errno)
+#define SockBase (tg->tg_SockBase)
+#define LIBENT __asm
+
+#define UDPRP ((struct UDPRPacket *)rp)
+
+/*
+**  Macros for how much to allocate/free for an RPacket and how much of an
+**  RPacket to send (we ask to receive up to UDPRPALLOCN).  We are sending a
+**  UDPRPacket overhead that shouldn't be sent over the wire, but this is the
+**  simplest way (for now) to get one send per packet rather than one send for
+**  RPacket and one for RPacket data.
+**
+**  The magic number '8' is the number of bytes in an RPacket which aren't
+**  sent over the net.
+*/
+#define UDPRPALLOCN    (sizeof(struct UDPRPacket)+NETBUFSIZE)
+#define UDPRPSENDN(x)  (sizeof(struct UDPRPacket)+x->DLen-8)
+#define UDPRPDSIZE(n)  n-(sizeof(struct UDPRPacket)-8)
+#define SETRPDATA(x)   x->rp.DataP = x->rp.AllocP = (char *)(x+1)
+
+#include "bolt-udp_protos.h"
+
+#endif /* D_UDP_H */
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d5 4
+a8 1
+**      $Log:	net-udp.h,v $
+d107 1
+a107 1
+#define DEFPACKETS  30
+@

@@ -1,0 +1,444 @@
+head     39.7;
+branch   ;
+access   ;
+symbols  ;
+locks    davidj:39.7; strict;
+comment  @ * @;
+
+
+39.7
+date     93.04.30.15.31.23;  author davidj;  state Exp;
+branches ;
+next     39.6;
+
+39.6
+date     93.03.22.16.17.27;  author davidj;  state Exp;
+branches ;
+next     39.5;
+
+39.5
+date     92.08.14.14.45.47;  author davidj;  state Exp;
+branches ;
+next     39.4;
+
+39.4
+date     92.08.13.13.18.48;  author davidj;  state Exp;
+branches ;
+next     39.3;
+
+39.3
+date     92.08.10.16.21.49;  author davidj;  state Exp;
+branches ;
+next     39.2;
+
+39.2
+date     92.06.19.04.08.30;  author davidj;  state Exp;
+branches ;
+next     39.1;
+
+39.1
+date     92.06.05.04.22.43;  author davidj;  state Exp;
+branches ;
+next     39.0;
+
+39.0
+date     92.06.02.08.33.02;  author davidj;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@initial RCS
+@
+
+
+39.7
+log
+@code cleanup
+@
+text
+@/* nddispatch.c
+ *
+ */
+
+#include "amigaguidebase.h"
+
+/*****************************************************************************/
+
+#define	DB(x)	;
+#define	DH(x)	;
+
+/*****************************************************************************/
+#if 0
+static void nd_sendCmd (struct AGLib *ag, struct ClientData *cd, STRPTR cmd)
+{
+    struct SIPCMsg *sm;
+    ULONG msize;
+
+    msize = sizeof (struct SIPCMsg) + strlen (cmd) + 1;
+    if (sm = AllocVec (msize, MEMF_CLEAR))
+    {
+	sm->sm_Message.mn_Node.ln_Type = NT_MESSAGE;
+	sm->sm_Message.mn_Length       = msize;
+	sm->sm_Type = SIPCT_COMMAND;
+	sm->sm_Data = MEMORY_FOLLOWING (sm);
+	strcpy (sm->sm_Data, cmd);
+	PutMsg (cd->cd_SIPCPort, (struct Message *) sm);
+    }
+}
+#endif
+
+/*****************************************************************************/
+
+Class *initHNClass (struct AGLib * ag)
+{
+    Class *cl;
+
+    if (cl = MakeClass (NULL, ROOTCLASS, NULL, sizeof (struct NodeData), 0L))
+    {
+	cl->cl_Dispatcher.h_Entry = (ULONG (*)()) HNDispatch;
+	cl->cl_UserData           = (ULONG) ag;
+    }
+
+    return (cl);
+}
+
+/*****************************************************************************/
+
+ULONG ASM HNDispatch (REG (a0) Class * cl, REG (a2) Object * o, REG (a1) Msg msg)
+{
+    struct AGLib *ag = (struct AGLib *) cl->cl_UserData;
+    struct NodeData *nd;
+    ULONG i, retval;
+    Object *newobj;
+
+    switch (msg->MethodID)
+    {
+	case OM_NEW:
+	    if (newobj = (Object *) DoSuperMethodA (cl, o, msg))
+	    {
+		if (!(initializeHN (ag, cl, newobj, (struct opSet *) msg)))
+		{
+		    CoerceMethod (cl, newobj, OM_DISPOSE);
+		    newobj = NULL;
+		}
+	    }
+	    retval = (ULONG) newobj;
+	    break;
+
+	case OM_SET:
+	    retval = setHNAttrs (ag, cl, o, (struct opSet *) msg);
+	    break;
+
+	case OM_DISPOSE:
+	    nd = INST_DATA (cl, o);
+
+	    if (nd->nd_Font)
+		CloseFont (nd->nd_Font);
+
+	    for (i = 0; i < ND_STRINGS; i++)
+		FreeVec (nd->nd_Strings[i]);
+
+	    if ((nd->nd_Flags & HNF_FREEBUFFER) && nd->nd_Buffer)
+		FreeVec (nd->nd_Buffer);
+	    if (nd->nd_Object)
+		DisposeDTObject (nd->nd_Object);
+
+	    /* Let the superclass handle everything else */
+	default:
+	    retval = (ULONG) DoSuperMethodA (cl, o, msg);
+	    break;
+    }
+
+    return (retval);
+}
+
+/*****************************************************************************/
+
+BOOL initializeHN (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+{
+    struct NodeData *nd = INST_DATA (cl, o);
+    struct DatabaseData *dbd;
+    Object *mo;
+    LONG i;
+
+    InitSemaphore (&nd->nd_Lock);
+
+    if (mo = (Object *) GetTagData (HNA_Database, NULL, msg->ops_AttrList))
+    {
+	dbd = INST_DATA (ag->ag_DatabaseClass, mo);
+	nd->nd_Database = mo;
+	nd->nd_Offset   = (-1);
+
+	/* Same font as the database */
+	nd->nd_TextAttr = *(&dbd->dbd_TextAttr);
+	strcpy (nd->nd_FontName, dbd->dbd_FontName);
+	nd->nd_TextAttr.ta_Name = nd->nd_FontName;
+	nd->nd_Font = OpenFont (&nd->nd_TextAttr);
+
+	/* Copy the default tab information */
+	nd->nd_MinWidth = dbd->dbd_MinWidth;
+	nd->nd_DefTabs = dbd->dbd_DefTabs;
+	for (i = 0; i < MAX_TABS; i++)
+	    nd->nd_Tabs[i] = dbd->dbd_Tabs[i];
+
+	setHNAttrs (ag, cl, o, msg);
+
+	DoMethod (mo, OM_ADDMEMBER, (LONG) o);
+
+	return (TRUE);
+    }
+
+    return (FALSE);
+}
+
+/*****************************************************************************/
+
+/* Set attributes of an object */
+ULONG setHNAttrs (struct AGLib * ag, Class * cl, Object * o, struct opSet * msg)
+{
+    struct TagItem *tags = msg->ops_AttrList;
+    struct NodeData *nd = INST_DATA (cl, o);
+    struct DatabaseData *dbd;
+    struct TagItem *tstate;
+    struct TagItem *tag;
+    ULONG refresh = 0L;
+    ULONG tidata;
+    ULONG i;
+
+    /* process rest */
+    tstate = tags;
+    while (tag = NextTagItem (&tstate))
+    {
+	tidata = tag->ti_Data;
+	switch (tag->ti_Tag)
+	{
+	    case HNA_Parent:
+		nd->nd_Parent = (Object *) tidata;
+		break;
+
+	    case HNA_Name:
+	    case HNA_Title:
+	    case HNA_TOC:
+	    case HNA_Previous:
+	    case HNA_Next:
+	    case HNA_Keywords:
+	    case HNA_OnOpen:
+	    case HNA_OnClose:
+		i = tag->ti_Tag - HNA_Name;
+		FreeVec (nd->nd_Strings[i]);
+		nd->nd_Strings[i] = NULL;
+		if (tidata && (nd->nd_Strings[i] = AllocVec (strlen ((STRPTR) tidata) + 3, MEMF_CLEAR)))
+		    strcpy (nd->nd_Strings[i], (STRPTR) tidata);
+
+		/* Adjust the title if the file is stale */
+		if (tag->ti_Tag == HNA_Title)
+		{
+		    /* Are we stale or not? */
+		    dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+		    if (dbd->dbd_Flags & DBDF_STALE)
+			strcat (nd->nd_Strings[i], " *");
+		}
+		break;
+
+	    case HNA_FileHandle:
+		nd->nd_FileHandle = (BPTR) tidata;
+		break;
+
+	    case HNA_Offset:
+		nd->nd_Offset = (LONG) tidata;
+		break;
+
+	    case HNA_Length:
+		nd->nd_Length = (LONG) tidata;
+		break;
+
+	    case HNA_Object:
+		nd->nd_Object = (Object *) tidata;
+		break;
+	}
+    }
+
+    return (refresh);
+}
+@
+
+
+39.6
+log
+@*** empty log message ***
+@
+text
+@d13 20
+d53 1
+a54 1
+    ULONG retval;
+d79 4
+a82 12
+	    if (nd->nd_Name)
+		FreeVec (nd->nd_Name);
+	    if (nd->nd_Title)
+		FreeVec (nd->nd_Title);
+	    if (nd->nd_TOC)
+		FreeVec (nd->nd_TOC);
+	    if (nd->nd_Prev)
+		FreeVec (nd->nd_Prev);
+	    if (nd->nd_Next)
+		FreeVec (nd->nd_Next);
+	    if (nd->nd_Keywords)
+		FreeVec (nd->nd_Keywords);
+d104 1
+d120 6
+d148 1
+a161 6
+		FreeVec (nd->nd_Name);
+		nd->nd_Name = NULL;
+		if (tidata && (nd->nd_Name = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+		    strcpy (nd->nd_Name, (STRPTR) tidata);
+		break;
+
+a162 11
+		FreeVec (nd->nd_Title);
+		nd->nd_Title = NULL;
+		if (tidata && (nd->nd_Title = AllocVec (strlen ((STRPTR) tidata) + 3, MEMF_CLEAR)))
+		    strcpy (nd->nd_Title, (STRPTR) tidata);
+
+		/* Are we stale or not? */
+		dbd = INST_DATA (ag->ag_DatabaseClass, nd->nd_Database);
+		if (dbd->dbd_Flags & DBDF_STALE)
+		    strcat (nd->nd_Title, " *");
+		break;
+
+a163 6
+		FreeVec (nd->nd_TOC);
+		nd->nd_TOC = NULL;
+		if (tidata && (nd->nd_TOC = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+		    strcpy (nd->nd_TOC, (STRPTR) tidata);
+		break;
+
+a164 6
+		FreeVec (nd->nd_Prev);
+		nd->nd_Prev = NULL;
+		if (tidata && (nd->nd_Prev = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+		    strcpy (nd->nd_Prev, (STRPTR) tidata);
+		break;
+
+d166 8
+a173 5
+		FreeVec (nd->nd_Next);
+		nd->nd_Next = NULL;
+		if (tidata && (nd->nd_Next = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+		    strcpy (nd->nd_Next, (STRPTR) tidata);
+		break;
+d175 8
+a182 5
+	    case HNA_Keywords:
+		FreeVec (nd->nd_Keywords);
+		nd->nd_Keywords = NULL;
+		if (tidata && (nd->nd_Keywords = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+		    strcpy (nd->nd_Keywords, (STRPTR) tidata);
+@
+
+
+39.5
+log
+@David - you need a login message.
+Spence
+@
+text
+@d20 1
+a20 1
+	cl->cl_Dispatcher.h_Entry = HNDispatch;
+a92 1
+    DB (kprintf ("ag : init nd=0x%lx nd_Lock=0x%lx semaphore\n", nd, &nd->nd_Lock));
+a148 1
+		DH (kprintf ("HNA_Title, %08lx %s\n", tidata, ((tidata) ? tidata : "")));
+a160 1
+		DH (kprintf ("HNA_TOC, %08lx %s\n", tidata, ((tidata) ? tidata : "")));
+a167 1
+		DH (kprintf ("HNA_Prev, %08lx %s\n", tidata, ((tidata) ? tidata : "")));
+a174 1
+		DH (kprintf ("HNA_Next, %08lx %s\n", tidata, ((tidata) ? tidata : "")));
+@
+
+
+39.4
+log
+@tracks help group
+@
+text
+@d10 1
+d143 1
+a143 2
+		if (nd->nd_Name)
+		    FreeVec (nd->nd_Name);
+d150 2
+a151 2
+		if (nd->nd_Title)
+		    FreeVec (nd->nd_Title);
+d163 2
+a164 2
+		if (nd->nd_TOC)
+		    FreeVec (nd->nd_TOC);
+d171 2
+a172 2
+		if (nd->nd_Prev)
+		    FreeVec (nd->nd_Prev);
+d179 2
+a180 2
+		if (nd->nd_Next)
+		    FreeVec (nd->nd_Next);
+d187 1
+a187 2
+		if (nd->nd_Keywords)
+		    FreeVec (nd->nd_Keywords);
+@
+
+
+39.3
+log
+@*** empty log message ***
+@
+text
+@d31 1
+a31 2
+    struct NodeData *nd = INST_DATA (cl, o);
+    ULONG retval = 0L;
+d33 1
+d124 1
+a124 1
+    struct DatabaseData *dbd = NULL;
+@
+
+
+39.2
+log
+@added node hosts
+@
+text
+@d124 1
+d153 1
+a153 1
+		if (tidata && (nd->nd_Title = AllocVec (strlen ((STRPTR) tidata) + 1, MEMF_CLEAR)))
+d155 5
+@
+
+
+39.1
+log
+@*** empty log message ***
+@
+text
+@d70 1
+a70 1
+	    if (nd->nd_Buffer)
+@
+
+
+39.0
+log
+@initial RCS
+@
+text
+@d92 1
+@

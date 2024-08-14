@@ -1,0 +1,117 @@
+Torsten:
+
+I have a proposal for how we communicate about added and deleted services 
+in a channel-free environment.  It's actually a simplification of the 
+present system, so you might like it.
+
+Throughout this document I refer to the PCAddsService and AmigaAddsService 
+fields as xAddsService when I'm talking about either machine's usage of 
+these fields.  
+
+As you know, I suggest we communicate about services using the 16-bit Janus
+memory offset, rather than a channel number.  
+I suggest we change the xAddsService field to being 16 bits wide, 
+to which we write the the normal 16-bit Janus memory offset of the 
+ServiceData structure that we're adding.  Also, we should add a new 16-bit 
+field, xDeletesService, for communicating about deleted services.  
+
+Currently, to inform one another about an added service, we 
+use this technique:  
+
+	- You, for example, wait until your PCAddsService byte is zero
+	- Write the channel number of the new service in 
+	  your PCAddsService byte 
+	- Wait until one of your PCToAmiga bytes 
+	  becomes zero
+	- Write ADD_SERVICE to that byte
+	- Signal the other processor
+
+
+Now, I suggest we use this technique for informing one another about added 
+services:  
+
+	- Wait until one of the two PCAddsService fields equals $FFFF
+	- Write the 16-bit Janus memory offset of the new ServiceData 
+	  structure into your PCAddsService field 
+	- Signal the other processor 
+
+
+Likewise, for deleting services I suggest we use this technique:
+
+	- Wait until one of the two xDeletesService fields equals $FFFF
+	- Write the 16-bit Janus memory offset of the new ServiceData 
+	  structure into the xDeletesService field 
+	- Signal the other processor 
+
+
+To communicate a CallService request, I suggest we use this technique:
+
+	- Wait until one of the four PCToAmiga (or AmigaToPC) 
+	  fields equals $FFFF
+	- Write the 16-bit Janus memory offset of the new ServiceData 
+	  structure into the field 
+	- Signal the other processor 
+
+
+
+We have a problem:  note that it's possible for one of us to add a service, 
+set the xAddsService field, then delete the service and set the 
+xDeletesService field, all before the other processor has a chance to look 
+at things.  We need a special mechanism that keeps this from causing 
+trouble.  We should check the xAddsService number for a match with the 
+one we're deleting, and if these are equal then set the xAddsService 
+field to $FFFF and don't set the xDeletesService field.  
+	In order to do this safely, we have to make it a rule that we 
+lock each other out of the ServiceParam structure by using the Lock field of 
+the structure whenever accessing 
+any of the xAddsService or xDeletesService fields, 
+which we currently may not be doing.  
+	Also, we must add the rule that any time you or I read, write, 
+and process any of the xAddsService or xDeletesService fields, we must 
+set the field to 'unused' (where unused == $FFFF) before we free the 
+ServiceParam lock.  This is to say that if I'm going to read and process a 
+PCToAmiga or PCAddsService field, I must set that field to 'unused' before 
+allowing you access to the ServiceParam structure.  
+My code already does this, and I bet yours does too.  But it won't hurt to 
+make it a real rule, and it's safe.  
+
+Also, in general, we should both have a second look at our code to make sure 
+as much as possible that all error conditions are handled gracefully.  
+
+To implement getting rid of channels and using the ServiceData offset as 
+our means of communication, we need to do the following:
+
+    - Make these changes to the ServiceData structure:  
+	- Change the ChannelNumber field name to ReservedPad0; 
+
+    - Make these changes to the ServiceParam structure:  
+	- Get rid of the 32-byte ChannelMasks field 
+	- Change the AmigaToPC[] and PCToAmiga[] fields to 16-bits (these will 
+	  be RPTR's on the Amiga side) 
+	- Change the AmigaAddsService and PCAddsService fields to being 
+	  16-bit, and make them each an array of 2 fields (you might not think 
+	  it's necessary, but I'm really afraid of locking up the Amiga 
+	  unnecessarily and I think that the small cost of 2 bytes 
+	  and testing 2 fields buys me a *lot* of relief, so please 
+	  appease me by implementing this) 
+	- Add new fields AmigaDeletesService[2] and PCDeletesService[2] 
+	- Also, get rid of the channel number definitions NO_CHANNEL, 
+	  ADD_SERVICE, DELETE_SERVICE, and FIRST_USER_CHANNEL
+
+    - Make these changes to our code:
+	- I have to initialize the ServiceParam fields PCToAmiga[], 
+	  AmigaToPC[], AmigaAddsService[], AmigaDeletesService[], 
+	  PCAddsService[] and PCDeletesService[] to $FFFF.
+	- When responding to an interrupt, rather than checking for a 
+	  channel number of ADD_SERVICE or DELETE_SERVICE, check 
+	  xAddsService and xDeletesService for non-$FFFF values.
+	- Check two fields of xAddsService and xDeletesService, not just one
+	- When about to set the xDeletesService field, first check for a match 
+	  in the xAddsService field and if a match is found set the 
+	  xAddsService field 'unused' and don't set the xDeletesService field
+	- UNLOCK the ServiceParam Lock before looking for an unused field in 
+	  any of PCToAmiga[], AmigaToPC[], AmigaAddsService[], 
+	  AmigaDeletesService[], PCAddsService[] and PCDeletesService[]
+	- Use the techniques outlined above to tell one another about 
+	  adding, deleting and calling services
+

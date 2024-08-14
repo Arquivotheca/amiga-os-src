@@ -1,0 +1,980 @@
+head     1.10;
+branch   ;
+access   ;
+symbols  ;
+locks    ; strict;
+comment  @ * @;
+
+
+1.10
+date     91.01.15.00.18.50;  author J_Toebes;  state Exp;
+branches ;
+next     1.9;
+
+1.9
+date     91.01.14.21.57.41;  author Doug;  state Exp;
+branches ;
+next     1.8;
+
+1.8
+date     91.01.14.21.45.25;  author Doug;  state Exp;
+branches ;
+next     1.7;
+
+1.7
+date     90.11.28.01.06.04;  author J_Toebes;  state Exp;
+branches ;
+next     1.6;
+
+1.6
+date     90.11.20.21.35.48;  author J_Toebes;  state Exp;
+branches ;
+next     1.5;
+
+1.5
+date     90.11.17.19.02.42;  author J_Toebes;  state Exp;
+branches ;
+next     1.4;
+
+1.4
+date     90.11.15.08.19.26;  author J_Toebes;  state Exp;
+branches ;
+next     1.3;
+
+1.3
+date     90.11.02.00.44.54;  author Doug;  state Exp;
+branches ;
+next     1.2;
+
+1.2
+date     90.11.01.23.27.18;  author Doug;  state Exp;
+branches ;
+next     1.1;
+
+1.1
+date     90.11.01.21.08.22;  author Doug;  state Exp;
+branches ;
+next     ;
+
+
+desc
+@Initialization, termination, general utility SDN routines
+@
+
+
+1.10
+log
+@Add better error checking for dead connections.
+@
+text
+@/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
+* |_o_o|\\ Copyright (c) 1990 The Software Distillery.                    *
+* |. o.| ||          All Rights Reserved                                  *
+* | .  | ||          Written by John Toebes and Doug Walker               *
+* | o  | ||          The Software Distillery                              *
+* |  . |//           207 Livingstone Drive                                *
+* ======             Cary, NC 27513                                       *
+*                    BBS:(919)-460-7430                                   *
+\* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#include "netcomm.h"
+#include "sdninet.h"
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNSerInit                                                         */
+/*                                                                             */
+/* PURPOSE: Perform Server Specific Initialization                             */
+/* SYNOPSIS:                                                                   */
+/*   rc = SDNSerInit(drglobal, mask, data);                                    */
+/*                                                                             */
+/*     drglobal     APTR *      (out)    Server-specific global data pointer   */
+/*                                                                             */
+/*     mask         ULONG *     (in/out) On input, mask of signal bits already */
+/*                                          being used by all other drivers;   */
+/*                                       On output, mask of signal bits this   */
+/*                                          driver will be using.              */
+/*     data         char *      (in)     Pointer to driver specific            */
+/*                                                Initialization string.       */
+/*                                                                             */
+/*     rc           int         (ret)    SDN_ERR, SDN_OK                       */
+/*                                                                             */
+/*   NOTES:                                                                    */
+/*      Driver is free to reuse signal bits or allocate new ones.              */
+/*      Called by the server to initialize communications.  A signal bit should*/
+/*         be set when a new connection is detected or when a pending read or  */
+/*         write completes.                                                    */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNSerInit      (register __a0 INETGLOBAL *tgp,
+                                register __a1 ULONG *maskp,
+                                register __a2 char *data,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   INETGLOBAL tg;
+   int hostaddr;
+   struct selectargs sa;
+   struct listenargs la;
+   int rc;
+
+   BUGP("SDNSerInit: Entry")
+
+   if ((rc = SDNHanInit((APTR *)tgp, maskp, data)) != SDN_OK)
+      return(rc);
+
+   tg = *tgp;
+
+
+   tg->sock = isocket(tg);
+   if(tg->sock < 0)
+   {
+      BUG(("********ERROR: Create Socket - errno=%ld\n", errno))
+      BUGR("No Socket!")
+      FreeMem((void *)tg, sizeof(*tg));
+      return(SDN_ERR) ;
+   }
+
+   tg->fhsmask = tg->sockmask = INETMASK(tg->sock);
+//   set_sockopts(tg, tg->sock);
+
+   tg->sin.sin_family       = AF_INET;
+   tg->sin.sin_port         = htons(tg->hostaddr);
+   tg->sin.sin_addr.s_addr  = INADDR_ANY;
+   if(ibind(tg, tg->sock, &tg->sin, sizeof(tg->sin)) < 0)
+   {
+      BUG(("********ERROR: Can't Bind Socket - errno=%ld\n", errno))
+      BUGR("Can't Bind!")
+      FreeMem((void *)tg, sizeof(*tg));
+      return(SDN_ERR);
+   }
+
+   la.errno   = 0L;
+   la.fp      = tg->_socks[tg->sock];
+   la.backlog = MAXCONNECT;
+   ListenAsm(&la);
+
+   tg->fhscurmask = tg->fhsmask;
+   sa.socks  = tg->_socks;         /* array of socket ptrs              */
+   sa.rd_set = (fd_set *)&tg->fhscurmask; /* sockets considered for read event */
+   sa.wr_set = 0;                  /* sockets considered for write event*/
+   sa.ex_set = 0;                  /* sockets considered for ex events  */
+   sa.task   = FindTask(0L);       /* task to signal when selecting     */
+   sa.sigbit = tg->socket_sigio;   /* signal to send when selecting     */
+   sa.numfds = 32;                 /* number of fds to consider         */
+   sa.errno  = 0;                  /* return error value                */
+   sa.rval   = 0;                  /* number of fds found ready         */
+
+   SelectAsm(&sa);
+
+   if (!sa.errno && !sa.rval)
+   {
+      /* Nothing really happened, just let them know */
+      tg->fhscurmask = 0;
+   }
+
+   BUGP("SDNSerInit: Exit")
+   
+   return(SDN_OK);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNSerTerm                                                         */
+/*                                                                             */
+/* PURPOSE: Perform Server Specific Termination                                */
+/* SYNOPSIS:                                                                   */
+/*   rc = SDNSerTerm(drglobal);                                                */
+/*                                                                             */
+/*    drglobal     APTR        (in)     Driver-specific global data pointer    */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Driver must not free ANY signal bits, even if it allocated them.         */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNSerTerm      (register __a0 INETGLOBAL tg,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   if(tg != NULL)
+   {
+      iclose(tg, tg->sock);
+      SDNSerTerm((APTR)tg);
+   }
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNHanInit                                                         */
+/*                                                                             */
+/* PURPOSE: Perform Server Specific Initialization                             */
+/* SYNOPSIS:                                                                   */
+/* rc = SDNHanInit(drglobal, mask, data);                                      */
+/*                                                                             */
+/*    drglobal     APTR *        (out)    Driver-specific global data pointer  */
+/*                                                                             */
+/*    mask         ULONG *       (in/out) On input, mask of signal bits already*/
+/*                                           being used by all other drivers;  */
+/*                                        On output, mask of signal bits this  */
+/*                                           driver will be using.             */
+/*    data         char *        (in)     Pointer to driver specific           */
+/*                                           Initialization string.            */
+/*                                                                             */
+/*    rc           int           (ret)    SDN_ERR, SDN_OK                      */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Driver is free to reuse signal bits or allocate new ones.                */
+/*                                                                             */
+/*    Called by handler to initialize communication.  A signal bit should be   */
+/*       set when a pending write completes and when a pending read completes. */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNHanInit      (register __a0 INETGLOBAL *tgp,
+                                register __a1 ULONG *maskp,
+                                register __a2 char *data,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   INETGLOBAL tg = *tgp;
+   int i;
+   int hostaddr;
+   struct INETRPacket *ip;
+#undef SysBase
+   struct Library *SysBase = ABSEXECBASE;
+
+   BUGP("SDNSerInit: Entry")
+   *tgp = 0;
+   *maskp = 0;
+
+   if(!tg)
+   {
+      if(!(tg = (void *)AllocMem(sizeof(*tg), MEMF_CLEAR)))
+      {
+         return(SDN_ERR);
+      }
+   }
+
+   tg->tg_SysBase       = SysBase;
+   tg->DriverBase       = DriverBase;
+   tg->tg_InetBase      = OpenLibrary("inet:libs/inet.library", 0L) ;
+   
+   if (tg->tg_InetBase == NULL)
+   {
+      FreeMem((void *)tg, sizeof(*tg));
+      return(SDN_ERR);
+   }
+
+   tg->socket_sigurg = AllocSignal(-1);
+   tg->socket_sigio  = AllocSignal(-1);
+
+   /* set up timer to determine when connection is dead */
+   tg->tr.tr_node.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+   tg->tr.tr_node.io_Message.mn_Length = sizeof(tg->tr);
+   tg->tr.tr_node.io_Message.mn_ReplyPort = CreatePort(0L,0L);
+   tg->alarm_bit = tg->tr.tr_node.io_Message.mn_ReplyPort->mp_SigBit;
+   if(OpenDevice(TIMERNAME,UNIT_VBLANK,&tg->tr,0L))
+      return(SDN_ERR);
+   tg->tr.tr_time.tv_secs = 10;		/* 10 second timeout */
+   tg->tr.tr_time.tv_micro = 0;
+
+   for(i=0; i<MAXCONNECT; i++) tg->connect[i].usage = -1;
+
+   /* Allocate our pool of 10 RPackets */
+   if ((tg->ppack = (struct INETRPacket *)
+                    AllocMem(DEFPACKETS*sizeof(struct INETRPacket), MEMF_CLEAR)) == NULL)
+   {
+      FreeMem((void *)tg, sizeof(*tg));
+      return(SDN_ERR) ;
+   }
+   for (ip = tg->ppack, i=0; i < DEFPACKETS; i++)
+   {
+      ip->next = ip+1;
+      ip->class = PACKET_FREE;
+      ip++;
+   }
+   ip--;
+   ip->next = NULL;
+
+   hostaddr = 0;
+   if (data)
+   {
+      while(*data == ' ') data++;
+      while(*data >= '0' && *data <= '9')
+      {
+         hostaddr = (((hostaddr << 2) + hostaddr)<<1) + *data++ - '0';
+      }
+   }
+   tg->hostaddr = hostaddr;
+   if (hostaddr == 0) tg->hostaddr = 7656;
+
+   *maskp = 1L << tg->socket_sigio;
+   *tgp = tg;
+
+   BUGP("SDNSerInit: Exit")
+   
+   return(SDN_OK);
+}
+#define SysBase (tg->tg_SysBase)
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNHanTerm                                                         */
+/*                                                                             */
+/* PURPOSE: Terminate all resources associated with a handler                  */
+/* SYNOPSIS:                                                                   */
+/*                                                                             */
+/* SDNHanTerm(drglobal);                                                       */
+/*                                                                             */
+/*    drglobal     APTR          (in)     Driver-specific global data pointer  */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Driver must not free ANY signal bits, even if it allocated them.         */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int LIBENT INETSDNHanTerm      (register __a0 INETGLOBAL tg,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   int i;
+
+   if(tg != NULL)
+   {
+      for(i = 0; i < tg->fhscount; i++)
+         iclose(tg, tg->connect[i].fh);
+      FreeMem((void *)tg, sizeof(*tg));
+   }
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNAllocRPacket                                                    */
+/*                                                                             */
+/* PURPOSE: Allocate an RPacket for general use                                */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    RP = SDNAllocRPacket(drglobal);                                          */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    RP        struct RPacket *  (out)    created RPacket (or NULL for error) */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+struct RPacket *
+    LIBENT INETSDNAllocRPacket (register __a0 INETGLOBAL tg,
+                                register __a1 APTR con,
+                                register __d0 int len,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   struct INETRPacket *ip;
+
+   for (ip = tg->ppack; ip != NULL && ip->class != PACKET_FREE; ip = ip->next);
+   if (ip != NULL)
+   {
+      ip->class = PACKET_PERM;
+   }
+   else
+   {
+      /* Have to allocate a temporary one from system storage */
+      ip = (struct INETRPacket *)AllocMem(sizeof(*ip), 0);
+      if (ip == NULL) return(NULL);
+      ip->next = tg->tpack;
+      ip->class = PACKET_TEMP; /* mark it to be freed later     */
+      tg->tpack = ip;
+      ip->rp.AllocP = NULL;
+   }
+   if(ip->con = (inetcon *)con) ip->con->usage++;
+   ip->rp.DataP = ip->rp.AllocP;
+   if (ip->rp.DataP == NULL && len > 0)
+   {
+      ip->rp.AllocP = ip->rp.DataP = AllocMem(NETBUFSIZE, 0);
+      if (ip->rp.AllocP == NULL)
+      {
+         SDNFreeRPacket((APTR)tg, ip);
+         ip = NULL;
+      }
+   }
+   return(ip);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNDupRPacket                                                      */
+/*                                                                             */
+/* PURPOSE: Allocate a second RPacket on the same connection                   */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    NewRP = SDNDupRPacket(drglobal, RP);                                     */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    RP        struct RPacket *  (in)     RPacket to duplicate                */
+/*                                                                             */
+/*    NewRP     struct RPacket *  (ret)    Duplicated RPacket (NULL if error)  */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+struct RPacket *
+    LIBENT INETSDNDupRPacket   (register __a0 INETGLOBAL tg,
+                                register __a1 struct RPacket *rp,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   struct INETRPacket *nrp;
+   inetcon *con;
+
+   if(con = ((struct INETRPacket *)rp)->con)
+      con->usage++;
+
+   if(nrp = (struct INETRPacket *)SDNAllocRPacket((APTR)tg, NULL, NETBUFSIZE))
+   {
+      /* Actually, this is wrong, we need to copy less, but we aren't using it  */
+      /* for now...                                                             */
+      memcpy(nrp, rp, sizeof(struct INETRPacket));
+   }
+
+   return(nrp);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNFreeRPacket                                                     */
+/*                                                                             */
+/* PURPOSE: Indicate that the driver may reuse a previously issued RPacket     */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    SDNFreeRPacket(drglobal, RP);                                            */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    RP        struct RPacket *  (in)     RPacket struct returned from        */
+/*                                         PluckRPacket/AcceptRPacket          */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    This routine must be called before the driver is allowed to reuse an     */
+/*       RPacket structure.                                                    */
+/*                                                                             */
+/*    Both handler and server can call this routine.                           */
+/*                                                                             */
+/*    FreeRPacket should be called ASAP on any packets returned from           */
+/*    PluckRPacket or AcceptRPacket since the returned packets are really      */
+/*    driver-allocated input buffers;  holding on to them may result in lots   */
+/*    of memory being allocated to the driver for buffering.  The server, in   */
+/*    particular, must call FreeRPacket BEFORE calling Dispatch() to process   */
+/*    the packet.                                                              */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void LIBENT INETSDNFreeRPacket (register __a0 INETGLOBAL tg,
+                                register __a1 struct RPacket *rp,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   struct INETRPacket *ipkt = (struct INETRPacket *)rp;
+   struct INETRPacket *ip;
+   inetcon *con;
+
+   if(con = ((struct INETRPacket *)rp)->con)
+      con->usage--;
+
+   if (ipkt == NULL) return;
+   switch(ipkt->class)
+   {
+      case PACKET_TEMP:
+         if (ipkt == tg->tpack)
+         {
+            tg->tpack = ipkt->next;
+         }
+         else
+         {
+            for(ip = tg->tpack; ip != NULL && ip->next != ipkt; ip = ip->next);
+            if (ip == NULL)
+            {
+               BUGR("Missing temporary packet");
+               return;
+            }
+            ip->next = ipkt->next;
+         }
+         if (ipkt->rp.AllocP != NULL)
+            FreeMem((void *)ipkt->rp.AllocP, NETBUFSIZE);
+         FreeMem((void *)ipkt, sizeof(*ipkt));
+         break;
+
+      case PACKET_PERM:
+         ipkt->class = PACKET_FREE;
+         break;
+
+      default:
+         BUGR("Bad packet type");
+         break;
+   }
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNGetConData                                                      */
+/*                                                                             */
+/* PURPOSE: Get data associated with a connection for a RPacket                */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    data = SDNGetConData(drglobal, RP);                                      */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    RP        struct RPacket *  (in)     RPacket struct returned from        */
+/*                                         PluckRPacket/AcceptRPacket          */
+/*                                                                             */
+/*    data      void *            (out)    Data for given connection           */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void *LIBENT INETSDNGetConData (register __a0 INETGLOBAL tg,
+                                register __a1 struct RPacket *rp,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   inetcon *con;
+
+   if(con = ((struct INETRPacket *)rp)->con)
+   {
+      return(con->data);
+   }
+   return(NULL);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNSetConData                                                      */
+/*                                                                             */
+/* PURPOSE: Set data associated with a connection for a RPacket                */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    SDNSetConData(drglobal, RP, data);                                       */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    RP        struct RPacket *  (in)     RPacket struct returned from        */
+/*                                         PluckRPacket/AcceptRPacket          */
+/*                                                                             */
+/*    data      void *            (in)     Data for given connection           */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void LIBENT INETSDNSetConData  (register __a0 INETGLOBAL tg,
+                                register __a1 struct RPacket *rp,
+                                register __a2 void *data,
+                                register __a6 struct DrLibrary *DriverBase
+                               )
+{
+   inetcon *con;
+
+   if(con = ((struct INETRPacket *)rp)->con)
+   {
+      con->data = data;
+   }
+}
+@
+
+
+1.9
+log
+@get rid of compile warning
+@
+text
+@d47 1
+d70 1
+a70 1
+   set_sockopts(tg, tg->sock);
+a82 3
+   tg->timeout.tv_sec = 0;
+   tg->timeout.tv_usec = 1;
+
+d133 1
+a133 1
+      SDNHanTerm((APTR)tg);
+d200 10
+@
+
+
+1.8
+log
+@Use right termination routine!
+.,
+@
+text
+@a46 1
+   int hostaddr;
+@
+
+
+1.7
+log
+@Corrected test for Null pointer, added NETBUFSIZE parm to AllocRPacket
+@
+text
+@d136 1
+a136 1
+      SDNSerTerm((APTR)tg);
+@
+
+
+1.6
+log
+@Added Set/GetConData routines.
+@
+text
+@d311 1
+d315 1
+a315 1
+   if (ip->rp.DataP == NULL)
+d357 1
+a357 1
+   if(nrp = (struct INETRPacket *)SDNAllocRPacket((APTR)tg, NULL, 0))
+@
+
+
+1.5
+log
+@Major cleanup.  Generally working.
+@
+text
+@d437 65
+@
+
+
+1.4
+log
+@Correct multiple bugs associated with new version. Sessions are not supported yet.
+@
+text
+@d12 1
+a12 2
+#include "netinet.h"
+#include "proto.h"
+a13 7
+#ifdef BUGR
+#undef BUGR
+#endif
+#define BUGR(s)
+
+extern void *_socks[FD_SETSIZE];
+
+d40 5
+a44 4
+int SDNSerInit(drgp, maskp, data)
+APTR *drgp;
+ULONG *maskp;
+char *data;
+d46 1
+a46 4
+
+   INETGLOBAL tg = (INETGLOBAL)*drgp;
+   int on = 1;
+   int i;
+a47 1
+   struct INETRPacket *ip;
+d49 2
+a52 10
+   *drgp = 0;
+   *maskp = 0;
+
+   if(!tg)
+   {
+      if(!(tg = (void *)AllocMem(sizeof(*tg), MEMF_CLEAR)))
+      {
+         return(SDN_ERR);
+      }
+   }
+d54 2
+a55 1
+   for(i=0; i<MAXCONNECT; i++) tg->connect[i].usage = -1;
+d57 1
+a57 15
+   /* Allocate our pool of 10 RPackets */
+   if ((tg->ppack = (struct INETRPacket *)
+                    AllocMem(DEFPACKETS*sizeof(struct INETRPacket), MEMF_CLEAR)) == NULL)
+   {
+      FreeMem((void *)tg, sizeof(*tg));
+      return(SDN_ERR) ;
+   }
+   for (ip = tg->ppack, i=0; i < DEFPACKETS; i++)
+   {
+      ip->next = ip+1;
+      ip->class = PACKET_FREE;
+      ip++;
+   }
+   ip--;
+   ip->next = NULL;
+a58 10
+   hostaddr = 0;
+   if (data)
+   {
+      while(*data == ' ') data++;
+      while(*data >= '0' && *data <= '9')
+      {
+         hostaddr = (hostaddr * 10) + *data++ - '0';
+      }
+   }
+   if (hostaddr == 0) hostaddr = 7656;
+d60 1
+a60 1
+   tg->sock = socket(AF_INET, SOCK_STREAM, 0);
+d70 1
+a70 1
+   setsockopt(tg->sock,IPPROTO_TCP,TCP_NODELAY,&on,sizeof(on));
+d73 1
+a73 1
+   tg->sin.sin_port         = htons(hostaddr);
+d75 1
+a75 1
+   if(bind(tg->sock, &tg->sin, sizeof(tg->sin)) < 0)
+d86 4
+a89 1
+   listen(tg->sock, MAXCONNECT);
+d92 1
+a92 1
+   sa.socks  = _socks;             /* array of socket ptrs              */
+d97 1
+a97 1
+   sa.sigbit = socket_sigio;       /* signal to send when selecting     */
+a109 3
+   *maskp = 1L << socket_sigio;
+   *drgp = (APTR)tg;
+
+d129 3
+a131 2
+int SDNSerTerm(drglobal)
+APTR drglobal;
+a132 3
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+   int i;
+
+d135 2
+a136 4
+      for(i = 0; i < tg->fhscount; i++)
+         close(tg->connect[i].fh);
+      close(tg->sock);
+      FreeMem((void *)tg, sizeof(*tg));
+d166 5
+a170 4
+int SDNHanInit(drgp, maskp, data)
+APTR *drgp;
+ULONG *maskp;
+char *data;
+d172 1
+d174 4
+a177 1
+   INETGLOBAL tg = (INETGLOBAL)*drgp;
+d179 2
+a180 2
+   BUGP("SDNHanInit: Entry")
+   *drgp = 0;
+d191 13
+d206 30
+a235 2
+   *maskp = 1L << socket_sigio;
+   *drgp = (APTR)tg;
+d237 1
+a237 1
+   BUGP("SDNHant: Exit")
+d241 1
+d258 3
+a260 2
+int SDNHanTerm(drglobal)
+APTR drglobal;
+d262 1
+a262 1
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+d266 2
+a274 53
+/* ROUTINE: SDNInitNode                                                        */
+/*                                                                             */
+/* PURPOSE: Establish a new node connection                                    */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    rc = SDNInitNode(drglobal, nnode);                                       */
+/*                                                                             */
+/*    drglobal   APTR             (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*    nnode      struct NetNode * (in/out) On input, name of node is set.      */
+/*                                         On output, driver sets the 'status' */
+/*                                            and 'ioptr' fields.              */
+/*                                                                             */
+/*    rc         int              (ret)    SDN_ERR, SDN_OK                     */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    Called by the handler to establish communications with a specific        */
+/*    remote node.                                                             */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+int SDNInitNode(APTR drglobal, APTR con)
+{
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+
+   return(SDN_ERR);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+/* ROUTINE: SDNTermNode                                                        */
+/*                                                                             */
+/* PURPOSE: Free Up all Driver resources associated with a Node                */
+/*                                                                             */
+/* SYNOPSIS:                                                                   */
+/*    SDNTermNode(drglobal, nnode);                                            */
+/*                                                                             */
+/*    drglobal  APTR              (in)     Driver-specific global data pointer */
+/*                                                                             */
+/*                                                                             */
+/*    nnode     struct NetNode *  (in)     NetNode to terminate                */
+/*                                                                             */
+/* NOTES:                                                                      */
+/*    This routine is void.                                                    */
+/*                                                                             */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void SDNTermNode(APTR drglobal, APTR con)
+{
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/*                                                                             */
+d289 6
+a294 1
+struct RPacket *SDNAllocRPacket(APTR drglobal, APTR con)
+a295 1
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+d313 1
+d316 2
+a317 2
+      ip->rp.DataP = AllocMem(NETBUFSIZE, 0);
+      if (ip->rp.DataP == NULL)
+d319 1
+a319 1
+         SDNFreeRPacket(drglobal, ip);
+d344 5
+a348 2
+
+struct RPacket *SDNDupRPacket(APTR drglobal, struct RPacket *rp)
+d356 1
+a356 1
+   if(nrp = (struct INETRPacket *)SDNAllocRPacket(drglobal, NULL))
+d394 4
+a397 1
+void SDNFreeRPacket(APTR drglobal, struct RPacket *rp)
+a398 1
+   INETGLOBAL tg = (INETGLOBAL)drglobal;
+d424 2
+a425 2
+         if (ipkt->rp.DataP != NULL)
+            FreeMem((void *)ipkt->rp.DataP, NETBUFSIZE);
+@
+
+
+1.3
+log
+@Get rid of references to struct NetNode
+add 'con' parm to AllocRPacket
+Initialize usage counts to -1 on connections
+Don't include server.h
+@
+text
+@d20 1
+d54 1
+a54 1
+   INETGLOBAL tg = (INETGLOBAL)drgp;
+d59 1
+d77 1
+a77 1
+                    AllocMem(DEFPACKETS*sizeof(struct INETRPacket), 0)) == NULL)
+d130 14
+a143 1
+   if (tg->fhscurmask)
+d145 1
+a145 1
+      BUGR("Non-Zero Mask!");
+d218 1
+a218 1
+   INETGLOBAL tg = (INETGLOBAL)drgp;
+d358 9
+a366 1
+   
+d398 3
+d402 1
+d463 2
+@
+
+
+1.2
+log
+@Implement SDNDupRPacket
+@
+text
+@a11 1
+#include "server.h"
+d13 1
+d71 2
+d165 1
+a165 1
+         close(tg->fhs[i]);
+d202 1
+a202 1
+
+d217 2
+d276 1
+a276 3
+int SDNInitNode(drglobal, nnode)
+APTR drglobal;
+struct NetNode *nnode;
+d301 1
+a301 3
+void SDNTermNode(drglobal, nnode)
+APTR drglobal;
+struct NetNode *nnode;
+d323 1
+a323 1
+struct RPacket *SDNAllocRPacket(APTR drglobal)
+d342 1
+a342 1
+   return((struct RPacket *)ip);
+d344 1
+d346 1
+d374 1
+a374 1
+   if(nrp = (struct INETRPacket *)SDNAllocRPacket(drglobal))
+d422 1
+a422 1
+         if (ip == tg->tpack)
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d121 2
+a122 2
+   tg->timeout.tv_sec = 5;
+   tg->timeout.tv_usec = 0;
+d323 1
+a323 2
+struct RPacket *SDNAllocRPacket(drglobal)
+APTR drglobal;
+d345 32
+d385 1
+a385 1
+/*    FreeRPacket(drglobal, RP);                                               */
+d406 1
+a406 3
+void SDNFreeRPacket(drglobal, rp)
+APTR drglobal;
+struct RPacket *rp;
+d411 4
+@
